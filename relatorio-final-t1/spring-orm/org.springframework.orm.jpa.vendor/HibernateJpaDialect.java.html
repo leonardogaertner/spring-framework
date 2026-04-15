@@ -1,0 +1,278 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>HibernateJpaDialect.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-orm</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.jpa.vendor</a> &gt; <span class="el_source">HibernateJpaDialect.java</span></div><h1>HibernateJpaDialect.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.jpa.vendor;
+
+import java.lang.reflect.Method;
+import java.sql.Connection;
+import java.sql.SQLException;
+import java.util.Map;
+
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.PersistenceException;
+import org.hibernate.ConnectionReleaseMode;
+import org.hibernate.FlushMode;
+import org.hibernate.JDBCException;
+import org.hibernate.Session;
+import org.hibernate.StatelessSession;
+import org.hibernate.engine.spi.SessionImplementor;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.dao.DataAccessException;
+import org.springframework.jdbc.datasource.ConnectionHandle;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.jdbc.support.SQLExceptionSubclassTranslator;
+import org.springframework.jdbc.support.SQLExceptionTranslator;
+import org.springframework.orm.jpa.DefaultJpaDialect;
+import org.springframework.orm.jpa.hibernate.HibernateExceptionTranslator;
+import org.springframework.transaction.InvalidIsolationLevelException;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionException;
+import org.springframework.transaction.support.ResourceTransactionDefinition;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * {@link org.springframework.orm.jpa.JpaDialect} implementation for Hibernate.
+ * Compatible with Hibernate ORM 7.x and 8.x.
+ *
+ * @author Juergen Hoeller
+ * @author Costin Leau
+ * @since 2.0
+ * @see HibernateJpaVendorAdapter
+ * @see org.hibernate.Session#setHibernateFlushMode
+ * @see org.hibernate.Transaction#setTimeout
+ */
+@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L60">public class HibernateJpaDialect extends DefaultJpaDialect {</span>
+
+	/** Hibernate 8.0: inherited setProperty(String, Object) method from JPA 4.0 EntityAgent. */
+<span class="fc" id="L63">	private static final @Nullable Method STATELESS_SESSION_SET_PROPERTY = ClassUtils.getMethodIfAvailable(</span>
+			StatelessSession.class, &quot;setProperty&quot;, String.class, Object.class);
+
+<span class="fc" id="L66">	private final HibernateExceptionTranslator exceptionTranslator = new HibernateExceptionTranslator();</span>
+
+<span class="fc" id="L68">	boolean prepareConnection = true;</span>
+
+
+	/**
+	 * Set whether to prepare the underlying JDBC Connection of a transactional
+	 * Hibernate Session, that is, whether to apply a transaction-specific
+	 * isolation level and/or the transaction's read-only flag to the underlying
+	 * JDBC Connection.
+	 * &lt;p&gt;Default is &quot;true&quot;. If you turn this flag off, JPA transaction management
+	 * will not support per-transaction isolation levels anymore. It will not call
+	 * {@code Connection.setReadOnly(true)} for read-only transactions anymore either.
+	 * If this flag is turned off, no cleanup of a JDBC Connection is required after
+	 * a transaction, since no Connection settings will get modified.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; The default behavior in terms of read-only handling changed
+	 * in Spring 4.1, propagating the read-only status to the JDBC Connection now,
+	 * analogous to other Spring transaction managers. This may have the effect
+	 * that you're running into read-only enforcement now where previously write
+	 * access has accidentally been tolerated: Please revise your transaction
+	 * declarations accordingly, removing invalid read-only markers if necessary.
+	 * @since 4.1
+	 * @see java.sql.Connection#setTransactionIsolation
+	 * @see java.sql.Connection#setReadOnly
+	 */
+	public void setPrepareConnection(boolean prepareConnection) {
+<span class="nc" id="L92">		this.prepareConnection = prepareConnection;</span>
+<span class="nc" id="L93">	}</span>
+
+	/**
+	 * Set the JDBC exception translator for Hibernate exception translation purposes.
+	 * &lt;p&gt;Applied to any detected {@link java.sql.SQLException} root cause of a Hibernate
+	 * {@link JDBCException}, overriding Hibernate's own {@code SQLException} translation
+	 * (which is based on a Hibernate Dialect for a specific target database).
+	 * &lt;p&gt;As of 6.1, also applied to {@link org.hibernate.TransactionException} translation
+	 * with a {@link SQLException} root cause (where Hibernate does not translate itself
+	 * at all), overriding Spring's default {@link SQLExceptionSubclassTranslator} there.
+	 * @param exceptionTranslator the {@link SQLExceptionTranslator} to delegate to, or
+	 * {@code null} for none. By default, a {@link SQLExceptionSubclassTranslator} will
+	 * be used for {@link org.hibernate.TransactionException} translation as of 6.1;
+	 * this can be reverted to pre-6.1 behavior through setting {@code null} here.
+	 * @since 5.1
+	 * @see java.sql.SQLException
+	 * @see org.hibernate.JDBCException
+	 * @see org.springframework.jdbc.support.SQLExceptionSubclassTranslator
+	 * @see org.springframework.jdbc.support.SQLErrorCodeSQLExceptionTranslator
+	 */
+	public void setJdbcExceptionTranslator(@Nullable SQLExceptionTranslator exceptionTranslator) {
+<span class="nc" id="L114">		this.exceptionTranslator.setJdbcExceptionTranslator(exceptionTranslator);</span>
+<span class="nc" id="L115">	}</span>
+
+
+	@Override
+	public Object beginTransaction(EntityManager entityManager, TransactionDefinition definition)
+			throws PersistenceException, SQLException, TransactionException {
+
+<span class="fc" id="L122">		SessionImplementor session = entityManager.unwrap(SessionImplementor.class);</span>
+
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">		if (definition.getTimeout() != TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+<span class="nc" id="L125">			session.getTransaction().setTimeout(definition.getTimeout());</span>
+		}
+
+<span class="fc bfc" id="L128" title="All 2 branches covered.">		boolean isolationLevelNeeded = (definition.getIsolationLevel() != TransactionDefinition.ISOLATION_DEFAULT);</span>
+<span class="fc" id="L129">		Integer previousIsolationLevel = null;</span>
+<span class="fc" id="L130">		Connection preparedCon = null;</span>
+
+<span class="fc bfc" id="L132" title="All 4 branches covered.">		if (isolationLevelNeeded || definition.isReadOnly()) {</span>
+<span class="pc bpc" id="L133" title="2 of 4 branches missed.">			if (this.prepareConnection &amp;&amp; ConnectionReleaseMode.ON_CLOSE.equals(</span>
+<span class="fc" id="L134">					session.getJdbcCoordinator().getLogicalConnection().getConnectionHandlingMode().getReleaseMode())) {</span>
+<span class="fc" id="L135">				preparedCon = session.getJdbcCoordinator().getLogicalConnection().getPhysicalConnection();</span>
+<span class="fc" id="L136">				previousIsolationLevel = DataSourceUtils.prepareConnectionForTransaction(preparedCon, definition);</span>
+			}
+<span class="nc bnc" id="L138" title="All 2 branches missed.">			else if (isolationLevelNeeded) {</span>
+<span class="nc" id="L139">				throw new InvalidIsolationLevelException(</span>
+						&quot;HibernateJpaDialect is not allowed to support custom isolation levels: &quot; +
+						&quot;make sure that its 'prepareConnection' flag is on (the default) and that the &quot; +
+						&quot;Hibernate connection release mode is set to ON_CLOSE.&quot;);
+			}
+		}
+
+		// Standard JPA transaction begin call for full JPA context setup...
+<span class="fc" id="L147">		entityManager.getTransaction().begin();</span>
+
+		// Adapt flush mode and store previous isolation level, if any.
+<span class="fc" id="L150">		FlushMode previousFlushMode = prepareFlushMode(session, definition.isReadOnly());</span>
+<span class="pc bpc" id="L151" title="2 of 4 branches missed.">		if (definition instanceof ResourceTransactionDefinition rtd &amp;&amp; rtd.isLocalResource()) {</span>
+			// As of 5.1, we explicitly optimize for a transaction-local EntityManager,
+			// aligned with native HibernateTransactionManager behavior.
+<span class="fc" id="L154">			previousFlushMode = null;</span>
+<span class="fc bfc" id="L155" title="All 2 branches covered.">			if (definition.isReadOnly()) {</span>
+<span class="fc" id="L156">				session.setDefaultReadOnly(true);</span>
+			}
+		}
+<span class="fc bfc" id="L159" title="All 2 branches covered.">		return new SessionTransactionData(</span>
+<span class="fc" id="L160">				session, previousFlushMode, (preparedCon != null), previousIsolationLevel, definition.isReadOnly());</span>
+	}
+
+	@Override
+	public Object prepareTransaction(EntityManager entityManager, boolean readOnly, @Nullable String name)
+			throws PersistenceException {
+
+<span class="nc" id="L167">		SessionImplementor session = entityManager.unwrap(SessionImplementor.class);</span>
+<span class="nc" id="L168">		FlushMode previousFlushMode = prepareFlushMode(session, readOnly);</span>
+<span class="nc" id="L169">		return new SessionTransactionData(session, previousFlushMode, false, null, readOnly);</span>
+	}
+
+	protected @Nullable FlushMode prepareFlushMode(Session session, boolean readOnly) throws PersistenceException {
+<span class="fc" id="L173">		FlushMode flushMode = session.getHibernateFlushMode();</span>
+<span class="fc bfc" id="L174" title="All 2 branches covered.">		if (readOnly) {</span>
+			// We should suppress flushing for a read-only transaction.
+<span class="pc bpc" id="L176" title="1 of 2 branches missed.">			if (!flushMode.equals(FlushMode.MANUAL)) {</span>
+<span class="fc" id="L177">				session.setHibernateFlushMode(FlushMode.MANUAL);</span>
+<span class="fc" id="L178">				return flushMode;</span>
+			}
+		}
+		else {
+			// We need AUTO or COMMIT for a non-read-only transaction.
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">			if (flushMode.lessThan(FlushMode.COMMIT)) {</span>
+<span class="nc" id="L184">				session.setHibernateFlushMode(FlushMode.AUTO);</span>
+<span class="nc" id="L185">				return flushMode;</span>
+			}
+		}
+		// No FlushMode change needed...
+<span class="fc" id="L189">		return null;</span>
+	}
+
+	@Override
+	public void cleanupTransaction(@Nullable Object transactionData) {
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">		if (transactionData instanceof SessionTransactionData sessionTransactionData) {</span>
+<span class="fc" id="L195">			sessionTransactionData.resetSessionState();</span>
+		}
+<span class="fc" id="L197">	}</span>
+
+	@Override
+	public ConnectionHandle getJdbcConnection(EntityManager entityManager, boolean readOnly)
+			throws PersistenceException, SQLException {
+
+<span class="fc" id="L203">		return new HibernateConnectionHandle(entityManager.unwrap(SessionImplementor.class));</span>
+	}
+
+	@Override
+	public StatelessSession deriveEntityAgent(EntityManager entityManager, @Nullable Map&lt;?, ?&gt; properties)
+			throws PersistenceException {
+
+<span class="nc" id="L210">		StatelessSession entityAgent = entityManager.unwrap(Session.class).statelessWithOptions().connection().open();</span>
+<span class="nc bnc" id="L211" title="All 4 branches missed.">		if (properties != null &amp;&amp; STATELESS_SESSION_SET_PROPERTY != null) {</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">			for (Map.Entry&lt;?, ?&gt; entry : properties.entrySet()) {</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">				if (entry.getKey() instanceof String key) {</span>
+<span class="nc" id="L214">					ReflectionUtils.invokeMethod(STATELESS_SESSION_SET_PROPERTY, entityAgent, key, entry.getValue());</span>
+				}
+<span class="nc" id="L216">			}</span>
+		}
+<span class="nc" id="L218">		return entityAgent;</span>
+	}
+
+	@Override
+	public @Nullable DataAccessException translateExceptionIfPossible(RuntimeException ex) {
+<span class="fc" id="L223">		return this.exceptionTranslator.translateExceptionIfPossible(ex);</span>
+	}
+
+
+	private static class SessionTransactionData {
+
+		private final SessionImplementor session;
+
+		private final @Nullable FlushMode previousFlushMode;
+
+		private final boolean needsConnectionReset;
+
+		private final @Nullable Integer previousIsolationLevel;
+
+		private final boolean readOnly;
+
+		public SessionTransactionData(SessionImplementor session, @Nullable FlushMode previousFlushMode,
+<span class="fc" id="L240">				boolean connectionPrepared, @Nullable Integer previousIsolationLevel, boolean readOnly) {</span>
+
+<span class="fc" id="L242">			this.session = session;</span>
+<span class="fc" id="L243">			this.previousFlushMode = previousFlushMode;</span>
+<span class="fc" id="L244">			this.needsConnectionReset = connectionPrepared;</span>
+<span class="fc" id="L245">			this.previousIsolationLevel = previousIsolationLevel;</span>
+<span class="fc" id="L246">			this.readOnly = readOnly;</span>
+<span class="fc" id="L247">		}</span>
+
+		public void resetSessionState() {
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">			if (this.previousFlushMode != null) {</span>
+<span class="nc" id="L251">				this.session.setHibernateFlushMode(this.previousFlushMode);</span>
+			}
+<span class="fc bfc" id="L253" title="All 2 branches covered.">			if (this.needsConnectionReset &amp;&amp;</span>
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">					this.session.getJdbcCoordinator().getLogicalConnection().isPhysicallyConnected()) {</span>
+<span class="fc" id="L255">				Connection con = this.session.getJdbcCoordinator().getLogicalConnection().getPhysicalConnection();</span>
+<span class="fc" id="L256">				DataSourceUtils.resetConnectionAfterTransaction(</span>
+						con, this.previousIsolationLevel, this.readOnly);
+			}
+<span class="fc" id="L259">		}</span>
+	}
+
+
+	private static class HibernateConnectionHandle implements ConnectionHandle {
+
+		private final SessionImplementor session;
+
+<span class="fc" id="L267">		public HibernateConnectionHandle(SessionImplementor session) {</span>
+<span class="fc" id="L268">			this.session = session;</span>
+<span class="fc" id="L269">		}</span>
+
+		@Override
+		public Connection getConnection() {
+<span class="fc" id="L273">			return this.session.getJdbcCoordinator().getLogicalConnection().getPhysicalConnection();</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

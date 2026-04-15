@@ -1,0 +1,466 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractJackson2Encoder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.codec.json</a> &gt; <span class="el_source">AbstractJackson2Encoder.java</span></div><h1>AbstractJackson2Encoder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.codec.json;
+
+import java.io.IOException;
+import java.lang.annotation.Annotation;
+import java.nio.charset.Charset;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+
+import com.fasterxml.jackson.core.JsonEncoding;
+import com.fasterxml.jackson.core.JsonGenerator;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.util.ByteArrayBuilder;
+import com.fasterxml.jackson.databind.JavaType;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.ObjectWriter;
+import com.fasterxml.jackson.databind.SequenceWriter;
+import com.fasterxml.jackson.databind.exc.InvalidDefinitionException;
+import com.fasterxml.jackson.databind.ser.FilterProvider;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.util.context.ContextView;
+
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.codec.CodecException;
+import org.springframework.core.codec.EncodingException;
+import org.springframework.core.codec.Hints;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.log.LogFormatUtils;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.AbstractJacksonEncoder;
+import org.springframework.http.codec.HttpMessageEncoder;
+import org.springframework.http.converter.json.MappingJacksonValue;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.MimeType;
+
+/**
+ * Base class providing support methods for Jackson 2.x encoding. For non-streaming use
+ * cases, {@link Flux} elements are collected into a {@link List} before serialization for
+ * performance reasons.
+ *
+ * @author Sebastien Deleuze
+ * @author Arjen Poutsma
+ * @since 5.0
+ * @deprecated since 7.0 in favor of {@link AbstractJacksonEncoder}
+ */
+@Deprecated(since = &quot;7.0&quot;, forRemoval = true)
+@SuppressWarnings(&quot;removal&quot;)
+public abstract class AbstractJackson2Encoder extends Jackson2CodecSupport implements HttpMessageEncoder&lt;Object&gt; {
+
+<span class="nc" id="L76">	private static final byte[] NEWLINE_SEPARATOR = {'\n'};</span>
+
+<span class="nc" id="L78">	private static final byte[] EMPTY_BYTES = new byte[0];</span>
+
+	private static final Map&lt;String, JsonEncoding&gt; ENCODINGS;
+
+	static {
+<span class="nc" id="L83">		ENCODINGS = CollectionUtils.newHashMap(JsonEncoding.values().length);</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">		for (JsonEncoding encoding : JsonEncoding.values()) {</span>
+<span class="nc" id="L85">			ENCODINGS.put(encoding.getJavaName(), encoding);</span>
+		}
+<span class="nc" id="L87">		ENCODINGS.put(&quot;US-ASCII&quot;, JsonEncoding.UTF8);</span>
+<span class="nc" id="L88">	}</span>
+
+
+<span class="nc" id="L91">	private final List&lt;MediaType&gt; streamingMediaTypes = new ArrayList&lt;&gt;(1);</span>
+
+
+	/**
+	 * Constructor with a Jackson {@link ObjectMapper} to use.
+	 */
+	protected AbstractJackson2Encoder(ObjectMapper mapper, MimeType... mimeTypes) {
+<span class="nc" id="L98">		super(mapper, mimeTypes);</span>
+<span class="nc" id="L99">	}</span>
+
+
+	/**
+	 * Configure &quot;streaming&quot; media types for which flushing should be performed
+	 * automatically vs at the end of the stream.
+	 */
+	public void setStreamingMediaTypes(List&lt;MediaType&gt; mediaTypes) {
+<span class="nc" id="L107">		this.streamingMediaTypes.clear();</span>
+<span class="nc" id="L108">		this.streamingMediaTypes.addAll(mediaTypes);</span>
+<span class="nc" id="L109">	}</span>
+
+
+	@SuppressWarnings(&quot;deprecation&quot;)  // as of Jackson 2.18: can(De)Serialize
+	@Override
+	public boolean canEncode(ResolvableType elementType, @Nullable MimeType mimeType) {
+<span class="nc bnc" id="L115" title="All 2 branches missed.">		if (!supportsMimeType(mimeType)) {</span>
+<span class="nc" id="L116">			return false;</span>
+		}
+<span class="nc bnc" id="L118" title="All 4 branches missed.">		if (mimeType != null &amp;&amp; mimeType.getCharset() != null) {</span>
+<span class="nc" id="L119">			Charset charset = mimeType.getCharset();</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">			if (!ENCODINGS.containsKey(charset.name())) {</span>
+<span class="nc" id="L121">				return false;</span>
+			}
+		}
+<span class="nc" id="L124">		ObjectMapper mapper = selectObjectMapper(elementType, mimeType);</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">		if (mapper == null) {</span>
+<span class="nc" id="L126">			return false;</span>
+		}
+<span class="nc" id="L128">		Class&lt;?&gt; clazz = elementType.toClass();</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">		if (String.class.isAssignableFrom(elementType.resolve(clazz))) {</span>
+<span class="nc" id="L130">			return false;</span>
+		}
+<span class="nc bnc" id="L132" title="All 2 branches missed.">		if (Object.class == clazz) {</span>
+<span class="nc" id="L133">			return true;</span>
+		}
+<span class="nc bnc" id="L135" title="All 2 branches missed.">		if (!logger.isDebugEnabled()) {</span>
+<span class="nc" id="L136">			return mapper.canSerialize(clazz);</span>
+		}
+		else {
+<span class="nc" id="L139">			AtomicReference&lt;Throwable&gt; causeRef = new AtomicReference&lt;&gt;();</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">			if (mapper.canSerialize(clazz, causeRef)) {</span>
+<span class="nc" id="L141">				return true;</span>
+			}
+<span class="nc" id="L143">			logWarningIfNecessary(clazz, causeRef.get());</span>
+<span class="nc" id="L144">			return false;</span>
+		}
+	}
+
+	@Override
+	public Flux&lt;DataBuffer&gt; encode(Publisher&lt;?&gt; inputStream, DataBufferFactory bufferFactory,
+			ResolvableType elementType, @Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="nc" id="L152">		Assert.notNull(inputStream, &quot;'inputStream' must not be null&quot;);</span>
+<span class="nc" id="L153">		Assert.notNull(bufferFactory, &quot;'bufferFactory' must not be null&quot;);</span>
+<span class="nc" id="L154">		Assert.notNull(elementType, &quot;'elementType' must not be null&quot;);</span>
+
+<span class="nc" id="L156">		return Flux.deferContextual(contextView -&gt; {</span>
+
+<span class="nc bnc" id="L158" title="All 2 branches missed.">			Map&lt;String, Object&gt; hintsToUse = contextView.isEmpty() ? hints :</span>
+<span class="nc" id="L159">					Hints.merge(hints, ContextView.class.getName(), contextView);</span>
+
+<span class="nc bnc" id="L161" title="All 2 branches missed.">			if (inputStream instanceof Mono) {</span>
+<span class="nc" id="L162">				return Mono.from(inputStream)</span>
+<span class="nc" id="L163">						.map(value -&gt; encodeValue(value, bufferFactory, elementType, mimeType, hintsToUse))</span>
+<span class="nc" id="L164">						.flux();</span>
+			}
+
+			try {
+<span class="nc" id="L168">				ObjectMapper mapper = selectObjectMapper(elementType, mimeType);</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">				if (mapper == null) {</span>
+<span class="nc" id="L170">					throw new IllegalStateException(&quot;No ObjectMapper for &quot; + elementType);</span>
+				}
+
+<span class="nc" id="L173">				ObjectWriter writer = createObjectWriter(mapper, elementType, mimeType, null, hintsToUse);</span>
+<span class="nc" id="L174">				ByteArrayBuilder byteBuilder = new ByteArrayBuilder(writer.getFactory()._getBufferRecycler());</span>
+<span class="nc" id="L175">				JsonEncoding encoding = getJsonEncoding(mimeType);</span>
+<span class="nc" id="L176">				JsonGenerator generator = mapper.getFactory().createGenerator(byteBuilder, encoding);</span>
+<span class="nc" id="L177">				SequenceWriter sequenceWriter = writer.writeValues(generator);</span>
+
+<span class="nc" id="L179">				byte[] separator = getStreamingMediaTypeSeparator(mimeType);</span>
+				Flux&lt;DataBuffer&gt; dataBufferFlux;
+
+<span class="nc bnc" id="L182" title="All 2 branches missed.">				if (separator != null) {</span>
+<span class="nc" id="L183">					dataBufferFlux = Flux.from(inputStream).map(value -&gt; encodeStreamingValue(</span>
+							value, bufferFactory, hintsToUse, sequenceWriter, byteBuilder, EMPTY_BYTES, separator));
+				}
+				else {
+<span class="nc" id="L187">					JsonArrayJoinHelper helper = new JsonArrayJoinHelper();</span>
+
+					// Do not prepend JSON array prefix until first signal is known, onNext vs onError
+					// Keeps response not committed for error handling
+
+<span class="nc" id="L192">					dataBufferFlux = Flux.from(inputStream)</span>
+<span class="nc" id="L193">							.map(value -&gt; {</span>
+<span class="nc" id="L194">								byte[] prefix = helper.getPrefix();</span>
+<span class="nc" id="L195">								byte[] delimiter = helper.getDelimiter();</span>
+
+<span class="nc" id="L197">								DataBuffer dataBuffer = encodeStreamingValue(</span>
+										value, bufferFactory, hintsToUse, sequenceWriter, byteBuilder,
+										delimiter, EMPTY_BYTES);
+
+<span class="nc bnc" id="L201" title="All 2 branches missed.">								return (prefix.length &gt; 0 ?</span>
+<span class="nc" id="L202">										bufferFactory.join(List.of(bufferFactory.wrap(prefix), dataBuffer)) :</span>
+<span class="nc" id="L203">										dataBuffer);</span>
+							})
+<span class="nc" id="L205">							.switchIfEmpty(Mono.fromCallable(() -&gt; bufferFactory.wrap(helper.getPrefix())))</span>
+<span class="nc" id="L206">							.concatWith(Mono.fromCallable(() -&gt; bufferFactory.wrap(helper.getSuffix())));</span>
+				}
+
+<span class="nc" id="L209">				return dataBufferFlux</span>
+<span class="nc" id="L210">						.doOnNext(dataBuffer -&gt; Hints.touchDataBuffer(dataBuffer, hintsToUse, logger))</span>
+<span class="nc" id="L211">						.doAfterTerminate(() -&gt; {</span>
+							try {
+<span class="nc" id="L213">								generator.close();</span>
+<span class="nc" id="L214">								byteBuilder.release();</span>
+							}
+<span class="nc" id="L216">							catch (IOException ex) {</span>
+<span class="nc" id="L217">								logger.error(&quot;Could not close Encoder resources&quot;, ex);</span>
+<span class="nc" id="L218">							}</span>
+<span class="nc" id="L219">						});</span>
+			}
+<span class="nc" id="L221">			catch (IOException ex) {</span>
+<span class="nc" id="L222">				return Flux.error(ex);</span>
+			}
+		});
+	}
+
+	@Override
+	public DataBuffer encodeValue(Object value, DataBufferFactory bufferFactory,
+			ResolvableType valueType, @Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="nc" id="L231">		Class&lt;?&gt; jsonView = null;</span>
+<span class="nc" id="L232">		FilterProvider filters = null;</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">		if (value instanceof MappingJacksonValue mappingJacksonValue) {</span>
+<span class="nc" id="L234">			value = mappingJacksonValue.getValue();</span>
+<span class="nc" id="L235">			valueType = ResolvableType.forInstance(value);</span>
+<span class="nc" id="L236">			jsonView = mappingJacksonValue.getSerializationView();</span>
+<span class="nc" id="L237">			filters = mappingJacksonValue.getFilters();</span>
+		}
+
+<span class="nc" id="L240">		ObjectMapper mapper = selectObjectMapper(valueType, mimeType);</span>
+<span class="nc bnc" id="L241" title="All 2 branches missed.">		if (mapper == null) {</span>
+<span class="nc" id="L242">			throw new IllegalStateException(&quot;No ObjectMapper for &quot; + valueType);</span>
+		}
+
+<span class="nc" id="L245">		ObjectWriter writer = createObjectWriter(mapper, valueType, mimeType, jsonView, hints);</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">		if (filters != null) {</span>
+<span class="nc" id="L247">			writer = writer.with(filters);</span>
+		}
+
+<span class="nc" id="L250">		ByteArrayBuilder byteBuilder = new ByteArrayBuilder(writer.getFactory()._getBufferRecycler());</span>
+		try {
+<span class="nc" id="L252">			JsonEncoding encoding = getJsonEncoding(mimeType);</span>
+
+<span class="nc" id="L254">			logValue(hints, value);</span>
+
+<span class="nc" id="L256">			try (JsonGenerator generator = mapper.getFactory().createGenerator(byteBuilder, encoding)) {</span>
+<span class="nc" id="L257">				writer.writeValue(generator, value);</span>
+<span class="nc" id="L258">				generator.flush();</span>
+			}
+<span class="nc" id="L260">			catch (InvalidDefinitionException ex) {</span>
+<span class="nc" id="L261">				throw new CodecException(&quot;Type definition error: &quot; + ex.getType(), ex);</span>
+			}
+<span class="nc" id="L263">			catch (JsonProcessingException ex) {</span>
+<span class="nc" id="L264">				throw new EncodingException(&quot;JSON encoding error: &quot; + ex.getOriginalMessage(), ex);</span>
+			}
+<span class="nc" id="L266">			catch (IOException ex) {</span>
+<span class="nc" id="L267">				throw new IllegalStateException(&quot;Unexpected I/O error while writing to byte array builder&quot;, ex);</span>
+<span class="nc" id="L268">			}</span>
+
+<span class="nc" id="L270">			byte[] bytes = byteBuilder.toByteArray();</span>
+<span class="nc" id="L271">			DataBuffer buffer = bufferFactory.allocateBuffer(bytes.length);</span>
+<span class="nc" id="L272">			buffer.write(bytes);</span>
+<span class="nc" id="L273">			Hints.touchDataBuffer(buffer, hints, logger);</span>
+
+<span class="nc" id="L275">			return buffer;</span>
+		}
+		finally {
+<span class="nc" id="L278">			byteBuilder.release();</span>
+		}
+	}
+
+	private DataBuffer encodeStreamingValue(
+			Object value, DataBufferFactory bufferFactory, @Nullable Map&lt;String, Object&gt; hints,
+			SequenceWriter sequenceWriter, ByteArrayBuilder byteArrayBuilder,
+			byte[] prefix, byte[] suffix) {
+
+<span class="nc" id="L287">		logValue(hints, value);</span>
+
+		try {
+<span class="nc" id="L290">			sequenceWriter.write(value);</span>
+<span class="nc" id="L291">			sequenceWriter.flush();</span>
+		}
+<span class="nc" id="L293">		catch (InvalidDefinitionException ex) {</span>
+<span class="nc" id="L294">			throw new CodecException(&quot;Type definition error: &quot; + ex.getType(), ex);</span>
+		}
+<span class="nc" id="L296">		catch (JsonProcessingException ex) {</span>
+<span class="nc" id="L297">			throw new EncodingException(&quot;JSON encoding error: &quot; + ex.getOriginalMessage(), ex);</span>
+		}
+<span class="nc" id="L299">		catch (IOException ex) {</span>
+<span class="nc" id="L300">			throw new IllegalStateException(&quot;Unexpected I/O error while writing to byte array builder&quot;, ex);</span>
+<span class="nc" id="L301">		}</span>
+
+<span class="nc" id="L303">		byte[] bytes = byteArrayBuilder.toByteArray();</span>
+<span class="nc" id="L304">		byteArrayBuilder.reset();</span>
+
+		int offset;
+		int length;
+<span class="nc bnc" id="L308" title="All 4 branches missed.">		if (bytes.length &gt; 0 &amp;&amp; bytes[0] == ' ') {</span>
+			// SequenceWriter writes an unnecessary space in between values
+<span class="nc" id="L310">			offset = 1;</span>
+<span class="nc" id="L311">			length = bytes.length - 1;</span>
+		}
+		else {
+<span class="nc" id="L314">			offset = 0;</span>
+<span class="nc" id="L315">			length = bytes.length;</span>
+		}
+<span class="nc" id="L317">		DataBuffer buffer = bufferFactory.allocateBuffer(length + prefix.length + suffix.length);</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">		if (prefix.length != 0) {</span>
+<span class="nc" id="L319">			buffer.write(prefix);</span>
+		}
+<span class="nc" id="L321">		buffer.write(bytes, offset, length);</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">		if (suffix.length != 0) {</span>
+<span class="nc" id="L323">			buffer.write(suffix);</span>
+		}
+<span class="nc" id="L325">		Hints.touchDataBuffer(buffer, hints, logger);</span>
+
+<span class="nc" id="L327">		return buffer;</span>
+	}
+
+	private void logValue(@Nullable Map&lt;String, Object&gt; hints, Object value) {
+<span class="nc bnc" id="L331" title="All 2 branches missed.">		if (!Hints.isLoggingSuppressed(hints)) {</span>
+<span class="nc" id="L332">			LogFormatUtils.traceDebug(logger, traceOn -&gt; {</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">				String formatted = LogFormatUtils.formatValue(value, !traceOn);</span>
+<span class="nc" id="L334">				return Hints.getLogPrefix(hints) + &quot;Encoding [&quot; + formatted + &quot;]&quot;;</span>
+			});
+		}
+<span class="nc" id="L337">	}</span>
+
+	private ObjectWriter createObjectWriter(
+			ObjectMapper mapper, ResolvableType valueType, @Nullable MimeType mimeType,
+			@Nullable Class&lt;?&gt; jsonView, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="nc" id="L343">		JavaType javaType = getJavaType(valueType.getType(), null);</span>
+<span class="nc bnc" id="L344" title="All 4 branches missed.">		if (jsonView == null &amp;&amp; hints != null) {</span>
+<span class="nc" id="L345">			jsonView = (Class&lt;?&gt;) hints.get(Jackson2CodecSupport.JSON_VIEW_HINT);</span>
+		}
+<span class="nc bnc" id="L347" title="All 2 branches missed.">		ObjectWriter writer = (jsonView != null ? mapper.writerWithView(jsonView) : mapper.writer());</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">		if (javaType.isContainerType()) {</span>
+<span class="nc" id="L349">			writer = writer.forType(javaType);</span>
+		}
+<span class="nc" id="L351">		return customizeWriter(writer, mimeType, valueType, hints);</span>
+	}
+
+	/**
+	 * Subclasses can use this method to customize the {@link ObjectWriter} used
+	 * for writing values.
+	 * @param writer the writer instance to customize
+	 * @param mimeType the selected MIME type
+	 * @param elementType the type of element values to write
+	 * @param hints a map with serialization hints; the Reactor Context, when
+	 * available, may be accessed under the key
+	 * {@code ContextView.class.getName()}
+	 * @return the customized {@code ObjectWriter} to use
+	 */
+	protected ObjectWriter customizeWriter(ObjectWriter writer, @Nullable MimeType mimeType,
+			ResolvableType elementType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="nc" id="L368">		return writer;</span>
+	}
+
+	/**
+	 * Return the separator to use for the given mime type.
+	 * &lt;p&gt;By default, this method returns new line {@code &quot;\n&quot;} if the given
+	 * mime type is one of the configured {@link #setStreamingMediaTypes(List)
+	 * streaming} mime types.
+	 * @since 5.3
+	 */
+	protected byte @Nullable [] getStreamingMediaTypeSeparator(@Nullable MimeType mimeType) {
+<span class="nc bnc" id="L379" title="All 2 branches missed.">		for (MediaType streamingMediaType : this.streamingMediaTypes) {</span>
+<span class="nc bnc" id="L380" title="All 2 branches missed.">			if (streamingMediaType.isCompatibleWith(mimeType)) {</span>
+<span class="nc" id="L381">				return NEWLINE_SEPARATOR;</span>
+			}
+<span class="nc" id="L383">		}</span>
+<span class="nc" id="L384">		return null;</span>
+	}
+
+	/**
+	 * Determine the JSON encoding to use for the given mime type.
+	 * @param mimeType the mime type as requested by the caller
+	 * @return the JSON encoding to use (never {@code null})
+	 * @since 5.0.5
+	 */
+	protected JsonEncoding getJsonEncoding(@Nullable MimeType mimeType) {
+<span class="nc bnc" id="L394" title="All 4 branches missed.">		if (mimeType != null &amp;&amp; mimeType.getCharset() != null) {</span>
+<span class="nc" id="L395">			Charset charset = mimeType.getCharset();</span>
+<span class="nc" id="L396">			JsonEncoding result = ENCODINGS.get(charset.name());</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">			if (result != null) {</span>
+<span class="nc" id="L398">				return result;</span>
+			}
+		}
+<span class="nc" id="L401">		return JsonEncoding.UTF8;</span>
+	}
+
+
+	// HttpMessageEncoder
+
+	@Override
+	public List&lt;MimeType&gt; getEncodableMimeTypes() {
+<span class="nc" id="L409">		return getMimeTypes();</span>
+	}
+
+	@Override
+	public List&lt;MimeType&gt; getEncodableMimeTypes(ResolvableType elementType) {
+<span class="nc" id="L414">		return getMimeTypes(elementType);</span>
+	}
+
+	@Override
+	public List&lt;MediaType&gt; getStreamingMediaTypes() {
+<span class="nc" id="L419">		return Collections.unmodifiableList(this.streamingMediaTypes);</span>
+	}
+
+	@Override
+	public Map&lt;String, Object&gt; getEncodeHints(@Nullable ResolvableType actualType, ResolvableType elementType,
+			@Nullable MediaType mediaType, ServerHttpRequest request, ServerHttpResponse response) {
+
+<span class="nc bnc" id="L426" title="All 2 branches missed.">		return (actualType != null ? getHints(actualType) : Hints.none());</span>
+	}
+
+
+	// Jackson2CodecSupport
+
+	@Override
+	protected &lt;A extends Annotation&gt; @Nullable A getAnnotation(MethodParameter parameter, Class&lt;A&gt; annotType) {
+<span class="nc" id="L434">		return parameter.getMethodAnnotation(annotType);</span>
+	}
+
+
+	private static class JsonArrayJoinHelper {
+
+<span class="nc" id="L440">		private static final byte[] COMMA_SEPARATOR = {','};</span>
+
+<span class="nc" id="L442">		private static final byte[] OPEN_BRACKET = {'['};</span>
+
+<span class="nc" id="L444">		private static final byte[] CLOSE_BRACKET = {']'};</span>
+
+		private boolean firstItemEmitted;
+
+		public byte[] getDelimiter() {
+<span class="nc bnc" id="L449" title="All 2 branches missed.">			if (this.firstItemEmitted) {</span>
+<span class="nc" id="L450">				return COMMA_SEPARATOR;</span>
+			}
+<span class="nc" id="L452">			this.firstItemEmitted = true;</span>
+<span class="nc" id="L453">			return EMPTY_BYTES;</span>
+		}
+
+		public byte[] getPrefix() {
+<span class="nc bnc" id="L457" title="All 2 branches missed.">			return (this.firstItemEmitted ? EMPTY_BYTES : OPEN_BRACKET);</span>
+		}
+
+		public byte[] getSuffix() {
+<span class="nc" id="L461">			return CLOSE_BRACKET;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

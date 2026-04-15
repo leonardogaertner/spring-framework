@@ -1,0 +1,354 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HttpServiceProxyFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.service.invoker</a> &gt; <span class="el_source">HttpServiceProxyFactory.java</span></div><h1>HttpServiceProxyFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.service.invoker;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import org.aopalliance.intercept.MethodInterceptor;
+import org.aopalliance.intercept.MethodInvocation;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.aop.framework.ReflectiveMethodInvocation;
+import org.springframework.core.KotlinDetector;
+import org.springframework.core.MethodIntrospector;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.format.support.DefaultFormattingConversionService;
+import org.springframework.util.Assert;
+import org.springframework.util.StringValueResolver;
+import org.springframework.web.service.annotation.HttpExchange;
+
+/**
+ * Factory to create a client proxy from an HTTP service interface with
+ * {@link HttpExchange @HttpExchange} methods.
+ *
+ * &lt;p&gt;To create an instance, use static methods to obtain a
+ * {@link Builder Builder}.
+ *
+ * @author Rossen Stoyanchev
+ * @since 6.0
+ * @see org.springframework.web.client.support.RestClientAdapter
+ * @see org.springframework.web.reactive.function.client.support.WebClientAdapter
+ * @see org.springframework.web.client.support.RestTemplateAdapter
+ */
+public final class HttpServiceProxyFactory {
+
+	private final HttpExchangeAdapter exchangeAdapter;
+
+	private final List&lt;HttpServiceArgumentResolver&gt; argumentResolvers;
+
+	private final HttpRequestValues.Processor requestValuesProcessor;
+
+	private final @Nullable StringValueResolver embeddedValueResolver;
+
+	private final List&lt;ProxyFactoryCustomizer&gt; proxyFactoryCustomizers;
+
+
+	private HttpServiceProxyFactory(
+			HttpExchangeAdapter exchangeAdapter, List&lt;HttpServiceArgumentResolver&gt; argumentResolvers,
+			List&lt;HttpRequestValues.Processor&gt; requestValuesProcessor,
+			@Nullable StringValueResolver embeddedValueResolver,
+<span class="nc" id="L73">			List&lt;ProxyFactoryCustomizer&gt; proxyFactoryCustomizers) {</span>
+
+<span class="nc" id="L75">		this.exchangeAdapter = exchangeAdapter;</span>
+<span class="nc" id="L76">		this.argumentResolvers = argumentResolvers;</span>
+<span class="nc" id="L77">		this.requestValuesProcessor = new CompositeHttpRequestValuesProcessor(requestValuesProcessor);</span>
+<span class="nc" id="L78">		this.embeddedValueResolver = embeddedValueResolver;</span>
+<span class="nc" id="L79">		this.proxyFactoryCustomizers = proxyFactoryCustomizers;</span>
+<span class="nc" id="L80">	}</span>
+
+
+	/**
+	 * Return a proxy that implements the given HTTP service interface to perform
+	 * HTTP requests and retrieve responses through an HTTP client.
+	 * @param serviceType the HTTP service to create a proxy for
+	 * @param &lt;S&gt; the HTTP service type
+	 * @return the created proxy
+	 */
+	public &lt;S&gt; S createClient(Class&lt;S&gt; serviceType) {
+<span class="nc" id="L91">		List&lt;HttpServiceMethod&gt; httpServiceMethods =</span>
+<span class="nc" id="L92">				MethodIntrospector.selectMethods(serviceType, this::isExchangeMethod).stream()</span>
+<span class="nc" id="L93">						.map(method -&gt; createHttpServiceMethod(serviceType, method))</span>
+<span class="nc" id="L94">						.toList();</span>
+
+<span class="nc" id="L96">		return getProxy(serviceType, httpServiceMethods);</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private &lt;S&gt; S getProxy(Class&lt;S&gt; serviceType, List&lt;HttpServiceMethod&gt; httpServiceMethods) {
+<span class="nc" id="L101">		MethodInterceptor interceptor = new HttpServiceMethodInterceptor(httpServiceMethods);</span>
+<span class="nc" id="L102">		ProxyFactory factory = new ProxyFactory(serviceType, interceptor);</span>
+<span class="nc bnc" id="L103" title="All 2 branches missed.">		for (ProxyFactoryCustomizer customizer : this.proxyFactoryCustomizers) {</span>
+<span class="nc" id="L104">			customizer.customize(factory, serviceType);</span>
+<span class="nc" id="L105">		}</span>
+<span class="nc" id="L106">		return (S) factory.getProxy(serviceType.getClassLoader());</span>
+	}
+
+	private boolean isExchangeMethod(Method method) {
+<span class="nc" id="L110">		return AnnotatedElementUtils.hasAnnotation(method, HttpExchange.class);</span>
+	}
+
+	private &lt;S&gt; HttpServiceMethod createHttpServiceMethod(Class&lt;S&gt; serviceType, Method method) {
+<span class="nc" id="L114">		Assert.notNull(this.argumentResolvers,</span>
+				&quot;No argument resolvers: afterPropertiesSet was not called&quot;);
+
+<span class="nc" id="L117">		return new HttpServiceMethod(</span>
+				method, serviceType, this.argumentResolvers, this.requestValuesProcessor,
+				this.exchangeAdapter, this.embeddedValueResolver);
+	}
+
+
+	/**
+	 * Return a builder that's initialized with the given client.
+	 * @since 6.1
+	 */
+	public static Builder builderFor(HttpExchangeAdapter exchangeAdapter) {
+<span class="nc" id="L128">		return new Builder().exchangeAdapter(exchangeAdapter);</span>
+	}
+
+	/**
+	 * Return an empty builder, with the client to be provided to builder.
+	 */
+	public static Builder builder() {
+<span class="nc" id="L135">		return new Builder();</span>
+	}
+
+
+	/**
+	 * Builder to create an {@link HttpServiceProxyFactory}.
+	 */
+	public static final class Builder {
+
+		private @Nullable HttpExchangeAdapter exchangeAdapter;
+
+<span class="nc" id="L146">		private Function&lt;HttpExchangeAdapter, HttpExchangeAdapter&gt; exchangeAdapterDecorator = Function.identity();</span>
+
+<span class="nc" id="L148">		private final List&lt;HttpServiceArgumentResolver&gt; customArgumentResolvers = new ArrayList&lt;&gt;();</span>
+
+		private @Nullable ConversionService conversionService;
+
+<span class="nc" id="L152">		private final List&lt;HttpRequestValues.Processor&gt; requestValuesProcessors = new ArrayList&lt;&gt;();</span>
+
+		private @Nullable StringValueResolver embeddedValueResolver;
+
+<span class="nc" id="L156">		private final List&lt;ProxyFactoryCustomizer&gt; proxyFactoryCustomizers = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L158">		private Builder() {</span>
+<span class="nc" id="L159">		}</span>
+
+		/**
+		 * Provide the HTTP client to perform requests through.
+		 * @param adapter a client adapted to {@link HttpExchangeAdapter}
+		 * @return this same builder instance
+		 * @since 6.1
+		 */
+		public Builder exchangeAdapter(HttpExchangeAdapter adapter) {
+<span class="nc" id="L168">			this.exchangeAdapter = adapter;</span>
+<span class="nc" id="L169">			return this;</span>
+		}
+
+		/**
+		 * Provide a function to wrap the configured {@code HttpExchangeAdapter}.
+		 * @param decorator a client adapted to {@link HttpExchangeAdapter}
+		 * @return this same builder instance
+		 * @since 7.0
+		 */
+		public Builder exchangeAdapterDecorator(Function&lt;HttpExchangeAdapter, HttpExchangeAdapter&gt; decorator) {
+<span class="nc" id="L179">			this.exchangeAdapterDecorator = this.exchangeAdapterDecorator.andThen(decorator);</span>
+<span class="nc" id="L180">			return this;</span>
+		}
+
+		/**
+		 * Register a custom argument resolver, invoked ahead of default resolvers.
+		 * @param resolver the resolver to add
+		 * @return this same builder instance
+		 */
+		public Builder customArgumentResolver(HttpServiceArgumentResolver resolver) {
+<span class="nc" id="L189">			this.customArgumentResolvers.add(resolver);</span>
+<span class="nc" id="L190">			return this;</span>
+		}
+
+		/**
+		 * Set the {@link ConversionService} to use where input values need to
+		 * be formatted as Strings.
+		 * &lt;p&gt;By default, this is {@link DefaultFormattingConversionService}.
+		 * @return this same builder instance
+		 */
+		public Builder conversionService(ConversionService conversionService) {
+<span class="nc" id="L200">			this.conversionService = conversionService;</span>
+<span class="nc" id="L201">			return this;</span>
+		}
+
+		/**
+		 * Register an {@link HttpRequestValues} processor that can further
+		 * customize request values based on the method and all arguments.
+		 * @param processor the processor to add
+		 * @return this same builder instance
+		 * @since 7.0
+		 */
+		public Builder httpRequestValuesProcessor(HttpRequestValues.Processor processor) {
+<span class="nc" id="L212">			this.requestValuesProcessors.add(processor);</span>
+<span class="nc" id="L213">			return this;</span>
+		}
+
+		/**
+		 * Set the {@link StringValueResolver} to use for resolving placeholders
+		 * and expressions embedded in {@link HttpExchange#url()}.
+		 * @param embeddedValueResolver the resolver to use
+		 * @return this same builder instance
+		 */
+		public Builder embeddedValueResolver(StringValueResolver embeddedValueResolver) {
+<span class="nc" id="L223">			this.embeddedValueResolver = embeddedValueResolver;</span>
+<span class="nc" id="L224">			return this;</span>
+		}
+
+		/**
+		 * Register a callback to customize the {@link ProxyFactory} used to
+		 * create the proxy for each HTTP service interface.
+		 * @param customizer the customizer to add
+		 * @return this same builder instance
+		 * @since 7.1
+		 */
+		public Builder proxyFactoryCustomizer(ProxyFactoryCustomizer customizer) {
+<span class="nc" id="L235">			this.proxyFactoryCustomizers.add(customizer);</span>
+<span class="nc" id="L236">			return this;</span>
+		}
+
+		/**
+		 * Build the {@link HttpServiceProxyFactory} instance.
+		 */
+		public HttpServiceProxyFactory build() {
+<span class="nc" id="L243">			Assert.notNull(this.exchangeAdapter, &quot;HttpClientAdapter is required&quot;);</span>
+<span class="nc" id="L244">			HttpExchangeAdapter adapterToUse = this.exchangeAdapterDecorator.apply(this.exchangeAdapter);</span>
+
+<span class="nc" id="L246">			return new HttpServiceProxyFactory(</span>
+<span class="nc" id="L247">					adapterToUse, initArgumentResolvers(), this.requestValuesProcessors,</span>
+					this.embeddedValueResolver, this.proxyFactoryCustomizers);
+		}
+
+		@SuppressWarnings({&quot;DataFlowIssue&quot;, &quot;NullAway&quot;})
+		private List&lt;HttpServiceArgumentResolver&gt; initArgumentResolvers() {
+
+			// Custom
+<span class="nc" id="L255">			List&lt;HttpServiceArgumentResolver&gt; resolvers = new ArrayList&lt;&gt;(this.customArgumentResolvers);</span>
+
+<span class="nc bnc" id="L257" title="All 2 branches missed.">			ConversionService service = (this.conversionService != null ?</span>
+<span class="nc" id="L258">					this.conversionService : new DefaultFormattingConversionService());</span>
+
+			// Annotation-based
+<span class="nc" id="L261">			resolvers.add(new RequestHeaderArgumentResolver(service));</span>
+<span class="nc" id="L262">			resolvers.add(new RequestBodyArgumentResolver(this.exchangeAdapter));</span>
+<span class="nc" id="L263">			resolvers.add(new PathVariableArgumentResolver(service));</span>
+<span class="nc" id="L264">			resolvers.add(new RequestParamArgumentResolver(service));</span>
+<span class="nc" id="L265">			resolvers.add(new RequestPartArgumentResolver(this.exchangeAdapter));</span>
+<span class="nc" id="L266">			resolvers.add(new CookieValueArgumentResolver(service));</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">			if (this.exchangeAdapter.supportsRequestAttributes()) {</span>
+<span class="nc" id="L268">				resolvers.add(new RequestAttributeArgumentResolver());</span>
+			}
+
+			// Specific type
+<span class="nc" id="L272">			resolvers.add(new UrlArgumentResolver());</span>
+<span class="nc" id="L273">			resolvers.add(new UriBuilderFactoryArgumentResolver());</span>
+<span class="nc" id="L274">			resolvers.add(new HttpMethodArgumentResolver());</span>
+
+<span class="nc" id="L276">			return resolvers;</span>
+		}
+	}
+
+
+	/**
+	 * {@link MethodInterceptor} that invokes an {@link HttpServiceMethod}.
+	 */
+	private static final class HttpServiceMethodInterceptor implements MethodInterceptor {
+
+		private final Map&lt;Method, HttpServiceMethod&gt; httpServiceMethods;
+
+<span class="nc" id="L288">		private HttpServiceMethodInterceptor(List&lt;HttpServiceMethod&gt; methods) {</span>
+<span class="nc" id="L289">			this.httpServiceMethods = methods.stream()</span>
+<span class="nc" id="L290">					.collect(Collectors.toMap(HttpServiceMethod::getMethod, Function.identity()));</span>
+<span class="nc" id="L291">		}</span>
+
+		@Override
+		public @Nullable Object invoke(MethodInvocation invocation) throws Throwable {
+<span class="nc" id="L295">			Method method = invocation.getMethod();</span>
+<span class="nc" id="L296">			HttpServiceMethod httpServiceMethod = this.httpServiceMethods.get(method);</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">			if (httpServiceMethod != null) {</span>
+<span class="nc bnc" id="L298" title="All 2 branches missed.">				@Nullable Object[] arguments = KotlinDetector.isSuspendingFunction(method) ?</span>
+<span class="nc" id="L299">						resolveCoroutinesArguments(invocation.getArguments()) : invocation.getArguments();</span>
+<span class="nc" id="L300">				return httpServiceMethod.invoke(arguments);</span>
+			}
+<span class="nc bnc" id="L302" title="All 2 branches missed.">			if (method.isDefault()) {</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">				if (invocation instanceof ReflectiveMethodInvocation reflectiveMethodInvocation) {</span>
+<span class="nc" id="L304">					Object proxy = reflectiveMethodInvocation.getProxy();</span>
+<span class="nc" id="L305">					return InvocationHandler.invokeDefault(proxy, method, invocation.getArguments());</span>
+				}
+			}
+<span class="nc" id="L308">			throw new IllegalStateException(&quot;Unexpected method invocation: &quot; + method);</span>
+		}
+
+		private static Object[] resolveCoroutinesArguments(@Nullable Object[] args) {
+<span class="nc" id="L312">			Object[] functionArgs = new Object[args.length - 1];</span>
+<span class="nc" id="L313">			System.arraycopy(args, 0, functionArgs, 0, args.length - 1);</span>
+<span class="nc" id="L314">			return functionArgs;</span>
+		}
+	}
+
+
+	/**
+	 * Processor that delegates to a list of other processors.
+	 */
+<span class="nc" id="L322">	private record CompositeHttpRequestValuesProcessor(List&lt;HttpRequestValues.Processor&gt; processors)</span>
+			implements HttpRequestValues.Processor {
+
+		@Override
+		public void process(
+				Method method, MethodParameter[] parameters, @Nullable Object[] arguments,
+				HttpRequestValues.Builder builder) {
+
+<span class="nc bnc" id="L330" title="All 2 branches missed.">			for (HttpRequestValues.Processor processor : this.processors) {</span>
+<span class="nc" id="L331">				processor.process(method, parameters, arguments, builder);</span>
+<span class="nc" id="L332">			}</span>
+<span class="nc" id="L333">		}</span>
+	}
+
+	/**
+	 * Callback mechanism to customize the {@link ProxyFactory} used to create the
+	 * proxy for each HTTP service interface, e.g. to add AOP interceptors.
+	 * @author Dung Dang Minh
+	 * @since 7.1
+	 */
+	public interface ProxyFactoryCustomizer {
+
+		/**
+		 * Customize the {@link ProxyFactory} for the given HTTP service type.
+		 * @param proxyFactory will never be {@literal null}.
+		 * @param serviceType the HTTP service interface type
+		 */
+		void customize(ProxyFactory proxyFactory, Class&lt;?&gt; serviceType);
+
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

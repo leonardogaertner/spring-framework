@@ -1,0 +1,179 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>TestBeanOverrideProcessor.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-test</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context.bean.override.convention</a> &gt; <span class="el_source">TestBeanOverrideProcessor.java</span></div><h1>TestBeanOverrideProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context.bean.override.convention;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.springframework.core.MethodIntrospector;
+import org.springframework.core.ResolvableType;
+import org.springframework.test.context.TestContextAnnotationUtils;
+import org.springframework.test.context.bean.override.BeanOverrideProcessor;
+import org.springframework.test.context.bean.override.BeanOverrideStrategy;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.ReflectionUtils.MethodFilter;
+
+import static org.springframework.test.context.bean.override.BeanOverrideStrategy.REPLACE;
+import static org.springframework.test.context.bean.override.BeanOverrideStrategy.REPLACE_OR_CREATE;
+
+/**
+ * {@link BeanOverrideProcessor} implementation for {@link TestBean @TestBean}
+ * support, which creates a {@link TestBeanOverrideHandler} for annotated
+ * fields in a given class and ensures that a corresponding static factory method
+ * exists, according to the {@linkplain TestBean documented conventions}.
+ *
+ * @author Simon Baslé
+ * @author Sam Brannen
+ * @author Stephane Nicoll
+ * @since 6.2
+ */
+<span class="fc" id="L54">class TestBeanOverrideProcessor implements BeanOverrideProcessor {</span>
+
+	@Override
+	public TestBeanOverrideHandler createHandler(Annotation overrideAnnotation, Class&lt;?&gt; testClass, Field field) {
+<span class="fc bfc" id="L58" title="All 2 branches covered.">		if (!(overrideAnnotation instanceof TestBean testBean)) {</span>
+<span class="fc" id="L59">			throw new IllegalStateException(&quot;Invalid annotation passed to %s: expected @TestBean on field %s.%s&quot;</span>
+<span class="fc" id="L60">					.formatted(getClass().getSimpleName(), field.getDeclaringClass().getName(), field.getName()));</span>
+		}
+
+<span class="fc bfc" id="L63" title="All 2 branches covered.">		String beanName = (!testBean.name().isBlank() ? testBean.name() : null);</span>
+<span class="fc" id="L64">		String methodName = testBean.methodName();</span>
+<span class="fc bfc" id="L65" title="All 2 branches covered.">		BeanOverrideStrategy strategy = (testBean.enforceOverride() ? REPLACE : REPLACE_OR_CREATE);</span>
+
+		Method factoryMethod;
+<span class="fc bfc" id="L68" title="All 2 branches covered.">		if (!methodName.isBlank()) {</span>
+			// If the user specified an explicit method name, search for that.
+<span class="fc" id="L70">			factoryMethod = findTestBeanFactoryMethod(field.getDeclaringClass(), field.getType(), methodName);</span>
+		}
+		else {
+			// Otherwise, search for candidate factory methods whose names match either
+			// the field name or the explicit bean name (if any).
+<span class="fc" id="L75">			List&lt;String&gt; candidateMethodNames = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L76">			candidateMethodNames.add(field.getName());</span>
+
+<span class="fc bfc" id="L78" title="All 2 branches covered.">			if (beanName != null) {</span>
+<span class="fc" id="L79">				candidateMethodNames.add(beanName);</span>
+			}
+<span class="fc" id="L81">			factoryMethod = findTestBeanFactoryMethod(field.getDeclaringClass(), field.getType(), candidateMethodNames);</span>
+		}
+
+<span class="fc" id="L84">		return new TestBeanOverrideHandler(</span>
+<span class="fc" id="L85">				field, ResolvableType.forField(field, testClass), beanName, testBean.contextName(), strategy, factoryMethod);</span>
+	}
+
+	/**
+	 * Find a test bean factory {@link Method} for the given {@link Class}.
+	 * &lt;p&gt;Delegates to {@link #findTestBeanFactoryMethod(Class, Class, Collection)}.
+	 */
+	Method findTestBeanFactoryMethod(Class&lt;?&gt; clazz, Class&lt;?&gt; methodReturnType, String... methodNames) {
+<span class="fc" id="L93">		return findTestBeanFactoryMethod(clazz, methodReturnType, List.of(methodNames));</span>
+	}
+
+	/**
+	 * Find a test bean factory {@link Method} for the given {@link Class}, which
+	 * meets the following criteria.
+	 * &lt;ul&gt;
+	 * &lt;li&gt;The method is static.&lt;/li&gt;
+	 * &lt;li&gt;The method does not accept any arguments.&lt;/li&gt;
+	 * &lt;li&gt;The method's return type matches the supplied {@code methodReturnType}.&lt;/li&gt;
+	 * &lt;li&gt;The method's name is one of the supplied {@code methodNames}.&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * &lt;p&gt;This method traverses up the type hierarchy of the given class in search
+	 * of the factory method, beginning with the class itself and then searching
+	 * implemented interfaces and superclasses. If a factory method is not found
+	 * in the type hierarchy, this method will also search the enclosing class
+	 * hierarchy if the class is a nested class.
+	 * &lt;p&gt;If multiple factory methods are found that match the search criteria,
+	 * an exception is thrown.
+	 * @param clazz the class in which to search for the factory method
+	 * @param methodReturnType the return type for the factory method
+	 * @param methodNames a set of supported names for the factory method
+	 * @return the corresponding factory method
+	 * @throws IllegalStateException if a matching factory method cannot
+	 * be found or multiple methods match
+	 */
+	Method findTestBeanFactoryMethod(Class&lt;?&gt; clazz, Class&lt;?&gt; methodReturnType, Collection&lt;String&gt; methodNames) {
+<span class="fc" id="L120">		Assert.notEmpty(methodNames, &quot;At least one candidate method name is required&quot;);</span>
+<span class="fc" id="L121">		Set&lt;Method&gt; methods = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc" id="L122">		Set&lt;String&gt; originalNames = new LinkedHashSet&lt;&gt;(methodNames);</span>
+
+		// Process fully-qualified method names first.
+<span class="fc bfc" id="L125" title="All 2 branches covered.">		for (String methodName : methodNames) {</span>
+<span class="fc" id="L126">			int indexOfHash = methodName.lastIndexOf('#');</span>
+<span class="fc bfc" id="L127" title="All 2 branches covered.">			if (indexOfHash != -1) {</span>
+<span class="fc" id="L128">				String className = methodName.substring(0, indexOfHash).trim();</span>
+<span class="fc" id="L129">				Assert.hasText(className, () -&gt; &quot;No class name present in fully-qualified method name: &quot; + methodName);</span>
+<span class="fc" id="L130">				String methodNameToUse = methodName.substring(indexOfHash + 1).trim();</span>
+<span class="fc" id="L131">				Assert.hasText(methodNameToUse, () -&gt; &quot;No method name present in fully-qualified method name: &quot; + methodName);</span>
+				Class&lt;?&gt; declaringClass;
+				try {
+<span class="fc" id="L134">					declaringClass = ClassUtils.forName(className, getClass().getClassLoader());</span>
+				}
+<span class="fc" id="L136">				catch (ClassNotFoundException | LinkageError ex) {</span>
+<span class="fc" id="L137">					throw new IllegalStateException(</span>
+							&quot;Failed to load class for fully-qualified method name: &quot; + methodName, ex);
+<span class="fc" id="L139">				}</span>
+<span class="fc" id="L140">				Method externalMethod = ReflectionUtils.findMethod(declaringClass, methodNameToUse);</span>
+<span class="pc bpc" id="L141" title="1 of 4 branches missed.">				Assert.state(externalMethod != null &amp;&amp; Modifier.isStatic(externalMethod.getModifiers()) &amp;&amp;</span>
+<span class="pc bpc" id="L142" title="1 of 2 branches missed.">						methodReturnType.isAssignableFrom(externalMethod.getReturnType()), () -&gt;</span>
+<span class="fc" id="L143">								&quot;No static method found named %s in %s with return type %s&quot;.formatted(</span>
+<span class="fc" id="L144">										methodNameToUse, className, methodReturnType.getName()));</span>
+<span class="fc" id="L145">				methods.add(externalMethod);</span>
+<span class="fc" id="L146">				originalNames.remove(methodName);</span>
+			}
+<span class="fc" id="L148">		}</span>
+
+<span class="fc" id="L150">		Set&lt;String&gt; supportedNames = new LinkedHashSet&lt;&gt;(originalNames);</span>
+<span class="fc bfc" id="L151" title="All 2 branches covered.">		MethodFilter methodFilter = method -&gt; (Modifier.isStatic(method.getModifiers()) &amp;&amp;</span>
+<span class="fc bfc" id="L152" title="All 2 branches covered.">				supportedNames.contains(method.getName()) &amp;&amp;</span>
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">				methodReturnType.isAssignableFrom(method.getReturnType()));</span>
+<span class="fc" id="L154">		findMethods(methods, clazz, methodFilter);</span>
+
+<span class="fc" id="L156">		String methodNamesDescription = supportedNames.stream()</span>
+<span class="fc" id="L157">				.map(name -&gt; name + &quot;()&quot;).collect(Collectors.joining(&quot; or &quot;));</span>
+<span class="fc bfc" id="L158" title="All 2 branches covered.">		Assert.state(!methods.isEmpty(), () -&gt;</span>
+<span class="fc" id="L159">				&quot;No static method found named %s in %s with return type %s&quot;.formatted(</span>
+<span class="fc" id="L160">						methodNamesDescription, clazz.getName(), methodReturnType.getName()));</span>
+
+<span class="fc" id="L162">		long uniqueMethodNameCount = methods.stream().map(Method::getName).distinct().count();</span>
+<span class="fc bfc" id="L163" title="All 2 branches covered.">		Assert.state(uniqueMethodNameCount == 1, () -&gt;</span>
+<span class="fc" id="L164">				&quot;Found %d competing static methods named %s in %s with return type %s&quot;.formatted(</span>
+<span class="fc" id="L165">						uniqueMethodNameCount, methodNamesDescription, clazz.getName(), methodReturnType.getName()));</span>
+
+<span class="fc" id="L167">		return methods.iterator().next();</span>
+	}
+
+	private static Set&lt;Method&gt; findMethods(Set&lt;Method&gt; methods, Class&lt;?&gt; clazz, MethodFilter methodFilter) {
+<span class="fc" id="L171">		methods.addAll(MethodIntrospector.selectMethods(clazz, methodFilter));</span>
+<span class="fc bfc" id="L172" title="All 4 branches covered.">		if (methods.isEmpty() &amp;&amp; TestContextAnnotationUtils.searchEnclosingClass(clazz)) {</span>
+<span class="fc" id="L173">			findMethods(methods, clazz.getEnclosingClass(), methodFilter);</span>
+		}
+<span class="fc" id="L175">		return methods;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

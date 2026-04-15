@@ -1,0 +1,144 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ExecutorLifecycleDelegate.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.scheduling.concurrent</a> &gt; <span class="el_source">ExecutorLifecycleDelegate.java</span></div><h1>ExecutorLifecycleDelegate.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.scheduling.concurrent;
+
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.locks.Condition;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.context.SmartLifecycle;
+
+/**
+ * An internal delegate for common {@link ExecutorService} lifecycle management
+ * with pause/resume support.
+ *
+ * @author Juergen Hoeller
+ * @since 6.1
+ * @see ExecutorConfigurationSupport
+ * @see SimpleAsyncTaskScheduler
+ */
+final class ExecutorLifecycleDelegate implements SmartLifecycle {
+
+	private final ExecutorService executor;
+
+<span class="fc" id="L41">	private final Lock pauseLock = new ReentrantLock();</span>
+
+<span class="fc" id="L43">	private final Condition unpaused = this.pauseLock.newCondition();</span>
+
+	private volatile boolean paused;
+
+	private volatile boolean shutdown;
+
+<span class="fc" id="L49">	private int executingTaskCount = 0;</span>
+
+	private @Nullable Runnable stopCallback;
+
+
+<span class="fc" id="L54">	public ExecutorLifecycleDelegate(ExecutorService executor) {</span>
+<span class="fc" id="L55">		this.executor = executor;</span>
+<span class="fc" id="L56">	}</span>
+
+
+	@Override
+	public void start() {
+<span class="fc" id="L61">		this.pauseLock.lock();</span>
+		try {
+<span class="fc" id="L63">			this.paused = false;</span>
+<span class="fc" id="L64">			this.unpaused.signalAll();</span>
+		}
+		finally {
+<span class="fc" id="L67">			this.pauseLock.unlock();</span>
+		}
+<span class="fc" id="L69">	}</span>
+
+	@Override
+	public void stop() {
+<span class="fc" id="L73">		this.pauseLock.lock();</span>
+		try {
+<span class="fc" id="L75">			this.paused = true;</span>
+<span class="fc" id="L76">			this.stopCallback = null;</span>
+		}
+		finally {
+<span class="fc" id="L79">			this.pauseLock.unlock();</span>
+		}
+<span class="fc" id="L81">	}</span>
+
+	@Override
+	public void stop(Runnable callback) {
+<span class="fc" id="L85">		this.pauseLock.lock();</span>
+		try {
+<span class="fc" id="L87">			this.paused = true;</span>
+<span class="fc bfc" id="L88" title="All 2 branches covered.">			if (this.executingTaskCount == 0) {</span>
+<span class="fc" id="L89">				this.stopCallback = null;</span>
+<span class="fc" id="L90">				callback.run();</span>
+			}
+			else {
+<span class="fc" id="L93">				this.stopCallback = callback;</span>
+			}
+		}
+		finally {
+<span class="fc" id="L97">			this.pauseLock.unlock();</span>
+		}
+<span class="fc" id="L99">	}</span>
+
+	@Override
+	public boolean isRunning() {
+<span class="fc bfc" id="L103" title="All 4 branches covered.">		return (!this.paused &amp;&amp; !this.executor.isTerminated());</span>
+	}
+
+	void markShutdown() {
+<span class="fc" id="L107">		this.shutdown = true;</span>
+<span class="fc" id="L108">	}</span>
+
+	void beforeExecute(Thread thread) {
+<span class="fc" id="L111">		this.pauseLock.lock();</span>
+		try {
+<span class="pc bpc" id="L113" title="1 of 6 branches missed.">			while (this.paused &amp;&amp; !this.shutdown &amp;&amp; !this.executor.isShutdown()) {</span>
+<span class="fc" id="L114">				this.unpaused.await();</span>
+			}
+		}
+<span class="nc" id="L117">		catch (InterruptedException ex) {</span>
+<span class="nc" id="L118">			thread.interrupt();</span>
+		}
+		finally {
+<span class="fc" id="L121">			this.executingTaskCount++;</span>
+<span class="fc" id="L122">			this.pauseLock.unlock();</span>
+		}
+<span class="fc" id="L124">	}</span>
+
+	void afterExecute() {
+<span class="fc" id="L127">		this.pauseLock.lock();</span>
+		try {
+<span class="fc" id="L129">			this.executingTaskCount--;</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">			if (this.executingTaskCount == 0) {</span>
+<span class="fc" id="L131">				Runnable callback = this.stopCallback;</span>
+<span class="fc bfc" id="L132" title="All 2 branches covered.">				if (callback != null) {</span>
+<span class="fc" id="L133">					callback.run();</span>
+<span class="fc" id="L134">					this.stopCallback = null;</span>
+				}
+			}
+		}
+		finally {
+<span class="fc" id="L139">			this.pauseLock.unlock();</span>
+		}
+<span class="fc" id="L141">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

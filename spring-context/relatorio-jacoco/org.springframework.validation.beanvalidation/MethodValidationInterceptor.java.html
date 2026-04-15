@@ -1,0 +1,305 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MethodValidationInterceptor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.validation.beanvalidation</a> &gt; <span class="el_source">MethodValidationInterceptor.java</span></div><h1>MethodValidationInterceptor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.validation.beanvalidation;
+
+import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
+import java.util.Collections;
+import java.util.List;
+import java.util.Set;
+import java.util.function.Supplier;
+
+import jakarta.validation.ConstraintViolation;
+import jakarta.validation.ConstraintViolationException;
+import jakarta.validation.Valid;
+import jakarta.validation.Validator;
+import jakarta.validation.ValidatorFactory;
+import org.aopalliance.intercept.MethodInterceptor;
+import org.aopalliance.intercept.MethodInvocation;
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.aop.ProxyMethodInvocation;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.SmartFactoryBean;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.validation.BeanPropertyBindingResult;
+import org.springframework.validation.Errors;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.validation.annotation.ValidationAnnotationUtils;
+import org.springframework.validation.method.MethodValidationException;
+import org.springframework.validation.method.MethodValidationResult;
+import org.springframework.validation.method.ParameterErrors;
+import org.springframework.validation.method.ParameterValidationResult;
+
+/**
+ * An AOP Alliance {@link MethodInterceptor} implementation that delegates to a
+ * JSR-303 provider for performing method-level validation on annotated methods.
+ *
+ * &lt;p&gt;Applicable methods have {@link jakarta.validation.Constraint} annotations on
+ * their parameters and/or on their return value (in the latter case specified at
+ * the method level, typically as inline annotation).
+ *
+ * &lt;p&gt;For example: {@code public @NotNull Object myValidMethod(@NotNull String arg1, @Max(10) int arg2)}
+ *
+ * &lt;p&gt;In case of validation errors, the interceptor can raise
+ * {@link ConstraintViolationException}, or adapt the violations to
+ * {@link MethodValidationResult} and raise {@link MethodValidationException}.
+ *
+ * &lt;p&gt;Validation groups can be specified through Spring's {@link Validated} annotation
+ * at the type level of the containing target class, applying to all public service methods
+ * of that class. By default, JSR-303 will validate against its default group only.
+ *
+ * @author Juergen Hoeller
+ * @author Rossen Stoyanchev
+ * @since 3.1
+ * @see MethodValidationPostProcessor
+ * @see jakarta.validation.executable.ExecutableValidator
+ */
+public class MethodValidationInterceptor implements MethodInterceptor {
+
+<span class="fc" id="L81">	private static final boolean REACTOR_PRESENT = ClassUtils.isPresent(</span>
+<span class="fc" id="L82">			&quot;reactor.core.publisher.Mono&quot;, MethodValidationInterceptor.class.getClassLoader());</span>
+
+
+	private final MethodValidationAdapter validationAdapter;
+
+	private final boolean adaptViolations;
+
+
+	/**
+	 * Create a new MethodValidationInterceptor using a default JSR-303 validator underneath.
+	 */
+	public MethodValidationInterceptor() {
+<span class="fc" id="L94">		this(new MethodValidationAdapter(), false);</span>
+<span class="fc" id="L95">	}</span>
+
+	/**
+	 * Create a new MethodValidationInterceptor using the given JSR-303 ValidatorFactory.
+	 * @param validatorFactory the JSR-303 ValidatorFactory to use
+	 */
+	public MethodValidationInterceptor(ValidatorFactory validatorFactory) {
+<span class="nc" id="L102">		this(new MethodValidationAdapter(validatorFactory), false);</span>
+<span class="nc" id="L103">	}</span>
+
+	/**
+	 * Create a new MethodValidationInterceptor using the given JSR-303 Validator.
+	 * @param validator the JSR-303 Validator to use
+	 */
+	public MethodValidationInterceptor(Validator validator) {
+<span class="fc" id="L110">		this(new MethodValidationAdapter(validator), false);</span>
+<span class="fc" id="L111">	}</span>
+
+	/**
+	 * Create a new MethodValidationInterceptor for the supplied
+	 * (potentially lazily initialized) Validator.
+	 * @param validator a Supplier for the Validator to use
+	 * @since 6.0
+	 */
+	public MethodValidationInterceptor(Supplier&lt;Validator&gt; validator) {
+<span class="nc" id="L120">		this(validator, false);</span>
+<span class="nc" id="L121">	}</span>
+
+	/**
+	 * Create a new MethodValidationInterceptor for the supplied
+	 * (potentially lazily initialized) Validator.
+	 * @param validator a Supplier for the Validator to use
+	 * @param adaptViolations whether to adapt {@link ConstraintViolation}s, and
+	 * if {@code true}, raise {@link MethodValidationException}, of if
+	 * {@code false} raise {@link ConstraintViolationException} instead
+	 * @since 6.1
+	 */
+	public MethodValidationInterceptor(Supplier&lt;Validator&gt; validator, boolean adaptViolations) {
+<span class="fc" id="L133">		this(new MethodValidationAdapter(validator), adaptViolations);</span>
+<span class="fc" id="L134">	}</span>
+
+<span class="fc" id="L136">	private MethodValidationInterceptor(MethodValidationAdapter validationAdapter, boolean adaptViolations) {</span>
+<span class="fc" id="L137">		this.validationAdapter = validationAdapter;</span>
+<span class="fc" id="L138">		this.adaptViolations = adaptViolations;</span>
+<span class="fc" id="L139">	}</span>
+
+
+	@Override
+	public @Nullable Object invoke(MethodInvocation invocation) throws Throwable {
+		// Avoid Validator invocation on FactoryBean.getObjectType/isSingleton
+<span class="fc bfc" id="L145" title="All 2 branches covered.">		if (isFactoryBeanMetadataMethod(invocation.getMethod())) {</span>
+<span class="fc" id="L146">			return invocation.proceed();</span>
+		}
+
+<span class="fc" id="L149">		Object target = getTarget(invocation);</span>
+<span class="fc" id="L150">		Method method = invocation.getMethod();</span>
+<span class="fc" id="L151">		@Nullable Object[] arguments = invocation.getArguments();</span>
+<span class="fc" id="L152">		Class&lt;?&gt;[] groups = determineValidationGroups(invocation);</span>
+
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">		if (REACTOR_PRESENT) {</span>
+<span class="fc" id="L155">			arguments = ReactorValidationHelper.insertAsyncValidation(</span>
+<span class="fc" id="L156">					this.validationAdapter.getSpringValidatorAdapter(), this.adaptViolations,</span>
+					target, method, arguments);
+		}
+
+		Set&lt;ConstraintViolation&lt;Object&gt;&gt; violations;
+
+<span class="fc bfc" id="L162" title="All 2 branches covered.">		if (this.adaptViolations) {</span>
+<span class="fc" id="L163">			this.validationAdapter.applyArgumentValidation(target, method, null, arguments, groups);</span>
+		}
+		else {
+<span class="fc" id="L166">			violations = this.validationAdapter.invokeValidatorForArguments(target, method, arguments, groups);</span>
+<span class="fc bfc" id="L167" title="All 2 branches covered.">			if (!violations.isEmpty()) {</span>
+<span class="fc" id="L168">				throw new ConstraintViolationException(violations);</span>
+			}
+		}
+
+<span class="fc" id="L172">		Object returnValue = invocation.proceed();</span>
+
+<span class="fc bfc" id="L174" title="All 2 branches covered.">		if (this.adaptViolations) {</span>
+<span class="fc" id="L175">			this.validationAdapter.applyReturnValueValidation(target, method, null, returnValue, groups);</span>
+		}
+		else {
+<span class="fc" id="L178">			violations = this.validationAdapter.invokeValidatorForReturnValue(target, method, returnValue, groups);</span>
+<span class="fc bfc" id="L179" title="All 2 branches covered.">			if (!violations.isEmpty()) {</span>
+<span class="fc" id="L180">				throw new ConstraintViolationException(violations);</span>
+			}
+		}
+
+<span class="fc" id="L184">		return returnValue;</span>
+	}
+
+	private static Object getTarget(MethodInvocation invocation) {
+<span class="fc" id="L188">		Object target = invocation.getThis();</span>
+<span class="pc bpc" id="L189" title="1 of 4 branches missed.">		if (target == null &amp;&amp; invocation instanceof ProxyMethodInvocation methodInvocation) {</span>
+			// Allow validation for AOP proxy without a target
+<span class="fc" id="L191">			target = methodInvocation.getProxy();</span>
+		}
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">		Assert.state(target != null, &quot;Target must not be null&quot;);</span>
+<span class="fc" id="L194">		return target;</span>
+	}
+
+	private boolean isFactoryBeanMetadataMethod(Method method) {
+<span class="fc" id="L198">		Class&lt;?&gt; clazz = method.getDeclaringClass();</span>
+
+		// Call from interface-based proxy handle, allowing for an efficient check?
+<span class="fc bfc" id="L201" title="All 2 branches covered.">		if (clazz.isInterface()) {</span>
+<span class="pc bpc" id="L202" title="1 of 4 branches missed.">			return ((clazz == FactoryBean.class || clazz == SmartFactoryBean.class) &amp;&amp;</span>
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">					!method.getName().equals(&quot;getObject&quot;));</span>
+		}
+
+		// Call from CGLIB proxy handle, potentially implementing a FactoryBean method?
+<span class="fc" id="L207">		Class&lt;?&gt; factoryBeanType = null;</span>
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">		if (SmartFactoryBean.class.isAssignableFrom(clazz)) {</span>
+<span class="nc" id="L209">			factoryBeanType = SmartFactoryBean.class;</span>
+		}
+<span class="fc bfc" id="L211" title="All 2 branches covered.">		else if (FactoryBean.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L212">			factoryBeanType = FactoryBean.class;</span>
+		}
+<span class="pc bpc" id="L214" title="1 of 4 branches missed.">		return (factoryBeanType != null &amp;&amp; !method.getName().equals(&quot;getObject&quot;) &amp;&amp;</span>
+<span class="fc bfc" id="L215" title="All 2 branches covered.">				ClassUtils.hasMethod(factoryBeanType, method));</span>
+	}
+
+	/**
+	 * Determine the validation groups to validate against for the given method invocation.
+	 * &lt;p&gt;Default are the validation groups as specified in the {@link Validated} annotation
+	 * on the method, or on the containing target class of the method, or for an AOP proxy
+	 * without a target (with all behavior in advisors), also check on proxied interfaces.
+	 * @param invocation the current MethodInvocation
+	 * @return the applicable validation groups as a Class array
+	 */
+	protected Class&lt;?&gt;[] determineValidationGroups(MethodInvocation invocation) {
+<span class="fc" id="L227">		Object target = getTarget(invocation);</span>
+<span class="fc" id="L228">		return ValidationAnnotationUtils.determineValidationGroups(target, invocation.getMethod());</span>
+	}
+
+
+	/**
+	 * Helper class to decorate reactive arguments with async validation.
+	 */
+	private static final class ReactorValidationHelper {
+
+<span class="fc" id="L237">		private static final ReactiveAdapterRegistry reactiveAdapterRegistry =</span>
+<span class="fc" id="L238">				ReactiveAdapterRegistry.getSharedInstance();</span>
+
+
+		static @Nullable Object[] insertAsyncValidation(
+				Supplier&lt;SpringValidatorAdapter&gt; validatorAdapterSupplier, boolean adaptViolations,
+				Object target, Method method, @Nullable Object[] arguments) {
+
+<span class="fc bfc" id="L245" title="All 2 branches covered.">			for (int i = 0; i &lt; method.getParameterCount(); i++) {</span>
+<span class="fc bfc" id="L246" title="All 2 branches covered.">				if (arguments[i] == null) {</span>
+<span class="fc" id="L247">					continue;</span>
+				}
+<span class="fc" id="L249">				Class&lt;?&gt; parameterType = method.getParameterTypes()[i];</span>
+<span class="fc" id="L250">				ReactiveAdapter reactiveAdapter = reactiveAdapterRegistry.getAdapter(parameterType);</span>
+<span class="pc bpc" id="L251" title="1 of 4 branches missed.">				if (reactiveAdapter == null || reactiveAdapter.isNoValue()) {</span>
+<span class="nc" id="L252">					continue;</span>
+				}
+<span class="fc" id="L254">				Class&lt;?&gt;[] groups = determineValidationGroups(method.getParameters()[i]);</span>
+<span class="pc bpc" id="L255" title="1 of 2 branches missed.">				if (groups == null) {</span>
+<span class="nc" id="L256">					continue;</span>
+				}
+<span class="fc" id="L258">				SpringValidatorAdapter validatorAdapter = validatorAdapterSupplier.get();</span>
+<span class="fc" id="L259">				MethodParameter param = new MethodParameter(method, i);</span>
+<span class="fc bfc" id="L260" title="All 2 branches covered.">				arguments[i] = (reactiveAdapter.isMultiValue() ?</span>
+<span class="fc" id="L261">						Flux.from(reactiveAdapter.toPublisher(arguments[i])).doOnNext(value -&gt;</span>
+<span class="fc" id="L262">								validate(validatorAdapter, adaptViolations, target, method, param, value, groups)) :</span>
+<span class="fc" id="L263">						Mono.from(reactiveAdapter.toPublisher(arguments[i])).doOnNext(value -&gt;</span>
+<span class="nc" id="L264">								validate(validatorAdapter, adaptViolations, target, method, param, value, groups)));</span>
+			}
+<span class="fc" id="L266">			return arguments;</span>
+		}
+
+		private static Class&lt;?&gt; @Nullable [] determineValidationGroups(Parameter parameter) {
+<span class="fc" id="L270">			Validated validated = AnnotationUtils.findAnnotation(parameter, Validated.class);</span>
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">			if (validated != null) {</span>
+<span class="nc" id="L272">				return validated.value();</span>
+			}
+<span class="fc" id="L274">			Valid valid = AnnotationUtils.findAnnotation(parameter, Valid.class);</span>
+<span class="pc bpc" id="L275" title="1 of 2 branches missed.">			if (valid != null) {</span>
+<span class="fc" id="L276">				return new Class&lt;?&gt;[0];</span>
+			}
+<span class="nc" id="L278">			return null;</span>
+		}
+
+		@SuppressWarnings(&quot;unchecked&quot;)
+		private static &lt;T&gt; void validate(
+				SpringValidatorAdapter validatorAdapter, boolean adaptViolations,
+				Object target, Method method, MethodParameter parameter, Object argument, Class&lt;?&gt;[] groups) {
+
+<span class="fc bfc" id="L286" title="All 2 branches covered.">			if (adaptViolations) {</span>
+<span class="fc" id="L287">				Errors errors = new BeanPropertyBindingResult(argument, argument.getClass().getSimpleName());</span>
+<span class="fc" id="L288">				validatorAdapter.validate(argument, errors);</span>
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">				if (errors.hasErrors()) {</span>
+<span class="fc" id="L290">					ParameterErrors paramErrors = new ParameterErrors(parameter, argument, errors, null, null, null);</span>
+<span class="fc" id="L291">					List&lt;ParameterValidationResult&gt; results = Collections.singletonList(paramErrors);</span>
+<span class="fc" id="L292">					throw new MethodValidationException(MethodValidationResult.create(target, method, results));</span>
+				}
+<span class="nc" id="L294">			}</span>
+			else {
+<span class="fc" id="L296">				Set&lt;ConstraintViolation&lt;T&gt;&gt; violations = validatorAdapter.validate((T) argument, groups);</span>
+<span class="fc bfc" id="L297" title="All 2 branches covered.">				if (!violations.isEmpty()) {</span>
+<span class="fc" id="L298">					throw new ConstraintViolationException(violations);</span>
+				}
+			}
+<span class="fc" id="L301">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

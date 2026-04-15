@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ObjectToObjectConverter.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.convert.support</a> &gt; <span class="el_source">ObjectToObjectConverter.java</span></div><h1>ObjectToObjectConverter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.convert.support;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.Collections;
+import java.util.Map;
+import java.util.Set;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.convert.ConversionFailedException;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.core.convert.converter.ConditionalGenericConverter;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ConcurrentReferenceHashMap;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * Generic converter that uses conventions to convert a source object to a
+ * {@code targetType} by delegating to a method on the source object or to
+ * a static factory method or constructor on the {@code targetType}.
+ *
+ * &lt;h3&gt;Conversion Algorithm&lt;/h3&gt;
+ * &lt;ol&gt;
+ * &lt;li&gt;Invoke a non-static {@code to[targetType.simpleName]()} method on the
+ * source object that has a return type assignable to {@code targetType}, if such
+ * a method exists. For example, {@code org.example.Bar Foo#toBar()} is a
+ * method that follows this convention.
+ * &lt;li&gt;Otherwise invoke a &lt;em&gt;static&lt;/em&gt; {@code valueOf(sourceType)} or Java
+ * 8 style &lt;em&gt;static&lt;/em&gt; {@code of(sourceType)} or {@code from(sourceType)}
+ * method on the {@code targetType} that has a return type &lt;em&gt;related&lt;/em&gt; to
+ * {@code targetType}, if such a method exists. For example, a static
+ * {@code Foo.of(sourceType)} method that returns a {@code Foo},
+ * {@code SuperFooType}, or {@code SubFooType} is a method that follows this
+ * convention. {@link java.time.ZoneId#of(String)} is a concrete example of
+ * such a static factory method which returns a subtype of {@code ZoneId}.
+ * &lt;li&gt;Otherwise invoke a constructor on the {@code targetType} that accepts
+ * a single {@code sourceType} argument, if such a constructor exists.
+ * &lt;li&gt;Otherwise throw a {@link ConversionFailedException} or
+ * {@link IllegalStateException}.
+ * &lt;/ol&gt;
+ *
+ * &lt;p&gt;&lt;strong&gt;Warning&lt;/strong&gt;: this converter does &lt;em&gt;not&lt;/em&gt; support the
+ * {@link Object#toString()} or {@link String#valueOf(Object)} methods for converting
+ * from a {@code sourceType} to {@code java.lang.String}. For {@code toString()}
+ * support, use {@link FallbackObjectToStringConverter} instead.
+ *
+ * @author Keith Donald
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 3.0
+ * @see FallbackObjectToStringConverter
+ */
+<span class="fc" id="L73">final class ObjectToObjectConverter implements ConditionalGenericConverter {</span>
+
+	// Cache for the latest to-method, static factory method, or factory constructor
+	// resolved on a given Class
+<span class="fc" id="L77">	private static final Map&lt;Class&lt;?&gt;, Executable&gt; conversionExecutableCache =</span>
+			new ConcurrentReferenceHashMap&lt;&gt;(32);
+
+
+	@Override
+	public Set&lt;ConvertiblePair&gt; getConvertibleTypes() {
+<span class="fc" id="L83">		return Collections.singleton(new ConvertiblePair(Object.class, Object.class));</span>
+	}
+
+	@Override
+	public boolean matches(TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="fc bfc" id="L88" title="All 2 branches covered.">		return (sourceType.getType() != targetType.getType() &amp;&amp;</span>
+<span class="fc bfc" id="L89" title="All 2 branches covered.">				hasConversionMethodOrConstructor(targetType.getType(), sourceType.getType()));</span>
+	}
+
+	@Override
+	public @Nullable Object convert(@Nullable Object source, TypeDescriptor sourceType, TypeDescriptor targetType) {
+<span class="pc bpc" id="L94" title="1 of 2 branches missed.">		if (source == null) {</span>
+<span class="nc" id="L95">			return null;</span>
+		}
+<span class="fc" id="L97">		Class&lt;?&gt; sourceClass = sourceType.getType();</span>
+<span class="fc" id="L98">		Class&lt;?&gt; targetClass = targetType.getType();</span>
+<span class="fc" id="L99">		Executable executable = getValidatedExecutable(targetClass, sourceClass);</span>
+
+		try {
+<span class="fc bfc" id="L102" title="All 2 branches covered.">			if (executable instanceof Method method) {</span>
+<span class="fc" id="L103">				ReflectionUtils.makeAccessible(method);</span>
+<span class="fc bfc" id="L104" title="All 2 branches covered.">				if (!Modifier.isStatic(method.getModifiers())) {</span>
+<span class="fc" id="L105">					return method.invoke(source);</span>
+				}
+				else {
+<span class="fc" id="L108">					return method.invoke(null, source);</span>
+				}
+			}
+<span class="pc bpc" id="L111" title="1 of 2 branches missed.">			else if (executable instanceof Constructor&lt;?&gt; constructor) {</span>
+<span class="fc" id="L112">				ReflectionUtils.makeAccessible(constructor);</span>
+<span class="fc" id="L113">				return constructor.newInstance(source);</span>
+			}
+		}
+<span class="fc" id="L116">		catch (InvocationTargetException ex) {</span>
+<span class="fc" id="L117">			throw new ConversionFailedException(sourceType, targetType, source, ex.getTargetException());</span>
+		}
+<span class="nc" id="L119">		catch (Throwable ex) {</span>
+<span class="nc" id="L120">			throw new ConversionFailedException(sourceType, targetType, source, ex);</span>
+<span class="nc" id="L121">		}</span>
+
+		// If sourceClass is Number and targetClass is Integer, the following message should expand to:
+		// No toInteger() method exists on java.lang.Number, and no static valueOf/of/from(java.lang.Number)
+		// method or Integer(java.lang.Number) constructor exists on java.lang.Integer.
+<span class="nc" id="L126">		throw new IllegalStateException(String.format(&quot;No to%3$s() method exists on %1$s, &quot; +</span>
+				&quot;and no static valueOf/of/from(%1$s) method or %3$s(%1$s) constructor exists on %2$s.&quot;,
+<span class="nc" id="L128">				sourceClass.getName(), targetClass.getName(), targetClass.getSimpleName()));</span>
+	}
+
+
+	static boolean hasConversionMethodOrConstructor(Class&lt;?&gt; targetClass, Class&lt;?&gt; sourceClass) {
+<span class="fc bfc" id="L133" title="All 2 branches covered.">		return (getValidatedExecutable(targetClass, sourceClass) != null);</span>
+	}
+
+	private static @Nullable Executable getValidatedExecutable(Class&lt;?&gt; targetClass, Class&lt;?&gt; sourceClass) {
+<span class="fc" id="L137">		Executable executable = conversionExecutableCache.get(targetClass);</span>
+<span class="fc bfc" id="L138" title="All 4 branches covered.">		if (executable != null &amp;&amp; isApplicable(executable, sourceClass)) {</span>
+<span class="fc" id="L139">			return executable;</span>
+		}
+
+<span class="fc" id="L142">		executable = determineToMethod(targetClass, sourceClass);</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">		if (executable == null) {</span>
+<span class="fc" id="L144">			executable = determineFactoryMethod(targetClass, sourceClass);</span>
+<span class="fc bfc" id="L145" title="All 2 branches covered.">			if (executable == null) {</span>
+<span class="fc" id="L146">				executable = determineFactoryConstructor(targetClass, sourceClass);</span>
+<span class="fc bfc" id="L147" title="All 2 branches covered.">				if (executable == null) {</span>
+<span class="fc" id="L148">					return null;</span>
+				}
+			}
+		}
+
+<span class="fc" id="L153">		conversionExecutableCache.put(targetClass, executable);</span>
+<span class="fc" id="L154">		return executable;</span>
+	}
+
+	private static boolean isApplicable(Executable executable, Class&lt;?&gt; sourceClass) {
+<span class="fc bfc" id="L158" title="All 2 branches covered.">		if (executable instanceof Method method) {</span>
+<span class="fc bfc" id="L159" title="All 2 branches covered.">			return (!Modifier.isStatic(method.getModifiers()) ?</span>
+<span class="fc" id="L160">					ClassUtils.isAssignable(method.getDeclaringClass(), sourceClass) :</span>
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">					method.getParameterTypes()[0] == sourceClass);</span>
+		}
+<span class="pc bpc" id="L163" title="1 of 2 branches missed.">		else if (executable instanceof Constructor&lt;?&gt; constructor) {</span>
+<span class="fc bfc" id="L164" title="All 2 branches covered.">			return (constructor.getParameterTypes()[0] == sourceClass);</span>
+		}
+		else {
+<span class="nc" id="L167">			return false;</span>
+		}
+	}
+
+	private static @Nullable Method determineToMethod(Class&lt;?&gt; targetClass, Class&lt;?&gt; sourceClass) {
+<span class="fc bfc" id="L172" title="All 4 branches covered.">		if (String.class == targetClass || String.class == sourceClass) {</span>
+			// Do not accept a toString() method or any to methods on String itself
+<span class="fc" id="L174">			return null;</span>
+		}
+
+<span class="fc" id="L177">		Method method = ClassUtils.getMethodIfAvailable(sourceClass, &quot;to&quot; + targetClass.getSimpleName());</span>
+<span class="pc bpc" id="L178" title="1 of 4 branches missed.">		return (method != null &amp;&amp; !Modifier.isStatic(method.getModifiers()) &amp;&amp;</span>
+<span class="pc bpc" id="L179" title="1 of 2 branches missed.">				ClassUtils.isAssignable(targetClass, method.getReturnType()) ? method : null);</span>
+	}
+
+	private static @Nullable Method determineFactoryMethod(Class&lt;?&gt; targetClass, Class&lt;?&gt; sourceClass) {
+<span class="fc bfc" id="L183" title="All 2 branches covered.">		if (String.class == targetClass) {</span>
+			// Do not accept the String.valueOf(Object) method
+<span class="fc" id="L185">			return null;</span>
+		}
+
+<span class="fc" id="L188">		Method method = ClassUtils.getStaticMethod(targetClass, &quot;valueOf&quot;, sourceClass);</span>
+<span class="fc bfc" id="L189" title="All 2 branches covered.">		if (method == null) {</span>
+<span class="fc" id="L190">			method = ClassUtils.getStaticMethod(targetClass, &quot;of&quot;, sourceClass);</span>
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">			if (method == null) {</span>
+<span class="fc" id="L192">				method = ClassUtils.getStaticMethod(targetClass, &quot;from&quot;, sourceClass);</span>
+			}
+		}
+
+<span class="pc bpc" id="L196" title="1 of 4 branches missed.">		return (method != null &amp;&amp; areRelatedTypes(targetClass, method.getReturnType()) ? method : null);</span>
+	}
+
+	/**
+	 * Determine if the two types reside in the same type hierarchy (i.e., type 1
+	 * is assignable to type 2 or vice versa).
+	 * @since 5.3.21
+	 * @see ClassUtils#isAssignable(Class, Class)
+	 */
+	private static boolean areRelatedTypes(Class&lt;?&gt; type1, Class&lt;?&gt; type2) {
+<span class="pc bpc" id="L206" title="3 of 4 branches missed.">		return (ClassUtils.isAssignable(type1, type2) || ClassUtils.isAssignable(type2, type1));</span>
+	}
+
+	private static @Nullable Constructor&lt;?&gt; determineFactoryConstructor(Class&lt;?&gt; targetClass, Class&lt;?&gt; sourceClass) {
+<span class="fc" id="L210">		return ClassUtils.getConstructorIfAvailable(targetClass, sourceClass);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

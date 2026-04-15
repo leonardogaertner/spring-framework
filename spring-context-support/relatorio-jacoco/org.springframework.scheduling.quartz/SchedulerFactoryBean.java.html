@@ -1,0 +1,853 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SchedulerFactoryBean.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.scheduling.quartz</a> &gt; <span class="el_source">SchedulerFactoryBean.java</span></div><h1>SchedulerFactoryBean.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.scheduling.quartz;
+
+import java.io.IOException;
+import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+
+import javax.sql.DataSource;
+
+import org.jspecify.annotations.Nullable;
+import org.quartz.Scheduler;
+import org.quartz.SchedulerException;
+import org.quartz.SchedulerFactory;
+import org.quartz.core.QuartzScheduler;
+import org.quartz.core.QuartzSchedulerResources;
+import org.quartz.impl.RemoteScheduler;
+import org.quartz.impl.SchedulerRepository;
+import org.quartz.impl.StdSchedulerFactory;
+import org.quartz.simpl.SimpleThreadPool;
+import org.quartz.spi.JobFactory;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.BeanNameAware;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.context.SmartLifecycle;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.core.io.support.PropertiesLoaderUtils;
+import org.springframework.scheduling.SchedulingException;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+
+/**
+ * {@link FactoryBean} that creates and configures a Quartz {@link org.quartz.Scheduler},
+ * manages its lifecycle as part of the Spring application context, and exposes the
+ * Scheduler as bean reference for dependency injection.
+ *
+ * &lt;p&gt;Allows registration of JobDetails, Calendars and Triggers, automatically
+ * starting the scheduler on initialization and shutting it down on destruction.
+ * In scenarios that just require static registration of jobs at startup, there
+ * is no need to access the Scheduler instance itself in application code.
+ *
+ * &lt;p&gt;For dynamic registration of jobs at runtime, use a bean reference to
+ * this SchedulerFactoryBean to get direct access to the Quartz Scheduler
+ * ({@code org.quartz.Scheduler}). This allows you to create new jobs
+ * and triggers, and also to control and monitor the entire Scheduler.
+ *
+ * &lt;p&gt;Note that Quartz instantiates a new Job for each execution, in
+ * contrast to Timer which uses a TimerTask instance that is shared
+ * between repeated executions. Just JobDetail descriptors are shared.
+ *
+ * &lt;p&gt;When using persistent jobs, it is strongly recommended to perform all
+ * operations on the Scheduler within Spring-managed (or plain JTA) transactions.
+ * Else, database locking will not properly work and might even break.
+ * (See {@link #setDataSource setDataSource} javadoc for details.)
+ *
+ * &lt;p&gt;The preferred way to achieve transactional execution is to demarcate
+ * declarative transactions at the business facade level, which will
+ * automatically apply to Scheduler operations performed within those scopes.
+ * Alternatively, you may add transactional advice for the Scheduler itself.
+ *
+ * &lt;p&gt;Compatible with Quartz 2.1.4 and higher.
+ *
+ * @author Juergen Hoeller
+ * @since 18.02.2004
+ * @see #setDataSource
+ * @see org.quartz.Scheduler
+ * @see org.quartz.SchedulerFactory
+ * @see org.quartz.impl.StdSchedulerFactory
+ * @see org.springframework.transaction.interceptor.TransactionProxyFactoryBean
+ */
+<span class="fc" id="L93">public class SchedulerFactoryBean extends SchedulerAccessor implements FactoryBean&lt;Scheduler&gt;,</span>
+		BeanNameAware, ApplicationContextAware, InitializingBean, DisposableBean, SmartLifecycle {
+
+	/**
+	 * The thread count property.
+	 */
+	public static final String PROP_THREAD_COUNT = &quot;org.quartz.threadPool.threadCount&quot;;
+
+	/**
+	 * The default thread count.
+	 */
+	public static final int DEFAULT_THREAD_COUNT = 10;
+
+
+<span class="fc" id="L107">	private static final ThreadLocal&lt;ResourceLoader&gt; configTimeResourceLoaderHolder = new ThreadLocal&lt;&gt;();</span>
+
+<span class="fc" id="L109">	private static final ThreadLocal&lt;Executor&gt; configTimeTaskExecutorHolder = new ThreadLocal&lt;&gt;();</span>
+
+<span class="fc" id="L111">	private static final ThreadLocal&lt;DataSource&gt; configTimeDataSourceHolder = new ThreadLocal&lt;&gt;();</span>
+
+<span class="fc" id="L113">	private static final ThreadLocal&lt;DataSource&gt; configTimeNonTransactionalDataSourceHolder = new ThreadLocal&lt;&gt;();</span>
+
+
+	/**
+	 * Return the {@link ResourceLoader} for the currently configured Quartz Scheduler,
+	 * to be used by {@link ResourceLoaderClassLoadHelper}.
+	 * &lt;p&gt;This instance will be set before initialization of the corresponding Scheduler,
+	 * and reset immediately afterwards. It is thus only available during configuration.
+	 * @see #setApplicationContext
+	 * @see ResourceLoaderClassLoadHelper
+	 */
+	public static @Nullable ResourceLoader getConfigTimeResourceLoader() {
+<span class="fc" id="L125">		return configTimeResourceLoaderHolder.get();</span>
+	}
+
+	/**
+	 * Return the {@link Executor} for the currently configured Quartz Scheduler,
+	 * to be used by {@link LocalTaskExecutorThreadPool}.
+	 * &lt;p&gt;This instance will be set before initialization of the corresponding Scheduler,
+	 * and reset immediately afterwards. It is thus only available during configuration.
+	 * @since 2.0
+	 * @see #setTaskExecutor
+	 * @see LocalTaskExecutorThreadPool
+	 */
+	public static @Nullable Executor getConfigTimeTaskExecutor() {
+<span class="nc" id="L138">		return configTimeTaskExecutorHolder.get();</span>
+	}
+
+	/**
+	 * Return the {@link DataSource} for the currently configured Quartz Scheduler,
+	 * to be used by {@link LocalDataSourceJobStore}.
+	 * &lt;p&gt;This instance will be set before initialization of the corresponding Scheduler,
+	 * and reset immediately afterwards. It is thus only available during configuration.
+	 * @since 1.1
+	 * @see #setDataSource
+	 * @see LocalDataSourceJobStore
+	 */
+	public static @Nullable DataSource getConfigTimeDataSource() {
+<span class="fc" id="L151">		return configTimeDataSourceHolder.get();</span>
+	}
+
+	/**
+	 * Return the non-transactional {@link DataSource} for the currently configured
+	 * Quartz Scheduler, to be used by {@link LocalDataSourceJobStore}.
+	 * &lt;p&gt;This instance will be set before initialization of the corresponding Scheduler,
+	 * and reset immediately afterwards. It is thus only available during configuration.
+	 * @since 1.1
+	 * @see #setNonTransactionalDataSource
+	 * @see LocalDataSourceJobStore
+	 */
+	public static @Nullable DataSource getConfigTimeNonTransactionalDataSource() {
+<span class="fc" id="L164">		return configTimeNonTransactionalDataSourceHolder.get();</span>
+	}
+
+
+	private @Nullable SchedulerFactory schedulerFactory;
+
+<span class="fc" id="L170">	private Class&lt;? extends SchedulerFactory&gt; schedulerFactoryClass = LocalSchedulerFactory.class;</span>
+
+	private @Nullable String schedulerName;
+
+	private @Nullable Resource configLocation;
+
+	private @Nullable Properties quartzProperties;
+
+	private @Nullable Executor taskExecutor;
+
+	private @Nullable DataSource dataSource;
+
+	private @Nullable DataSource nonTransactionalDataSource;
+
+	private @Nullable Map&lt;String, ?&gt; schedulerContextMap;
+
+	private @Nullable String applicationContextSchedulerContextKey;
+
+	private @Nullable JobFactory jobFactory;
+
+<span class="fc" id="L190">	private boolean jobFactorySet = false;</span>
+
+<span class="fc" id="L192">	private boolean autoStartup = true;</span>
+
+<span class="fc" id="L194">	private int startupDelay = 0;</span>
+
+<span class="fc" id="L196">	private int phase = DEFAULT_PHASE;</span>
+
+<span class="fc" id="L198">	private boolean exposeSchedulerInRepository = false;</span>
+
+<span class="fc" id="L200">	private boolean waitForJobsToCompleteOnShutdown = false;</span>
+
+	private @Nullable String beanName;
+
+	private @Nullable ApplicationContext applicationContext;
+
+	private @Nullable Scheduler scheduler;
+
+	private @Nullable LocalDataSourceJobStore jobStore;
+
+
+	/**
+	 * Set an external Quartz {@link SchedulerFactory} instance to use.
+	 * &lt;p&gt;Default is an internal {@link StdSchedulerFactory} instance. If this method is
+	 * called, it overrides any class specified through {@link #setSchedulerFactoryClass}
+	 * as well as any settings specified through {@link #setConfigLocation},
+	 * {@link #setQuartzProperties}, {@link #setTaskExecutor} or {@link #setDataSource}.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; With an externally provided {@code SchedulerFactory} instance,
+	 * local settings such as {@link #setConfigLocation} or {@link #setQuartzProperties}
+	 * will be ignored here in {@code SchedulerFactoryBean}, expecting the external
+	 * {@code SchedulerFactory} instance to get initialized on its own.
+	 * @since 4.3.15
+	 * @see #setSchedulerFactoryClass
+	 */
+	public void setSchedulerFactory(SchedulerFactory schedulerFactory) {
+<span class="nc" id="L225">		this.schedulerFactory = schedulerFactory;</span>
+<span class="nc" id="L226">	}</span>
+
+	/**
+	 * Set the Quartz {@link SchedulerFactory} implementation to use.
+	 * &lt;p&gt;Default is a Spring-internal subclass of the {@link StdSchedulerFactory}
+	 * class, reading in the standard {@code quartz.properties} from
+	 * {@code quartz.jar}. For applying custom Quartz properties,
+	 * specify {@link #setConfigLocation &quot;configLocation&quot;} and/or
+	 * {@link #setQuartzProperties &quot;quartzProperties&quot;} etc on this
+	 * local {@code SchedulerFactoryBean} instance.
+	 * @see org.quartz.impl.StdSchedulerFactory
+	 * @see #setConfigLocation
+	 * @see #setQuartzProperties
+	 * @see #setTaskExecutor
+	 * @see #setDataSource
+	 */
+	public void setSchedulerFactoryClass(Class&lt;? extends SchedulerFactory&gt; schedulerFactoryClass) {
+<span class="nc" id="L243">		this.schedulerFactoryClass = schedulerFactoryClass;</span>
+<span class="nc" id="L244">	}</span>
+
+	/**
+	 * Set the name of the Scheduler to create via the SchedulerFactory, as an
+	 * alternative to the {@code org.quartz.scheduler.instanceName} property.
+	 * &lt;p&gt;If not specified, the name will be taken from Quartz properties
+	 * ({@code org.quartz.scheduler.instanceName}), or from the declared
+	 * {@code SchedulerFactoryBean} bean name as a fallback.
+	 * @see #setBeanName
+	 * @see StdSchedulerFactory#PROP_SCHED_INSTANCE_NAME
+	 * @see org.quartz.SchedulerFactory#getScheduler()
+	 * @see org.quartz.SchedulerFactory#getScheduler(String)
+	 */
+	public void setSchedulerName(String schedulerName) {
+<span class="fc" id="L258">		this.schedulerName = schedulerName;</span>
+<span class="fc" id="L259">	}</span>
+
+	/**
+	 * Set the location of the Quartz properties config file, for example
+	 * as classpath resource &quot;classpath:quartz.properties&quot;.
+	 * &lt;p&gt;Note: Can be omitted when all necessary properties are specified
+	 * locally via this bean, or when relying on Quartz' default configuration.
+	 * @see #setQuartzProperties
+	 */
+	public void setConfigLocation(Resource configLocation) {
+<span class="nc" id="L269">		this.configLocation = configLocation;</span>
+<span class="nc" id="L270">	}</span>
+
+	/**
+	 * Set Quartz properties, like &quot;org.quartz.threadPool.class&quot;.
+	 * &lt;p&gt;Can be used to override values in a Quartz properties config file,
+	 * or to specify all necessary properties locally.
+	 * @see #setConfigLocation
+	 */
+	public void setQuartzProperties(Properties quartzProperties) {
+<span class="fc" id="L279">		this.quartzProperties = quartzProperties;</span>
+<span class="fc" id="L280">	}</span>
+
+	/**
+	 * Set a Spring-managed {@link Executor} to use as Quartz backend.
+	 * Exposed as thread pool through the Quartz SPI.
+	 * &lt;p&gt;Can be used to assign a local JDK ThreadPoolExecutor or a CommonJ
+	 * WorkManager as Quartz backend, to avoid Quartz's manual thread creation.
+	 * &lt;p&gt;By default, a Quartz SimpleThreadPool will be used, configured through
+	 * the corresponding Quartz properties.
+	 * @since 2.0
+	 * @see #setQuartzProperties
+	 * @see LocalTaskExecutorThreadPool
+	 * @see org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor
+	 * @see org.springframework.scheduling.concurrent.DefaultManagedTaskExecutor
+	 */
+	public void setTaskExecutor(Executor taskExecutor) {
+<span class="nc" id="L296">		this.taskExecutor = taskExecutor;</span>
+<span class="nc" id="L297">	}</span>
+
+	/**
+	 * Set the default {@link DataSource} to be used by the Scheduler.
+	 * &lt;p&gt;Note: If this is set, the Quartz settings should not define
+	 * a job store &quot;dataSource&quot; to avoid meaningless double configuration.
+	 * Also, do not define a &quot;org.quartz.jobStore.class&quot; property at all.
+	 * (You may explicitly define Spring's {@link LocalDataSourceJobStore}
+	 * but that's the default when using this method anyway.)
+	 * &lt;p&gt;A Spring-specific subclass of Quartz' JobStoreCMT will be used.
+	 * It is therefore strongly recommended to perform all operations on
+	 * the Scheduler within Spring-managed (or plain JTA) transactions.
+	 * Else, database locking will not properly work and might even break
+	 * (for example, if trying to obtain a lock on Oracle without a transaction).
+	 * &lt;p&gt;Supports both transactional and non-transactional DataSource access.
+	 * With a non-XA DataSource and local Spring transactions, a single DataSource
+	 * argument is sufficient. In case of an XA DataSource and global JTA transactions,
+	 * SchedulerFactoryBean's &quot;nonTransactionalDataSource&quot; property should be set,
+	 * passing in a non-XA DataSource that will not participate in global transactions.
+	 * @since 1.1
+	 * @see #setNonTransactionalDataSource
+	 * @see #setQuartzProperties
+	 * @see #setTransactionManager
+	 * @see LocalDataSourceJobStore
+	 */
+	public void setDataSource(DataSource dataSource) {
+<span class="fc" id="L323">		this.dataSource = dataSource;</span>
+<span class="fc" id="L324">	}</span>
+
+	/**
+	 * Set the {@link DataSource} to be used &lt;i&gt;for non-transactional access&lt;/i&gt;.
+	 * &lt;p&gt;This is only necessary if the default DataSource is an XA DataSource that will
+	 * always participate in transactions: A non-XA version of that DataSource should
+	 * be specified as &quot;nonTransactionalDataSource&quot; in such a scenario.
+	 * &lt;p&gt;This is not relevant with a local DataSource instance and Spring transactions.
+	 * Specifying a single default DataSource as &quot;dataSource&quot; is sufficient there.
+	 * @since 1.1
+	 * @see #setDataSource
+	 * @see LocalDataSourceJobStore
+	 */
+	public void setNonTransactionalDataSource(DataSource nonTransactionalDataSource) {
+<span class="nc" id="L338">		this.nonTransactionalDataSource = nonTransactionalDataSource;</span>
+<span class="nc" id="L339">	}</span>
+
+	/**
+	 * Register objects in the Scheduler context via a given Map.
+	 * These objects will be available to any Job that runs in this Scheduler.
+	 * &lt;p&gt;Note: When using persistent Jobs whose JobDetail will be kept in the
+	 * database, do not put Spring-managed beans or an ApplicationContext
+	 * reference into the JobDataMap but rather into the SchedulerContext.
+	 * @param schedulerContextAsMap a Map with String keys and any objects as
+	 * values (for example Spring-managed beans)
+	 * @see JobDetailFactoryBean#setJobDataAsMap
+	 */
+	public void setSchedulerContextAsMap(Map&lt;String, ?&gt; schedulerContextAsMap) {
+<span class="fc" id="L352">		this.schedulerContextMap = schedulerContextAsMap;</span>
+<span class="fc" id="L353">	}</span>
+
+	/**
+	 * Set the key of an {@link ApplicationContext} reference to expose in the
+	 * SchedulerContext, for example &quot;applicationContext&quot;. Default is none.
+	 * Only applicable when running in a Spring ApplicationContext.
+	 * &lt;p&gt;Note: When using persistent Jobs whose JobDetail will be kept in the
+	 * database, do not put an ApplicationContext reference into the JobDataMap
+	 * but rather into the SchedulerContext.
+	 * &lt;p&gt;In case of a QuartzJobBean, the reference will be applied to the Job
+	 * instance as bean property. An &quot;applicationContext&quot; attribute will
+	 * correspond to a &quot;setApplicationContext&quot; method in that scenario.
+	 * &lt;p&gt;Note that BeanFactory callback interfaces like ApplicationContextAware
+	 * are not automatically applied to Quartz Job instances, because Quartz
+	 * itself is responsible for the lifecycle of its Jobs.
+	 * @see JobDetailFactoryBean#setApplicationContextJobDataKey
+	 * @see org.springframework.context.ApplicationContext
+	 */
+	public void setApplicationContextSchedulerContextKey(String applicationContextSchedulerContextKey) {
+<span class="fc" id="L372">		this.applicationContextSchedulerContextKey = applicationContextSchedulerContextKey;</span>
+<span class="fc" id="L373">	}</span>
+
+	/**
+	 * Set the Quartz {@link JobFactory} to use for this Scheduler.
+	 * &lt;p&gt;Default is Spring's {@link AdaptableJobFactory}, which supports
+	 * {@link java.lang.Runnable} objects as well as standard Quartz
+	 * {@link org.quartz.Job} instances. Note that this default only applies
+	 * to a &lt;i&gt;local&lt;/i&gt; Scheduler, not to a RemoteScheduler (where setting
+	 * a custom JobFactory is not supported by Quartz).
+	 * &lt;p&gt;Specify an instance of Spring's {@link SpringBeanJobFactory} here
+	 * (typically as an inner bean definition) to automatically populate a job's
+	 * bean properties from the specified job data map and scheduler context.
+	 * @since 2.0
+	 * @see AdaptableJobFactory
+	 * @see SpringBeanJobFactory
+	 */
+	public void setJobFactory(JobFactory jobFactory) {
+<span class="fc" id="L390">		this.jobFactory = jobFactory;</span>
+<span class="fc" id="L391">		this.jobFactorySet = true;</span>
+<span class="fc" id="L392">	}</span>
+
+	/**
+	 * Set whether to automatically start the scheduler after initialization.
+	 * &lt;p&gt;Default is &quot;true&quot;; set this to &quot;false&quot; to allow for manual startup.
+	 */
+	public void setAutoStartup(boolean autoStartup) {
+<span class="fc" id="L399">		this.autoStartup = autoStartup;</span>
+<span class="fc" id="L400">	}</span>
+
+	/**
+	 * Return whether this scheduler is configured for auto-startup. If &quot;true&quot;,
+	 * the scheduler will start after the context is refreshed and after the
+	 * start delay, if any.
+	 */
+	@Override
+	public boolean isAutoStartup() {
+<span class="fc" id="L409">		return this.autoStartup;</span>
+	}
+
+	/**
+	 * Specify the phase in which this scheduler should be started and stopped.
+	 * The startup order proceeds from lowest to highest, and the shutdown order
+	 * is the reverse of that. By default this value is {@code Integer.MAX_VALUE}
+	 * meaning that this scheduler starts as late as possible and stops as soon
+	 * as possible.
+	 * @since 3.0
+	 */
+	public void setPhase(int phase) {
+<span class="fc" id="L421">		this.phase = phase;</span>
+<span class="fc" id="L422">	}</span>
+
+	/**
+	 * Return the phase in which this scheduler will be started and stopped.
+	 */
+	@Override
+	public int getPhase() {
+<span class="fc" id="L429">		return this.phase;</span>
+	}
+
+	/**
+	 * Set the number of seconds to wait after initialization before
+	 * starting the scheduler asynchronously. Default is 0, meaning
+	 * immediate synchronous startup on initialization of this bean.
+	 * &lt;p&gt;Setting this to 10 or 20 seconds makes sense if no jobs
+	 * should be run before the entire application has started up.
+	 */
+	public void setStartupDelay(int startupDelay) {
+<span class="nc" id="L440">		this.startupDelay = startupDelay;</span>
+<span class="nc" id="L441">	}</span>
+
+	/**
+	 * Set whether to expose the Spring-managed {@link Scheduler} instance in the
+	 * Quartz {@link SchedulerRepository}. Default is &quot;false&quot;, since the Spring-managed
+	 * Scheduler is usually exclusively intended for access within the Spring context.
+	 * &lt;p&gt;Switch this flag to &quot;true&quot; in order to expose the Scheduler globally.
+	 * This is not recommended unless you have an existing Spring application that
+	 * relies on this behavior.
+	 */
+	public void setExposeSchedulerInRepository(boolean exposeSchedulerInRepository) {
+<span class="fc" id="L452">		this.exposeSchedulerInRepository = exposeSchedulerInRepository;</span>
+<span class="fc" id="L453">	}</span>
+
+	/**
+	 * Set whether to wait for running jobs to complete on shutdown.
+	 * &lt;p&gt;Default is &quot;false&quot;. Switch this to &quot;true&quot; if you prefer
+	 * fully completed jobs at the expense of a longer shutdown phase.
+	 * @see org.quartz.Scheduler#shutdown(boolean)
+	 */
+	public void setWaitForJobsToCompleteOnShutdown(boolean waitForJobsToCompleteOnShutdown) {
+<span class="nc" id="L462">		this.waitForJobsToCompleteOnShutdown = waitForJobsToCompleteOnShutdown;</span>
+<span class="nc" id="L463">	}</span>
+
+	@Override
+	public void setBeanName(String name) {
+<span class="fc" id="L467">		this.beanName = name;</span>
+<span class="fc" id="L468">	}</span>
+
+	@Override
+	public void setApplicationContext(ApplicationContext applicationContext) {
+<span class="fc" id="L472">		this.applicationContext = applicationContext;</span>
+<span class="fc" id="L473">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Implementation of InitializingBean interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public void afterPropertiesSet() throws Exception {
+<span class="pc bpc" id="L482" title="1 of 4 branches missed.">		if (this.dataSource == null &amp;&amp; this.nonTransactionalDataSource != null) {</span>
+<span class="nc" id="L483">			this.dataSource = this.nonTransactionalDataSource;</span>
+		}
+
+<span class="fc bfc" id="L486" title="All 4 branches covered.">		if (this.applicationContext != null &amp;&amp; this.resourceLoader == null) {</span>
+<span class="fc" id="L487">			this.resourceLoader = this.applicationContext;</span>
+		}
+
+		// Initialize the Scheduler instance...
+<span class="fc" id="L491">		this.scheduler = prepareScheduler(prepareSchedulerFactory());</span>
+		try {
+<span class="fc" id="L493">			registerListeners();</span>
+<span class="fc" id="L494">			registerJobsAndTriggers();</span>
+		}
+<span class="nc" id="L496">		catch (Exception ex) {</span>
+			try {
+<span class="nc" id="L498">				this.scheduler.shutdown(true);</span>
+			}
+<span class="nc" id="L500">			catch (Exception ex2) {</span>
+<span class="nc" id="L501">				logger.debug(&quot;Scheduler shutdown exception after registration failure&quot;, ex2);</span>
+<span class="nc" id="L502">			}</span>
+<span class="nc" id="L503">			throw ex;</span>
+<span class="fc" id="L504">		}</span>
+<span class="fc" id="L505">	}</span>
+
+
+	/**
+	 * Create a SchedulerFactory if necessary and apply locally defined Quartz properties to it.
+	 * @return the initialized SchedulerFactory
+	 */
+	private SchedulerFactory prepareSchedulerFactory() throws SchedulerException, IOException {
+<span class="fc" id="L513">		SchedulerFactory schedulerFactory = this.schedulerFactory;</span>
+<span class="pc bpc" id="L514" title="1 of 2 branches missed.">		if (schedulerFactory == null) {</span>
+			// Create local SchedulerFactory instance (typically a LocalSchedulerFactory)
+<span class="pc bpc" id="L516" title="1 of 2 branches missed.">			schedulerFactory = (this.schedulerFactoryClass == LocalSchedulerFactory.class ?</span>
+<span class="pc" id="L517">					new LocalSchedulerFactory() : BeanUtils.instantiateClass(this.schedulerFactoryClass));</span>
+<span class="pc bpc" id="L518" title="1 of 2 branches missed.">			if (schedulerFactory instanceof StdSchedulerFactory stdSchedulerFactory) {</span>
+<span class="fc" id="L519">				initSchedulerFactory(stdSchedulerFactory);</span>
+			}
+<span class="nc bnc" id="L521" title="All 8 branches missed.">			else if (this.configLocation != null || this.quartzProperties != null ||</span>
+					this.taskExecutor != null || this.dataSource != null) {
+<span class="nc" id="L523">				throw new IllegalArgumentException(</span>
+						&quot;StdSchedulerFactory required for applying Quartz properties: &quot; + schedulerFactory);
+			}
+			// Otherwise, no local settings to be applied via StdSchedulerFactory.initialize(Properties)
+		}
+		// Otherwise, assume that externally provided factory has been initialized with appropriate settings
+<span class="fc" id="L529">		return schedulerFactory;</span>
+	}
+
+	/**
+	 * Initialize the given SchedulerFactory, applying locally defined Quartz properties to it.
+	 * @param schedulerFactory the SchedulerFactory to initialize
+	 */
+	private void initSchedulerFactory(StdSchedulerFactory schedulerFactory) throws SchedulerException, IOException {
+<span class="fc" id="L537">		Properties mergedProps = new Properties();</span>
+<span class="fc bfc" id="L538" title="All 2 branches covered.">		if (this.resourceLoader != null) {</span>
+<span class="fc" id="L539">			mergedProps.setProperty(StdSchedulerFactory.PROP_SCHED_CLASS_LOAD_HELPER_CLASS,</span>
+<span class="fc" id="L540">					ResourceLoaderClassLoadHelper.class.getName());</span>
+		}
+
+<span class="pc bpc" id="L543" title="1 of 2 branches missed.">		if (this.taskExecutor != null) {</span>
+<span class="nc" id="L544">			mergedProps.setProperty(StdSchedulerFactory.PROP_THREAD_POOL_CLASS,</span>
+<span class="nc" id="L545">					LocalTaskExecutorThreadPool.class.getName());</span>
+		}
+		else {
+			// Set necessary default properties here, as Quartz will not apply
+			// its default configuration when explicitly given properties.
+<span class="fc" id="L550">			mergedProps.setProperty(StdSchedulerFactory.PROP_THREAD_POOL_CLASS, SimpleThreadPool.class.getName());</span>
+<span class="fc" id="L551">			mergedProps.setProperty(PROP_THREAD_COUNT, Integer.toString(DEFAULT_THREAD_COUNT));</span>
+		}
+
+<span class="pc bpc" id="L554" title="1 of 2 branches missed.">		if (this.configLocation != null) {</span>
+<span class="nc bnc" id="L555" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L556">				logger.debug(&quot;Loading Quartz config from [&quot; + this.configLocation + &quot;]&quot;);</span>
+			}
+<span class="nc" id="L558">			PropertiesLoaderUtils.fillProperties(mergedProps, this.configLocation);</span>
+		}
+
+<span class="fc" id="L561">		CollectionUtils.mergePropertiesIntoMap(this.quartzProperties, mergedProps);</span>
+<span class="fc bfc" id="L562" title="All 2 branches covered.">		if (this.dataSource != null) {</span>
+<span class="fc" id="L563">			mergedProps.putIfAbsent(StdSchedulerFactory.PROP_JOB_STORE_CLASS, LocalDataSourceJobStore.class.getName());</span>
+		}
+
+		// Determine scheduler name across local settings and Quartz properties...
+<span class="fc bfc" id="L567" title="All 2 branches covered.">		if (this.schedulerName != null) {</span>
+<span class="fc" id="L568">			mergedProps.setProperty(StdSchedulerFactory.PROP_SCHED_INSTANCE_NAME, this.schedulerName);</span>
+		}
+		else {
+<span class="fc" id="L571">			String nameProp = mergedProps.getProperty(StdSchedulerFactory.PROP_SCHED_INSTANCE_NAME);</span>
+<span class="fc bfc" id="L572" title="All 2 branches covered.">			if (nameProp != null) {</span>
+<span class="fc" id="L573">				this.schedulerName = nameProp;</span>
+			}
+<span class="fc bfc" id="L575" title="All 2 branches covered.">			else if (this.beanName != null) {</span>
+<span class="fc" id="L576">				mergedProps.setProperty(StdSchedulerFactory.PROP_SCHED_INSTANCE_NAME, this.beanName);</span>
+<span class="fc" id="L577">				this.schedulerName = this.beanName;</span>
+			}
+		}
+
+<span class="fc" id="L581">		schedulerFactory.initialize(mergedProps);</span>
+<span class="fc" id="L582">	}</span>
+
+	private Scheduler prepareScheduler(SchedulerFactory schedulerFactory) throws SchedulerException {
+<span class="fc bfc" id="L585" title="All 2 branches covered.">		if (this.resourceLoader != null) {</span>
+			// Make given ResourceLoader available for SchedulerFactory configuration.
+<span class="fc" id="L587">			configTimeResourceLoaderHolder.set(this.resourceLoader);</span>
+		}
+<span class="pc bpc" id="L589" title="1 of 2 branches missed.">		if (this.taskExecutor != null) {</span>
+			// Make given TaskExecutor available for SchedulerFactory configuration.
+<span class="nc" id="L591">			configTimeTaskExecutorHolder.set(this.taskExecutor);</span>
+		}
+<span class="fc bfc" id="L593" title="All 2 branches covered.">		if (this.dataSource != null) {</span>
+			// Make given DataSource available for SchedulerFactory configuration.
+<span class="fc" id="L595">			configTimeDataSourceHolder.set(this.dataSource);</span>
+		}
+<span class="pc bpc" id="L597" title="1 of 2 branches missed.">		if (this.nonTransactionalDataSource != null) {</span>
+			// Make given non-transactional DataSource available for SchedulerFactory configuration.
+<span class="nc" id="L599">			configTimeNonTransactionalDataSourceHolder.set(this.nonTransactionalDataSource);</span>
+		}
+
+		// Get Scheduler instance from SchedulerFactory.
+		try {
+<span class="fc" id="L604">			Scheduler scheduler = createScheduler(schedulerFactory, this.schedulerName);</span>
+<span class="fc" id="L605">			populateSchedulerContext(scheduler);</span>
+
+<span class="pc bpc" id="L607" title="1 of 4 branches missed.">			if (!this.jobFactorySet &amp;&amp; !(scheduler instanceof RemoteScheduler)) {</span>
+				// Use AdaptableJobFactory as default for a local Scheduler, unless when
+				// explicitly given a null value through the &quot;jobFactory&quot; bean property.
+<span class="fc" id="L610">				this.jobFactory = new AdaptableJobFactory();</span>
+			}
+<span class="fc bfc" id="L612" title="All 2 branches covered.">			if (this.jobFactory != null) {</span>
+<span class="pc bpc" id="L613" title="1 of 4 branches missed.">				if (this.applicationContext != null &amp;&amp; this.jobFactory instanceof ApplicationContextAware applicationContextAware) {</span>
+<span class="nc" id="L614">					applicationContextAware.setApplicationContext(this.applicationContext);</span>
+				}
+<span class="pc bpc" id="L616" title="1 of 2 branches missed.">				if (this.jobFactory instanceof SchedulerContextAware schedulerContextAware) {</span>
+<span class="nc" id="L617">					schedulerContextAware.setSchedulerContext(scheduler.getContext());</span>
+				}
+<span class="fc" id="L619">				scheduler.setJobFactory(this.jobFactory);</span>
+			}
+<span class="fc" id="L621">			return scheduler;</span>
+		}
+
+		finally {
+<span class="fc bfc" id="L625" title="All 2 branches covered.">			if (this.resourceLoader != null) {</span>
+<span class="fc" id="L626">				configTimeResourceLoaderHolder.remove();</span>
+			}
+<span class="pc bpc" id="L628" title="1 of 2 branches missed.">			if (this.taskExecutor != null) {</span>
+<span class="nc" id="L629">				configTimeTaskExecutorHolder.remove();</span>
+			}
+<span class="fc bfc" id="L631" title="All 2 branches covered.">			if (this.dataSource != null) {</span>
+<span class="fc" id="L632">				configTimeDataSourceHolder.remove();</span>
+			}
+<span class="pc bpc" id="L634" title="1 of 2 branches missed.">			if (this.nonTransactionalDataSource != null) {</span>
+<span class="nc" id="L635">				configTimeNonTransactionalDataSourceHolder.remove();</span>
+			}
+		}
+	}
+
+	/**
+	 * Create the Scheduler instance for the given factory and scheduler name.
+	 * Called by {@link #afterPropertiesSet}.
+	 * &lt;p&gt;The default implementation invokes SchedulerFactory's {@code getScheduler}
+	 * method. Can be overridden for custom Scheduler creation.
+	 * @param schedulerFactory the factory to create the Scheduler with
+	 * @param schedulerName the name of the scheduler to create
+	 * @return the Scheduler instance
+	 * @throws SchedulerException if thrown by Quartz methods
+	 * @see #afterPropertiesSet
+	 * @see org.quartz.SchedulerFactory#getScheduler
+	 */
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	protected Scheduler createScheduler(SchedulerFactory schedulerFactory, @Nullable String schedulerName)
+			throws SchedulerException {
+
+		// Override thread context ClassLoader to work around naive Quartz ClassLoadHelper loading.
+<span class="fc" id="L657">		Thread currentThread = Thread.currentThread();</span>
+<span class="fc" id="L658">		ClassLoader threadContextClassLoader = currentThread.getContextClassLoader();</span>
+<span class="fc bfc" id="L659" title="All 2 branches covered.">		boolean overrideClassLoader = (this.resourceLoader != null &amp;&amp;</span>
+<span class="pc bpc" id="L660" title="1 of 2 branches missed.">				this.resourceLoader.getClassLoader() != threadContextClassLoader);</span>
+<span class="pc bpc" id="L661" title="1 of 2 branches missed.">		if (overrideClassLoader) {</span>
+<span class="nc" id="L662">			currentThread.setContextClassLoader(this.resourceLoader.getClassLoader());</span>
+		}
+		try {
+<span class="fc" id="L665">			SchedulerRepository repository = SchedulerRepository.getInstance();</span>
+<span class="fc" id="L666">			synchronized (repository) {</span>
+<span class="pc bpc" id="L667" title="1 of 2 branches missed.">				Scheduler existingScheduler = (schedulerName != null ? repository.lookup(schedulerName) : null);</span>
+<span class="fc" id="L668">				Scheduler newScheduler = schedulerFactory.getScheduler();</span>
+<span class="pc bpc" id="L669" title="1 of 2 branches missed.">				if (newScheduler == existingScheduler) {</span>
+<span class="nc" id="L670">					throw new IllegalStateException(&quot;Active Scheduler of name '&quot; + schedulerName + &quot;' already registered &quot; +</span>
+							&quot;in Quartz SchedulerRepository. Cannot create a new Spring-managed Scheduler of the same name!&quot;);
+				}
+<span class="fc bfc" id="L673" title="All 2 branches covered.">				if (!this.exposeSchedulerInRepository) {</span>
+					// Need to remove it in this case, since Quartz shares the Scheduler instance by default!
+<span class="fc" id="L675">					SchedulerRepository.getInstance().remove(newScheduler.getSchedulerName());</span>
+				}
+<span class="fc" id="L677">				return newScheduler;</span>
+			}
+		}
+		finally {
+<span class="pc bpc" id="L681" title="1 of 2 branches missed.">			if (overrideClassLoader) {</span>
+				// Reset original thread context ClassLoader.
+<span class="nc" id="L683">				currentThread.setContextClassLoader(threadContextClassLoader);</span>
+			}
+		}
+	}
+
+	/**
+	 * Expose the specified context attributes and/or the current
+	 * ApplicationContext in the Quartz SchedulerContext.
+	 */
+	private void populateSchedulerContext(Scheduler scheduler) throws SchedulerException {
+		// Put specified objects into Scheduler context.
+<span class="fc bfc" id="L694" title="All 2 branches covered.">		if (this.schedulerContextMap != null) {</span>
+<span class="fc" id="L695">			scheduler.getContext().putAll(this.schedulerContextMap);</span>
+		}
+
+		// Register ApplicationContext in Scheduler context.
+<span class="fc bfc" id="L699" title="All 2 branches covered.">		if (this.applicationContextSchedulerContextKey != null) {</span>
+<span class="pc bpc" id="L700" title="1 of 2 branches missed.">			if (this.applicationContext == null) {</span>
+<span class="nc" id="L701">				throw new IllegalStateException(</span>
+					&quot;SchedulerFactoryBean needs to be set up in an ApplicationContext &quot; +
+					&quot;to be able to handle an 'applicationContextSchedulerContextKey'&quot;);
+			}
+<span class="fc" id="L705">			scheduler.getContext().put(this.applicationContextSchedulerContextKey, this.applicationContext);</span>
+		}
+<span class="fc" id="L707">	}</span>
+
+
+	/**
+	 * Start the Quartz Scheduler, respecting the &quot;startupDelay&quot; setting.
+	 * @param scheduler the Scheduler to start
+	 * @param startupDelay the number of seconds to wait before starting
+	 * the Scheduler asynchronously
+	 */
+	protected void startScheduler(final Scheduler scheduler, final int startupDelay) throws SchedulerException {
+<span class="pc bpc" id="L717" title="1 of 2 branches missed.">		if (startupDelay &lt;= 0) {</span>
+<span class="fc" id="L718">			logger.info(&quot;Starting Quartz Scheduler now&quot;);</span>
+<span class="fc" id="L719">			scheduler.start();</span>
+		}
+		else {
+<span class="nc bnc" id="L722" title="All 2 branches missed.">			if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L723">				logger.info(&quot;Will start Quartz Scheduler [&quot; + scheduler.getSchedulerName() +</span>
+						&quot;] in &quot; + startupDelay + &quot; seconds&quot;);
+			}
+			// Not using the Quartz startDelayed method since we explicitly want a daemon
+			// thread here, not keeping the JVM alive in case of all other threads ending.
+<span class="nc" id="L728">			Thread schedulerThread = new Thread(() -&gt; {</span>
+				try {
+<span class="nc" id="L730">					TimeUnit.SECONDS.sleep(startupDelay);</span>
+				}
+<span class="nc" id="L732">				catch (InterruptedException ex) {</span>
+<span class="nc" id="L733">					Thread.currentThread().interrupt();</span>
+					// simply proceed
+<span class="nc" id="L735">				}</span>
+<span class="nc bnc" id="L736" title="All 2 branches missed.">				if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L737">					logger.info(&quot;Starting Quartz Scheduler now, after delay of &quot; + startupDelay + &quot; seconds&quot;);</span>
+				}
+				try {
+<span class="nc" id="L740">					scheduler.start();</span>
+				}
+<span class="nc" id="L742">				catch (SchedulerException ex) {</span>
+<span class="nc" id="L743">					throw new SchedulingException(&quot;Could not start Quartz Scheduler after delay&quot;, ex);</span>
+<span class="nc" id="L744">				}</span>
+<span class="nc" id="L745">			});</span>
+<span class="nc" id="L746">			schedulerThread.setName(&quot;Quartz Scheduler [&quot; + scheduler.getSchedulerName() + &quot;]&quot;);</span>
+<span class="nc" id="L747">			schedulerThread.setDaemon(true);</span>
+<span class="nc" id="L748">			schedulerThread.start();</span>
+		}
+<span class="fc" id="L750">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Implementation of FactoryBean interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public Scheduler getScheduler() {
+<span class="pc bpc" id="L759" title="1 of 2 branches missed.">		Assert.state(this.scheduler != null, &quot;No Scheduler set&quot;);</span>
+<span class="fc" id="L760">		return this.scheduler;</span>
+	}
+
+	@Override
+	public @Nullable Scheduler getObject() {
+<span class="fc" id="L765">		return this.scheduler;</span>
+	}
+
+	@Override
+	public Class&lt;? extends Scheduler&gt; getObjectType() {
+<span class="fc bfc" id="L770" title="All 2 branches covered.">		return (this.scheduler != null ? this.scheduler.getClass() : Scheduler.class);</span>
+	}
+
+	@Override
+	public boolean isSingleton() {
+<span class="fc" id="L775">		return true;</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of SmartLifecycle interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public void start() throws SchedulingException {
+<span class="pc bpc" id="L785" title="1 of 2 branches missed.">		if (this.scheduler != null) {</span>
+<span class="fc bfc" id="L786" title="All 2 branches covered.">			if (this.jobStore != null) {</span>
+<span class="fc" id="L787">				this.jobStore.initializeConnectionProvider();</span>
+			}
+			try {
+<span class="fc" id="L790">				startScheduler(this.scheduler, this.startupDelay);</span>
+			}
+<span class="nc" id="L792">			catch (SchedulerException ex) {</span>
+<span class="nc" id="L793">				throw new SchedulingException(&quot;Could not start Quartz Scheduler&quot;, ex);</span>
+<span class="fc" id="L794">			}</span>
+		}
+<span class="fc" id="L796">	}</span>
+
+	@Override
+	public void stop() throws SchedulingException {
+<span class="pc bpc" id="L800" title="1 of 2 branches missed.">		if (this.scheduler != null) {</span>
+			try {
+<span class="fc" id="L802">				this.scheduler.standby();</span>
+			}
+<span class="nc" id="L804">			catch (SchedulerException ex) {</span>
+<span class="nc" id="L805">				throw new SchedulingException(&quot;Could not stop Quartz Scheduler&quot;, ex);</span>
+<span class="fc" id="L806">			}</span>
+		}
+<span class="fc" id="L808">	}</span>
+
+	@Override
+	public boolean isRunning() throws SchedulingException {
+<span class="pc bpc" id="L812" title="1 of 2 branches missed.">		if (this.scheduler != null) {</span>
+			try {
+<span class="fc bfc" id="L814" title="All 2 branches covered.">				return !this.scheduler.isInStandbyMode();</span>
+			}
+<span class="nc" id="L816">			catch (SchedulerException ex) {</span>
+<span class="nc" id="L817">				return false;</span>
+			}
+		}
+<span class="nc" id="L820">		return false;</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of DisposableBean interface
+	//---------------------------------------------------------------------
+
+	/**
+	 * Shut down the Quartz scheduler on bean factory shutdown,
+	 * stopping all scheduled jobs.
+	 */
+	@Override
+	public void destroy() throws SchedulerException {
+<span class="pc bpc" id="L834" title="1 of 2 branches missed.">		if (this.scheduler != null) {</span>
+<span class="fc" id="L835">			logger.info(&quot;Shutting down Quartz Scheduler&quot;);</span>
+<span class="fc" id="L836">			this.scheduler.shutdown(this.waitForJobsToCompleteOnShutdown);</span>
+		}
+<span class="fc" id="L838">	}</span>
+
+
+<span class="fc" id="L841">	private class LocalSchedulerFactory extends StdSchedulerFactory {</span>
+
+		@Override
+		protected Scheduler instantiate(QuartzSchedulerResources rsrcs, QuartzScheduler qs) {
+<span class="fc bfc" id="L845" title="All 2 branches covered.">			if (rsrcs.getJobStore() instanceof LocalDataSourceJobStore ldsjs) {</span>
+<span class="fc" id="L846">				SchedulerFactoryBean.this.jobStore = ldsjs;</span>
+			}
+<span class="fc" id="L848">			return super.instantiate(rsrcs, qs);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

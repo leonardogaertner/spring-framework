@@ -1,0 +1,691 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>GenericApplicationContext.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.context.support</a> &gt; <span class="el_source">GenericApplicationContext.java</span></div><h1>GenericApplicationContext.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.context.support;
+
+import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Supplier;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aot.hint.RuntimeHints;
+import org.springframework.aot.hint.support.ClassHintUtils;
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanDefinitionStoreException;
+import org.springframework.beans.factory.BeanRegistrar;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.BeanDefinitionCustomizer;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.beans.factory.config.SmartInstantiationAwareBeanPostProcessor;
+import org.springframework.beans.factory.support.BeanDefinitionRegistry;
+import org.springframework.beans.factory.support.BeanDefinitionRegistryPostProcessor;
+import org.springframework.beans.factory.support.BeanRegistryAdapter;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.beans.factory.support.MergedBeanDefinitionPostProcessor;
+import org.springframework.beans.factory.support.RootBeanDefinition;
+import org.springframework.context.ApplicationContext;
+import org.springframework.core.Ordered;
+import org.springframework.core.PriorityOrdered;
+import org.springframework.core.io.ProtocolResolver;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.core.io.support.ResourcePatternResolver;
+import org.springframework.core.metrics.ApplicationStartup;
+import org.springframework.util.Assert;
+
+/**
+ * Generic ApplicationContext implementation that holds a single internal
+ * {@link org.springframework.beans.factory.support.DefaultListableBeanFactory}
+ * instance and does not assume a specific bean definition format. Implements
+ * the {@link org.springframework.beans.factory.support.BeanDefinitionRegistry}
+ * interface in order to allow for applying any bean definition readers to it.
+ *
+ * &lt;p&gt;Typical usage is to register a variety of bean definitions via the
+ * {@link org.springframework.beans.factory.support.BeanDefinitionRegistry}
+ * interface and then call {@link #refresh()} to initialize those beans
+ * with application context semantics (handling
+ * {@link org.springframework.context.ApplicationContextAware}, auto-detecting
+ * {@link org.springframework.beans.factory.config.BeanFactoryPostProcessor BeanFactoryPostProcessors},
+ * etc).
+ *
+ * &lt;p&gt;In contrast to other ApplicationContext implementations that create a new
+ * internal BeanFactory instance for each refresh, the internal BeanFactory of
+ * this context is available right from the start, to be able to register bean
+ * definitions on it. {@link #refresh()} may only be called once.
+ *
+ * &lt;p&gt;This ApplicationContext implementation is suitable for Ahead of Time
+ * processing, using {@link #refreshForAotProcessing} as an alternative to the
+ * regular {@link #refresh()}.
+ *
+ * &lt;p&gt;Usage example:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * GenericApplicationContext ctx = new GenericApplicationContext();
+ * XmlBeanDefinitionReader xmlReader = new XmlBeanDefinitionReader(ctx);
+ * xmlReader.loadBeanDefinitions(new ClassPathResource(&quot;applicationContext.xml&quot;));
+ * ctx.refresh();
+ *
+ * MyBean myBean = (MyBean) ctx.getBean(&quot;myBean&quot;);
+ * ...&lt;/pre&gt;
+ *
+ * For the typical case of XML bean definitions, you may also use
+ * {@link ClassPathXmlApplicationContext} or {@link FileSystemXmlApplicationContext},
+ * which are easier to set up - but less flexible, since you can just use standard
+ * resource locations for XML bean definitions, rather than mixing arbitrary bean
+ * definition formats. For a custom application context implementation supposed to
+ * read a specific bean definition format in a refreshable manner, consider
+ * deriving from the {@link AbstractRefreshableApplicationContext} base class.
+ *
+ * @author Juergen Hoeller
+ * @author Chris Beams
+ * @author Stephane Nicoll
+ * @author Sam Brannen
+ * @since 1.1.2
+ * @see #registerBeanDefinition
+ * @see #refresh()
+ * @see org.springframework.beans.factory.xml.XmlBeanDefinitionReader
+ */
+public class GenericApplicationContext extends AbstractApplicationContext implements BeanDefinitionRegistry {
+
+<span class="fc" id="L110">	private static final String DEFERRED_REGISTRY_POST_PROCESSOR_BEAN_NAME =</span>
+<span class="fc" id="L111">			GenericApplicationContext.class.getName() + &quot;.deferredRegistryPostProcessor&quot;;</span>
+
+
+	private final DefaultListableBeanFactory beanFactory;
+
+	private @Nullable ResourceLoader resourceLoader;
+
+<span class="fc" id="L118">	private boolean customClassLoader = false;</span>
+
+<span class="fc" id="L120">	private final AtomicBoolean refreshed = new AtomicBoolean();</span>
+
+
+	/**
+	 * Create a new GenericApplicationContext.
+	 * @see #registerBeanDefinition
+	 * @see #refresh
+	 */
+<span class="fc" id="L128">	public GenericApplicationContext() {</span>
+<span class="fc" id="L129">		this.beanFactory = new DefaultListableBeanFactory();</span>
+<span class="fc" id="L130">	}</span>
+
+	/**
+	 * Create a new GenericApplicationContext with the given DefaultListableBeanFactory.
+	 * @param beanFactory the DefaultListableBeanFactory instance to use for this context
+	 * @see #registerBeanDefinition
+	 * @see #refresh
+	 */
+<span class="fc" id="L138">	public GenericApplicationContext(DefaultListableBeanFactory beanFactory) {</span>
+<span class="fc" id="L139">		Assert.notNull(beanFactory, &quot;BeanFactory must not be null&quot;);</span>
+<span class="fc" id="L140">		this.beanFactory = beanFactory;</span>
+<span class="fc" id="L141">	}</span>
+
+	/**
+	 * Create a new GenericApplicationContext with the given parent.
+	 * @param parent the parent application context
+	 * @see #registerBeanDefinition
+	 * @see #refresh
+	 */
+	public GenericApplicationContext(@Nullable ApplicationContext parent) {
+<span class="fc" id="L150">		this();</span>
+<span class="fc" id="L151">		setParent(parent);</span>
+<span class="fc" id="L152">	}</span>
+
+	/**
+	 * Create a new GenericApplicationContext with the given DefaultListableBeanFactory.
+	 * @param beanFactory the DefaultListableBeanFactory instance to use for this context
+	 * @param parent the parent application context
+	 * @see #registerBeanDefinition
+	 * @see #refresh
+	 */
+	public GenericApplicationContext(DefaultListableBeanFactory beanFactory, ApplicationContext parent) {
+<span class="nc" id="L162">		this(beanFactory);</span>
+<span class="nc" id="L163">		setParent(parent);</span>
+<span class="nc" id="L164">	}</span>
+
+
+	/**
+	 * Set the parent of this application context, also setting
+	 * the parent of the internal BeanFactory accordingly.
+	 * @see org.springframework.beans.factory.config.ConfigurableBeanFactory#setParentBeanFactory
+	 */
+	@Override
+	public void setParent(@Nullable ApplicationContext parent) {
+<span class="fc" id="L174">		super.setParent(parent);</span>
+<span class="fc" id="L175">		this.beanFactory.setParentBeanFactory(getInternalParentBeanFactory());</span>
+<span class="fc" id="L176">	}</span>
+
+	@Override
+	public void setApplicationStartup(ApplicationStartup applicationStartup) {
+<span class="fc" id="L180">		super.setApplicationStartup(applicationStartup);</span>
+<span class="fc" id="L181">		this.beanFactory.setApplicationStartup(applicationStartup);</span>
+<span class="fc" id="L182">	}</span>
+
+	/**
+	 * Set whether it should be allowed to override bean definitions by registering
+	 * a different definition with the same name, automatically replacing the former.
+	 * If not, an exception will be thrown. Default is &quot;true&quot;.
+	 * @since 3.0
+	 * @see org.springframework.beans.factory.support.DefaultListableBeanFactory#setAllowBeanDefinitionOverriding
+	 */
+	public void setAllowBeanDefinitionOverriding(boolean allowBeanDefinitionOverriding) {
+<span class="fc" id="L192">		this.beanFactory.setAllowBeanDefinitionOverriding(allowBeanDefinitionOverriding);</span>
+<span class="fc" id="L193">	}</span>
+
+	/**
+	 * Set whether to allow circular references between beans - and automatically
+	 * try to resolve them.
+	 * &lt;p&gt;Default is &quot;true&quot;. Turn this off to throw an exception when encountering
+	 * a circular reference, disallowing them completely.
+	 * @since 3.0
+	 * @see org.springframework.beans.factory.support.DefaultListableBeanFactory#setAllowCircularReferences
+	 */
+	public void setAllowCircularReferences(boolean allowCircularReferences) {
+<span class="nc" id="L204">		this.beanFactory.setAllowCircularReferences(allowCircularReferences);</span>
+<span class="nc" id="L205">	}</span>
+
+	/**
+	 * Set a ResourceLoader to use for this context. If set, the context will
+	 * delegate all {@code getResource} calls to the given ResourceLoader.
+	 * If not set, default resource loading will apply.
+	 * &lt;p&gt;The main reason to specify a custom ResourceLoader is to resolve
+	 * resource paths (without URL prefix) in a specific fashion.
+	 * The default behavior is to resolve such paths as class path locations.
+	 * To resolve resource paths as file system locations, specify a
+	 * FileSystemResourceLoader here.
+	 * &lt;p&gt;You can also pass in a full ResourcePatternResolver, which will
+	 * be autodetected by the context and used for {@code getResources}
+	 * calls as well. Else, default resource pattern matching will apply.
+	 * @see #getResource
+	 * @see org.springframework.core.io.DefaultResourceLoader
+	 * @see org.springframework.core.io.FileSystemResourceLoader
+	 * @see org.springframework.core.io.support.ResourcePatternResolver
+	 * @see #getResources
+	 */
+	public void setResourceLoader(ResourceLoader resourceLoader) {
+<span class="fc" id="L226">		this.resourceLoader = resourceLoader;</span>
+<span class="fc" id="L227">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// ResourceLoader / ResourcePatternResolver override if necessary
+	//---------------------------------------------------------------------
+
+	/**
+	 * This implementation delegates to this context's {@code ResourceLoader} if set,
+	 * falling back to the default superclass behavior otherwise.
+	 * &lt;p&gt;As of Spring Framework 5.3.22, this method also honors registered
+	 * {@linkplain #getProtocolResolvers() protocol resolvers} when a custom
+	 * {@code ResourceLoader} has been set.
+	 * @see #setResourceLoader(ResourceLoader)
+	 * @see #addProtocolResolver(ProtocolResolver)
+	 */
+	@Override
+	public Resource getResource(String location) {
+<span class="fc bfc" id="L245" title="All 2 branches covered.">		if (this.resourceLoader != null) {</span>
+<span class="fc bfc" id="L246" title="All 2 branches covered.">			for (ProtocolResolver protocolResolver : getProtocolResolvers()) {</span>
+<span class="fc" id="L247">				Resource resource = protocolResolver.resolve(location, this);</span>
+<span class="fc bfc" id="L248" title="All 2 branches covered.">				if (resource != null) {</span>
+<span class="fc" id="L249">					return resource;</span>
+				}
+<span class="fc" id="L251">			}</span>
+<span class="fc" id="L252">			return this.resourceLoader.getResource(location);</span>
+		}
+<span class="fc" id="L254">		return super.getResource(location);</span>
+	}
+
+	/**
+	 * This implementation delegates to this context's ResourceLoader if it
+	 * implements the ResourcePatternResolver interface, falling back to the
+	 * default superclass behavior otherwise.
+	 * @see #setResourceLoader
+	 */
+	@Override
+	public Resource[] getResources(String locationPattern) throws IOException {
+<span class="pc bpc" id="L265" title="1 of 2 branches missed.">		if (this.resourceLoader instanceof ResourcePatternResolver resourcePatternResolver) {</span>
+<span class="nc" id="L266">			return resourcePatternResolver.getResources(locationPattern);</span>
+		}
+<span class="fc" id="L268">		return super.getResources(locationPattern);</span>
+	}
+
+	@Override
+	public void setClassLoader(@Nullable ClassLoader classLoader) {
+<span class="fc" id="L273">		super.setClassLoader(classLoader);</span>
+<span class="fc" id="L274">		this.customClassLoader = true;</span>
+<span class="fc" id="L275">	}</span>
+
+	@Override
+	public @Nullable ClassLoader getClassLoader() {
+<span class="pc bpc" id="L279" title="1 of 4 branches missed.">		if (this.resourceLoader != null &amp;&amp; !this.customClassLoader) {</span>
+<span class="fc" id="L280">			return this.resourceLoader.getClassLoader();</span>
+		}
+<span class="fc" id="L282">		return super.getClassLoader();</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementations of AbstractApplicationContext's template methods
+	//---------------------------------------------------------------------
+
+	/**
+	 * Do nothing: We hold a single internal BeanFactory and rely on callers
+	 * to register beans through our public methods (or the BeanFactory's).
+	 * @see #registerBeanDefinition
+	 */
+	@Override
+	protected final void refreshBeanFactory() throws IllegalStateException {
+<span class="fc bfc" id="L297" title="All 2 branches covered.">		if (!this.refreshed.compareAndSet(false, true)) {</span>
+<span class="fc" id="L298">			throw new IllegalStateException(</span>
+					&quot;GenericApplicationContext does not support multiple refresh attempts: just call 'refresh' once&quot;);
+		}
+<span class="fc" id="L301">		this.beanFactory.setSerializationId(getId());</span>
+<span class="fc" id="L302">	}</span>
+
+	@Override
+	protected void cancelRefresh(Throwable ex) {
+<span class="fc" id="L306">		this.beanFactory.setSerializationId(null);</span>
+<span class="fc" id="L307">		super.cancelRefresh(ex);</span>
+<span class="fc" id="L308">	}</span>
+
+	/**
+	 * Not much to do: We hold a single internal BeanFactory that will never
+	 * get released.
+	 */
+	@Override
+	protected final void closeBeanFactory() {
+<span class="fc" id="L316">		this.beanFactory.setSerializationId(null);</span>
+<span class="fc" id="L317">	}</span>
+
+	/**
+	 * Return the single internal BeanFactory held by this context
+	 * (as ConfigurableListableBeanFactory).
+	 */
+	@Override
+	public final ConfigurableListableBeanFactory getBeanFactory() {
+<span class="fc" id="L325">		return this.beanFactory;</span>
+	}
+
+	/**
+	 * Return the underlying bean factory of this context,
+	 * available for registering bean definitions.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; You need to call {@link #refresh()} to initialize the
+	 * bean factory and its contained beans with application context semantics
+	 * (autodetecting BeanFactoryPostProcessors, etc).
+	 * @return the internal bean factory (as DefaultListableBeanFactory)
+	 */
+	public final DefaultListableBeanFactory getDefaultListableBeanFactory() {
+<span class="fc" id="L337">		return this.beanFactory;</span>
+	}
+
+	@Override
+	public AutowireCapableBeanFactory getAutowireCapableBeanFactory() throws IllegalStateException {
+<span class="fc" id="L342">		assertBeanFactoryActive();</span>
+<span class="fc" id="L343">		return this.beanFactory;</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of BeanDefinitionRegistry
+	//---------------------------------------------------------------------
+
+	@Override
+	public void registerBeanDefinition(String beanName, BeanDefinition beanDefinition)
+			throws BeanDefinitionStoreException {
+
+<span class="fc" id="L355">		this.beanFactory.registerBeanDefinition(beanName, beanDefinition);</span>
+<span class="fc" id="L356">	}</span>
+
+	@Override
+	public void removeBeanDefinition(String beanName) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L360">		this.beanFactory.removeBeanDefinition(beanName);</span>
+<span class="fc" id="L361">	}</span>
+
+	@Override
+	public BeanDefinition getBeanDefinition(String beanName) throws NoSuchBeanDefinitionException {
+<span class="fc" id="L365">		return this.beanFactory.getBeanDefinition(beanName);</span>
+	}
+
+	@Override
+	public boolean isBeanDefinitionOverridable(String beanName) {
+<span class="fc" id="L370">		return this.beanFactory.isBeanDefinitionOverridable(beanName);</span>
+	}
+
+	@Override
+	public boolean isBeanNameInUse(String beanName) {
+<span class="fc" id="L375">		return this.beanFactory.isBeanNameInUse(beanName);</span>
+	}
+
+	@Override
+	public void registerAlias(String beanName, String alias) {
+<span class="fc" id="L380">		this.beanFactory.registerAlias(beanName, alias);</span>
+<span class="fc" id="L381">	}</span>
+
+	@Override
+	public void removeAlias(String alias) {
+<span class="nc" id="L385">		this.beanFactory.removeAlias(alias);</span>
+<span class="nc" id="L386">	}</span>
+
+	@Override
+	public boolean isAlias(String beanName) {
+<span class="fc" id="L390">		return this.beanFactory.isAlias(beanName);</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// AOT processing
+	//---------------------------------------------------------------------
+
+	/**
+	 * Load or refresh the persistent representation of the configuration up to
+	 * a point where the underlying bean factory is ready to create bean
+	 * instances.
+	 * &lt;p&gt;This variant of {@link #refresh()} is used by Ahead of Time (AOT)
+	 * processing that optimizes the application context, typically at build time.
+	 * &lt;p&gt;In this mode, only {@link BeanDefinitionRegistryPostProcessor} and
+	 * {@link MergedBeanDefinitionPostProcessor} are invoked.
+	 * @param runtimeHints the runtime hints
+	 * @throws BeansException if the bean factory could not be initialized
+	 * @throws IllegalStateException if already initialized and multiple refresh
+	 * attempts are not supported
+	 * @since 6.0
+	 */
+	public void refreshForAotProcessing(RuntimeHints runtimeHints) {
+<span class="pc bpc" id="L413" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L414">			logger.debug(&quot;Preparing bean factory for AOT processing&quot;);</span>
+		}
+<span class="fc" id="L416">		prepareRefresh();</span>
+<span class="fc" id="L417">		obtainFreshBeanFactory();</span>
+<span class="fc" id="L418">		prepareBeanFactory(this.beanFactory);</span>
+<span class="fc" id="L419">		postProcessBeanFactory(this.beanFactory);</span>
+<span class="fc" id="L420">		invokeBeanFactoryPostProcessors(this.beanFactory);</span>
+<span class="fc" id="L421">		this.beanFactory.freezeConfiguration();</span>
+<span class="fc" id="L422">		PostProcessorRegistrationDelegate.invokeMergedBeanDefinitionPostProcessors(this.beanFactory);</span>
+<span class="fc" id="L423">		preDetermineBeanTypes(runtimeHints);</span>
+<span class="fc" id="L424">	}</span>
+
+	/**
+	 * Pre-determine bean types in order to trigger early proxy class creation.
+	 * @see org.springframework.beans.factory.BeanFactory#getType
+	 * @see SmartInstantiationAwareBeanPostProcessor#determineBeanType
+	 */
+	private void preDetermineBeanTypes(RuntimeHints runtimeHints) {
+<span class="fc" id="L432">		List&lt;String&gt; singletons = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L433">		List&lt;String&gt; lazyBeans = new ArrayList&lt;&gt;();</span>
+
+		// First round: pre-registered singleton instances, if any.
+<span class="fc bfc" id="L436" title="All 2 branches covered.">		for (String beanName : this.beanFactory.getSingletonNames()) {</span>
+<span class="fc" id="L437">			Class&lt;?&gt; beanType = this.beanFactory.getType(beanName);</span>
+<span class="pc bpc" id="L438" title="1 of 2 branches missed.">			if (beanType != null) {</span>
+<span class="fc" id="L439">				ClassHintUtils.registerProxyIfNecessary(beanType, runtimeHints);</span>
+			}
+<span class="fc" id="L441">			singletons.add(beanName);</span>
+		}
+
+<span class="fc" id="L444">		List&lt;SmartInstantiationAwareBeanPostProcessor&gt; bpps =</span>
+<span class="fc" id="L445">				PostProcessorRegistrationDelegate.loadBeanPostProcessors(</span>
+						this.beanFactory, SmartInstantiationAwareBeanPostProcessor.class);
+
+		// Second round: non-lazy singleton beans in definition order,
+		// matching preInstantiateSingletons.
+<span class="fc bfc" id="L450" title="All 2 branches covered.">		for (String beanName : this.beanFactory.getBeanDefinitionNames()) {</span>
+<span class="fc bfc" id="L451" title="All 2 branches covered.">			if (!singletons.contains(beanName)) {</span>
+<span class="fc" id="L452">				BeanDefinition bd = getBeanDefinition(beanName);</span>
+<span class="pc bpc" id="L453" title="1 of 4 branches missed.">				if (bd.isSingleton() &amp;&amp; !bd.isLazyInit()) {</span>
+<span class="fc" id="L454">					preDetermineBeanType(beanName, bpps, runtimeHints);</span>
+				}
+				else {
+<span class="fc" id="L457">					lazyBeans.add(beanName);</span>
+				}
+			}
+		}
+
+		// Third round: lazy singleton beans and scoped beans.
+<span class="fc bfc" id="L463" title="All 2 branches covered.">		for (String beanName : lazyBeans) {</span>
+<span class="fc" id="L464">			preDetermineBeanType(beanName, bpps, runtimeHints);</span>
+<span class="fc" id="L465">		}</span>
+<span class="fc" id="L466">	}</span>
+
+	private void preDetermineBeanType(String beanName, List&lt;SmartInstantiationAwareBeanPostProcessor&gt; bpps,
+			RuntimeHints runtimeHints) {
+
+<span class="fc" id="L471">		Class&lt;?&gt; beanType = this.beanFactory.getType(beanName);</span>
+<span class="fc bfc" id="L472" title="All 2 branches covered.">		if (beanType != null) {</span>
+<span class="fc" id="L473">			ClassHintUtils.registerProxyIfNecessary(beanType, runtimeHints);</span>
+<span class="fc bfc" id="L474" title="All 2 branches covered.">			for (SmartInstantiationAwareBeanPostProcessor bpp : bpps) {</span>
+<span class="fc" id="L475">				Class&lt;?&gt; newBeanType = bpp.determineBeanType(beanType, beanName);</span>
+<span class="fc bfc" id="L476" title="All 2 branches covered.">				if (newBeanType != beanType) {</span>
+<span class="fc" id="L477">					ClassHintUtils.registerProxyIfNecessary(newBeanType, runtimeHints);</span>
+<span class="fc" id="L478">					beanType = newBeanType;</span>
+				}
+<span class="fc" id="L480">			}</span>
+		}
+<span class="fc" id="L482">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Convenient methods for registering individual beans
+	//---------------------------------------------------------------------
+
+	/**
+	 * Register a bean from the given bean class, optionally providing explicit
+	 * constructor arguments for consideration in the autowiring process.
+	 * @param beanClass the class of the bean
+	 * @param constructorArgs custom argument values to be fed into Spring's
+	 * constructor resolution algorithm, resolving either all arguments or just
+	 * specific ones, with the rest to be resolved through regular autowiring
+	 * (may be {@code null} or empty)
+	 * @since 5.2 (since 5.0 on the AnnotationConfigApplicationContext subclass)
+	 */
+	public &lt;T&gt; void registerBean(Class&lt;T&gt; beanClass, @Nullable Object... constructorArgs) {
+<span class="fc" id="L500">		registerBean(null, beanClass, constructorArgs);</span>
+<span class="fc" id="L501">	}</span>
+
+	/**
+	 * Register a bean from the given bean class, optionally providing explicit
+	 * constructor arguments for consideration in the autowiring process.
+	 * @param beanName the name of the bean (may be {@code null})
+	 * @param beanClass the class of the bean
+	 * @param constructorArgs custom argument values to be fed into Spring's
+	 * constructor resolution algorithm, resolving either all arguments or just
+	 * specific ones, with the rest to be resolved through regular autowiring
+	 * (may be {@code null} or empty)
+	 * @since 5.2 (since 5.0 on the AnnotationConfigApplicationContext subclass)
+	 */
+	public &lt;T&gt; void registerBean(@Nullable String beanName, Class&lt;T&gt; beanClass, @Nullable Object... constructorArgs) {
+<span class="fc" id="L515">		registerBean(beanName, beanClass, (Supplier&lt;T&gt;) null,</span>
+				bd -&gt; {
+<span class="fc bfc" id="L517" title="All 2 branches covered.">					for (Object arg : constructorArgs) {</span>
+<span class="fc" id="L518">						bd.getConstructorArgumentValues().addGenericArgumentValue(arg);</span>
+					}
+<span class="fc" id="L520">				});</span>
+<span class="fc" id="L521">	}</span>
+
+	/**
+	 * Register a bean from the given bean class, optionally customizing its
+	 * bean definition metadata (typically declared as a lambda expression).
+	 * @param beanClass the class of the bean (resolving a public constructor
+	 * to be autowired, possibly simply the default constructor)
+	 * @param customizers one or more callbacks for customizing the factory's
+	 * {@link BeanDefinition}, for example, setting a lazy-init or primary flag
+	 * @since 5.0
+	 * @see #registerBean(String, Class, Supplier, BeanDefinitionCustomizer...)
+	 */
+	public final &lt;T&gt; void registerBean(Class&lt;T&gt; beanClass, BeanDefinitionCustomizer... customizers) {
+<span class="fc" id="L534">		registerBean(null, beanClass, null, customizers);</span>
+<span class="fc" id="L535">	}</span>
+
+	/**
+	 * Register a bean from the given bean class, optionally customizing its
+	 * bean definition metadata (typically declared as a lambda expression).
+	 * @param beanName the name of the bean (may be {@code null})
+	 * @param beanClass the class of the bean (resolving a public constructor
+	 * to be autowired, possibly simply the default constructor)
+	 * @param customizers one or more callbacks for customizing the factory's
+	 * {@link BeanDefinition}, for example, setting a lazy-init or primary flag
+	 * @since 5.0
+	 * @see #registerBean(String, Class, Supplier, BeanDefinitionCustomizer...)
+	 */
+	public final &lt;T&gt; void registerBean(
+			@Nullable String beanName, Class&lt;T&gt; beanClass, BeanDefinitionCustomizer... customizers) {
+
+<span class="fc" id="L551">		registerBean(beanName, beanClass, null, customizers);</span>
+<span class="fc" id="L552">	}</span>
+
+	/**
+	 * Register a bean from the given bean class, using the given supplier for
+	 * obtaining a new instance (typically declared as a lambda expression or
+	 * method reference), optionally customizing its bean definition metadata
+	 * (again typically declared as a lambda expression).
+	 * @param beanClass the class of the bean
+	 * @param supplier a callback for creating an instance of the bean
+	 * @param customizers one or more callbacks for customizing the factory's
+	 * {@link BeanDefinition}, for example, setting a lazy-init or primary flag
+	 * @since 5.0
+	 * @see #registerBean(String, Class, Supplier, BeanDefinitionCustomizer...)
+	 */
+	public final &lt;T&gt; void registerBean(
+			Class&lt;T&gt; beanClass, Supplier&lt;T&gt; supplier, BeanDefinitionCustomizer... customizers) {
+
+<span class="fc" id="L569">		registerBean(null, beanClass, supplier, customizers);</span>
+<span class="fc" id="L570">	}</span>
+
+	/**
+	 * Register a bean from the given bean class, using the given supplier for
+	 * obtaining a new instance (typically declared as a lambda expression or
+	 * method reference), optionally customizing its bean definition metadata
+	 * (again typically declared as a lambda expression).
+	 * &lt;p&gt;This method can be overridden to adapt the registration mechanism for
+	 * all {@code registerBean} methods (since they all delegate to this one).
+	 * @param beanName the name of the bean (may be {@code null})
+	 * @param beanClass the class of the bean
+	 * @param supplier a callback for creating an instance of the bean (in case
+	 * of {@code null}, resolving a public constructor to be autowired instead)
+	 * @param customizers one or more callbacks for customizing the factory's
+	 * {@link BeanDefinition}, for example, setting a lazy-init or primary flag
+	 * @since 5.0
+	 */
+	public &lt;T&gt; void registerBean(@Nullable String beanName, Class&lt;T&gt; beanClass,
+			@Nullable Supplier&lt;T&gt; supplier, BeanDefinitionCustomizer... customizers) {
+
+<span class="fc" id="L590">		ClassDerivedBeanDefinition beanDefinition = new ClassDerivedBeanDefinition(beanClass);</span>
+<span class="fc bfc" id="L591" title="All 2 branches covered.">		if (supplier != null) {</span>
+<span class="fc" id="L592">			beanDefinition.setInstanceSupplier(supplier);</span>
+		}
+<span class="fc bfc" id="L594" title="All 2 branches covered.">		for (BeanDefinitionCustomizer customizer : customizers) {</span>
+<span class="fc" id="L595">			customizer.customize(beanDefinition);</span>
+		}
+
+<span class="fc bfc" id="L598" title="All 2 branches covered.">		String nameToUse = (beanName != null ? beanName : beanClass.getName());</span>
+<span class="fc" id="L599">		registerBeanDefinition(nameToUse, beanDefinition);</span>
+<span class="fc" id="L600">	}</span>
+
+	/**
+	 * Invoke the given registrars for registering their beans with this
+	 * application context.
+	 * &lt;p&gt;This can be used to apply encapsulated pieces of programmatic
+	 * bean registration to this application context without relying on
+	 * individual calls to its context-level {@code registerBean} methods.
+	 * @param registrars one or more {@link BeanRegistrar} instances
+	 * @since 7.0
+	 */
+	public void register(BeanRegistrar... registrars) {
+<span class="fc bfc" id="L612" title="All 2 branches covered.">		for (BeanRegistrar registrar : registrars) {</span>
+<span class="fc" id="L613">			DeferredRegistryPostProcessor pp = (DeferredRegistryPostProcessor)</span>
+<span class="fc" id="L614">					this.beanFactory.getSingleton(DEFERRED_REGISTRY_POST_PROCESSOR_BEAN_NAME);</span>
+<span class="pc bpc" id="L615" title="1 of 2 branches missed.">			if (pp == null) {</span>
+<span class="fc" id="L616">				pp = new DeferredRegistryPostProcessor();</span>
+<span class="fc" id="L617">				this.beanFactory.registerSingleton(DEFERRED_REGISTRY_POST_PROCESSOR_BEAN_NAME, pp);</span>
+			}
+<span class="fc" id="L619">			pp.addRegistrar(registrar);</span>
+		}
+<span class="fc" id="L621">	}</span>
+
+
+	/**
+	 * {@link RootBeanDefinition} subclass for {@code #registerBean} based
+	 * registrations with flexible autowiring for public constructors.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	private static class ClassDerivedBeanDefinition extends RootBeanDefinition {
+
+		public ClassDerivedBeanDefinition(Class&lt;?&gt; beanClass) {
+<span class="fc" id="L632">			super(beanClass);</span>
+<span class="fc" id="L633">		}</span>
+
+		public ClassDerivedBeanDefinition(ClassDerivedBeanDefinition original) {
+<span class="fc" id="L636">			super(original);</span>
+<span class="fc" id="L637">		}</span>
+
+		@Override
+		public Constructor&lt;?&gt; @Nullable [] getPreferredConstructors() {
+<span class="fc" id="L641">			Constructor&lt;?&gt;[] fromAttribute = super.getPreferredConstructors();</span>
+<span class="pc bpc" id="L642" title="1 of 2 branches missed.">			if (fromAttribute != null) {</span>
+<span class="nc" id="L643">				return fromAttribute;</span>
+			}
+<span class="fc" id="L645">			Class&lt;?&gt; clazz = getBeanClass();</span>
+<span class="fc" id="L646">			Constructor&lt;?&gt; primaryCtor = BeanUtils.findPrimaryConstructor(clazz);</span>
+<span class="fc bfc" id="L647" title="All 2 branches covered.">			if (primaryCtor != null) {</span>
+<span class="fc" id="L648">				return new Constructor&lt;?&gt;[] {primaryCtor};</span>
+			}
+<span class="fc" id="L650">			Constructor&lt;?&gt;[] publicCtors = clazz.getConstructors();</span>
+<span class="fc bfc" id="L651" title="All 2 branches covered.">			if (publicCtors.length &gt; 0) {</span>
+<span class="fc" id="L652">				return publicCtors;</span>
+			}
+<span class="fc" id="L654">			return null;</span>
+		}
+
+		@Override
+		public RootBeanDefinition cloneBeanDefinition() {
+<span class="fc" id="L659">			return new ClassDerivedBeanDefinition(this);</span>
+		}
+	}
+
+
+	/**
+	 * Internal post-processor for invoking DeferredBeanRegistrars at the end
+	 * of the BeanDefinitionRegistryPostProcessor PriorityOrdered phase,
+	 * right before a potential ConfigurationClassPostProcessor.
+	 */
+<span class="fc" id="L669">	private class DeferredRegistryPostProcessor implements BeanDefinitionRegistryPostProcessor, PriorityOrdered {</span>
+
+<span class="fc" id="L671">		private final List&lt;BeanRegistrar&gt; registrars = new ArrayList&lt;&gt;();</span>
+
+		public void addRegistrar(BeanRegistrar registrar) {
+<span class="fc" id="L674">			this.registrars.add(registrar);</span>
+<span class="fc" id="L675">		}</span>
+
+		@Override
+		public int getOrder() {
+<span class="fc" id="L679">			return Ordered.LOWEST_PRECEDENCE - 1;  // within PriorityOrdered, 1 before ConfigurationClassPostProcessor</span>
+		}
+
+		@Override
+		public void postProcessBeanDefinitionRegistry(BeanDefinitionRegistry registry) throws BeansException {
+<span class="fc bfc" id="L684" title="All 2 branches covered.">			for (BeanRegistrar registrar : this.registrars) {</span>
+<span class="fc" id="L685">				new BeanRegistryAdapter(beanFactory, getEnvironment(), registrar.getClass()).register(registrar);</span>
+<span class="fc" id="L686">			}</span>
+<span class="fc" id="L687">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

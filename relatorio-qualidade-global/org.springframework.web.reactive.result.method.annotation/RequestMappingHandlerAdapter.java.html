@@ -1,0 +1,371 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequestMappingHandlerAdapter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.result.method.annotation</a> &gt; <span class="el_source">RequestMappingHandlerAdapter.java</span></div><h1>RequestMappingHandlerAdapter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.result.method.annotation;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.Executor;
+import java.util.function.Predicate;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
+
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.core.KotlinDetector;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.http.codec.HttpMessageReader;
+import org.springframework.http.codec.ServerCodecConfigurer;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.web.bind.support.WebBindingInitializer;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.reactive.BindingContext;
+import org.springframework.web.reactive.DispatchExceptionHandler;
+import org.springframework.web.reactive.HandlerAdapter;
+import org.springframework.web.reactive.HandlerMapping;
+import org.springframework.web.reactive.HandlerResult;
+import org.springframework.web.reactive.accept.RequestedContentTypeResolver;
+import org.springframework.web.reactive.accept.RequestedContentTypeResolverBuilder;
+import org.springframework.web.reactive.result.method.InvocableHandlerMethod;
+import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.util.DisconnectedClientHelper;
+
+/**
+ * Supports the invocation of
+ * {@link org.springframework.web.bind.annotation.RequestMapping @RequestMapping}
+ * handler methods.
+ *
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @since 5.0
+ */
+<span class="fc" id="L64">public class RequestMappingHandlerAdapter</span>
+		implements HandlerAdapter, DispatchExceptionHandler, ApplicationContextAware, InitializingBean {
+
+<span class="fc" id="L67">	private static final Log logger = LogFactory.getLog(RequestMappingHandlerAdapter.class);</span>
+
+	/**
+	 * Log category to use for network failure after a client has gone away.
+	 * @see DisconnectedClientHelper
+	 */
+	private static final String DISCONNECTED_CLIENT_LOG_CATEGORY =
+			&quot;org.springframework.web.reactive.result.method.annotation.DisconnectedClient&quot;;
+
+<span class="fc" id="L76">	private static final DisconnectedClientHelper disconnectedClientHelper =</span>
+			new DisconnectedClientHelper(DISCONNECTED_CLIENT_LOG_CATEGORY);
+
+
+<span class="fc" id="L80">	private List&lt;HttpMessageReader&lt;?&gt;&gt; messageReaders = Collections.emptyList();</span>
+
+	private @Nullable WebBindingInitializer webBindingInitializer;
+
+	private @Nullable ArgumentResolverConfigurer argumentResolverConfigurer;
+
+<span class="fc" id="L86">	private RequestedContentTypeResolver contentTypeResolver = new RequestedContentTypeResolverBuilder().build();</span>
+
+	private @Nullable Scheduler scheduler;
+
+	private @Nullable Predicate&lt;HandlerMethod&gt; blockingMethodPredicate;
+
+	private @Nullable ReactiveAdapterRegistry reactiveAdapterRegistry;
+
+	private @Nullable ConfigurableApplicationContext applicationContext;
+
+	private @Nullable ControllerMethodResolver methodResolver;
+
+	private @Nullable ModelInitializer modelInitializer;
+
+
+	/**
+	 * Configure HTTP message readers to de-serialize the request body with.
+	 * &lt;p&gt;By default this is set to {@link ServerCodecConfigurer}'s readers with defaults.
+	 */
+	public void setMessageReaders(List&lt;HttpMessageReader&lt;?&gt;&gt; messageReaders) {
+<span class="fc" id="L106">		Assert.notNull(messageReaders, &quot;'messageReaders' must not be null&quot;);</span>
+<span class="fc" id="L107">		this.messageReaders = messageReaders;</span>
+<span class="fc" id="L108">	}</span>
+
+	/**
+	 * Return the configurer for HTTP message readers.
+	 */
+	public List&lt;HttpMessageReader&lt;?&gt;&gt; getMessageReaders() {
+<span class="fc" id="L114">		return this.messageReaders;</span>
+	}
+
+	/**
+	 * Provide a WebBindingInitializer with &quot;global&quot; initialization to apply
+	 * to every DataBinder instance.
+	 */
+	public void setWebBindingInitializer(@Nullable WebBindingInitializer webBindingInitializer) {
+<span class="fc" id="L122">		this.webBindingInitializer = webBindingInitializer;</span>
+<span class="fc" id="L123">	}</span>
+
+	/**
+	 * Return the configured WebBindingInitializer, or {@code null} if none.
+	 */
+	public @Nullable WebBindingInitializer getWebBindingInitializer() {
+<span class="fc" id="L129">		return this.webBindingInitializer;</span>
+	}
+
+	/**
+	 * Configure resolvers for controller method arguments.
+	 */
+	public void setArgumentResolverConfigurer(@Nullable ArgumentResolverConfigurer configurer) {
+<span class="fc" id="L136">		this.argumentResolverConfigurer = configurer;</span>
+<span class="fc" id="L137">	}</span>
+
+	/**
+	 * Return the configured resolvers for controller method arguments.
+	 */
+	public @Nullable ArgumentResolverConfigurer getArgumentResolverConfigurer() {
+<span class="nc" id="L143">		return this.argumentResolverConfigurer;</span>
+	}
+
+	/**
+	 * Set the {@link RequestedContentTypeResolver} to use to determine requested
+	 * media types. If not set, the default constructor is used.
+	 * @since 6.2
+	 */
+	public void setContentTypeResolver(RequestedContentTypeResolver contentTypeResolver) {
+<span class="fc" id="L152">		Assert.notNull(contentTypeResolver, &quot;'contentTypeResolver' must not be null&quot;);</span>
+<span class="fc" id="L153">		this.contentTypeResolver = contentTypeResolver;</span>
+<span class="fc" id="L154">	}</span>
+
+	/**
+	 * Return the configured {@link RequestedContentTypeResolver}.
+	 * @since 6.2
+	 */
+	public RequestedContentTypeResolver getContentTypeResolver() {
+<span class="nc" id="L161">		return this.contentTypeResolver;</span>
+	}
+
+	/**
+	 * Configure an executor to invoke blocking controller methods with.
+	 * &lt;p&gt;By default, this is not set in which case controller methods are
+	 * invoked without the use of an Executor.
+	 * @param executor the task executor to use
+	 * @since 6.1
+	 */
+	public void setBlockingExecutor(@Nullable Executor executor) {
+<span class="nc bnc" id="L172" title="All 2 branches missed.">		this.scheduler = (executor != null ? Schedulers.fromExecutor(executor) : null);</span>
+<span class="nc" id="L173">	}</span>
+
+	/**
+	 * Provide a predicate to decide which controller methods to invoke through
+	 * the configured {@link #setBlockingExecutor blockingExecutor}.
+	 * &lt;p&gt;If an executor is configured, the default predicate matches controller
+	 * methods whose return type is not recognized by the configured
+	 * {@link org.springframework.core.ReactiveAdapterRegistry}.
+	 * @param predicate the predicate to use
+	 * @since 6.1
+	 */
+	public void setBlockingMethodPredicate(Predicate&lt;HandlerMethod&gt; predicate) {
+<span class="nc" id="L185">		this.blockingMethodPredicate = predicate;</span>
+<span class="nc" id="L186">	}</span>
+
+	/**
+	 * Configure the registry for adapting various reactive types.
+	 * &lt;p&gt;By default this is an instance of {@link ReactiveAdapterRegistry} with
+	 * default settings.
+	 */
+	public void setReactiveAdapterRegistry(@Nullable ReactiveAdapterRegistry registry) {
+<span class="fc" id="L194">		this.reactiveAdapterRegistry = registry;</span>
+<span class="fc" id="L195">	}</span>
+
+	/**
+	 * Return the configured registry for adapting reactive types.
+	 */
+	public @Nullable ReactiveAdapterRegistry getReactiveAdapterRegistry() {
+<span class="fc" id="L201">		return this.reactiveAdapterRegistry;</span>
+	}
+
+	/**
+	 * A {@link ConfigurableApplicationContext} is expected for resolving
+	 * expressions in method argument default values as well as for
+	 * detecting {@code @ControllerAdvice} beans.
+	 */
+	@Override
+	public void setApplicationContext(ApplicationContext applicationContext) {
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">		if (applicationContext instanceof ConfigurableApplicationContext cac) {</span>
+<span class="fc" id="L212">			this.applicationContext = cac;</span>
+		}
+<span class="fc" id="L214">	}</span>
+
+
+	@Override
+	public void afterPropertiesSet() throws Exception {
+<span class="fc" id="L219">		Assert.notNull(this.applicationContext, &quot;ApplicationContext is required&quot;);</span>
+
+<span class="pc bpc" id="L221" title="1 of 2 branches missed.">		if (CollectionUtils.isEmpty(this.messageReaders)) {</span>
+<span class="nc" id="L222">			ServerCodecConfigurer codecConfigurer = ServerCodecConfigurer.create();</span>
+<span class="nc" id="L223">			this.messageReaders = codecConfigurer.getReaders();</span>
+		}
+
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">		if (this.argumentResolverConfigurer == null) {</span>
+<span class="nc" id="L227">			this.argumentResolverConfigurer = new ArgumentResolverConfigurer();</span>
+		}
+
+<span class="pc bpc" id="L230" title="1 of 2 branches missed.">		if (this.reactiveAdapterRegistry == null) {</span>
+<span class="nc" id="L231">			this.reactiveAdapterRegistry = ReactiveAdapterRegistry.getSharedInstance();</span>
+		}
+
+<span class="pc bpc" id="L234" title="3 of 4 branches missed.">		if (this.scheduler != null &amp;&amp; this.blockingMethodPredicate == null) {</span>
+<span class="nc" id="L235">			this.blockingMethodPredicate = new NonReactiveHandlerMethodPredicate(this.reactiveAdapterRegistry);</span>
+		}
+
+<span class="fc" id="L238">		this.methodResolver = new ControllerMethodResolver(</span>
+				this.argumentResolverConfigurer, this.reactiveAdapterRegistry, this.applicationContext,
+				this.contentTypeResolver, this.messageReaders, this.webBindingInitializer,
+				this.scheduler, this.blockingMethodPredicate);
+
+<span class="fc" id="L243">		this.modelInitializer = new ModelInitializer(this.methodResolver, this.reactiveAdapterRegistry);</span>
+<span class="fc" id="L244">	}</span>
+
+
+	@Override
+	public boolean supports(Object handler) {
+<span class="fc" id="L249">		return handler instanceof HandlerMethod;</span>
+	}
+
+	@Override
+	public Mono&lt;HandlerResult&gt; handle(ServerWebExchange exchange, Object handler) {
+
+<span class="pc bpc" id="L255" title="3 of 6 branches missed.">		Assert.state(this.methodResolver != null &amp;&amp;</span>
+				this.modelInitializer != null &amp;&amp; this.reactiveAdapterRegistry != null, &quot;Not initialized&quot;);
+
+<span class="fc" id="L258">		HandlerMethod handlerMethod = (HandlerMethod) handler;</span>
+
+<span class="fc" id="L260">		InitBinderBindingContext bindingContext = new InitBinderBindingContext(</span>
+<span class="fc" id="L261">				this.webBindingInitializer, this.methodResolver.getInitBinderMethods(handlerMethod),</span>
+<span class="pc bpc" id="L262" title="2 of 4 branches missed.">				this.methodResolver.hasMethodValidator() &amp;&amp; handlerMethod.shouldValidateArguments(),</span>
+				this.reactiveAdapterRegistry);
+
+<span class="fc" id="L265">		InvocableHandlerMethod invocableMethod = this.methodResolver.getRequestMappingMethod(handlerMethod);</span>
+
+<span class="fc" id="L267">		DispatchExceptionHandler exceptionHandler =</span>
+<span class="fc" id="L268">				(exchange2, ex) -&gt; handleException(exchange, ex, handlerMethod, bindingContext);</span>
+
+<span class="fc" id="L270">		Mono&lt;HandlerResult&gt; resultMono = this.modelInitializer</span>
+<span class="fc" id="L271">				.initModel(handlerMethod, bindingContext, exchange)</span>
+<span class="fc" id="L272">				.then(Mono.defer(() -&gt; invocableMethod.invoke(exchange, bindingContext)))</span>
+<span class="fc" id="L273">				.doOnNext(result -&gt; result.setExceptionHandler(exceptionHandler))</span>
+<span class="fc" id="L274">				.onErrorResume(ex -&gt; exceptionHandler.handleError(exchange, ex));</span>
+
+<span class="fc" id="L276">		Scheduler optionalScheduler = this.methodResolver.getSchedulerFor(handlerMethod);</span>
+<span class="pc bpc" id="L277" title="1 of 2 branches missed.">		if (optionalScheduler != null) {</span>
+<span class="nc" id="L278">			return resultMono.subscribeOn(optionalScheduler);</span>
+		}
+
+<span class="fc" id="L281">		return resultMono;</span>
+	}
+
+	private Mono&lt;HandlerResult&gt; handleException(
+			ServerWebExchange exchange, Throwable exception,
+			@Nullable HandlerMethod handlerMethod, @Nullable BindingContext bindingContext) {
+
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">		Assert.state(this.methodResolver != null, &quot;Not initialized&quot;);</span>
+
+		// Success and error responses may use different content types
+<span class="fc" id="L291">		exchange.getAttributes().remove(HandlerMapping.PRODUCIBLE_MEDIA_TYPES_ATTRIBUTE);</span>
+<span class="fc" id="L292">		exchange.getResponse().getHeaders().clearContentHeaders();</span>
+
+<span class="fc" id="L294">		InvocableHandlerMethod invocable =</span>
+<span class="fc" id="L295">				this.methodResolver.getExceptionHandlerMethod(exception, exchange, handlerMethod);</span>
+
+<span class="fc bfc" id="L297" title="All 2 branches covered.">		if (invocable != null) {</span>
+<span class="fc" id="L298">			ArrayList&lt;Throwable&gt; exceptions = new ArrayList&lt;&gt;();</span>
+			try {
+<span class="fc bfc" id="L300" title="All 2 branches covered.">				if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L301">					logger.debug(exchange.getLogPrefix() + &quot;Using @ExceptionHandler &quot; + invocable);</span>
+				}
+<span class="fc bfc" id="L303" title="All 2 branches covered.">				if (bindingContext != null) {</span>
+<span class="fc" id="L304">					bindingContext.getModel().asMap().clear();</span>
+				}
+				else {
+<span class="fc" id="L307">					bindingContext = new BindingContext();</span>
+				}
+
+				// Expose causes as provided arguments as well
+<span class="fc" id="L311">				Throwable exToExpose = exception;</span>
+<span class="fc bfc" id="L312" title="All 2 branches covered.">				while (exToExpose != null) {</span>
+<span class="fc" id="L313">					exceptions.add(exToExpose);</span>
+<span class="fc" id="L314">					Throwable cause = exToExpose.getCause();</span>
+<span class="pc bpc" id="L315" title="1 of 2 branches missed.">					exToExpose = (cause != exToExpose ? cause : null);</span>
+<span class="fc" id="L316">				}</span>
+<span class="fc" id="L317">				@Nullable Object[] arguments = new Object[exceptions.size() + 1];</span>
+<span class="fc" id="L318">				exceptions.toArray(arguments);  // efficient arraycopy call in ArrayList</span>
+<span class="fc" id="L319">				arguments[arguments.length - 1] = handlerMethod;</span>
+
+<span class="fc" id="L321">				return invocable.invoke(exchange, bindingContext, arguments)</span>
+<span class="fc" id="L322">						.onErrorResume(invocationEx -&gt;</span>
+<span class="nc" id="L323">								handleExceptionHandlerFailure(exchange, exception, invocationEx, exceptions, invocable));</span>
+			}
+<span class="nc" id="L325">			catch (Throwable invocationEx) {</span>
+<span class="nc" id="L326">				return handleExceptionHandlerFailure(exchange, exception, invocationEx, exceptions, invocable);</span>
+			}
+		}
+<span class="fc" id="L329">		return Mono.error(exception);</span>
+	}
+
+	private static Mono&lt;HandlerResult&gt; handleExceptionHandlerFailure(
+			ServerWebExchange exchange, Throwable exception, Throwable invocationEx,
+			ArrayList&lt;Throwable&gt; exceptions, InvocableHandlerMethod invocable) {
+
+<span class="nc bnc" id="L336" title="All 2 branches missed.">		if (disconnectedClientHelper.checkAndLogClientDisconnectedException(invocationEx)) {</span>
+<span class="nc" id="L337">			return Mono.empty();</span>
+		}
+
+		// Any other than the original exception (or a cause) is unintended here,
+		// probably an accident (for example, failed assertion or the like).
+<span class="nc bnc" id="L342" title="All 4 branches missed.">		if (!exceptions.contains(invocationEx) &amp;&amp; logger.isWarnEnabled()) {</span>
+<span class="nc" id="L343">			logger.warn(exchange.getLogPrefix() + &quot;Failure in @ExceptionHandler &quot; + invocable, invocationEx);</span>
+		}
+
+<span class="nc" id="L346">		return Mono.error(exception);</span>
+	}
+
+	@Override
+	public Mono&lt;HandlerResult&gt; handleError(ServerWebExchange exchange, Throwable ex) {
+<span class="fc" id="L351">		return handleException(exchange, ex, null, null);</span>
+	}
+
+
+	/**
+	 * Match methods with a return type without an adapter in {@link ReactiveAdapterRegistry}
+	 * which are not suspending functions.
+	 */
+<span class="nc" id="L359">	private record NonReactiveHandlerMethodPredicate(ReactiveAdapterRegistry adapterRegistry)</span>
+			implements Predicate&lt;HandlerMethod&gt; {
+
+		@Override
+		public boolean test(HandlerMethod handlerMethod) {
+<span class="nc" id="L364">			Class&lt;?&gt; returnType = handlerMethod.getReturnType().getParameterType();</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">			return (this.adapterRegistry.getAdapter(returnType) == null &amp;&amp;</span>
+<span class="nc bnc" id="L366" title="All 2 branches missed.">					!KotlinDetector.isSuspendingFunction(handlerMethod.getMethod()));</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

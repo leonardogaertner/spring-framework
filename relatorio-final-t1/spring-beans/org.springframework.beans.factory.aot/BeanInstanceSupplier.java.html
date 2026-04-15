@@ -1,0 +1,463 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>BeanInstanceSupplier.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.aot</a> &gt; <span class="el_source">BeanInstanceSupplier.java</span></div><h1>BeanInstanceSupplier.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.aot;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Parameter;
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aot.hint.ExecutableMode;
+import org.springframework.beans.BeanInstantiationException;
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.TypeConverter;
+import org.springframework.beans.factory.UnsatisfiedDependencyException;
+import org.springframework.beans.factory.config.ConstructorArgumentValues;
+import org.springframework.beans.factory.config.ConstructorArgumentValues.ValueHolder;
+import org.springframework.beans.factory.config.DependencyDescriptor;
+import org.springframework.beans.factory.support.AbstractAutowireCapableBeanFactory;
+import org.springframework.beans.factory.support.BeanDefinitionValueResolver;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.beans.factory.support.InstanceSupplier;
+import org.springframework.beans.factory.support.RegisteredBean;
+import org.springframework.beans.factory.support.RootBeanDefinition;
+import org.springframework.beans.factory.support.SimpleInstantiationStrategy;
+import org.springframework.core.MethodParameter;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.function.ThrowingBiFunction;
+import org.springframework.util.function.ThrowingFunction;
+import org.springframework.util.function.ThrowingSupplier;
+
+/**
+ * Specialized {@link InstanceSupplier} that provides the factory {@link Method}
+ * used to instantiate the underlying bean instance, if any. Transparently
+ * handles resolution of {@link AutowiredArguments} if necessary. Typically used
+ * in AOT-processed applications as a targeted alternative to the reflection
+ * based injection.
+ *
+ * &lt;p&gt;If no {@code generator} is provided, reflection is used to instantiate the
+ * bean instance, and full {@link ExecutableMode#INVOKE invocation} hints are
+ * contributed. Multiple generator callback styles are supported:
+ * &lt;ul&gt;
+ * &lt;li&gt;A function with the {@code registeredBean} and resolved {@code arguments}
+ * for executables that require arguments resolution. An
+ * {@link ExecutableMode#INTROSPECT introspection} hint is added so that
+ * parameter annotations can be read &lt;/li&gt;
+ * &lt;li&gt;A function with only the {@code registeredBean} for simpler cases that
+ * do not require resolution of arguments&lt;/li&gt;
+ * &lt;li&gt;A supplier when a method reference can be used&lt;/li&gt;
+ * &lt;/ul&gt;
+ * Generator callbacks handle checked exceptions so that the caller does not
+ * have to deal with them.
+ *
+ * @author Phillip Webb
+ * @author Stephane Nicoll
+ * @author Juergen Hoeller
+ * @since 6.0
+ * @param &lt;T&gt; the type of instance supplied by this supplier
+ * @see AutowiredArguments
+ */
+public final class BeanInstanceSupplier&lt;T&gt; extends AutowiredElementResolver implements InstanceSupplier&lt;T&gt; {
+
+	private final ExecutableLookup lookup;
+
+	private final @Nullable ThrowingFunction&lt;RegisteredBean, T&gt; generatorWithoutArguments;
+
+	private final @Nullable ThrowingBiFunction&lt;RegisteredBean, AutowiredArguments, T&gt; generatorWithArguments;
+
+	private final String @Nullable [] shortcutBeanNames;
+
+
+	private BeanInstanceSupplier(ExecutableLookup lookup,
+			@Nullable ThrowingFunction&lt;RegisteredBean, T&gt; generatorWithoutArguments,
+			@Nullable ThrowingBiFunction&lt;RegisteredBean, AutowiredArguments, T&gt; generatorWithArguments,
+<span class="fc" id="L100">			String @Nullable [] shortcutBeanNames) {</span>
+
+<span class="fc" id="L102">		this.lookup = lookup;</span>
+<span class="fc" id="L103">		this.generatorWithoutArguments = generatorWithoutArguments;</span>
+<span class="fc" id="L104">		this.generatorWithArguments = generatorWithArguments;</span>
+<span class="fc" id="L105">		this.shortcutBeanNames = shortcutBeanNames;</span>
+<span class="fc" id="L106">	}</span>
+
+
+	/**
+	 * Create a {@link BeanInstanceSupplier} that resolves
+	 * arguments for the specified bean constructor.
+	 * @param &lt;T&gt; the type of instance supplied
+	 * @param parameterTypes the constructor parameter types
+	 * @return a new {@link BeanInstanceSupplier} instance
+	 */
+	public static &lt;T&gt; BeanInstanceSupplier&lt;T&gt; forConstructor(Class&lt;?&gt;... parameterTypes) {
+<span class="fc" id="L117">		Assert.notNull(parameterTypes, &quot;'parameterTypes' must not be null&quot;);</span>
+<span class="fc" id="L118">		Assert.noNullElements(parameterTypes, &quot;'parameterTypes' must not contain null elements&quot;);</span>
+<span class="fc" id="L119">		return new BeanInstanceSupplier&lt;&gt;(new ConstructorLookup(parameterTypes), null, null, null);</span>
+	}
+
+	/**
+	 * Create a new {@link BeanInstanceSupplier} that
+	 * resolves arguments for the specified factory method.
+	 * @param &lt;T&gt; the type of instance supplied
+	 * @param declaringClass the class that declares the factory method
+	 * @param methodName the factory method name
+	 * @param parameterTypes the factory method parameter types
+	 * @return a new {@link BeanInstanceSupplier} instance
+	 */
+	public static &lt;T&gt; BeanInstanceSupplier&lt;T&gt; forFactoryMethod(
+			Class&lt;?&gt; declaringClass, String methodName, Class&lt;?&gt;... parameterTypes) {
+
+<span class="fc" id="L134">		Assert.notNull(declaringClass, &quot;'declaringClass' must not be null&quot;);</span>
+<span class="fc" id="L135">		Assert.hasText(methodName, &quot;'methodName' must not be empty&quot;);</span>
+<span class="fc" id="L136">		Assert.notNull(parameterTypes, &quot;'parameterTypes' must not be null&quot;);</span>
+<span class="fc" id="L137">		Assert.noNullElements(parameterTypes, &quot;'parameterTypes' must not contain null elements&quot;);</span>
+<span class="fc" id="L138">		return new BeanInstanceSupplier&lt;&gt;(</span>
+				new FactoryMethodLookup(declaringClass, methodName, parameterTypes),
+				null, null, null);
+	}
+
+
+	ExecutableLookup getLookup() {
+<span class="fc" id="L145">		return this.lookup;</span>
+	}
+
+	/**
+	 * Return a new {@link BeanInstanceSupplier} instance that uses the specified
+	 * {@code generator} bi-function to instantiate the underlying bean.
+	 * @param generator a {@link ThrowingBiFunction} that uses the
+	 * {@link RegisteredBean} and resolved {@link AutowiredArguments} to
+	 * instantiate the underlying bean
+	 * @return a new {@link BeanInstanceSupplier} instance with the specified generator
+	 */
+	public BeanInstanceSupplier&lt;T&gt; withGenerator(ThrowingBiFunction&lt;RegisteredBean, AutowiredArguments, T&gt; generator) {
+<span class="fc" id="L157">		Assert.notNull(generator, &quot;'generator' must not be null&quot;);</span>
+<span class="fc" id="L158">		return new BeanInstanceSupplier&lt;&gt;(this.lookup, null, generator, this.shortcutBeanNames);</span>
+	}
+
+	/**
+	 * Return a new {@link BeanInstanceSupplier} instance that uses the specified
+	 * {@code generator} function to instantiate the underlying bean.
+	 * @param generator a {@link ThrowingFunction} that uses the
+	 * {@link RegisteredBean} to instantiate the underlying bean
+	 * @return a new {@link BeanInstanceSupplier} instance with the specified generator
+	 */
+	public BeanInstanceSupplier&lt;T&gt; withGenerator(ThrowingFunction&lt;RegisteredBean, T&gt; generator) {
+<span class="fc" id="L169">		Assert.notNull(generator, &quot;'generator' must not be null&quot;);</span>
+<span class="fc" id="L170">		return new BeanInstanceSupplier&lt;&gt;(this.lookup, generator, null, this.shortcutBeanNames);</span>
+	}
+
+	/**
+	 * Return a new {@link BeanInstanceSupplier} instance that uses
+	 * direct bean name injection shortcuts for specific parameters.
+	 * @param beanNames the bean names to use as shortcut (aligned with the
+	 * constructor or factory method parameters)
+	 * @return a new {@link BeanInstanceSupplier} instance that uses the
+	 * given shortcut bean names
+	 * @since 6.2
+	 */
+	public BeanInstanceSupplier&lt;T&gt; withShortcut(String... beanNames) {
+<span class="fc" id="L183">		return new BeanInstanceSupplier&lt;&gt;(</span>
+				this.lookup, this.generatorWithoutArguments, this.generatorWithArguments, beanNames);
+	}
+
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Override
+	public T get(RegisteredBean registeredBean) {
+<span class="fc" id="L191">		Assert.notNull(registeredBean, &quot;'registeredBean' must not be null&quot;);</span>
+<span class="fc bfc" id="L192" title="All 2 branches covered.">		if (this.generatorWithoutArguments != null) {</span>
+<span class="fc" id="L193">			Executable executable = getFactoryMethodForGenerator();</span>
+<span class="fc" id="L194">			return invokeBeanSupplier(executable, () -&gt; this.generatorWithoutArguments.apply(registeredBean));</span>
+		}
+<span class="fc bfc" id="L196" title="All 2 branches covered.">		else if (this.generatorWithArguments != null) {</span>
+<span class="fc" id="L197">			Executable executable = getFactoryMethodForGenerator();</span>
+<span class="fc" id="L198">			AutowiredArguments arguments = resolveArguments(registeredBean,</span>
+<span class="pc bpc" id="L199" title="1 of 2 branches missed.">					executable != null ? executable : this.lookup.get(registeredBean));</span>
+<span class="fc" id="L200">			return invokeBeanSupplier(executable, () -&gt; this.generatorWithArguments.apply(registeredBean, arguments));</span>
+		}
+		else {
+<span class="fc" id="L203">			Executable executable = this.lookup.get(registeredBean);</span>
+<span class="fc" id="L204">			@Nullable Object[] arguments = resolveArguments(registeredBean, executable).toArray();</span>
+<span class="fc" id="L205">			return invokeBeanSupplier(executable, () -&gt; (T) instantiate(registeredBean, executable, arguments));</span>
+		}
+	}
+
+	@Override
+	public @Nullable Method getFactoryMethod() {
+		// Cached factory method retrieval for qualifier introspection etc.
+<span class="fc bfc" id="L212" title="All 2 branches covered.">		if (this.lookup instanceof FactoryMethodLookup factoryMethodLookup) {</span>
+<span class="fc" id="L213">			return factoryMethodLookup.get();</span>
+		}
+<span class="fc" id="L215">		return null;</span>
+	}
+
+	private @Nullable Method getFactoryMethodForGenerator() {
+		// Avoid unnecessary currentlyInvokedFactoryMethod exposure outside of full configuration classes.
+<span class="fc bfc" id="L220" title="All 2 branches covered.">		if (this.lookup instanceof FactoryMethodLookup factoryMethodLookup &amp;&amp;</span>
+<span class="fc bfc" id="L221" title="All 2 branches covered.">				factoryMethodLookup.declaringClass.getName().contains(ClassUtils.CGLIB_CLASS_SEPARATOR)) {</span>
+<span class="fc" id="L222">			return factoryMethodLookup.get();</span>
+		}
+<span class="fc" id="L224">		return null;</span>
+	}
+
+	private T invokeBeanSupplier(@Nullable Executable executable, ThrowingSupplier&lt;T&gt; beanSupplier) {
+<span class="fc bfc" id="L228" title="All 2 branches covered.">		if (executable instanceof Method method) {</span>
+<span class="fc" id="L229">			return SimpleInstantiationStrategy.instantiateWithFactoryMethod(method, beanSupplier);</span>
+		}
+<span class="fc" id="L231">		return beanSupplier.get();</span>
+	}
+
+	/**
+	 * Resolve arguments for the specified registered bean.
+	 * @param registeredBean the registered bean
+	 * @return the resolved constructor or factory method arguments
+	 */
+	AutowiredArguments resolveArguments(RegisteredBean registeredBean) {
+<span class="fc" id="L240">		Assert.notNull(registeredBean, &quot;'registeredBean' must not be null&quot;);</span>
+<span class="fc" id="L241">		return resolveArguments(registeredBean, this.lookup.get(registeredBean));</span>
+	}
+
+	private AutowiredArguments resolveArguments(RegisteredBean registeredBean, Executable executable) {
+<span class="fc" id="L245">		int parameterCount = executable.getParameterCount();</span>
+<span class="fc" id="L246">		@Nullable Object[] resolved = new Object[parameterCount];</span>
+<span class="pc bpc" id="L247" title="1 of 4 branches missed.">		Assert.isTrue(this.shortcutBeanNames == null || this.shortcutBeanNames.length == resolved.length,</span>
+<span class="nc" id="L248">				() -&gt; &quot;'shortcuts' must contain &quot; + resolved.length + &quot; elements&quot;);</span>
+
+<span class="fc" id="L250">		ValueHolder[] argumentValues = resolveArgumentValues(registeredBean, executable);</span>
+<span class="fc" id="L251">		Set&lt;String&gt; autowiredBeanNames = new LinkedHashSet&lt;&gt;(resolved.length * 2);</span>
+<span class="fc bfc" id="L252" title="All 2 branches covered.">		int startIndex = (executable instanceof Constructor&lt;?&gt; constructor &amp;&amp;</span>
+<span class="fc bfc" id="L253" title="All 2 branches covered.">				ClassUtils.isInnerClass(constructor.getDeclaringClass())) ? 1 : 0;</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">		for (int i = startIndex; i &lt; parameterCount; i++) {</span>
+<span class="fc" id="L255">			MethodParameter parameter = getMethodParameter(executable, i);</span>
+<span class="fc" id="L256">			DependencyDescriptor descriptor = new DependencyDescriptor(parameter, true);</span>
+<span class="fc bfc" id="L257" title="All 2 branches covered.">			String shortcut = (this.shortcutBeanNames != null ? this.shortcutBeanNames[i] : null);</span>
+<span class="fc bfc" id="L258" title="All 2 branches covered.">			if (shortcut != null) {</span>
+<span class="fc" id="L259">				descriptor = new ShortcutDependencyDescriptor(descriptor, shortcut);</span>
+			}
+<span class="fc" id="L261">			ValueHolder argumentValue = argumentValues[i];</span>
+<span class="fc" id="L262">			resolved[i] = resolveAutowiredArgument(</span>
+					registeredBean, descriptor, argumentValue, autowiredBeanNames);
+		}
+<span class="fc" id="L265">		registerDependentBeans(registeredBean.getBeanFactory(), registeredBean.getBeanName(), autowiredBeanNames);</span>
+
+<span class="fc" id="L267">		return AutowiredArguments.of(resolved);</span>
+	}
+
+	private MethodParameter getMethodParameter(Executable executable, int index) {
+<span class="fc bfc" id="L271" title="All 2 branches covered.">		if (executable instanceof Constructor&lt;?&gt; constructor) {</span>
+<span class="fc" id="L272">			return new MethodParameter(constructor, index);</span>
+		}
+<span class="pc bpc" id="L274" title="1 of 2 branches missed.">		if (executable instanceof Method method) {</span>
+<span class="fc" id="L275">			return new MethodParameter(method, index);</span>
+		}
+<span class="nc" id="L277">		throw new IllegalStateException(&quot;Unsupported executable: &quot; + executable.getClass().getName());</span>
+	}
+
+	private ValueHolder[] resolveArgumentValues(RegisteredBean registeredBean, Executable executable) {
+<span class="fc" id="L281">		Parameter[] parameters = executable.getParameters();</span>
+<span class="fc" id="L282">		ValueHolder[] resolved = new ValueHolder[parameters.length];</span>
+<span class="fc" id="L283">		RootBeanDefinition beanDefinition = registeredBean.getMergedBeanDefinition();</span>
+<span class="fc bfc" id="L284" title="All 2 branches covered.">		if (beanDefinition.hasConstructorArgumentValues() &amp;&amp;</span>
+<span class="pc bpc" id="L285" title="1 of 2 branches missed.">				registeredBean.getBeanFactory() instanceof AbstractAutowireCapableBeanFactory beanFactory) {</span>
+<span class="fc" id="L286">			BeanDefinitionValueResolver valueResolver = new BeanDefinitionValueResolver(</span>
+<span class="fc" id="L287">					beanFactory, registeredBean.getBeanName(), beanDefinition, beanFactory.getTypeConverter());</span>
+<span class="fc" id="L288">			ConstructorArgumentValues values = resolveConstructorArguments(</span>
+<span class="fc" id="L289">					valueResolver, beanDefinition.getConstructorArgumentValues());</span>
+<span class="fc" id="L290">			Set&lt;ValueHolder&gt; usedValueHolders = CollectionUtils.newHashSet(parameters.length);</span>
+<span class="fc bfc" id="L291" title="All 2 branches covered.">			for (int i = 0; i &lt; parameters.length; i++) {</span>
+<span class="fc" id="L292">				Class&lt;?&gt; parameterType = parameters[i].getType();</span>
+<span class="fc bfc" id="L293" title="All 2 branches covered.">				String parameterName = (parameters[i].isNamePresent() ? parameters[i].getName() : null);</span>
+<span class="fc" id="L294">				ValueHolder valueHolder = values.getArgumentValue(</span>
+						i, parameterType, parameterName, usedValueHolders);
+<span class="fc bfc" id="L296" title="All 2 branches covered.">				if (valueHolder != null) {</span>
+<span class="fc" id="L297">					resolved[i] = valueHolder;</span>
+<span class="fc" id="L298">					usedValueHolders.add(valueHolder);</span>
+				}
+			}
+		}
+<span class="fc" id="L302">		return resolved;</span>
+	}
+
+	private ConstructorArgumentValues resolveConstructorArguments(
+			BeanDefinitionValueResolver valueResolver, ConstructorArgumentValues constructorArguments) {
+
+<span class="fc" id="L308">		ConstructorArgumentValues resolvedConstructorArguments = new ConstructorArgumentValues();</span>
+<span class="fc bfc" id="L309" title="All 2 branches covered.">		for (Map.Entry&lt;Integer, ConstructorArgumentValues.ValueHolder&gt; entry : constructorArguments.getIndexedArgumentValues().entrySet()) {</span>
+<span class="fc" id="L310">			resolvedConstructorArguments.addIndexedArgumentValue(entry.getKey(), resolveArgumentValue(valueResolver, entry.getValue()));</span>
+<span class="fc" id="L311">		}</span>
+<span class="fc bfc" id="L312" title="All 2 branches covered.">		for (ConstructorArgumentValues.ValueHolder valueHolder : constructorArguments.getGenericArgumentValues()) {</span>
+<span class="fc" id="L313">			resolvedConstructorArguments.addGenericArgumentValue(resolveArgumentValue(valueResolver, valueHolder));</span>
+<span class="fc" id="L314">		}</span>
+<span class="fc" id="L315">		return resolvedConstructorArguments;</span>
+	}
+
+	private ValueHolder resolveArgumentValue(BeanDefinitionValueResolver resolver, ValueHolder valueHolder) {
+<span class="fc bfc" id="L319" title="All 2 branches covered.">		if (valueHolder.isConverted()) {</span>
+<span class="fc" id="L320">			return valueHolder;</span>
+		}
+<span class="fc" id="L322">		Object value = resolver.resolveValueIfNecessary(&quot;constructor argument&quot;, valueHolder.getValue());</span>
+<span class="fc" id="L323">		ValueHolder resolvedHolder = new ValueHolder(value, valueHolder.getType(), valueHolder.getName());</span>
+<span class="fc" id="L324">		resolvedHolder.setSource(valueHolder);</span>
+<span class="fc" id="L325">		return resolvedHolder;</span>
+	}
+
+	private @Nullable Object resolveAutowiredArgument(RegisteredBean registeredBean, DependencyDescriptor descriptor,
+			@Nullable ValueHolder argumentValue, Set&lt;String&gt; autowiredBeanNames) {
+
+<span class="fc" id="L331">		TypeConverter typeConverter = registeredBean.getBeanFactory().getTypeConverter();</span>
+<span class="fc bfc" id="L332" title="All 2 branches covered.">		if (argumentValue != null) {</span>
+<span class="fc bfc" id="L333" title="All 2 branches covered.">			return (argumentValue.isConverted() ? argumentValue.getConvertedValue() :</span>
+<span class="fc" id="L334">					typeConverter.convertIfNecessary(argumentValue.getValue(),</span>
+<span class="fc" id="L335">							descriptor.getDependencyType(), descriptor.getMethodParameter()));</span>
+		}
+		try {
+<span class="fc" id="L338">			return registeredBean.resolveAutowiredArgument(descriptor, typeConverter, autowiredBeanNames);</span>
+		}
+<span class="fc" id="L340">		catch (BeansException ex) {</span>
+<span class="fc" id="L341">			throw new UnsatisfiedDependencyException(null, registeredBean.getBeanName(), descriptor, ex);</span>
+		}
+	}
+
+	private Object instantiate(RegisteredBean registeredBean, Executable executable, @Nullable Object[] args) {
+<span class="fc bfc" id="L346" title="All 2 branches covered.">		if (executable instanceof Constructor&lt;?&gt; constructor) {</span>
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">			if (registeredBean.getBeanFactory() instanceof DefaultListableBeanFactory dlbf &amp;&amp;</span>
+<span class="fc bfc" id="L348" title="All 2 branches covered.">					registeredBean.getMergedBeanDefinition().hasMethodOverrides()) {</span>
+<span class="fc" id="L349">				return dlbf.getInstantiationStrategy().instantiate(registeredBean.getMergedBeanDefinition(),</span>
+<span class="fc" id="L350">						registeredBean.getBeanName(), registeredBean.getBeanFactory());</span>
+			}
+<span class="fc" id="L352">			return BeanUtils.instantiateClass(constructor, args);</span>
+		}
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">		if (executable instanceof Method method) {</span>
+<span class="fc" id="L355">			Object target = null;</span>
+<span class="fc" id="L356">			String factoryBeanName = registeredBean.getMergedBeanDefinition().getFactoryBeanName();</span>
+<span class="pc bpc" id="L357" title="1 of 2 branches missed.">			if (factoryBeanName != null) {</span>
+<span class="fc" id="L358">				target = registeredBean.getBeanFactory().getBean(factoryBeanName, method.getDeclaringClass());</span>
+			}
+<span class="nc bnc" id="L360" title="All 2 branches missed.">			else if (!Modifier.isStatic(method.getModifiers())) {</span>
+<span class="nc" id="L361">				throw new IllegalStateException(&quot;Cannot invoke instance method without factoryBeanName: &quot; + method);</span>
+			}
+			try {
+<span class="fc" id="L364">				ReflectionUtils.makeAccessible(method);</span>
+<span class="fc" id="L365">				return method.invoke(target, args);</span>
+			}
+<span class="nc" id="L367">			catch (Throwable ex) {</span>
+<span class="nc" id="L368">				throw new BeanInstantiationException(method, ex.getMessage(), ex);</span>
+			}
+		}
+<span class="nc" id="L371">		throw new IllegalStateException(&quot;Unsupported executable &quot; + executable.getClass().getName());</span>
+	}
+
+
+	private static String toCommaSeparatedNames(Class&lt;?&gt;... parameterTypes) {
+<span class="fc" id="L376">		return Arrays.stream(parameterTypes).map(Class::getName).collect(Collectors.joining(&quot;, &quot;));</span>
+	}
+
+
+	/**
+	 * Performs lookup of the {@link Executable}.
+	 */
+<span class="fc" id="L383">	abstract static class ExecutableLookup {</span>
+
+		abstract Executable get(RegisteredBean registeredBean);
+	}
+
+
+	/**
+	 * Performs lookup of the {@link Constructor}.
+	 */
+	private static class ConstructorLookup extends ExecutableLookup {
+
+		private final Class&lt;?&gt;[] parameterTypes;
+
+<span class="fc" id="L396">		ConstructorLookup(Class&lt;?&gt;[] parameterTypes) {</span>
+<span class="fc" id="L397">			this.parameterTypes = parameterTypes;</span>
+<span class="fc" id="L398">		}</span>
+
+		@Override
+		public Executable get(RegisteredBean registeredBean) {
+<span class="fc" id="L402">			Class&lt;?&gt; beanClass = registeredBean.getMergedBeanDefinition().getBeanClass();</span>
+			try {
+<span class="fc" id="L404">				return beanClass.getDeclaredConstructor(this.parameterTypes);</span>
+			}
+<span class="fc" id="L406">			catch (NoSuchMethodException ex) {</span>
+<span class="fc" id="L407">				throw new IllegalArgumentException(</span>
+<span class="fc" id="L408">						&quot;%s cannot be found on %s&quot;.formatted(this, beanClass.getName()), ex);</span>
+			}
+		}
+
+		@Override
+		public String toString() {
+<span class="fc" id="L414">			return &quot;Constructor with parameter types [%s]&quot;.formatted(toCommaSeparatedNames(this.parameterTypes));</span>
+		}
+	}
+
+
+	/**
+	 * Performs lookup of the factory {@link Method}.
+	 */
+	private static class FactoryMethodLookup extends ExecutableLookup {
+
+		private final Class&lt;?&gt; declaringClass;
+
+		private final String methodName;
+
+		private final Class&lt;?&gt;[] parameterTypes;
+
+		private volatile @Nullable Method resolvedMethod;
+
+<span class="fc" id="L432">		FactoryMethodLookup(Class&lt;?&gt; declaringClass, String methodName, Class&lt;?&gt;[] parameterTypes) {</span>
+<span class="fc" id="L433">			this.declaringClass = declaringClass;</span>
+<span class="fc" id="L434">			this.methodName = methodName;</span>
+<span class="fc" id="L435">			this.parameterTypes = parameterTypes;</span>
+<span class="fc" id="L436">		}</span>
+
+		@Override
+		public Executable get(RegisteredBean registeredBean) {
+<span class="fc" id="L440">			return get();</span>
+		}
+
+		Method get() {
+<span class="fc" id="L444">			Method method = this.resolvedMethod;</span>
+<span class="fc bfc" id="L445" title="All 2 branches covered.">			if (method == null) {</span>
+<span class="fc" id="L446">				method = ReflectionUtils.findMethod(</span>
+<span class="fc" id="L447">						ClassUtils.getUserClass(this.declaringClass), this.methodName, this.parameterTypes);</span>
+<span class="fc" id="L448">				Assert.notNull(method, () -&gt; &quot;%s cannot be found&quot;.formatted(this));</span>
+<span class="fc" id="L449">				this.resolvedMethod = method;</span>
+			}
+<span class="fc" id="L451">			return method;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="fc" id="L456">			return &quot;Factory method '%s' with parameter types [%s] declared on %s&quot;.formatted(</span>
+<span class="fc" id="L457">					this.methodName, toCommaSeparatedNames(this.parameterTypes),</span>
+					this.declaringClass);
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

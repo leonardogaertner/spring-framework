@@ -1,0 +1,472 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DefaultContextCache.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context.cache</a> &gt; <span class="el_source">DefaultContextCache.java</span></div><h1>DefaultContextCache.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context.cache;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.core.style.ToStringCreator;
+import org.springframework.test.annotation.DirtiesContext.HierarchyMode;
+import org.springframework.test.context.MergedContextConfiguration;
+import org.springframework.util.Assert;
+
+/**
+ * Default implementation of the {@link ContextCache} API.
+ *
+ * &lt;p&gt;Uses a synchronized {@link Map} configured with a maximum size
+ * and a &lt;em&gt;least recently used&lt;/em&gt; (LRU) eviction policy to cache
+ * {@link ApplicationContext} instances.
+ *
+ * &lt;p&gt;The maximum size may be supplied as a {@linkplain #DefaultContextCache(int)
+ * constructor argument} or set via a system property or Spring property named
+ * {@value ContextCache#MAX_CONTEXT_CACHE_SIZE_PROPERTY_NAME}.
+ *
+ * &lt;p&gt;The {@link PauseMode} may be supplied as a {@linkplain #DefaultContextCache(int, PauseMode)
+ * constructor argument} or set via a system property or Spring property named
+ * {@value ContextCache#CONTEXT_CACHE_PAUSE_PROPERTY_NAME}.
+ *
+ * @author Sam Brannen
+ * @author Juergen Hoeller
+ * @since 2.5
+ * @see ContextCacheUtils#retrieveMaxCacheSize()
+ * @see ContextCacheUtils#retrievePauseMode()
+ */
+public class DefaultContextCache implements ContextCache {
+
+<span class="fc" id="L65">	private static final Log statsLogger = LogFactory.getLog(CONTEXT_CACHE_LOGGING_CATEGORY);</span>
+
+
+	/**
+	 * Map of context keys to Spring {@code ApplicationContext} instances.
+	 */
+<span class="fc" id="L71">	private final Map&lt;MergedContextConfiguration, ApplicationContext&gt; contextMap =</span>
+<span class="fc" id="L72">			Collections.synchronizedMap(new LinkedHashMap&lt;&gt;(32, 0.75f, true));</span>
+
+	/**
+	 * Map of parent keys to sets of children keys, representing a top-down &lt;em&gt;tree&lt;/em&gt;
+	 * of context hierarchies. This information is used for determining which subtrees
+	 * need to be recursively removed and closed when removing a context that is a parent
+	 * of other contexts.
+	 */
+<span class="fc" id="L80">	private final Map&lt;MergedContextConfiguration, Set&lt;MergedContextConfiguration&gt;&gt; hierarchyMap =</span>
+			new ConcurrentHashMap&lt;&gt;(32);
+
+	/**
+	 * Map of context keys to active test classes (i.e., test classes that are actively
+	 * using the corresponding {@link ApplicationContext}).
+	 * @since 7.0
+	 */
+<span class="fc" id="L88">	private final Map&lt;MergedContextConfiguration, Set&lt;Class&lt;?&gt;&gt;&gt; contextUsageMap = new ConcurrentHashMap&lt;&gt;(32);</span>
+
+	/**
+	 * Set of keys for contexts that are currently unused and are therefore
+	 * candidates for pausing on context switch.
+	 * @since 7.0.3
+	 */
+<span class="fc" id="L95">	private final Set&lt;MergedContextConfiguration&gt; unusedContexts = new LinkedHashSet&lt;&gt;(4);</span>
+
+	/**
+	 * Map of context keys to context load failure counts.
+	 * @since 6.1
+	 */
+<span class="fc" id="L101">	private final Map&lt;MergedContextConfiguration, Integer&gt; failureCounts = new ConcurrentHashMap&lt;&gt;(32);</span>
+
+<span class="fc" id="L103">	private final AtomicInteger totalFailureCount = new AtomicInteger();</span>
+
+	private final int maxSize;
+
+	private final PauseMode pauseMode;
+
+<span class="fc" id="L109">	private final AtomicInteger hitCount = new AtomicInteger();</span>
+
+<span class="fc" id="L111">	private final AtomicInteger missCount = new AtomicInteger();</span>
+
+
+	/**
+	 * Create a new {@code DefaultContextCache} using the maximum cache size
+	 * obtained via {@link ContextCacheUtils#retrieveMaxCacheSize()} and the
+	 * {@link PauseMode} obtained via {@link ContextCacheUtils#retrievePauseMode()}.
+	 * @since 4.3
+	 * @see #DefaultContextCache(int)
+	 * @see #DefaultContextCache(int, PauseMode)
+	 * @see ContextCacheUtils#retrieveMaxCacheSize()
+	 * @see ContextCacheUtils#retrievePauseMode()
+	 */
+	public DefaultContextCache() {
+<span class="fc" id="L125">		this(ContextCacheUtils.retrieveMaxCacheSize());</span>
+<span class="fc" id="L126">	}</span>
+
+	/**
+	 * Create a new {@code DefaultContextCache} using the supplied maximum
+	 * cache size and the {@link PauseMode} obtained via
+	 * {@link ContextCacheUtils#retrievePauseMode()}.
+	 * @param maxSize the maximum cache size
+	 * @throws IllegalArgumentException if the supplied {@code maxSize} value
+	 * is not positive
+	 * @since 4.3
+	 * @see #DefaultContextCache()
+	 * @see #DefaultContextCache(int, PauseMode)
+	 * @see ContextCacheUtils#retrievePauseMode()
+	 */
+	public DefaultContextCache(int maxSize) {
+<span class="fc" id="L141">		this(maxSize, ContextCacheUtils.retrievePauseMode());</span>
+<span class="fc" id="L142">	}</span>
+
+	/**
+	 * Create a new {@code DefaultContextCache} using the supplied maximum
+	 * cache size and {@link PauseMode}.
+	 * @param maxSize the maximum cache size
+	 * @param pauseMode the {@code PauseMode} to use
+	 * @throws IllegalArgumentException if the supplied {@code maxSize} value
+	 * is not positive or if the supplied {@code PauseMode} is {@code null}
+	 * @since 7.0.3
+	 * @see #DefaultContextCache()
+	 */
+<span class="fc" id="L154">	public DefaultContextCache(int maxSize, PauseMode pauseMode) {</span>
+<span class="fc bfc" id="L155" title="All 2 branches covered.">		Assert.isTrue(maxSize &gt; 0, &quot;'maxSize' must be positive&quot;);</span>
+<span class="fc" id="L156">		Assert.notNull(pauseMode, &quot;'pauseMode' must not be null&quot;);</span>
+<span class="fc" id="L157">		this.maxSize = maxSize;</span>
+<span class="fc" id="L158">		this.pauseMode = pauseMode;</span>
+<span class="fc" id="L159">	}</span>
+
+
+	@Override
+	public boolean contains(MergedContextConfiguration key) {
+<span class="fc" id="L164">		Assert.notNull(key, &quot;Key must not be null&quot;);</span>
+<span class="fc" id="L165">		return this.contextMap.containsKey(key);</span>
+	}
+
+	@Override
+	public @Nullable ApplicationContext get(MergedContextConfiguration key) {
+<span class="fc" id="L170">		Assert.notNull(key, &quot;Key must not be null&quot;);</span>
+<span class="fc" id="L171">		ApplicationContext context = this.contextMap.get(key);</span>
+<span class="fc bfc" id="L172" title="All 2 branches covered.">		if (context == null) {</span>
+<span class="fc" id="L173">			this.missCount.incrementAndGet();</span>
+		}
+		else {
+<span class="fc" id="L176">			this.hitCount.incrementAndGet();</span>
+<span class="fc" id="L177">			pauseOnContextSwitchIfNecessary(key);</span>
+<span class="fc" id="L178">			restartContextIfNecessary(context);</span>
+		}
+<span class="fc" id="L180">		return context;</span>
+	}
+
+	private void restartContextIfNecessary(ApplicationContext context) {
+<span class="fc bfc" id="L184" title="All 2 branches covered.">		if (this.pauseMode != PauseMode.NEVER) {</span>
+			// Recurse up the context hierarchy first.
+<span class="fc" id="L186">			ApplicationContext parent = context.getParent();</span>
+<span class="fc bfc" id="L187" title="All 2 branches covered.">			if (parent != null) {</span>
+<span class="fc" id="L188">				restartContextIfNecessary(parent);</span>
+			}
+<span class="pc bpc" id="L190" title="1 of 4 branches missed.">			if (context instanceof ConfigurableApplicationContext cac &amp;&amp; !cac.isRunning()) {</span>
+<span class="fc" id="L191">				cac.restart();</span>
+			}
+		}
+<span class="fc" id="L194">	}</span>
+
+	@Override
+	@Deprecated(since = &quot;7.0&quot;)
+	public void put(MergedContextConfiguration key, ApplicationContext context) {
+<span class="fc" id="L199">		Assert.notNull(key, &quot;Key must not be null&quot;);</span>
+<span class="fc" id="L200">		Assert.notNull(context, &quot;ApplicationContext must not be null&quot;);</span>
+
+<span class="fc" id="L202">		evictLruContextIfNecessary();</span>
+<span class="fc" id="L203">		pauseOnContextSwitchIfNecessary(key);</span>
+<span class="fc" id="L204">		putInternal(key, context);</span>
+<span class="fc" id="L205">	}</span>
+
+	@Override
+	public ApplicationContext put(MergedContextConfiguration key, LoadFunction loadFunction) {
+<span class="fc" id="L209">		Assert.notNull(key, &quot;Key must not be null&quot;);</span>
+<span class="fc" id="L210">		Assert.notNull(loadFunction, &quot;LoadFunction must not be null&quot;);</span>
+
+<span class="fc" id="L212">		evictLruContextIfNecessary();</span>
+<span class="fc" id="L213">		pauseOnContextSwitchIfNecessary(key);</span>
+<span class="fc" id="L214">		ApplicationContext context = loadFunction.loadContext(key);</span>
+<span class="pc bpc" id="L215" title="1 of 2 branches missed.">		Assert.state(context != null, &quot;LoadFunction must return a non-null ApplicationContext&quot;);</span>
+<span class="fc" id="L216">		putInternal(key, context);</span>
+<span class="fc" id="L217">		return context;</span>
+	}
+
+	/**
+	 * Evict the least recently used (LRU) context if necessary.
+	 * @since 7.0
+	 */
+	private void evictLruContextIfNecessary() {
+<span class="fc bfc" id="L225" title="All 2 branches covered.">		if (this.contextMap.size() &gt;= this.maxSize) {</span>
+<span class="fc" id="L226">			Iterator&lt;MergedContextConfiguration&gt; iterator = this.contextMap.keySet().iterator();</span>
+<span class="fc" id="L227">			Assert.state(iterator.hasNext(), &quot;Failed to retrieve LRU context&quot;);</span>
+			// The least recently used (LRU) key is the first/head in a LinkedHashMap
+			// configured for access-order iteration order.
+<span class="fc" id="L230">			MergedContextConfiguration lruKey = iterator.next();</span>
+<span class="fc" id="L231">			remove(lruKey, HierarchyMode.CURRENT_LEVEL);</span>
+		}
+<span class="fc" id="L233">	}</span>
+
+	private void putInternal(MergedContextConfiguration key, ApplicationContext context) {
+<span class="fc" id="L236">		this.contextMap.put(key, context);</span>
+
+		// Update context hierarchy map.
+<span class="fc" id="L239">		MergedContextConfiguration child = key;</span>
+<span class="fc" id="L240">		MergedContextConfiguration parent = child.getParent();</span>
+<span class="fc bfc" id="L241" title="All 2 branches covered.">		while (parent != null) {</span>
+<span class="fc" id="L242">			Set&lt;MergedContextConfiguration&gt; set = this.hierarchyMap.computeIfAbsent(parent, k -&gt; new HashSet&lt;&gt;());</span>
+<span class="fc" id="L243">			set.add(child);</span>
+<span class="fc" id="L244">			child = parent;</span>
+<span class="fc" id="L245">			parent = child.getParent();</span>
+<span class="fc" id="L246">		}</span>
+<span class="fc" id="L247">	}</span>
+
+	@Override
+	public void registerContextUsage(MergedContextConfiguration mergedConfig, Class&lt;?&gt; testClass) {
+		// Recurse up the context hierarchy first.
+<span class="fc" id="L252">		MergedContextConfiguration parent = mergedConfig.getParent();</span>
+<span class="fc bfc" id="L253" title="All 2 branches covered.">		if (parent != null) {</span>
+<span class="fc" id="L254">			registerContextUsage(parent, testClass);</span>
+		}
+<span class="fc" id="L256">		getActiveTestClasses(mergedConfig).add(testClass);</span>
+<span class="fc" id="L257">	}</span>
+
+	@Override
+	public void unregisterContextUsage(MergedContextConfiguration mergedConfig, Class&lt;?&gt; testClass) {
+<span class="fc" id="L261">		ApplicationContext context = this.contextMap.get(mergedConfig);</span>
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">		Assert.state(context != null, &quot;ApplicationContext must not be null for: &quot; + mergedConfig);</span>
+
+<span class="fc" id="L264">		Set&lt;Class&lt;?&gt;&gt; activeTestClasses = getActiveTestClasses(mergedConfig);</span>
+<span class="fc" id="L265">		activeTestClasses.remove(testClass);</span>
+<span class="fc bfc" id="L266" title="All 2 branches covered.">		if (activeTestClasses.isEmpty()) {</span>
+<span class="fc bfc" id="L267" title="All 3 branches covered.">			switch (this.pauseMode) {</span>
+<span class="fc" id="L268">				case ALWAYS -&gt; pauseIfNecessary(context);</span>
+<span class="fc" id="L269">				case ON_CONTEXT_SWITCH -&gt; this.unusedContexts.add(mergedConfig);</span>
+			}
+<span class="fc" id="L271">			this.contextUsageMap.remove(mergedConfig);</span>
+		}
+
+		// Recurse up the context hierarchy last.
+<span class="fc" id="L275">		MergedContextConfiguration parent = mergedConfig.getParent();</span>
+<span class="fc bfc" id="L276" title="All 2 branches covered.">		if (parent != null) {</span>
+<span class="fc" id="L277">			unregisterContextUsage(parent, testClass);</span>
+		}
+<span class="fc" id="L279">	}</span>
+
+	private Set&lt;Class&lt;?&gt;&gt; getActiveTestClasses(MergedContextConfiguration mergedConfig) {
+<span class="fc" id="L282">		return this.contextUsageMap.computeIfAbsent(mergedConfig, key -&gt; new HashSet&lt;&gt;());</span>
+	}
+
+	private boolean pauseOnContextSwitch() {
+<span class="fc bfc" id="L286" title="All 2 branches covered.">		return (this.pauseMode == PauseMode.ON_CONTEXT_SWITCH);</span>
+	}
+
+	private void pauseOnContextSwitchIfNecessary(MergedContextConfiguration activeContextKey) {
+<span class="fc bfc" id="L290" title="All 2 branches covered.">		if (pauseOnContextSwitch()) {</span>
+<span class="fc" id="L291">			removeFromUnusedContexts(activeContextKey);</span>
+<span class="fc bfc" id="L292" title="All 2 branches covered.">			for (MergedContextConfiguration unusedContextKey : this.unusedContexts) {</span>
+<span class="fc" id="L293">				pauseIfNecessary(this.contextMap.get(unusedContextKey));</span>
+<span class="fc" id="L294">			}</span>
+<span class="fc" id="L295">			this.unusedContexts.clear();</span>
+		}
+<span class="fc" id="L297">	}</span>
+
+	/**
+	 * Remove the supplied key and any keys for parent contexts from the unused
+	 * contexts set. This effectively stops tracking the context (or context
+	 * hierarchy) as unused.
+	 */
+	private void removeFromUnusedContexts(MergedContextConfiguration key) {
+		do {
+<span class="fc" id="L306">			this.unusedContexts.remove(key);</span>
+<span class="fc" id="L307">			key = key.getParent();</span>
+<span class="fc bfc" id="L308" title="All 2 branches covered.">		} while (key != null);</span>
+<span class="fc" id="L309">	}</span>
+
+	private static void pauseIfNecessary(@Nullable ApplicationContext context) {
+<span class="pc bpc" id="L312" title="2 of 4 branches missed.">		if (context instanceof ConfigurableApplicationContext cac &amp;&amp; cac.isRunning()) {</span>
+<span class="fc" id="L313">			cac.pause();</span>
+		}
+<span class="fc" id="L315">	}</span>
+
+	@Override
+	public void remove(MergedContextConfiguration key, @Nullable HierarchyMode hierarchyMode) {
+<span class="fc" id="L319">		Assert.notNull(key, &quot;Key must not be null&quot;);</span>
+
+		// startKey is the level at which to begin clearing the cache,
+		// depending on the configured hierarchy mode.
+<span class="fc" id="L323">		MergedContextConfiguration startKey = key;</span>
+<span class="fc bfc" id="L324" title="All 2 branches covered.">		if (hierarchyMode == HierarchyMode.EXHAUSTIVE) {</span>
+<span class="fc" id="L325">			MergedContextConfiguration parent = startKey.getParent();</span>
+<span class="fc bfc" id="L326" title="All 2 branches covered.">			while (parent != null) {</span>
+<span class="fc" id="L327">				startKey = parent;</span>
+<span class="fc" id="L328">				parent = startKey.getParent();</span>
+			}
+		}
+
+<span class="fc" id="L332">		List&lt;MergedContextConfiguration&gt; removedContexts = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L333">		remove(removedContexts, startKey);</span>
+
+		// Remove all remaining references to any removed contexts from the
+		// hierarchy map.
+<span class="fc bfc" id="L337" title="All 2 branches covered.">		for (MergedContextConfiguration currentKey : removedContexts) {</span>
+<span class="fc bfc" id="L338" title="All 2 branches covered.">			for (Set&lt;MergedContextConfiguration&gt; children : this.hierarchyMap.values()) {</span>
+<span class="fc" id="L339">				children.remove(currentKey);</span>
+<span class="fc" id="L340">			}</span>
+<span class="fc" id="L341">		}</span>
+
+		// Remove empty entries from the hierarchy map.
+<span class="fc" id="L344">		this.hierarchyMap.entrySet().removeIf(entry -&gt; entry.getValue().isEmpty());</span>
+<span class="fc" id="L345">	}</span>
+
+	private void remove(List&lt;MergedContextConfiguration&gt; removedContexts, MergedContextConfiguration key) {
+<span class="fc" id="L348">		Assert.notNull(key, &quot;Key must not be null&quot;);</span>
+
+<span class="fc" id="L350">		Set&lt;MergedContextConfiguration&gt; children = this.hierarchyMap.get(key);</span>
+<span class="fc bfc" id="L351" title="All 2 branches covered.">		if (children != null) {</span>
+<span class="fc bfc" id="L352" title="All 2 branches covered.">			for (MergedContextConfiguration child : children) {</span>
+				// Recurse through lower levels
+<span class="fc" id="L354">				remove(removedContexts, child);</span>
+<span class="fc" id="L355">			}</span>
+			// Remove the set of children for the current context from the hierarchy map.
+<span class="fc" id="L357">			this.hierarchyMap.remove(key);</span>
+		}
+
+		// Physically remove and close leaf nodes first (i.e., on the way back up the
+		// stack as opposed to prior to the recursive call).
+<span class="fc" id="L362">		ApplicationContext context = this.contextMap.remove(key);</span>
+<span class="fc" id="L363">		this.contextUsageMap.remove(key);</span>
+<span class="fc bfc" id="L364" title="All 2 branches covered.">		if (pauseOnContextSwitch()) {</span>
+<span class="fc" id="L365">			this.unusedContexts.remove(key);</span>
+		}
+<span class="fc bfc" id="L367" title="All 2 branches covered.">		if (context instanceof ConfigurableApplicationContext cac) {</span>
+<span class="fc" id="L368">			cac.close();</span>
+		}
+<span class="fc" id="L370">		removedContexts.add(key);</span>
+<span class="fc" id="L371">	}</span>
+
+	@Override
+	public int getFailureCount(MergedContextConfiguration key) {
+<span class="fc" id="L375">		return this.failureCounts.getOrDefault(key, 0);</span>
+	}
+
+	@Override
+	public void incrementFailureCount(MergedContextConfiguration key) {
+<span class="fc" id="L380">		this.totalFailureCount.incrementAndGet();</span>
+<span class="fc" id="L381">		this.failureCounts.merge(key, 1, Integer::sum);</span>
+<span class="fc" id="L382">	}</span>
+
+	@Override
+	public int size() {
+<span class="fc" id="L386">		return this.contextMap.size();</span>
+	}
+
+	/**
+	 * Get the maximum size of this cache.
+	 */
+	public int getMaxSize() {
+<span class="fc" id="L393">		return this.maxSize;</span>
+	}
+
+	@Override
+	public int getContextUsageCount() {
+<span class="fc" id="L398">		return this.contextUsageMap.size();</span>
+	}
+
+	@Override
+	public int getParentContextCount() {
+<span class="fc" id="L403">		return this.hierarchyMap.size();</span>
+	}
+
+	@Override
+	public int getHitCount() {
+<span class="fc" id="L408">		return this.hitCount.get();</span>
+	}
+
+	@Override
+	public int getMissCount() {
+<span class="fc" id="L413">		return this.missCount.get();</span>
+	}
+
+	@Override
+	public void reset() {
+<span class="fc" id="L418">		synchronized (this.contextMap) {</span>
+<span class="fc" id="L419">			clear();</span>
+<span class="fc" id="L420">			clearStatistics();</span>
+<span class="fc" id="L421">			this.totalFailureCount.set(0);</span>
+<span class="fc" id="L422">			this.failureCounts.clear();</span>
+<span class="fc" id="L423">		}</span>
+<span class="fc" id="L424">	}</span>
+
+	@Override
+	public void clear() {
+<span class="fc" id="L428">		synchronized (this.contextMap) {</span>
+<span class="fc" id="L429">			this.contextMap.clear();</span>
+<span class="fc" id="L430">			this.hierarchyMap.clear();</span>
+<span class="fc" id="L431">			this.contextUsageMap.clear();</span>
+<span class="fc" id="L432">			this.unusedContexts.clear();</span>
+<span class="fc" id="L433">		}</span>
+<span class="fc" id="L434">	}</span>
+
+	@Override
+	public void clearStatistics() {
+<span class="fc" id="L438">		synchronized (this.contextMap) {</span>
+<span class="fc" id="L439">			this.hitCount.set(0);</span>
+<span class="fc" id="L440">			this.missCount.set(0);</span>
+<span class="fc" id="L441">		}</span>
+<span class="fc" id="L442">	}</span>
+
+	@Override
+	public void logStatistics() {
+<span class="fc bfc" id="L446" title="All 2 branches covered.">		if (statsLogger.isDebugEnabled()) {</span>
+<span class="fc" id="L447">			statsLogger.debug(&quot;Spring test ApplicationContext cache statistics: &quot; + this);</span>
+		}
+<span class="fc" id="L449">	}</span>
+
+	/**
+	 * Generate a text string containing the implementation type of this
+	 * cache and its statistics.
+	 * &lt;p&gt;The string returned by this method contains all information
+	 * required for compliance with the contract for {@link #logStatistics()}.
+	 * @return a string representation of this cache, including statistics
+	 */
+	@Override
+	public String toString() {
+<span class="fc" id="L460">		return new ToStringCreator(this)</span>
+<span class="fc" id="L461">				.append(&quot;size&quot;, size())</span>
+<span class="fc" id="L462">				.append(&quot;maxSize&quot;, getMaxSize())</span>
+<span class="fc" id="L463">				.append(&quot;contextUsageCount&quot;, getContextUsageCount())</span>
+<span class="fc" id="L464">				.append(&quot;parentContextCount&quot;, getParentContextCount())</span>
+<span class="fc" id="L465">				.append(&quot;hitCount&quot;, getHitCount())</span>
+<span class="fc" id="L466">				.append(&quot;missCount&quot;, getMissCount())</span>
+<span class="fc" id="L467">				.append(&quot;failureCount&quot;, this.totalFailureCount)</span>
+<span class="fc" id="L468">				.toString();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

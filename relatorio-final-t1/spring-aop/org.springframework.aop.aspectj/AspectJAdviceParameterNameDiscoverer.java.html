@@ -1,0 +1,760 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>AspectJAdviceParameterNameDiscoverer.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-aop</a> &gt; <a href="index.source.html" class="el_package">org.springframework.aop.aspectj</a> &gt; <span class="el_source">AspectJAdviceParameterNameDiscoverer.java</span></div><h1>AspectJAdviceParameterNameDiscoverer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.aop.aspectj;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+
+import org.aspectj.lang.JoinPoint;
+import org.aspectj.lang.ProceedingJoinPoint;
+import org.aspectj.weaver.tools.PointcutParser;
+import org.aspectj.weaver.tools.PointcutPrimitive;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.ParameterNameDiscoverer;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@link ParameterNameDiscoverer} implementation that tries to deduce parameter names
+ * for an advice method from the pointcut expression, returning, and throwing clauses.
+ * If an unambiguous interpretation is not available, it returns {@code null}.
+ *
+ * &lt;h3&gt;Algorithm Summary&lt;/h3&gt;
+ * &lt;p&gt;If an unambiguous binding can be deduced, then it is.
+ * If the advice requirements cannot possibly be satisfied, then {@code null}
+ * is returned. By setting the {@link #setRaiseExceptions(boolean) raiseExceptions}
+ * property to {@code true}, descriptive exceptions will be thrown instead of
+ * returning {@code null} in the case that the parameter names cannot be discovered.
+ *
+ * &lt;h3&gt;Algorithm Details&lt;/h3&gt;
+ * &lt;p&gt;This class interprets arguments in the following way:
+ * &lt;ol&gt;
+ * &lt;li&gt;If the first parameter of the method is of type {@link JoinPoint}
+ * or {@link ProceedingJoinPoint}, it is assumed to be for passing
+ * {@code thisJoinPoint} to the advice, and the parameter name will
+ * be assigned the value {@code &quot;thisJoinPoint&quot;}.&lt;/li&gt;
+ * &lt;li&gt;If the first parameter of the method is of type
+ * {@code JoinPoint.StaticPart}, it is assumed to be for passing
+ * {@code &quot;thisJoinPointStaticPart&quot;} to the advice, and the parameter name
+ * will be assigned the value {@code &quot;thisJoinPointStaticPart&quot;}.&lt;/li&gt;
+ * &lt;li&gt;If a {@link #setThrowingName(String) throwingName} has been set, and
+ * there are no unbound arguments of type {@code Throwable+}, then an
+ * {@link IllegalArgumentException} is raised. If there is more than one
+ * unbound argument of type {@code Throwable+}, then an
+ * {@link AmbiguousBindingException} is raised. If there is exactly one
+ * unbound argument of type {@code Throwable+}, then the corresponding
+ * parameter name is assigned the value &amp;lt;throwingName&amp;gt;.&lt;/li&gt;
+ * &lt;li&gt;If there remain unbound arguments, then the pointcut expression is
+ * examined. Let {@code a} be the number of annotation-based pointcut
+ * expressions (&amp;#64;annotation, &amp;#64;this, &amp;#64;target, &amp;#64;args,
+ * &amp;#64;within, &amp;#64;withincode) that are used in binding form. Usage in
+ * binding form has itself to be deduced: if the expression inside the
+ * pointcut is a single string literal that meets Java variable name
+ * conventions it is assumed to be a variable name. If {@code a} is
+ * zero we proceed to the next stage. If {@code a} &amp;gt; 1 then an
+ * {@code AmbiguousBindingException} is raised. If {@code a} == 1,
+ * and there are no unbound arguments of type {@code Annotation+},
+ * then an {@code IllegalArgumentException} is raised. If there is
+ * exactly one such argument, then the corresponding parameter name is
+ * assigned the value from the pointcut expression.&lt;/li&gt;
+ * &lt;li&gt;If a {@code returningName} has been set, and there are no unbound arguments
+ * then an {@code IllegalArgumentException} is raised. If there is
+ * more than one unbound argument then an
+ * {@code AmbiguousBindingException} is raised. If there is exactly
+ * one unbound argument then the corresponding parameter name is assigned
+ * the value of the {@code returningName}.&lt;/li&gt;
+ * &lt;li&gt;If there remain unbound arguments, then the pointcut expression is
+ * examined once more for {@code this}, {@code target}, and
+ * {@code args} pointcut expressions used in the binding form (binding
+ * forms are deduced as described for the annotation based pointcuts). If
+ * there remains more than one unbound argument of a primitive type (which
+ * can only be bound in {@code args}) then an
+ * {@code AmbiguousBindingException} is raised. If there is exactly
+ * one argument of a primitive type, then if exactly one {@code args}
+ * bound variable was found, we assign the corresponding parameter name
+ * the variable name. If there were no {@code args} bound variables
+ * found an {@code IllegalStateException} is raised. If there are
+ * multiple {@code args} bound variables, an
+ * {@code AmbiguousBindingException} is raised. At this point, if
+ * there remains more than one unbound argument we raise an
+ * {@code AmbiguousBindingException}. If there are no unbound arguments
+ * remaining, we are done. If there is exactly one unbound argument
+ * remaining, and only one candidate variable name unbound from
+ * {@code this}, {@code target}, or {@code args}, it is
+ * assigned as the corresponding parameter name. If there are multiple
+ * possibilities, an {@code AmbiguousBindingException} is raised.&lt;/li&gt;
+ * &lt;/ol&gt;
+ *
+ * &lt;p&gt;The behavior on raising an {@code IllegalArgumentException} or
+ * {@code AmbiguousBindingException} is configurable to allow this discoverer
+ * to be used as part of a chain-of-responsibility. By default the condition will
+ * be logged and the {@link #getParameterNames(Method)} method will simply return
+ * {@code null}. If the {@link #setRaiseExceptions(boolean) raiseExceptions}
+ * property is set to {@code true}, the conditions will be thrown as
+ * {@code IllegalArgumentException} and {@code AmbiguousBindingException},
+ * respectively.
+ *
+ * @author Adrian Colyer
+ * @author Juergen Hoeller
+ * @since 2.0
+ */
+public class AspectJAdviceParameterNameDiscoverer implements ParameterNameDiscoverer {
+
+	private static final String THIS_JOIN_POINT = &quot;thisJoinPoint&quot;;
+	private static final String THIS_JOIN_POINT_STATIC_PART = &quot;thisJoinPointStaticPart&quot;;
+
+	// Steps in the binding algorithm...
+	private static final int STEP_JOIN_POINT_BINDING = 1;
+	private static final int STEP_THROWING_BINDING = 2;
+	private static final int STEP_ANNOTATION_BINDING = 3;
+	private static final int STEP_RETURNING_BINDING = 4;
+	private static final int STEP_PRIMITIVE_ARGS_BINDING = 5;
+	private static final int STEP_THIS_TARGET_ARGS_BINDING = 6;
+	private static final int STEP_REFERENCE_PCUT_BINDING = 7;
+	private static final int STEP_FINISHED = 8;
+
+<span class="fc" id="L135">	private static final Set&lt;String&gt; singleValuedAnnotationPcds = Set.of(</span>
+			&quot;@this&quot;,
+			&quot;@target&quot;,
+			&quot;@within&quot;,
+			&quot;@withincode&quot;,
+			&quot;@annotation&quot;);
+
+<span class="fc" id="L142">	private static final Set&lt;String&gt; nonReferencePointcutTokens = new HashSet&lt;&gt;();</span>
+
+
+	static {
+<span class="fc" id="L146">		Set&lt;PointcutPrimitive&gt; pointcutPrimitives = PointcutParser.getAllSupportedPointcutPrimitives();</span>
+<span class="fc bfc" id="L147" title="All 2 branches covered.">		for (PointcutPrimitive primitive : pointcutPrimitives) {</span>
+<span class="fc" id="L148">			nonReferencePointcutTokens.add(primitive.getName());</span>
+<span class="fc" id="L149">		}</span>
+<span class="fc" id="L150">		nonReferencePointcutTokens.add(&quot;&amp;&amp;&quot;);</span>
+<span class="fc" id="L151">		nonReferencePointcutTokens.add(&quot;!&quot;);</span>
+<span class="fc" id="L152">		nonReferencePointcutTokens.add(&quot;||&quot;);</span>
+<span class="fc" id="L153">		nonReferencePointcutTokens.add(&quot;and&quot;);</span>
+<span class="fc" id="L154">		nonReferencePointcutTokens.add(&quot;or&quot;);</span>
+<span class="fc" id="L155">		nonReferencePointcutTokens.add(&quot;not&quot;);</span>
+<span class="fc" id="L156">	}</span>
+
+
+	/** The pointcut expression associated with the advice, as a simple String. */
+	private final @Nullable String pointcutExpression;
+
+	private boolean raiseExceptions;
+
+	/** If the advice is afterReturning, and binds the return value, this is the parameter name used. */
+	private @Nullable String returningName;
+
+	/** If the advice is afterThrowing, and binds the thrown value, this is the parameter name used. */
+	private @Nullable String throwingName;
+
+<span class="fc" id="L170">	private Class&lt;?&gt;[] argumentTypes = new Class&lt;?&gt;[0];</span>
+
+<span class="fc" id="L172">	private @Nullable String[] parameterNameBindings = new String[0];</span>
+
+	private int numberOfRemainingUnboundArguments;
+
+
+	/**
+	 * Create a new discoverer that attempts to discover parameter names.
+	 * from the given pointcut expression.
+	 */
+<span class="fc" id="L181">	public AspectJAdviceParameterNameDiscoverer(@Nullable String pointcutExpression) {</span>
+<span class="fc" id="L182">		this.pointcutExpression = pointcutExpression;</span>
+<span class="fc" id="L183">	}</span>
+
+
+	/**
+	 * Indicate whether {@link IllegalArgumentException} and {@link AmbiguousBindingException}
+	 * must be thrown as appropriate in the case of failing to deduce advice parameter names.
+	 * @param raiseExceptions {@code true} if exceptions are to be thrown
+	 */
+	public void setRaiseExceptions(boolean raiseExceptions) {
+<span class="fc" id="L192">		this.raiseExceptions = raiseExceptions;</span>
+<span class="fc" id="L193">	}</span>
+
+	/**
+	 * If {@code afterReturning} advice binds the return value, the
+	 * {@code returning} variable name must be specified.
+	 * @param returningName the name of the returning variable
+	 */
+	public void setReturningName(@Nullable String returningName) {
+<span class="fc" id="L201">		this.returningName = returningName;</span>
+<span class="fc" id="L202">	}</span>
+
+	/**
+	 * If {@code afterThrowing} advice binds the thrown value, the
+	 * {@code throwing} variable name must be specified.
+	 * @param throwingName the name of the throwing variable
+	 */
+	public void setThrowingName(@Nullable String throwingName) {
+<span class="fc" id="L210">		this.throwingName = throwingName;</span>
+<span class="fc" id="L211">	}</span>
+
+	/**
+	 * Deduce the parameter names for an advice method.
+	 * &lt;p&gt;See the {@link AspectJAdviceParameterNameDiscoverer class-level javadoc}
+	 * for this class for details on the algorithm used.
+	 * @param method the target {@link Method}
+	 * @return the parameter names
+	 */
+	@Override
+	public @Nullable String @Nullable [] getParameterNames(Method method) {
+<span class="fc" id="L222">		this.argumentTypes = method.getParameterTypes();</span>
+<span class="fc" id="L223">		this.numberOfRemainingUnboundArguments = this.argumentTypes.length;</span>
+<span class="fc" id="L224">		this.parameterNameBindings = new String[this.numberOfRemainingUnboundArguments];</span>
+
+<span class="fc" id="L226">		int minimumNumberUnboundArgs = 0;</span>
+<span class="fc bfc" id="L227" title="All 2 branches covered.">		if (this.returningName != null) {</span>
+<span class="fc" id="L228">			minimumNumberUnboundArgs++;</span>
+		}
+<span class="fc bfc" id="L230" title="All 2 branches covered.">		if (this.throwingName != null) {</span>
+<span class="fc" id="L231">			minimumNumberUnboundArgs++;</span>
+		}
+<span class="fc bfc" id="L233" title="All 2 branches covered.">		if (this.numberOfRemainingUnboundArguments &lt; minimumNumberUnboundArgs) {</span>
+<span class="fc" id="L234">			throw new IllegalStateException(</span>
+					&quot;Not enough arguments in method to satisfy binding of returning and throwing variables&quot;);
+		}
+
+		try {
+<span class="fc" id="L239">			int algorithmicStep = STEP_JOIN_POINT_BINDING;</span>
+<span class="fc bfc" id="L240" title="All 4 branches covered.">			while (this.numberOfRemainingUnboundArguments &gt; 0 &amp;&amp; algorithmicStep &lt; STEP_FINISHED) {</span>
+<span class="pc bpc" id="L241" title="1 of 8 branches missed.">				switch (algorithmicStep++) {</span>
+					case STEP_JOIN_POINT_BINDING -&gt; {
+<span class="fc bfc" id="L243" title="All 2 branches covered.">						if (!maybeBindThisJoinPoint()) {</span>
+<span class="fc" id="L244">							maybeBindThisJoinPointStaticPart();</span>
+						}
+					}
+<span class="fc" id="L247">					case STEP_THROWING_BINDING -&gt; maybeBindThrowingVariable();</span>
+<span class="fc" id="L248">					case STEP_ANNOTATION_BINDING -&gt; maybeBindAnnotationsFromPointcutExpression();</span>
+<span class="fc" id="L249">					case STEP_RETURNING_BINDING -&gt; maybeBindReturningVariable();</span>
+<span class="fc" id="L250">					case STEP_PRIMITIVE_ARGS_BINDING -&gt; maybeBindPrimitiveArgsFromPointcutExpression();</span>
+<span class="fc" id="L251">					case STEP_THIS_TARGET_ARGS_BINDING -&gt; maybeBindThisOrTargetOrArgsFromPointcutExpression();</span>
+<span class="fc" id="L252">					case STEP_REFERENCE_PCUT_BINDING -&gt; maybeBindReferencePointcutParameter();</span>
+<span class="nc" id="L253">					default -&gt; throw new IllegalStateException(&quot;Unknown algorithmic step: &quot; + (algorithmicStep - 1));</span>
+				}
+			}
+		}
+<span class="fc" id="L257">		catch (AmbiguousBindingException | IllegalArgumentException ex) {</span>
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">			if (this.raiseExceptions) {</span>
+<span class="fc" id="L259">				throw ex;</span>
+			}
+			else {
+<span class="nc" id="L262">				return null;</span>
+			}
+<span class="fc" id="L264">		}</span>
+
+<span class="fc bfc" id="L266" title="All 2 branches covered.">		if (this.numberOfRemainingUnboundArguments == 0) {</span>
+<span class="fc" id="L267">			return this.parameterNameBindings;</span>
+		}
+		else {
+<span class="pc bpc" id="L270" title="1 of 2 branches missed.">			if (this.raiseExceptions) {</span>
+<span class="fc" id="L271">				throw new IllegalStateException(&quot;Failed to bind all argument names: &quot; +</span>
+						this.numberOfRemainingUnboundArguments + &quot; argument(s) could not be bound&quot;);
+			}
+			else {
+				// convention for failing is to return null, allowing participation in a chain of responsibility
+<span class="nc" id="L276">				return null;</span>
+			}
+		}
+	}
+
+	/**
+	 * An advice method can never be a constructor in Spring.
+	 * @return {@code null}
+	 * @throws UnsupportedOperationException if
+	 * {@link #setRaiseExceptions(boolean) raiseExceptions} has been set to {@code true}
+	 */
+	@Override
+	public String @Nullable [] getParameterNames(Constructor&lt;?&gt; ctor) {
+<span class="nc bnc" id="L289" title="All 2 branches missed.">		if (this.raiseExceptions) {</span>
+<span class="nc" id="L290">			throw new UnsupportedOperationException(&quot;An advice method can never be a constructor&quot;);</span>
+		}
+		else {
+			// we return null rather than throw an exception so that we behave well
+			// in a chain-of-responsibility.
+<span class="nc" id="L295">			return null;</span>
+		}
+	}
+
+
+	private void bindParameterName(int index, @Nullable String name) {
+<span class="fc" id="L301">		this.parameterNameBindings[index] = name;</span>
+<span class="fc" id="L302">		this.numberOfRemainingUnboundArguments--;</span>
+<span class="fc" id="L303">	}</span>
+
+	/**
+	 * If the first parameter is of type JoinPoint or ProceedingJoinPoint, bind &quot;thisJoinPoint&quot; as
+	 * parameter name and return true, else return false.
+	 */
+	private boolean maybeBindThisJoinPoint() {
+<span class="fc bfc" id="L310" title="All 4 branches covered.">		if ((this.argumentTypes[0] == JoinPoint.class) || (this.argumentTypes[0] == ProceedingJoinPoint.class)) {</span>
+<span class="fc" id="L311">			bindParameterName(0, THIS_JOIN_POINT);</span>
+<span class="fc" id="L312">			return true;</span>
+		}
+		else {
+<span class="fc" id="L315">			return false;</span>
+		}
+	}
+
+	private void maybeBindThisJoinPointStaticPart() {
+<span class="fc bfc" id="L320" title="All 2 branches covered.">		if (this.argumentTypes[0] == JoinPoint.StaticPart.class) {</span>
+<span class="fc" id="L321">			bindParameterName(0, THIS_JOIN_POINT_STATIC_PART);</span>
+		}
+<span class="fc" id="L323">	}</span>
+
+	/**
+	 * If a throwing name was specified and there is exactly one choice remaining
+	 * (argument that is a subtype of Throwable) then bind it.
+	 */
+	private void maybeBindThrowingVariable() {
+<span class="fc bfc" id="L330" title="All 2 branches covered.">		if (this.throwingName == null) {</span>
+<span class="fc" id="L331">			return;</span>
+		}
+
+		// So there is binding work to do...
+<span class="fc" id="L335">		int throwableIndex = -1;</span>
+<span class="fc bfc" id="L336" title="All 2 branches covered.">		for (int i = 0; i &lt; this.argumentTypes.length; i++) {</span>
+<span class="fc bfc" id="L337" title="All 4 branches covered.">			if (isUnbound(i) &amp;&amp; isSubtypeOf(Throwable.class, i)) {</span>
+<span class="fc bfc" id="L338" title="All 2 branches covered.">				if (throwableIndex == -1) {</span>
+<span class="fc" id="L339">					throwableIndex = i;</span>
+				}
+				else {
+					// Second candidate we've found - ambiguous binding
+<span class="fc" id="L343">					throw new AmbiguousBindingException(&quot;Binding of throwing parameter '&quot; +</span>
+							this.throwingName + &quot;' is ambiguous: could be bound to argument &quot; +
+							throwableIndex + &quot; or &quot; + i);
+				}
+			}
+		}
+
+<span class="pc bpc" id="L350" title="1 of 2 branches missed.">		if (throwableIndex == -1) {</span>
+<span class="nc" id="L351">			throw new IllegalStateException(&quot;Binding of throwing parameter '&quot; + this.throwingName +</span>
+					&quot;' could not be completed as no available arguments are a subtype of Throwable&quot;);
+		}
+		else {
+<span class="fc" id="L355">			bindParameterName(throwableIndex, this.throwingName);</span>
+		}
+<span class="fc" id="L357">	}</span>
+
+	/**
+	 * If a returning variable was specified and there is only one choice remaining, bind it.
+	 */
+	private void maybeBindReturningVariable() {
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">		if (this.numberOfRemainingUnboundArguments == 0) {</span>
+<span class="nc" id="L364">			throw new IllegalStateException(</span>
+					&quot;Algorithm assumes that there must be at least one unbound parameter on entry to this method&quot;);
+		}
+
+<span class="fc bfc" id="L368" title="All 2 branches covered.">		if (this.returningName != null) {</span>
+<span class="fc bfc" id="L369" title="All 2 branches covered.">			if (this.numberOfRemainingUnboundArguments &gt; 1) {</span>
+<span class="fc" id="L370">				throw new AmbiguousBindingException(&quot;Binding of returning parameter '&quot; + this.returningName +</span>
+						&quot;' is ambiguous: there are &quot; + this.numberOfRemainingUnboundArguments + &quot; candidates. &quot; +
+						&quot;Consider compiling with -parameters in order to make declared parameter names available.&quot;);
+			}
+
+			// We're all set... find the unbound parameter, and bind it.
+<span class="pc bpc" id="L376" title="1 of 2 branches missed.">			for (int i = 0; i &lt; this.parameterNameBindings.length; i++) {</span>
+<span class="pc bpc" id="L377" title="1 of 2 branches missed.">				if (this.parameterNameBindings[i] == null) {</span>
+<span class="fc" id="L378">					bindParameterName(i, this.returningName);</span>
+<span class="fc" id="L379">					break;</span>
+				}
+			}
+		}
+<span class="fc" id="L383">	}</span>
+
+	/**
+	 * Parse the string pointcut expression looking for:
+	 * &amp;#64;this, &amp;#64;target, &amp;#64;args, &amp;#64;within, &amp;#64;withincode, &amp;#64;annotation.
+	 * If we find one of these pointcut expressions, try and extract a candidate variable
+	 * name (or variable names, in the case of args).
+	 * &lt;p&gt;Some more support from AspectJ in doing this exercise would be nice... :)
+	 */
+	private void maybeBindAnnotationsFromPointcutExpression() {
+<span class="fc" id="L393">		List&lt;String&gt; varNames = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L394">		String[] tokens = StringUtils.tokenizeToStringArray(this.pointcutExpression, &quot; &quot;);</span>
+<span class="fc bfc" id="L395" title="All 2 branches covered.">		for (int i = 0; i &lt; tokens.length; i++) {</span>
+<span class="fc" id="L396">			String toMatch = tokens[i];</span>
+<span class="fc" id="L397">			int firstParenIndex = toMatch.indexOf('(');</span>
+<span class="fc bfc" id="L398" title="All 2 branches covered.">			if (firstParenIndex != -1) {</span>
+<span class="fc" id="L399">				toMatch = toMatch.substring(0, firstParenIndex);</span>
+			}
+<span class="fc bfc" id="L401" title="All 2 branches covered.">			if (singleValuedAnnotationPcds.contains(toMatch)) {</span>
+<span class="fc" id="L402">				PointcutBody body = getPointcutBody(tokens, i);</span>
+<span class="fc" id="L403">				i += body.numTokensConsumed;</span>
+<span class="fc" id="L404">				String varName = maybeExtractVariableName(body.text);</span>
+<span class="pc bpc" id="L405" title="1 of 2 branches missed.">				if (varName != null) {</span>
+<span class="fc" id="L406">					varNames.add(varName);</span>
+				}
+<span class="fc" id="L408">			}</span>
+<span class="pc bpc" id="L409" title="1 of 4 branches missed.">			else if (tokens[i].startsWith(&quot;@args(&quot;) || tokens[i].equals(&quot;@args&quot;)) {</span>
+<span class="fc" id="L410">				PointcutBody body = getPointcutBody(tokens, i);</span>
+<span class="fc" id="L411">				i += body.numTokensConsumed;</span>
+<span class="fc" id="L412">				maybeExtractVariableNamesFromArgs(body.text, varNames);</span>
+			}
+		}
+
+<span class="fc" id="L416">		bindAnnotationsFromVarNames(varNames);</span>
+<span class="fc" id="L417">	}</span>
+
+	/**
+	 * Match the given list of extracted variable names to argument slots.
+	 */
+	private void bindAnnotationsFromVarNames(List&lt;String&gt; varNames) {
+<span class="fc bfc" id="L423" title="All 2 branches covered.">		if (!varNames.isEmpty()) {</span>
+			// we have work to do...
+<span class="fc" id="L425">			int numAnnotationSlots = countNumberOfUnboundAnnotationArguments();</span>
+<span class="fc bfc" id="L426" title="All 2 branches covered.">			if (numAnnotationSlots &gt; 1) {</span>
+<span class="fc" id="L427">				throw new AmbiguousBindingException(&quot;Found &quot; + varNames.size() +</span>
+						&quot; potential annotation variable(s) and &quot; +
+						numAnnotationSlots + &quot; potential argument slots&quot;);
+			}
+<span class="pc bpc" id="L431" title="1 of 2 branches missed.">			else if (numAnnotationSlots == 1) {</span>
+<span class="fc bfc" id="L432" title="All 2 branches covered.">				if (varNames.size() == 1) {</span>
+					// it's a match
+<span class="fc" id="L434">					findAndBind(Annotation.class, varNames.get(0));</span>
+				}
+				else {
+					// multiple candidate vars, but only one slot
+<span class="fc" id="L438">					throw new IllegalArgumentException(&quot;Found &quot; + varNames.size() +</span>
+							&quot; candidate annotation binding variables&quot; +
+							&quot; but only one potential argument binding slot&quot;);
+				}
+			}
+			else {
+				// no slots so presume those candidate vars were actually type names
+			}
+		}
+<span class="fc" id="L447">	}</span>
+
+	/**
+	 * If the token starts meets Java identifier conventions, it's in.
+	 */
+	private @Nullable String maybeExtractVariableName(@Nullable String candidateToken) {
+<span class="fc bfc" id="L453" title="All 2 branches covered.">		if (AspectJProxyUtils.isVariableName(candidateToken)) {</span>
+<span class="fc" id="L454">			return candidateToken;</span>
+		}
+<span class="fc" id="L456">		return null;</span>
+	}
+
+	/**
+	 * Given an args pointcut body (could be {@code args} or {@code at_args}),
+	 * add any candidate variable names to the given list.
+	 */
+	private void maybeExtractVariableNamesFromArgs(@Nullable String argsSpec, List&lt;String&gt; varNames) {
+<span class="pc bpc" id="L464" title="1 of 2 branches missed.">		if (argsSpec == null) {</span>
+<span class="nc" id="L465">			return;</span>
+		}
+<span class="fc" id="L467">		String[] tokens = StringUtils.tokenizeToStringArray(argsSpec, &quot;,&quot;);</span>
+<span class="fc bfc" id="L468" title="All 2 branches covered.">		for (int i = 0; i &lt; tokens.length; i++) {</span>
+<span class="fc" id="L469">			tokens[i] = tokens[i].strip();</span>
+<span class="fc" id="L470">			String varName = maybeExtractVariableName(tokens[i]);</span>
+<span class="pc bpc" id="L471" title="1 of 2 branches missed.">			if (varName != null) {</span>
+<span class="fc" id="L472">				varNames.add(varName);</span>
+			}
+		}
+<span class="fc" id="L475">	}</span>
+
+	/**
+	 * Parse the string pointcut expression looking for this(), target() and args() expressions.
+	 * If we find one, try and extract a candidate variable name and bind it.
+	 */
+	private void maybeBindThisOrTargetOrArgsFromPointcutExpression() {
+<span class="fc bfc" id="L482" title="All 2 branches covered.">		if (this.numberOfRemainingUnboundArguments &gt; 1) {</span>
+<span class="fc" id="L483">			throw new AmbiguousBindingException(&quot;Still &quot; + this.numberOfRemainingUnboundArguments +</span>
+					&quot; unbound args at this()/target()/args() binding stage, with no way to determine between them&quot;);
+		}
+
+<span class="fc" id="L487">		List&lt;String&gt; varNames = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L488">		String[] tokens = StringUtils.tokenizeToStringArray(this.pointcutExpression, &quot; &quot;);</span>
+<span class="fc bfc" id="L489" title="All 2 branches covered.">		for (int i = 0; i &lt; tokens.length; i++) {</span>
+<span class="fc bfc" id="L490" title="All 2 branches covered.">			if (tokens[i].equals(&quot;this&quot;) ||</span>
+<span class="fc bfc" id="L491" title="All 2 branches covered.">					tokens[i].startsWith(&quot;this(&quot;) ||</span>
+<span class="fc bfc" id="L492" title="All 2 branches covered.">					tokens[i].equals(&quot;target&quot;) ||</span>
+<span class="fc bfc" id="L493" title="All 2 branches covered.">					tokens[i].startsWith(&quot;target(&quot;)) {</span>
+<span class="fc" id="L494">				PointcutBody body = getPointcutBody(tokens, i);</span>
+<span class="fc" id="L495">				i += body.numTokensConsumed;</span>
+<span class="fc" id="L496">				String varName = maybeExtractVariableName(body.text);</span>
+<span class="fc bfc" id="L497" title="All 2 branches covered.">				if (varName != null) {</span>
+<span class="fc" id="L498">					varNames.add(varName);</span>
+				}
+<span class="fc" id="L500">			}</span>
+<span class="pc bpc" id="L501" title="1 of 4 branches missed.">			else if (tokens[i].equals(&quot;args&quot;) || tokens[i].startsWith(&quot;args(&quot;)) {</span>
+<span class="fc" id="L502">				PointcutBody body = getPointcutBody(tokens, i);</span>
+<span class="fc" id="L503">				i += body.numTokensConsumed;</span>
+<span class="fc" id="L504">				List&lt;String&gt; candidateVarNames = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L505">				maybeExtractVariableNamesFromArgs(body.text, candidateVarNames);</span>
+				// we may have found some var names that were bound in previous primitive args binding step,
+				// filter them out...
+<span class="fc bfc" id="L508" title="All 2 branches covered.">				for (String varName : candidateVarNames) {</span>
+<span class="fc bfc" id="L509" title="All 2 branches covered.">					if (!alreadyBound(varName)) {</span>
+<span class="fc" id="L510">						varNames.add(varName);</span>
+					}
+<span class="fc" id="L512">				}</span>
+			}
+		}
+
+<span class="fc bfc" id="L516" title="All 2 branches covered.">		if (varNames.size() &gt; 1) {</span>
+<span class="fc" id="L517">			throw new AmbiguousBindingException(&quot;Found &quot; + varNames.size() +</span>
+					&quot; candidate this(), target(), or args() variables but only one unbound argument slot&quot;);
+		}
+<span class="fc bfc" id="L520" title="All 2 branches covered.">		else if (varNames.size() == 1) {</span>
+<span class="pc bpc" id="L521" title="1 of 2 branches missed.">			for (int j = 0; j &lt; this.parameterNameBindings.length; j++) {</span>
+<span class="fc bfc" id="L522" title="All 2 branches covered.">				if (isUnbound(j)) {</span>
+<span class="fc" id="L523">					bindParameterName(j, varNames.get(0));</span>
+<span class="fc" id="L524">					break;</span>
+				}
+			}
+		}
+		// else varNames.size must be 0 and we have nothing to bind.
+<span class="fc" id="L529">	}</span>
+
+	private void maybeBindReferencePointcutParameter() {
+<span class="pc bpc" id="L532" title="1 of 2 branches missed.">		if (this.numberOfRemainingUnboundArguments &gt; 1) {</span>
+<span class="nc" id="L533">			throw new AmbiguousBindingException(&quot;Still &quot; + this.numberOfRemainingUnboundArguments +</span>
+					&quot; unbound args at reference pointcut binding stage, with no way to determine between them&quot;);
+		}
+
+<span class="fc" id="L537">		List&lt;String&gt; varNames = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L538">		String[] tokens = StringUtils.tokenizeToStringArray(this.pointcutExpression, &quot; &quot;);</span>
+<span class="fc bfc" id="L539" title="All 2 branches covered.">		for (int i = 0; i &lt; tokens.length; i++) {</span>
+<span class="fc" id="L540">			String toMatch = tokens[i];</span>
+<span class="pc bpc" id="L541" title="1 of 2 branches missed.">			if (toMatch.startsWith(&quot;!&quot;)) {</span>
+<span class="nc" id="L542">				toMatch = toMatch.substring(1);</span>
+			}
+<span class="fc" id="L544">			int firstParenIndex = toMatch.indexOf('(');</span>
+<span class="fc bfc" id="L545" title="All 2 branches covered.">			if (firstParenIndex != -1) {</span>
+<span class="fc" id="L546">				toMatch = toMatch.substring(0, firstParenIndex);</span>
+			}
+			else {
+<span class="fc bfc" id="L549" title="All 2 branches covered.">				if (tokens.length &lt; i + 2) {</span>
+					// no &quot;(&quot; and nothing following
+<span class="fc" id="L551">					continue;</span>
+				}
+				else {
+<span class="fc" id="L554">					String nextToken = tokens[i + 1];</span>
+<span class="fc bfc" id="L555" title="All 2 branches covered.">					if (nextToken.charAt(0) != '(') {</span>
+						// next token is not &quot;(&quot; either, can't be a pc...
+<span class="fc" id="L557">						continue;</span>
+					}
+				}
+
+			}
+
+			// eat the body
+<span class="fc" id="L564">			PointcutBody body = getPointcutBody(tokens, i);</span>
+<span class="fc" id="L565">			i += body.numTokensConsumed;</span>
+
+<span class="fc bfc" id="L567" title="All 2 branches covered.">			if (!nonReferencePointcutTokens.contains(toMatch)) {</span>
+				// then it could be a reference pointcut
+<span class="fc" id="L569">				String varName = maybeExtractVariableName(body.text);</span>
+<span class="fc bfc" id="L570" title="All 2 branches covered.">				if (varName != null) {</span>
+<span class="fc" id="L571">					varNames.add(varName);</span>
+				}
+			}
+		}
+
+<span class="pc bpc" id="L576" title="1 of 2 branches missed.">		if (varNames.size() &gt; 1) {</span>
+<span class="nc" id="L577">			throw new AmbiguousBindingException(&quot;Found &quot; + varNames.size() +</span>
+					&quot; candidate reference pointcut variables but only one unbound argument slot&quot;);
+		}
+<span class="fc bfc" id="L580" title="All 2 branches covered.">		else if (varNames.size() == 1) {</span>
+<span class="pc bpc" id="L581" title="1 of 2 branches missed.">			for (int j = 0; j &lt; this.parameterNameBindings.length; j++) {</span>
+<span class="pc bpc" id="L582" title="1 of 2 branches missed.">				if (isUnbound(j)) {</span>
+<span class="fc" id="L583">					bindParameterName(j, varNames.get(0));</span>
+<span class="fc" id="L584">					break;</span>
+				}
+			}
+		}
+		// else varNames.size must be 0 and we have nothing to bind.
+<span class="fc" id="L589">	}</span>
+
+	/**
+	 * We've found the start of a binding pointcut at the given index into the
+	 * token array. Now we need to extract the pointcut body and return it.
+	 */
+	private PointcutBody getPointcutBody(String[] tokens, int startIndex) {
+<span class="fc" id="L596">		int numTokensConsumed = 0;</span>
+<span class="fc" id="L597">		String currentToken = tokens[startIndex];</span>
+<span class="fc" id="L598">		int bodyStart = currentToken.indexOf('(');</span>
+<span class="fc bfc" id="L599" title="All 2 branches covered.">		if (currentToken.charAt(currentToken.length() - 1) == ')') {</span>
+			// It's an all in one... get the text between the first (and the last)
+<span class="fc" id="L601">			return new PointcutBody(0, currentToken.substring(bodyStart + 1, currentToken.length() - 1));</span>
+		}
+		else {
+<span class="fc" id="L604">			StringBuilder sb = new StringBuilder();</span>
+<span class="fc bfc" id="L605" title="All 4 branches covered.">			if (bodyStart &gt;= 0 &amp;&amp; bodyStart != (currentToken.length() - 1)) {</span>
+<span class="fc" id="L606">				sb.append(currentToken.substring(bodyStart + 1));</span>
+<span class="fc" id="L607">				sb.append(' ');</span>
+			}
+<span class="fc" id="L609">			numTokensConsumed++;</span>
+<span class="fc" id="L610">			int currentIndex = startIndex + numTokensConsumed;</span>
+<span class="fc bfc" id="L611" title="All 2 branches covered.">			while (currentIndex &lt; tokens.length) {</span>
+<span class="fc bfc" id="L612" title="All 2 branches covered.">				if (tokens[currentIndex].equals(&quot;(&quot;)) {</span>
+<span class="fc" id="L613">					currentIndex++;</span>
+<span class="fc" id="L614">					continue;</span>
+				}
+
+<span class="fc bfc" id="L617" title="All 2 branches covered.">				if (tokens[currentIndex].endsWith(&quot;)&quot;)) {</span>
+<span class="fc" id="L618">					sb.append(tokens[currentIndex], 0, tokens[currentIndex].length() - 1);</span>
+<span class="fc" id="L619">					return new PointcutBody(numTokensConsumed, sb.toString().trim());</span>
+				}
+
+<span class="fc" id="L622">				String toAppend = tokens[currentIndex];</span>
+<span class="fc bfc" id="L623" title="All 2 branches covered.">				if (toAppend.startsWith(&quot;(&quot;)) {</span>
+<span class="fc" id="L624">					toAppend = toAppend.substring(1);</span>
+				}
+<span class="fc" id="L626">				sb.append(toAppend);</span>
+<span class="fc" id="L627">				sb.append(' ');</span>
+<span class="fc" id="L628">				currentIndex++;</span>
+<span class="fc" id="L629">				numTokensConsumed++;</span>
+<span class="fc" id="L630">			}</span>
+
+		}
+
+		// We looked and failed...
+<span class="fc" id="L635">		return new PointcutBody(numTokensConsumed, null);</span>
+	}
+
+	/**
+	 * Match up args against unbound arguments of primitive types.
+	 */
+	private void maybeBindPrimitiveArgsFromPointcutExpression() {
+<span class="fc" id="L642">		int numUnboundPrimitives = countNumberOfUnboundPrimitiveArguments();</span>
+<span class="pc bpc" id="L643" title="1 of 2 branches missed.">		if (numUnboundPrimitives &gt; 1) {</span>
+<span class="nc" id="L644">			throw new AmbiguousBindingException(&quot;Found &quot; + numUnboundPrimitives +</span>
+					&quot; unbound primitive arguments with no way to distinguish between them.&quot;);
+		}
+<span class="fc bfc" id="L647" title="All 2 branches covered.">		if (numUnboundPrimitives == 1) {</span>
+			// Look for arg variable and bind it if we find exactly one...
+<span class="fc" id="L649">			List&lt;String&gt; varNames = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L650">			String[] tokens = StringUtils.tokenizeToStringArray(this.pointcutExpression, &quot; &quot;);</span>
+<span class="fc bfc" id="L651" title="All 2 branches covered.">			for (int i = 0; i &lt; tokens.length; i++) {</span>
+<span class="pc bpc" id="L652" title="1 of 4 branches missed.">				if (tokens[i].equals(&quot;args&quot;) || tokens[i].startsWith(&quot;args(&quot;)) {</span>
+<span class="fc" id="L653">					PointcutBody body = getPointcutBody(tokens, i);</span>
+<span class="fc" id="L654">					i += body.numTokensConsumed;</span>
+<span class="fc" id="L655">					maybeExtractVariableNamesFromArgs(body.text, varNames);</span>
+				}
+			}
+<span class="fc bfc" id="L658" title="All 2 branches covered.">			if (varNames.size() &gt; 1) {</span>
+<span class="fc" id="L659">				throw new AmbiguousBindingException(&quot;Found &quot; + varNames.size() +</span>
+						&quot; candidate variable names but only one candidate binding slot when matching primitive args&quot;);
+			}
+<span class="fc bfc" id="L662" title="All 2 branches covered.">			else if (varNames.size() == 1) {</span>
+				// 1 primitive arg, and one candidate...
+<span class="pc bpc" id="L664" title="1 of 2 branches missed.">				for (int i = 0; i &lt; this.argumentTypes.length; i++) {</span>
+<span class="fc bfc" id="L665" title="All 4 branches covered.">					if (isUnbound(i) &amp;&amp; this.argumentTypes[i].isPrimitive()) {</span>
+<span class="fc" id="L666">						bindParameterName(i, varNames.get(0));</span>
+<span class="fc" id="L667">						break;</span>
+					}
+				}
+			}
+		}
+<span class="fc" id="L672">	}</span>
+
+	/*
+	 * Return true if the parameter name binding for the given parameter
+	 * index has not yet been assigned.
+	 */
+	private boolean isUnbound(int i) {
+<span class="fc bfc" id="L679" title="All 2 branches covered.">		return this.parameterNameBindings[i] == null;</span>
+	}
+
+	private boolean alreadyBound(String varName) {
+<span class="fc bfc" id="L683" title="All 2 branches covered.">		for (int i = 0; i &lt; this.parameterNameBindings.length; i++) {</span>
+<span class="fc bfc" id="L684" title="All 4 branches covered.">			if (!isUnbound(i) &amp;&amp; varName.equals(this.parameterNameBindings[i])) {</span>
+<span class="fc" id="L685">				return true;</span>
+			}
+		}
+<span class="fc" id="L688">		return false;</span>
+	}
+
+	/**
+	 * Return {@code true} if the given argument type is a subclass
+	 * of the given supertype.
+	 */
+	private boolean isSubtypeOf(Class&lt;?&gt; supertype, int argumentNumber) {
+<span class="fc" id="L696">		return supertype.isAssignableFrom(this.argumentTypes[argumentNumber]);</span>
+	}
+
+	private int countNumberOfUnboundAnnotationArguments() {
+<span class="fc" id="L700">		int count = 0;</span>
+<span class="fc bfc" id="L701" title="All 2 branches covered.">		for (int i = 0; i &lt; this.argumentTypes.length; i++) {</span>
+<span class="fc bfc" id="L702" title="All 4 branches covered.">			if (isUnbound(i) &amp;&amp; isSubtypeOf(Annotation.class, i)) {</span>
+<span class="fc" id="L703">				count++;</span>
+			}
+		}
+<span class="fc" id="L706">		return count;</span>
+	}
+
+	private int countNumberOfUnboundPrimitiveArguments() {
+<span class="fc" id="L710">		int count = 0;</span>
+<span class="fc bfc" id="L711" title="All 2 branches covered.">		for (int i = 0; i &lt; this.argumentTypes.length; i++) {</span>
+<span class="fc bfc" id="L712" title="All 4 branches covered.">			if (isUnbound(i) &amp;&amp; this.argumentTypes[i].isPrimitive()) {</span>
+<span class="fc" id="L713">				count++;</span>
+			}
+		}
+<span class="fc" id="L716">		return count;</span>
+	}
+
+	/**
+	 * Find the argument index with the given type, and bind the given
+	 * {@code varName} in that position.
+	 */
+	private void findAndBind(Class&lt;?&gt; argumentType, String varName) {
+<span class="pc bpc" id="L724" title="1 of 2 branches missed.">		for (int i = 0; i &lt; this.argumentTypes.length; i++) {</span>
+<span class="fc bfc" id="L725" title="All 4 branches covered.">			if (isUnbound(i) &amp;&amp; isSubtypeOf(argumentType, i)) {</span>
+<span class="fc" id="L726">				bindParameterName(i, varName);</span>
+<span class="fc" id="L727">				return;</span>
+			}
+		}
+<span class="nc" id="L730">		throw new IllegalStateException(&quot;Expected to find an unbound argument of type '&quot; +</span>
+<span class="nc" id="L731">				argumentType.getName() + &quot;'&quot;);</span>
+	}
+
+
+	/**
+	 * Simple record to hold the extracted text from a pointcut body, together
+	 * with the number of tokens consumed in extracting it.
+	 */
+<span class="fc" id="L739">	private record PointcutBody(int numTokensConsumed, @Nullable String text) {</span>
+	}
+
+
+	/**
+	 * Thrown in response to an ambiguous binding being detected when
+	 * trying to resolve a method's parameter names.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	public static class AmbiguousBindingException extends RuntimeException {
+
+		/**
+		 * Construct a new AmbiguousBindingException with the specified message.
+		 * @param msg the detail message
+		 */
+		public AmbiguousBindingException(String msg) {
+<span class="fc" id="L755">			super(msg);</span>
+<span class="fc" id="L756">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

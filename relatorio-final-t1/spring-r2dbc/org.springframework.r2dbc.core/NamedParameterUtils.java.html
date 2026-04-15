@@ -1,0 +1,611 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>NamedParameterUtils.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-r2dbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.r2dbc.core</a> &gt; <span class="el_source">NamedParameterUtils.java</span></div><h1>NamedParameterUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.r2dbc.core;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+
+import io.r2dbc.spi.Parameter;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.dao.InvalidDataAccessApiUsageException;
+import org.springframework.r2dbc.core.binding.BindMarker;
+import org.springframework.r2dbc.core.binding.BindMarkers;
+import org.springframework.r2dbc.core.binding.BindMarkersFactory;
+import org.springframework.r2dbc.core.binding.BindTarget;
+import org.springframework.util.Assert;
+
+/**
+ * Helper methods for named parameter parsing.
+ *
+ * &lt;p&gt;Only intended for internal use within Spring's R2DBC framework.
+ *
+ * &lt;p&gt;References to the same parameter name are substituted with
+ * the same bind marker placeholder if a {@link BindMarkersFactory} uses
+ * {@link BindMarkersFactory#identifiablePlaceholders() identifiable}
+ * placeholders.
+ *
+ * @author Thomas Risberg
+ * @author Juergen Hoeller
+ * @author Mark Paluch
+ * @author Anton Naydenov
+ * @author Sam Brannen
+ * @since 5.3
+ */
+<span class="nc" id="L55">abstract class NamedParameterUtils {</span>
+
+	/**
+	 * Set of characters that qualify as comment or quote starting characters.
+	 */
+<span class="fc" id="L60">	private static final String[] START_SKIP = {&quot;'&quot;, &quot;\&quot;&quot;, &quot;--&quot;, &quot;/*&quot;, &quot;`&quot;};</span>
+
+	/**
+	 * Set of characters that are the corresponding comment or quote ending characters.
+	 */
+<span class="fc" id="L65">	private static final String[] STOP_SKIP = {&quot;'&quot;, &quot;\&quot;&quot;, &quot;\n&quot;, &quot;*/&quot;, &quot;`&quot;};</span>
+
+	/**
+	 * Set of characters that qualify as parameter separators,
+	 * indicating that a parameter name in an SQL String has ended.
+	 */
+	private static final String PARAMETER_SEPARATORS = &quot;\&quot;':&amp;,;()|=+-*%/\\&lt;&gt;^&quot;;
+
+	/**
+	 * An index with separator flags per character code.
+	 * Technically only needed between 34 and 124 at this point.
+	 */
+<span class="fc" id="L77">	private static final boolean[] separatorIndex = new boolean[128];</span>
+
+	static {
+<span class="fc bfc" id="L80" title="All 2 branches covered.">		for (char c : PARAMETER_SEPARATORS.toCharArray()) {</span>
+<span class="fc" id="L81">			separatorIndex[c] = true;</span>
+		}
+<span class="fc" id="L83">	}</span>
+
+
+	// -------------------------------------------------------------------------
+	// Core methods used by NamedParameterExpander
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Parse the SQL statement and locate any placeholders or named parameters.
+	 * Named parameters are substituted for an R2DBC placeholder.
+	 * @param sql the SQL statement
+	 * @return the parsed statement, represented as {@link ParsedSql} instance
+	 */
+	public static ParsedSql parseSqlStatement(String sql) {
+<span class="fc" id="L97">		Assert.notNull(sql, &quot;SQL must not be null&quot;);</span>
+
+<span class="fc" id="L99">		Set&lt;String&gt; namedParameters = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L100">		StringBuilder sqlToUse = new StringBuilder(sql);</span>
+<span class="fc" id="L101">		List&lt;ParameterHolder&gt; parameterList = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L103">		char[] statement = sql.toCharArray();</span>
+<span class="fc" id="L104">		int namedParameterCount = 0;</span>
+<span class="fc" id="L105">		int unnamedParameterCount = 0;</span>
+<span class="fc" id="L106">		int totalParameterCount = 0;</span>
+
+<span class="fc" id="L108">		int escapes = 0;</span>
+<span class="fc" id="L109">		int i = 0;</span>
+<span class="fc bfc" id="L110" title="All 2 branches covered.">		while (i &lt; statement.length) {</span>
+<span class="fc" id="L111">			int skipToPosition = i;</span>
+<span class="fc bfc" id="L112" title="All 2 branches covered.">			while (i &lt; statement.length) {</span>
+<span class="fc" id="L113">				skipToPosition = skipCommentsAndQuotes(statement, i);</span>
+<span class="fc bfc" id="L114" title="All 2 branches covered.">				if (i == skipToPosition) {</span>
+<span class="fc" id="L115">					break;</span>
+				}
+				else {
+<span class="fc" id="L118">					i = skipToPosition;</span>
+				}
+			}
+<span class="fc bfc" id="L121" title="All 2 branches covered.">			if (i &gt;= statement.length) {</span>
+<span class="fc" id="L122">				break;</span>
+			}
+<span class="fc" id="L124">			char c = statement[i];</span>
+<span class="fc bfc" id="L125" title="All 4 branches covered.">			if (c == ':' || c == '&amp;') {</span>
+<span class="fc" id="L126">				int j = i + 1;</span>
+<span class="pc bpc" id="L127" title="1 of 6 branches missed.">				if (c == ':' &amp;&amp; j &lt; statement.length &amp;&amp; statement[j] == ':') {</span>
+					// Postgres-style &quot;::&quot; casting operator should be skipped
+<span class="fc" id="L129">					i = i + 2;</span>
+<span class="fc" id="L130">					continue;</span>
+				}
+<span class="fc" id="L132">				String parameter = null;</span>
+<span class="pc bpc" id="L133" title="1 of 6 branches missed.">				if (c == ':' &amp;&amp; j &lt; statement.length &amp;&amp; statement[j] == '{') {</span>
+					// :{x} style parameter
+<span class="fc bfc" id="L135" title="All 2 branches covered.">					while (statement[j] != '}') {</span>
+<span class="fc" id="L136">						j++;</span>
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">						if (j &gt;= statement.length) {</span>
+<span class="nc" id="L138">							throw new InvalidDataAccessApiUsageException(</span>
+									&quot;Non-terminated named parameter declaration at position &quot; + i +
+									&quot; in statement: &quot; + sql);
+						}
+<span class="pc bpc" id="L142" title="2 of 4 branches missed.">						if (statement[j] == ':' || statement[j] == '{') {</span>
+<span class="nc" id="L143">							throw new InvalidDataAccessApiUsageException(</span>
+									&quot;Parameter name contains invalid character '&quot; + statement[j] +
+									&quot;' at position &quot; + i + &quot; in statement: &quot; + sql);
+						}
+					}
+<span class="fc bfc" id="L148" title="All 2 branches covered.">					if (j - i &gt; 2) {</span>
+<span class="fc" id="L149">						parameter = sql.substring(i + 2, j);</span>
+<span class="fc" id="L150">						namedParameterCount = addNewNamedParameter(</span>
+								namedParameters, namedParameterCount, parameter);
+<span class="fc" id="L152">						totalParameterCount = addNamedParameter(</span>
+								parameterList, totalParameterCount, escapes, i, j + 1, parameter);
+					}
+<span class="fc" id="L155">					j++;</span>
+				}
+				else {
+<span class="fc" id="L158">					boolean paramWithSquareBrackets = false;</span>
+<span class="fc bfc" id="L159" title="All 2 branches covered.">					while (j &lt; statement.length) {</span>
+<span class="fc" id="L160">						c = statement[j];</span>
+<span class="fc bfc" id="L161" title="All 2 branches covered.">						if (isParameterSeparator(c)) {</span>
+<span class="fc" id="L162">							break;</span>
+						}
+<span class="fc bfc" id="L164" title="All 2 branches covered.">						if (c == '[') {</span>
+<span class="fc" id="L165">							paramWithSquareBrackets = true;</span>
+						}
+<span class="fc bfc" id="L167" title="All 2 branches covered.">						else if (c == ']') {</span>
+<span class="fc bfc" id="L168" title="All 2 branches covered.">							if (!paramWithSquareBrackets) {</span>
+<span class="fc" id="L169">								break;</span>
+							}
+<span class="fc" id="L171">							paramWithSquareBrackets = false;</span>
+						}
+<span class="fc" id="L173">						j++;</span>
+					}
+<span class="fc bfc" id="L175" title="All 2 branches covered.">					if (j - i &gt; 1) {</span>
+<span class="fc" id="L176">						parameter = sql.substring(i + 1, j);</span>
+<span class="fc" id="L177">						namedParameterCount = addNewNamedParameter(</span>
+								namedParameters, namedParameterCount, parameter);
+<span class="fc" id="L179">						totalParameterCount = addNamedParameter(</span>
+								parameterList, totalParameterCount, escapes, i, j, parameter);
+					}
+				}
+<span class="fc" id="L183">				i = j - 1;</span>
+<span class="fc" id="L184">			}</span>
+			else {
+<span class="fc bfc" id="L186" title="All 2 branches covered.">				if (c == '\\') {</span>
+<span class="fc" id="L187">					int j = i + 1;</span>
+<span class="pc bpc" id="L188" title="2 of 4 branches missed.">					if (j &lt; statement.length &amp;&amp; statement[j] == ':') {</span>
+						// escaped &quot;:&quot; should be skipped
+<span class="fc" id="L190">						sqlToUse.deleteCharAt(i - escapes);</span>
+<span class="fc" id="L191">						escapes++;</span>
+<span class="fc" id="L192">						i = i + 2;</span>
+<span class="fc" id="L193">						continue;</span>
+					}
+				}
+			}
+<span class="fc" id="L197">			i++;</span>
+<span class="fc" id="L198">		}</span>
+<span class="fc" id="L199">		ParsedSql parsedSql = new ParsedSql(sqlToUse.toString());</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">		for (ParameterHolder ph : parameterList) {</span>
+<span class="fc" id="L201">			parsedSql.addNamedParameter(ph.getParameterName(), ph.getStartIndex(), ph.getEndIndex());</span>
+<span class="fc" id="L202">		}</span>
+<span class="fc" id="L203">		parsedSql.setNamedParameterCount(namedParameterCount);</span>
+<span class="fc" id="L204">		parsedSql.setUnnamedParameterCount(unnamedParameterCount);</span>
+<span class="fc" id="L205">		parsedSql.setTotalParameterCount(totalParameterCount);</span>
+<span class="fc" id="L206">		return parsedSql;</span>
+	}
+
+	private static int addNamedParameter(List&lt;ParameterHolder&gt; parameterList,
+			int totalParameterCount, int escapes, int i, int j, String parameter) {
+
+<span class="fc" id="L212">		parameterList.add(new ParameterHolder(parameter, i - escapes, j - escapes));</span>
+<span class="fc" id="L213">		totalParameterCount++;</span>
+<span class="fc" id="L214">		return totalParameterCount;</span>
+	}
+
+	private static int addNewNamedParameter(Set&lt;String&gt; namedParameters, int namedParameterCount, String parameter) {
+<span class="fc bfc" id="L218" title="All 2 branches covered.">		if (!namedParameters.contains(parameter)) {</span>
+<span class="fc" id="L219">			namedParameters.add(parameter);</span>
+<span class="fc" id="L220">			namedParameterCount++;</span>
+		}
+<span class="fc" id="L222">		return namedParameterCount;</span>
+	}
+
+	/**
+	 * Skip over comments and quoted names present in an SQL statement.
+	 * @param statement character array containing SQL statement
+	 * @param position current position of statement
+	 * @return next position to process after any comments or quotes are skipped
+	 */
+	private static int skipCommentsAndQuotes(char[] statement, int position) {
+<span class="fc bfc" id="L232" title="All 2 branches covered.">		for (int i = 0; i &lt; START_SKIP.length; i++) {</span>
+<span class="fc bfc" id="L233" title="All 2 branches covered.">			if (statement[position] == START_SKIP[i].charAt(0)) {</span>
+<span class="fc" id="L234">				boolean match = true;</span>
+<span class="fc bfc" id="L235" title="All 2 branches covered.">				for (int j = 1; j &lt; START_SKIP[i].length(); j++) {</span>
+<span class="fc bfc" id="L236" title="All 2 branches covered.">					if (statement[position + j] != START_SKIP[i].charAt(j)) {</span>
+<span class="fc" id="L237">						match = false;</span>
+<span class="fc" id="L238">						break;</span>
+					}
+				}
+<span class="fc bfc" id="L241" title="All 2 branches covered.">				if (match) {</span>
+<span class="fc" id="L242">					int offset = START_SKIP[i].length();</span>
+<span class="fc bfc" id="L243" title="All 2 branches covered.">					for (int m = position + offset; m &lt; statement.length; m++) {</span>
+<span class="fc bfc" id="L244" title="All 2 branches covered.">						if (statement[m] == STOP_SKIP[i].charAt(0)) {</span>
+<span class="fc" id="L245">							boolean endMatch = true;</span>
+<span class="fc" id="L246">							int endPos = m;</span>
+<span class="fc bfc" id="L247" title="All 2 branches covered.">							for (int n = 1; n &lt; STOP_SKIP[i].length(); n++) {</span>
+<span class="pc bpc" id="L248" title="1 of 2 branches missed.">								if (m + n &gt;= statement.length) {</span>
+									// last comment not closed properly
+<span class="nc" id="L250">									return statement.length;</span>
+								}
+<span class="pc bpc" id="L252" title="1 of 2 branches missed.">								if (statement[m + n] != STOP_SKIP[i].charAt(n)) {</span>
+<span class="nc" id="L253">									endMatch = false;</span>
+<span class="nc" id="L254">									break;</span>
+								}
+<span class="fc" id="L256">								endPos = m + n;</span>
+							}
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">							if (endMatch) {</span>
+								// found character sequence ending comment or quote
+<span class="fc" id="L260">								return endPos + 1;</span>
+							}
+						}
+					}
+					// character sequence ending comment or quote not found
+<span class="fc" id="L265">					return statement.length;</span>
+				}
+			}
+		}
+<span class="fc" id="L269">		return position;</span>
+	}
+
+	/**
+	 * Parse the SQL statement and locate any placeholders or named parameters. Named
+	 * parameters are substituted for an R2DBC placeholder, and any select list is expanded
+	 * to the required number of placeholders. Select lists may contain an array of objects,
+	 * and in that case the placeholders will be grouped and enclosed with parentheses.
+	 * This allows for the use of &quot;expression lists&quot; in the SQL statement like:
+	 * {@code select id, name, state from table where (name, age) in (('John', 35), ('Ann', 50))}
+	 * &lt;p&gt;The parameter values passed in are used to determine the number of
+	 * placeholders to be used for a select list. Select lists should not be empty
+	 * and should be limited to 100 or fewer elements. An empty list or a larger
+	 * number of elements is not guaranteed to be supported by the database and
+	 * is strictly vendor-dependent.
+	 * @param parsedSql the parsed representation of the SQL statement
+	 * @param bindMarkersFactory the bind marker factory.
+	 * @param paramSource the source for named parameters
+	 * @return the expanded query that accepts bind parameters and allows for execution
+	 * without further translation
+	 * @see #parseSqlStatement
+	 */
+	public static PreparedOperation&lt;String&gt; substituteNamedParameters(ParsedSql parsedSql,
+			BindMarkersFactory bindMarkersFactory, BindParameterSource paramSource) {
+
+<span class="fc" id="L294">		NamedParameters markerHolder = new NamedParameters(bindMarkersFactory);</span>
+<span class="fc" id="L295">		String originalSql = parsedSql.getOriginalSql();</span>
+<span class="fc" id="L296">		List&lt;String&gt; paramNames = parsedSql.getParameterNames();</span>
+<span class="fc bfc" id="L297" title="All 2 branches covered.">		if (paramNames.isEmpty()) {</span>
+<span class="fc" id="L298">			return new ExpandedQuery(originalSql, markerHolder, paramSource);</span>
+		}
+
+<span class="fc" id="L301">		StringBuilder actualSql = new StringBuilder(originalSql.length());</span>
+<span class="fc" id="L302">		int lastIndex = 0;</span>
+<span class="fc bfc" id="L303" title="All 2 branches covered.">		for (int i = 0; i &lt; paramNames.size(); i++) {</span>
+<span class="fc" id="L304">			String paramName = paramNames.get(i);</span>
+<span class="fc" id="L305">			int[] indexes = parsedSql.getParameterIndexes(i);</span>
+<span class="fc" id="L306">			int startIndex = indexes[0];</span>
+<span class="fc" id="L307">			int endIndex = indexes[1];</span>
+<span class="fc" id="L308">			actualSql.append(originalSql, lastIndex, startIndex);</span>
+<span class="fc" id="L309">			NamedParameters.NamedParameter marker = markerHolder.getOrCreate(paramName);</span>
+<span class="fc bfc" id="L310" title="All 2 branches covered.">			if (paramSource.hasValue(paramName)) {</span>
+<span class="fc" id="L311">				Parameter parameter = paramSource.getValue(paramName);</span>
+<span class="fc bfc" id="L312" title="All 2 branches covered.">				if (parameter.getValue() instanceof Collection&lt;?&gt; collection) {</span>
+<span class="fc" id="L313">					int k = 0;</span>
+<span class="fc" id="L314">					int counter = 0;</span>
+<span class="fc bfc" id="L315" title="All 2 branches covered.">					for (Object entryItem : collection) {</span>
+<span class="fc bfc" id="L316" title="All 2 branches covered.">						if (k &gt; 0) {</span>
+<span class="fc" id="L317">							actualSql.append(&quot;, &quot;);</span>
+						}
+<span class="fc" id="L319">						k++;</span>
+<span class="fc bfc" id="L320" title="All 2 branches covered.">						if (entryItem instanceof Object[] expressionList) {</span>
+<span class="fc" id="L321">							actualSql.append('(');</span>
+<span class="fc bfc" id="L322" title="All 2 branches covered.">							for (int m = 0; m &lt; expressionList.length; m++) {</span>
+<span class="fc bfc" id="L323" title="All 2 branches covered.">								if (m &gt; 0) {</span>
+<span class="fc" id="L324">									actualSql.append(&quot;, &quot;);</span>
+								}
+<span class="fc" id="L326">								actualSql.append(marker.getPlaceholder(counter));</span>
+<span class="fc" id="L327">								counter++;</span>
+							}
+<span class="fc" id="L329">							actualSql.append(')');</span>
+						}
+						else {
+<span class="fc" id="L332">							actualSql.append(marker.getPlaceholder(counter));</span>
+<span class="fc" id="L333">							counter++;</span>
+						}
+<span class="fc" id="L335">					}</span>
+<span class="fc" id="L336">				}</span>
+				else {
+<span class="fc" id="L338">					actualSql.append(marker.getPlaceholder());</span>
+				}
+<span class="fc" id="L340">			}</span>
+			else {
+<span class="fc" id="L342">				actualSql.append(marker.getPlaceholder());</span>
+			}
+<span class="fc" id="L344">			lastIndex = endIndex;</span>
+		}
+<span class="fc" id="L346">		actualSql.append(originalSql, lastIndex, originalSql.length());</span>
+
+<span class="fc" id="L348">		return new ExpandedQuery(actualSql.toString(), markerHolder, paramSource);</span>
+	}
+
+	/**
+	 * Determine whether a parameter name ends at the current position,
+	 * that is, whether the given character qualifies as a separator.
+	 */
+	private static boolean isParameterSeparator(char c) {
+<span class="fc bfc" id="L356" title="All 6 branches covered.">		return (c &lt; 128 &amp;&amp; separatorIndex[c]) || Character.isWhitespace(c);</span>
+	}
+
+
+	// -------------------------------------------------------------------------
+	// Convenience methods operating on a plain SQL String
+	// -------------------------------------------------------------------------
+
+	/**
+	 * Parse the SQL statement and locate any placeholders or named parameters.
+	 * &lt;p&gt;Named parameters are substituted for a native placeholder and any
+	 * select list is expanded to the required number of placeholders.
+	 * &lt;p&gt;This is a shortcut version of
+	 * {@link #parseSqlStatement(String)} in combination with
+	 * {@link #substituteNamedParameters(ParsedSql, BindMarkersFactory, BindParameterSource)}.
+	 * @param sql the SQL statement
+	 * @param bindMarkersFactory the bind marker factory
+	 * @param paramSource the source for named parameters
+	 * @return the expanded query that accepts bind parameters and allows for execution
+	 * without further translation
+	 */
+	public static PreparedOperation&lt;String&gt; substituteNamedParameters(String sql,
+			BindMarkersFactory bindMarkersFactory, BindParameterSource paramSource) {
+
+<span class="fc" id="L380">		ParsedSql parsedSql = parseSqlStatement(sql);</span>
+<span class="fc" id="L381">		return substituteNamedParameters(parsedSql, bindMarkersFactory, paramSource);</span>
+	}
+
+
+	private static class ParameterHolder {
+
+		private final String parameterName;
+
+		private final int startIndex;
+
+		private final int endIndex;
+
+<span class="fc" id="L393">		ParameterHolder(String parameterName, int startIndex, int endIndex) {</span>
+<span class="fc" id="L394">			Assert.notNull(parameterName, &quot;Parameter name must not be null&quot;);</span>
+<span class="fc" id="L395">			this.parameterName = parameterName;</span>
+<span class="fc" id="L396">			this.startIndex = startIndex;</span>
+<span class="fc" id="L397">			this.endIndex = endIndex;</span>
+<span class="fc" id="L398">		}</span>
+
+		String getParameterName() {
+<span class="fc" id="L401">			return this.parameterName;</span>
+		}
+
+		int getStartIndex() {
+<span class="fc" id="L405">			return this.startIndex;</span>
+		}
+
+		int getEndIndex() {
+<span class="fc" id="L409">			return this.endIndex;</span>
+		}
+
+		@Override
+		public boolean equals(@Nullable Object other) {
+<span class="nc bnc" id="L414" title="All 8 branches missed.">			return (this == other || (other instanceof ParameterHolder that &amp;&amp;</span>
+					this.startIndex == that.startIndex &amp;&amp; this.endIndex == that.endIndex &amp;&amp;
+<span class="nc bnc" id="L416" title="All 2 branches missed.">					this.parameterName.equals(that.parameterName)));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L421">			return this.parameterName.hashCode();</span>
+		}
+	}
+
+
+	/**
+	 * Holder for bind markers progress.
+	 */
+	static class NamedParameters {
+
+		private final BindMarkers bindMarkers;
+
+		private final boolean identifiable;
+
+<span class="fc" id="L435">		private final Map&lt;String, List&lt;NamedParameter&gt;&gt; references = new TreeMap&lt;&gt;();</span>
+
+<span class="fc" id="L437">		NamedParameters(BindMarkersFactory factory) {</span>
+<span class="fc" id="L438">			this.bindMarkers = factory.create();</span>
+<span class="fc" id="L439">			this.identifiable = factory.identifiablePlaceholders();</span>
+<span class="fc" id="L440">		}</span>
+
+		/**
+		 * Get the {@link NamedParameter} identified by {@code namedParameter}.
+		 * Parameter objects get created if they do not yet exist.
+		 * @param namedParameter the parameter name
+		 * @return the named parameter
+		 */
+		NamedParameter getOrCreate(String namedParameter) {
+<span class="fc" id="L449">			List&lt;NamedParameter&gt; reference = this.references.computeIfAbsent(</span>
+<span class="fc" id="L450">					namedParameter, key -&gt; new ArrayList&lt;&gt;());</span>
+<span class="fc bfc" id="L451" title="All 2 branches covered.">			if (reference.isEmpty()) {</span>
+<span class="fc" id="L452">				NamedParameter param = new NamedParameter(namedParameter);</span>
+<span class="fc" id="L453">				reference.add(param);</span>
+<span class="fc" id="L454">				return param;</span>
+			}
+<span class="fc bfc" id="L456" title="All 2 branches covered.">			if (this.identifiable) {</span>
+<span class="fc" id="L457">				return reference.get(0);</span>
+			}
+<span class="fc" id="L459">			NamedParameter param = new NamedParameter(namedParameter);</span>
+<span class="fc" id="L460">			reference.add(param);</span>
+<span class="fc" id="L461">			return param;</span>
+		}
+
+		@Nullable List&lt;NamedParameter&gt; getMarker(String name) {
+<span class="fc" id="L465">			return this.references.get(name);</span>
+		}
+
+
+		class NamedParameter {
+
+			private final String namedParameter;
+
+<span class="fc" id="L473">			private final List&lt;BindMarker&gt; placeholders = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L475">			NamedParameter(String namedParameter) {</span>
+<span class="fc" id="L476">				this.namedParameter = namedParameter;</span>
+<span class="fc" id="L477">			}</span>
+
+			/**
+			 * Create a placeholder to translate a single value into a bindable parameter.
+			 * &lt;p&gt;Can be called multiple times to create placeholders for array/collections.
+			 * @return the placeholder to be used in the SQL statement
+			 */
+			String addPlaceholder() {
+<span class="fc" id="L485">				BindMarker bindMarker = NamedParameters.this.bindMarkers.next(this.namedParameter);</span>
+<span class="fc" id="L486">				this.placeholders.add(bindMarker);</span>
+<span class="fc" id="L487">				return bindMarker.getPlaceholder();</span>
+			}
+
+			String getPlaceholder() {
+<span class="fc" id="L491">				return getPlaceholder(0);</span>
+			}
+
+			String getPlaceholder(int counter) {
+<span class="fc bfc" id="L495" title="All 2 branches covered.">				while (counter + 1 &gt; this.placeholders.size()) {</span>
+<span class="fc" id="L496">					addPlaceholder();</span>
+				}
+<span class="fc" id="L498">				return this.placeholders.get(counter).getPlaceholder();</span>
+			}
+		}
+	}
+
+
+	/**
+	 * Expanded query that allows binding of parameters using parameter names that were
+	 * used to expand the query. Binding unrolls {@link Collection}s and nested arrays.
+	 */
+	private static class ExpandedQuery implements PreparedOperation&lt;String&gt; {
+
+		private final String expandedSql;
+
+		private final NamedParameters parameters;
+
+		private final BindParameterSource parameterSource;
+
+
+<span class="fc" id="L517">		ExpandedQuery(String expandedSql, NamedParameters parameters, BindParameterSource parameterSource) {</span>
+<span class="fc" id="L518">			this.expandedSql = expandedSql;</span>
+<span class="fc" id="L519">			this.parameters = parameters;</span>
+<span class="fc" id="L520">			this.parameterSource = parameterSource;</span>
+<span class="fc" id="L521">		}</span>
+
+
+		@Override
+		public String toQuery() {
+<span class="fc" id="L526">			return this.expandedSql;</span>
+		}
+
+		@Override
+		public String getSource() {
+<span class="nc" id="L531">			return this.expandedSql;</span>
+		}
+
+		@Override
+		public void bindTo(BindTarget target) {
+<span class="fc bfc" id="L536" title="All 2 branches covered.">			for (String namedParameter : this.parameterSource.getParameterNames()) {</span>
+<span class="fc" id="L537">				Parameter parameter = this.parameterSource.getValue(namedParameter);</span>
+<span class="fc bfc" id="L538" title="All 2 branches covered.">				if (parameter.getValue() == null) {</span>
+<span class="fc" id="L539">					bindNull(target, namedParameter, parameter);</span>
+				}
+				else {
+<span class="fc" id="L542">					bind(target, namedParameter, parameter);</span>
+				}
+<span class="fc" id="L544">			}</span>
+<span class="fc" id="L545">		}</span>
+
+		private void bindNull(BindTarget target, String identifier, Parameter parameter) {
+<span class="fc" id="L548">			List&lt;List&lt;BindMarker&gt;&gt; bindMarkers = getBindMarkers(identifier);</span>
+<span class="pc bpc" id="L549" title="1 of 2 branches missed.">			if (bindMarkers == null) {</span>
+<span class="nc" id="L550">				target.bind(identifier, parameter);</span>
+<span class="nc" id="L551">				return;</span>
+			}
+<span class="fc bfc" id="L553" title="All 2 branches covered.">			for (List&lt;BindMarker&gt; outer : bindMarkers) {</span>
+<span class="fc bfc" id="L554" title="All 2 branches covered.">				for (BindMarker bindMarker : outer) {</span>
+<span class="fc" id="L555">					bindMarker.bind(target, parameter);</span>
+<span class="fc" id="L556">				}</span>
+<span class="fc" id="L557">			}</span>
+<span class="fc" id="L558">		}</span>
+
+		private void bind(BindTarget target, String identifier, Parameter parameter) {
+<span class="fc" id="L561">			List&lt;List&lt;BindMarker&gt;&gt; bindMarkers = getBindMarkers(identifier);</span>
+<span class="pc bpc" id="L562" title="1 of 2 branches missed.">			if (bindMarkers == null) {</span>
+<span class="nc" id="L563">				target.bind(identifier, parameter);</span>
+<span class="nc" id="L564">				return;</span>
+			}
+
+<span class="fc bfc" id="L567" title="All 2 branches covered.">			for (List&lt;BindMarker&gt; outer : bindMarkers) {</span>
+<span class="fc bfc" id="L568" title="All 2 branches covered.">				if (parameter.getValue() instanceof Collection&lt;?&gt; collection) {</span>
+<span class="fc" id="L569">					Iterator&lt;BindMarker&gt; markers = outer.iterator();</span>
+<span class="fc bfc" id="L570" title="All 2 branches covered.">					for (Object valueToBind : collection) {</span>
+<span class="fc bfc" id="L571" title="All 2 branches covered.">						if (valueToBind instanceof Object[] objects) {</span>
+<span class="fc bfc" id="L572" title="All 2 branches covered.">							for (Object object : objects) {</span>
+<span class="fc" id="L573">								bind(target, markers, object);</span>
+							}
+						}
+						else {
+<span class="fc" id="L577">							bind(target, markers, valueToBind);</span>
+						}
+<span class="fc" id="L579">					}</span>
+<span class="fc" id="L580">				}</span>
+				else {
+<span class="fc bfc" id="L582" title="All 2 branches covered.">					for (BindMarker bindMarker : outer) {</span>
+<span class="fc" id="L583">						bindMarker.bind(target, parameter);</span>
+<span class="fc" id="L584">					}</span>
+				}
+<span class="fc" id="L586">			}</span>
+<span class="fc" id="L587">		}</span>
+
+		private void bind(BindTarget target, Iterator&lt;BindMarker&gt; markers, Object valueToBind) {
+<span class="pc" id="L590">			Assert.isTrue(markers.hasNext(), () -&gt; String.format(</span>
+					&quot;No bind marker for value [%s] in SQL [%s]. Check that the query was expanded using the same arguments.&quot;,
+<span class="nc" id="L592">					valueToBind, toQuery()));</span>
+<span class="fc" id="L593">			markers.next().bind(target, valueToBind);</span>
+<span class="fc" id="L594">		}</span>
+
+		private @Nullable List&lt;List&lt;BindMarker&gt;&gt; getBindMarkers(String identifier) {
+<span class="fc" id="L597">			List&lt;NamedParameters.NamedParameter&gt; parameters = this.parameters.getMarker(identifier);</span>
+<span class="pc bpc" id="L598" title="1 of 2 branches missed.">			if (parameters == null) {</span>
+<span class="nc" id="L599">				return null;</span>
+			}
+<span class="fc" id="L601">			List&lt;List&lt;BindMarker&gt;&gt; markers = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L602" title="All 2 branches covered.">			for (NamedParameters.NamedParameter parameter : parameters) {</span>
+<span class="fc" id="L603">				markers.add(new ArrayList&lt;&gt;(parameter.placeholders));</span>
+<span class="fc" id="L604">			}</span>
+<span class="fc" id="L605">			return markers;</span>
+		}
+
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

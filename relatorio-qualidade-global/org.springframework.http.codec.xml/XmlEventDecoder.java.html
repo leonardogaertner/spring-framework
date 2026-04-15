@@ -1,0 +1,255 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>XmlEventDecoder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.codec.xml</a> &gt; <span class="el_source">XmlEventDecoder.java</span></div><h1>XmlEventDecoder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.codec.xml;
+
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.events.XMLEvent;
+import javax.xml.stream.util.XMLEventAllocator;
+
+import com.fasterxml.aalto.AsyncByteBufferFeeder;
+import com.fasterxml.aalto.AsyncXMLInputFactory;
+import com.fasterxml.aalto.AsyncXMLStreamReader;
+import com.fasterxml.aalto.evt.EventAllocatorImpl;
+import com.fasterxml.aalto.stax.InputFactoryImpl;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+
+import org.springframework.core.ResolvableType;
+import org.springframework.core.codec.AbstractDecoder;
+import org.springframework.core.codec.DecodingException;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferLimitException;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.http.MediaType;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.MimeType;
+import org.springframework.util.MimeTypeUtils;
+import org.springframework.util.xml.StaxUtils;
+
+/**
+ * Decodes a {@link DataBuffer} stream into a stream of {@link XMLEvent XMLEvents}.
+ *
+ * &lt;p&gt;Given the following XML:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;root&amp;gt;
+ *     &amp;lt;child&amp;gt;foo&amp;lt;/child&amp;gt;
+ *     &amp;lt;child&amp;gt;bar&amp;lt;/child&amp;gt;
+ * &amp;lt;/root&amp;gt;
+ * &lt;/pre&gt;
+ *
+ * this decoder will produce a {@link Flux} with the following events:
+ *
+ * &lt;ol&gt;
+ * &lt;li&gt;{@link javax.xml.stream.events.StartDocument}&lt;/li&gt;
+ * &lt;li&gt;{@link javax.xml.stream.events.StartElement} {@code root}&lt;/li&gt;
+ * &lt;li&gt;{@link javax.xml.stream.events.StartElement} {@code child}&lt;/li&gt;
+ * &lt;li&gt;{@link javax.xml.stream.events.Characters} {@code foo}&lt;/li&gt;
+ * &lt;li&gt;{@link javax.xml.stream.events.EndElement} {@code child}&lt;/li&gt;
+ * &lt;li&gt;{@link javax.xml.stream.events.StartElement} {@code child}&lt;/li&gt;
+ * &lt;li&gt;{@link javax.xml.stream.events.Characters} {@code bar}&lt;/li&gt;
+ * &lt;li&gt;{@link javax.xml.stream.events.EndElement} {@code child}&lt;/li&gt;
+ * &lt;li&gt;{@link javax.xml.stream.events.EndElement} {@code root}&lt;/li&gt;
+ * &lt;/ol&gt;
+ *
+ * &lt;p&gt;Note that this decoder is not registered by default but is used internally
+ * by other decoders which are registered by default.
+ *
+ * @author Arjen Poutsma
+ * @author Sam Brannen
+ * @since 5.0
+ */
+public class XmlEventDecoder extends AbstractDecoder&lt;XMLEvent&gt; {
+
+<span class="fc" id="L87">	private static final XMLInputFactory inputFactory = StaxUtils.createDefensiveInputFactory();</span>
+
+<span class="fc" id="L89">	private static final boolean AALTO_PRESENT = ClassUtils.isPresent(</span>
+<span class="fc" id="L90">			&quot;com.fasterxml.aalto.AsyncXMLStreamReader&quot;, XmlEventDecoder.class.getClassLoader());</span>
+
+<span class="fc" id="L92">	boolean useAalto = AALTO_PRESENT;</span>
+
+<span class="fc" id="L94">	private int maxInMemorySize = 256 * 1024;</span>
+
+
+	public XmlEventDecoder() {
+<span class="fc" id="L98">		super(MimeTypeUtils.APPLICATION_XML, MimeTypeUtils.TEXT_XML, new MediaType(&quot;application&quot;, &quot;*+xml&quot;));</span>
+<span class="fc" id="L99">	}</span>
+
+
+	/**
+	 * Set the max number of bytes that can be buffered by this decoder. This
+	 * is either the size the entire input when decoding as a whole, or when
+	 * using async parsing via Aalto XML, it is size one top-level XML tree.
+	 * When the limit is exceeded, {@link DataBufferLimitException} is raised.
+	 * &lt;p&gt;By default this is set to 256K.
+	 * @param byteCount the max number of bytes to buffer, or -1 for unlimited
+	 * @since 5.1.11
+	 */
+	public void setMaxInMemorySize(int byteCount) {
+<span class="nc" id="L112">		this.maxInMemorySize = byteCount;</span>
+<span class="nc" id="L113">	}</span>
+
+	/**
+	 * Return the {@link #setMaxInMemorySize configured} byte count limit.
+	 * @since 5.1.11
+	 */
+	public int getMaxInMemorySize() {
+<span class="nc" id="L120">		return this.maxInMemorySize;</span>
+	}
+
+
+	@Override
+	public Flux&lt;XMLEvent&gt; decode(Publisher&lt;DataBuffer&gt; input, ResolvableType elementType,
+			@Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="pc bpc" id="L128" title="1 of 2 branches missed.">		if (this.useAalto) {</span>
+<span class="fc" id="L129">			AaltoDataBufferToXmlEvent mapper = new AaltoDataBufferToXmlEvent(this.maxInMemorySize);</span>
+<span class="fc" id="L130">			return Flux.from(input)</span>
+<span class="fc" id="L131">					.flatMapIterable(mapper)</span>
+<span class="fc" id="L132">					.doFinally(signalType -&gt; mapper.endOfInput());</span>
+		}
+		else {
+<span class="nc" id="L135">			return DataBufferUtils.join(input, this.maxInMemorySize)</span>
+<span class="nc" id="L136">					.flatMapIterable(buffer -&gt; {</span>
+						try {
+<span class="nc" id="L138">							InputStream is = buffer.asInputStream();</span>
+<span class="nc" id="L139">							Iterator&lt;Object&gt; eventReader = inputFactory.createXMLEventReader(is);</span>
+<span class="nc" id="L140">							List&lt;XMLEvent&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L141">							eventReader.forEachRemaining(event -&gt; result.add((XMLEvent) event));</span>
+<span class="nc" id="L142">							return result;</span>
+						}
+<span class="nc" id="L144">						catch (XMLStreamException ex) {</span>
+<span class="nc" id="L145">							throw new DecodingException(ex.getMessage(), ex);</span>
+						}
+						finally {
+<span class="nc" id="L148">							DataBufferUtils.release(buffer);</span>
+						}
+					});
+		}
+	}
+
+
+	/*
+	 * Separate static class to isolate Aalto dependency.
+	 */
+	private static class AaltoDataBufferToXmlEvent implements Function&lt;DataBuffer, List&lt;? extends XMLEvent&gt;&gt; {
+
+<span class="fc" id="L160">		private static final AsyncXMLInputFactory inputFactory =</span>
+<span class="fc" id="L161">				StaxUtils.createDefensiveInputFactory(InputFactoryImpl::new);</span>
+
+<span class="fc" id="L163">		private final AsyncXMLStreamReader&lt;AsyncByteBufferFeeder&gt; streamReader =</span>
+<span class="fc" id="L164">				inputFactory.createAsyncForByteBuffer();</span>
+
+<span class="fc" id="L166">		private final XMLEventAllocator eventAllocator = EventAllocatorImpl.getDefaultInstance();</span>
+
+		private final int maxInMemorySize;
+
+		private int byteCount;
+
+		private int elementDepth;
+
+
+<span class="fc" id="L175">		public AaltoDataBufferToXmlEvent(int maxInMemorySize) {</span>
+<span class="fc" id="L176">			this.maxInMemorySize = maxInMemorySize;</span>
+<span class="fc" id="L177">		}</span>
+
+
+		@Override
+		public List&lt;? extends XMLEvent&gt; apply(DataBuffer dataBuffer) {
+			try {
+<span class="fc" id="L183">				increaseByteCount(dataBuffer);</span>
+<span class="fc" id="L184">				AsyncByteBufferFeeder inputFeeder = this.streamReader.getInputFeeder();</span>
+<span class="fc" id="L185">				try (DataBuffer.ByteBufferIterator iterator = dataBuffer.readableByteBuffers()) {</span>
+<span class="fc bfc" id="L186" title="All 2 branches covered.">					while (iterator.hasNext()) {</span>
+<span class="fc" id="L187">						inputFeeder.feedInput(iterator.next());</span>
+					}
+				}
+<span class="fc" id="L190">				List&lt;XMLEvent&gt; events = new ArrayList&lt;&gt;();</span>
+				while (true) {
+<span class="fc bfc" id="L192" title="All 2 branches covered.">					if (this.streamReader.next() == AsyncXMLStreamReader.EVENT_INCOMPLETE) {</span>
+						// no more events with what currently has been fed to the reader
+<span class="fc" id="L194">						break;</span>
+					}
+					else {
+<span class="fc" id="L197">						XMLEvent event = this.eventAllocator.allocate(this.streamReader);</span>
+<span class="fc" id="L198">						events.add(event);</span>
+<span class="pc bpc" id="L199" title="1 of 2 branches missed.">						if (event.isEndDocument()) {</span>
+<span class="nc" id="L200">							break;</span>
+						}
+<span class="fc" id="L202">						checkDepthAndResetByteCount(event);</span>
+<span class="fc" id="L203">					}</span>
+				}
+<span class="pc bpc" id="L205" title="2 of 4 branches missed.">				if (this.maxInMemorySize &gt; 0 &amp;&amp; this.byteCount &gt; this.maxInMemorySize) {</span>
+<span class="nc" id="L206">					raiseLimitException();</span>
+				}
+<span class="fc" id="L208">				return events;</span>
+			}
+<span class="nc" id="L210">			catch (XMLStreamException ex) {</span>
+<span class="nc" id="L211">				throw new DecodingException(ex.getMessage(), ex);</span>
+			}
+			finally {
+<span class="fc" id="L214">				DataBufferUtils.release(dataBuffer);</span>
+			}
+		}
+
+		private void increaseByteCount(DataBuffer dataBuffer) {
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">			if (this.maxInMemorySize &gt; 0) {</span>
+<span class="pc bpc" id="L220" title="1 of 2 branches missed.">				if (dataBuffer.readableByteCount() &gt; Integer.MAX_VALUE - this.byteCount) {</span>
+<span class="nc" id="L221">					raiseLimitException();</span>
+				}
+				else {
+<span class="fc" id="L224">					this.byteCount += dataBuffer.readableByteCount();</span>
+				}
+			}
+<span class="fc" id="L227">		}</span>
+
+		private void checkDepthAndResetByteCount(XMLEvent event) {
+<span class="pc bpc" id="L230" title="1 of 2 branches missed.">			if (this.maxInMemorySize &gt; 0) {</span>
+<span class="fc bfc" id="L231" title="All 2 branches covered.">				if (event.isStartElement()) {</span>
+<span class="fc bfc" id="L232" title="All 2 branches covered.">					this.byteCount = this.elementDepth == 1 ? 0 : this.byteCount;</span>
+<span class="fc" id="L233">					this.elementDepth++;</span>
+				}
+<span class="fc bfc" id="L235" title="All 2 branches covered.">				else if (event.isEndElement()) {</span>
+<span class="fc" id="L236">					this.elementDepth--;</span>
+<span class="fc bfc" id="L237" title="All 2 branches covered.">					this.byteCount = this.elementDepth == 1 ? 0 : this.byteCount;</span>
+				}
+			}
+<span class="fc" id="L240">		}</span>
+
+		private void raiseLimitException() {
+<span class="nc" id="L243">			throw new DataBufferLimitException(</span>
+					&quot;Exceeded limit on max bytes per XML top-level node: &quot; + this.maxInMemorySize);
+		}
+
+		public void endOfInput() {
+<span class="fc" id="L248">			this.streamReader.getInputFeeder().endOfInput();</span>
+<span class="fc" id="L249">		}</span>
+	}
+
+
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

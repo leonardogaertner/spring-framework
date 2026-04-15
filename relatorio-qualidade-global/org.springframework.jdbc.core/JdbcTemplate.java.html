@@ -1,0 +1,1826 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>JdbcTemplate.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.core</a> &gt; <span class="el_source">JdbcTemplate.java</span></div><h1>JdbcTemplate.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.core;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.sql.BatchUpdateException;
+import java.sql.CallableStatement;
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.SQLWarning;
+import java.sql.Statement;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Spliterator;
+import java.util.function.Consumer;
+import java.util.stream.Stream;
+import java.util.stream.StreamSupport;
+
+import javax.sql.DataSource;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.InvalidDataAccessApiUsageException;
+import org.springframework.dao.support.DataAccessUtils;
+import org.springframework.jdbc.InvalidResultSetAccessException;
+import org.springframework.jdbc.SQLWarningException;
+import org.springframework.jdbc.UncategorizedSQLException;
+import org.springframework.jdbc.datasource.ConnectionProxy;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.jdbc.support.JdbcAccessor;
+import org.springframework.jdbc.support.JdbcUtils;
+import org.springframework.jdbc.support.KeyHolder;
+import org.springframework.jdbc.support.rowset.SqlRowSet;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.LinkedCaseInsensitiveMap;
+
+/**
+ * &lt;b&gt;This is the central delegate in the JDBC core package.&lt;/b&gt;
+ * It can be used directly for many data access purposes, supporting any kind
+ * of JDBC operation. For a more focused and convenient facade on top of this,
+ * consider {@link org.springframework.jdbc.core.simple.JdbcClient} as of 6.1.
+ *
+ * &lt;p&gt;This class simplifies the use of JDBC and helps to avoid common errors.
+ * It executes core JDBC workflow, leaving application code to provide SQL
+ * and extract results. This class executes SQL queries or updates, initiating
+ * iteration over ResultSets and catching JDBC exceptions and translating
+ * them to the common {@code org.springframework.dao} exception hierarchy.
+ *
+ * &lt;p&gt;Code using this class need only implement callback interfaces, giving
+ * them a clearly defined contract. The {@link PreparedStatementCreator} callback
+ * interface creates a prepared statement given a Connection, providing SQL and
+ * any necessary parameters. The {@link ResultSetExtractor} interface extracts
+ * values from a ResultSet. See also {@link PreparedStatementSetter} and
+ * {@link RowMapper} for two popular alternative callback interfaces.
+ *
+ * &lt;p&gt;An instance of this template class is thread-safe once configured.
+ * Can be used within a service implementation via direct instantiation
+ * with a DataSource reference, or get prepared in an application context
+ * and given to services as bean reference. Note: The DataSource should
+ * always be configured as a bean in the application context, in the first case
+ * given to the service directly, in the second case to the prepared template.
+ *
+ * &lt;p&gt;Because this class is parameterizable by the callback interfaces and
+ * the {@link org.springframework.jdbc.support.SQLExceptionTranslator}
+ * interface, there should be no need to subclass it.
+ *
+ * &lt;p&gt;All SQL operations performed by this class are logged at debug level,
+ * using &quot;org.springframework.jdbc.core.JdbcTemplate&quot; as log category.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE: As of 6.1, there is a unified JDBC access facade available in
+ * the form of {@link org.springframework.jdbc.core.simple.JdbcClient}.&lt;/b&gt;
+ * {@code JdbcClient} provides a fluent API style for common JDBC queries/updates
+ * with flexible use of indexed or named parameters. It delegates to a
+ * {@code JdbcTemplate}/{@code NamedParameterJdbcTemplate} for actual execution.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Thomas Risberg
+ * @author Yanming Zhou
+ * @since May 3, 2001
+ * @see JdbcOperations
+ * @see PreparedStatementCreator
+ * @see PreparedStatementSetter
+ * @see CallableStatementCreator
+ * @see PreparedStatementCallback
+ * @see CallableStatementCallback
+ * @see ResultSetExtractor
+ * @see RowCallbackHandler
+ * @see RowMapper
+ * @see org.springframework.jdbc.support.SQLExceptionTranslator
+ * @see org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate
+ */
+public class JdbcTemplate extends JdbcAccessor implements JdbcOperations {
+
+	private static final String RETURN_RESULT_SET_PREFIX = &quot;#result-set-&quot;;
+
+	private static final String RETURN_UPDATE_COUNT_PREFIX = &quot;#update-count-&quot;;
+
+
+	/** If this variable is {@code false}, we will throw exceptions on SQL warnings. */
+<span class="fc" id="L126">	private boolean ignoreWarnings = true;</span>
+
+	/**
+	 * If this variable is set to a non-negative value, it will be used for setting the
+	 * fetchSize property on statements used for query processing.
+	 */
+<span class="fc" id="L132">	private int fetchSize = -1;</span>
+
+	/**
+	 * If this variable is set to a non-negative value, it will be used for setting the
+	 * maxRows property on statements used for query processing.
+	 */
+<span class="fc" id="L138">	private int maxRows = -1;</span>
+
+	/**
+	 * If this variable is set to a non-negative value, it will be used for setting the
+	 * queryTimeout property on statements used for query processing.
+	 */
+<span class="fc" id="L144">	private int queryTimeout = -1;</span>
+
+	/**
+	 * If this variable is set to true, then all results checking will be bypassed for any
+	 * callable statement processing. This can be used to avoid a bug in some older Oracle
+	 * JDBC drivers like 10.1.0.2.
+	 */
+<span class="fc" id="L151">	private boolean skipResultsProcessing = false;</span>
+
+	/**
+	 * If this variable is set to true then all results from a stored procedure call
+	 * that don't have a corresponding SqlOutParameter declaration will be bypassed.
+	 * All other results processing will be take place unless the variable
+	 * {@code skipResultsProcessing} is set to {@code true}.
+	 */
+<span class="fc" id="L159">	private boolean skipUndeclaredResults = false;</span>
+
+	/**
+	 * If this variable is set to true then execution of a CallableStatement will return
+	 * the results in a Map that uses case-insensitive names for the parameters.
+	 */
+<span class="fc" id="L165">	private boolean resultsMapCaseInsensitive = false;</span>
+
+
+	/**
+	 * Construct a new JdbcTemplate for bean usage.
+	 * &lt;p&gt;Note: The DataSource has to be set before using the instance.
+	 * @see #setDataSource
+	 */
+<span class="fc" id="L173">	public JdbcTemplate() {</span>
+<span class="fc" id="L174">	}</span>
+
+	/**
+	 * Construct a new JdbcTemplate, given a DataSource to obtain connections from.
+	 * &lt;p&gt;Note: This will not trigger initialization of the exception translator.
+	 * @param dataSource the JDBC DataSource to obtain connections from
+	 */
+<span class="fc" id="L181">	public JdbcTemplate(DataSource dataSource) {</span>
+<span class="fc" id="L182">		setDataSource(dataSource);</span>
+<span class="fc" id="L183">		afterPropertiesSet();</span>
+<span class="fc" id="L184">	}</span>
+
+	/**
+	 * Construct a new JdbcTemplate, given a DataSource to obtain connections from.
+	 * &lt;p&gt;Note: Depending on the &quot;lazyInit&quot; flag, initialization of the exception translator
+	 * will be triggered.
+	 * @param dataSource the JDBC DataSource to obtain connections from
+	 * @param lazyInit whether to lazily initialize the SQLExceptionTranslator
+	 */
+<span class="fc" id="L193">	public JdbcTemplate(DataSource dataSource, boolean lazyInit) {</span>
+<span class="fc" id="L194">		setDataSource(dataSource);</span>
+<span class="fc" id="L195">		setLazyInit(lazyInit);</span>
+<span class="fc" id="L196">		afterPropertiesSet();</span>
+<span class="fc" id="L197">	}</span>
+
+	/**
+	 * Copy constructor for a derived JdbcTemplate.
+	 * @param original the original template to copy from
+	 * @since 7.0
+	 */
+<span class="fc" id="L204">	public JdbcTemplate(JdbcAccessor original) {</span>
+<span class="fc" id="L205">		setDataSource(original.getDataSource());</span>
+<span class="fc" id="L206">		setExceptionTranslator(original.getExceptionTranslator());</span>
+<span class="fc" id="L207">		setLazyInit(original.isLazyInit());</span>
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">		if (original instanceof JdbcTemplate originalTemplate) {</span>
+<span class="fc" id="L209">			setIgnoreWarnings(originalTemplate.isIgnoreWarnings());</span>
+<span class="fc" id="L210">			setFetchSize(originalTemplate.getFetchSize());</span>
+<span class="fc" id="L211">			setMaxRows(originalTemplate.getMaxRows());</span>
+<span class="fc" id="L212">			setQueryTimeout(originalTemplate.getQueryTimeout());</span>
+<span class="fc" id="L213">			setSkipResultsProcessing(originalTemplate.isSkipResultsProcessing());</span>
+<span class="fc" id="L214">			setSkipUndeclaredResults(originalTemplate.isSkipUndeclaredResults());</span>
+<span class="fc" id="L215">			setResultsMapCaseInsensitive(originalTemplate.isResultsMapCaseInsensitive());</span>
+		}
+<span class="fc" id="L217">	}</span>
+
+
+	/**
+	 * Set whether we want to ignore JDBC statement warnings ({@link SQLWarning}).
+	 * &lt;p&gt;Default is {@code true}, swallowing and logging all warnings. Switch this flag to
+	 * {@code false} to make this JdbcTemplate throw a {@link SQLWarningException} instead
+	 * (or chain the {@link SQLWarning} into the primary {@link SQLException}, if any).
+	 * @see Statement#getWarnings()
+	 * @see java.sql.SQLWarning
+	 * @see org.springframework.jdbc.SQLWarningException
+	 * @see #handleWarnings(Statement)
+	 */
+	public void setIgnoreWarnings(boolean ignoreWarnings) {
+<span class="fc" id="L231">		this.ignoreWarnings = ignoreWarnings;</span>
+<span class="fc" id="L232">	}</span>
+
+	/**
+	 * Return whether we ignore SQLWarnings.
+	 */
+	public boolean isIgnoreWarnings() {
+<span class="fc" id="L238">		return this.ignoreWarnings;</span>
+	}
+
+	/**
+	 * Set the fetch size for this JdbcTemplate. This is important for processing large
+	 * result sets: Setting this higher than the default value will increase processing
+	 * speed at the cost of memory consumption; setting this lower can avoid transferring
+	 * row data that will never be read by the application.
+	 * &lt;p&gt;Default is -1, indicating to use the JDBC driver's default configuration
+	 * (i.e. to not pass a specific fetch size setting on to the driver).
+	 * &lt;p&gt;Note: As of 4.3, negative values other than -1 will get passed on to the driver,
+	 * since, for example, MySQL supports special behavior for {@code Integer.MIN_VALUE}.
+	 * @see java.sql.Statement#setFetchSize
+	 */
+	public void setFetchSize(int fetchSize) {
+<span class="fc" id="L253">		this.fetchSize = fetchSize;</span>
+<span class="fc" id="L254">	}</span>
+
+	/**
+	 * Return the fetch size specified for this JdbcTemplate.
+	 */
+	public int getFetchSize() {
+<span class="fc" id="L260">		return this.fetchSize;</span>
+	}
+
+	/**
+	 * Set the maximum number of rows for this JdbcTemplate. This is important for
+	 * processing subsets of large result sets, avoiding to read and hold the entire
+	 * result set in the database or in the JDBC driver if we're never interested in
+	 * the entire result in the first place (for example, when performing searches
+	 * that might return a large number of matches).
+	 * &lt;p&gt;Default is -1, indicating to use the JDBC driver's default configuration
+	 * (i.e. to not pass a specific max rows setting on to the driver).
+	 * &lt;p&gt;Note: As of 4.3, negative values other than -1 will get passed on to the
+	 * driver, in sync with {@link #setFetchSize}'s support for special MySQL values.
+	 * @see java.sql.Statement#setMaxRows
+	 */
+	public void setMaxRows(int maxRows) {
+<span class="fc" id="L276">		this.maxRows = maxRows;</span>
+<span class="fc" id="L277">	}</span>
+
+	/**
+	 * Return the maximum number of rows specified for this JdbcTemplate.
+	 */
+	public int getMaxRows() {
+<span class="fc" id="L283">		return this.maxRows;</span>
+	}
+
+	/**
+	 * Set the query timeout (seconds) for statements that this JdbcTemplate executes.
+	 * &lt;p&gt;Default is -1, indicating to use the JDBC driver's default
+	 * (i.e. to not pass a specific query timeout setting on the driver).
+	 * &lt;p&gt;Note: Any timeout specified here will be overridden by the remaining
+	 * transaction timeout when executing within a transaction that has a
+	 * timeout specified at the transaction level.
+	 * @see java.sql.Statement#setQueryTimeout
+	 */
+	public void setQueryTimeout(int queryTimeout) {
+<span class="fc" id="L296">		this.queryTimeout = queryTimeout;</span>
+<span class="fc" id="L297">	}</span>
+
+	/**
+	 * Return the query timeout (seconds) for statements that this JdbcTemplate executes.
+	 */
+	public int getQueryTimeout() {
+<span class="fc" id="L303">		return this.queryTimeout;</span>
+	}
+
+	/**
+	 * Set whether results processing should be skipped. Can be used to optimize callable
+	 * statement processing when we know that no results are being passed back - the processing
+	 * of out parameter will still take place. This can be used to avoid a bug in some older
+	 * Oracle JDBC drivers like 10.1.0.2.
+	 */
+	public void setSkipResultsProcessing(boolean skipResultsProcessing) {
+<span class="fc" id="L313">		this.skipResultsProcessing = skipResultsProcessing;</span>
+<span class="fc" id="L314">	}</span>
+
+	/**
+	 * Return whether results processing should be skipped.
+	 */
+	public boolean isSkipResultsProcessing() {
+<span class="fc" id="L320">		return this.skipResultsProcessing;</span>
+	}
+
+	/**
+	 * Set whether undeclared results should be skipped.
+	 */
+	public void setSkipUndeclaredResults(boolean skipUndeclaredResults) {
+<span class="fc" id="L327">		this.skipUndeclaredResults = skipUndeclaredResults;</span>
+<span class="fc" id="L328">	}</span>
+
+	/**
+	 * Return whether undeclared results should be skipped.
+	 */
+	public boolean isSkipUndeclaredResults() {
+<span class="fc" id="L334">		return this.skipUndeclaredResults;</span>
+	}
+
+	/**
+	 * Set whether execution of a CallableStatement will return the results in a Map
+	 * that uses case-insensitive names for the parameters.
+	 */
+	public void setResultsMapCaseInsensitive(boolean resultsMapCaseInsensitive) {
+<span class="fc" id="L342">		this.resultsMapCaseInsensitive = resultsMapCaseInsensitive;</span>
+<span class="fc" id="L343">	}</span>
+
+	/**
+	 * Return whether execution of a CallableStatement will return the results in a Map
+	 * that uses case-insensitive names for the parameters.
+	 */
+	public boolean isResultsMapCaseInsensitive() {
+<span class="fc" id="L350">		return this.resultsMapCaseInsensitive;</span>
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Methods dealing with a plain java.sql.Connection
+	//-------------------------------------------------------------------------
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T execute(ConnectionCallback&lt;T&gt; action) throws DataAccessException {
+<span class="fc" id="L360">		Assert.notNull(action, &quot;Callback object must not be null&quot;);</span>
+
+<span class="fc" id="L362">		Connection con = DataSourceUtils.getConnection(obtainDataSource());</span>
+		try {
+			// Create close-suppressing Connection proxy, also preparing returned Statements.
+<span class="fc" id="L365">			Connection conToUse = createConnectionProxy(con);</span>
+<span class="fc" id="L366">			return action.doInConnection(conToUse);</span>
+		}
+<span class="nc" id="L368">		catch (SQLException ex) {</span>
+			// Release Connection early, to avoid potential connection pool deadlock
+			// in the case when the exception translator hasn't been initialized yet.
+<span class="nc" id="L371">			String sql = getSql(action);</span>
+<span class="nc" id="L372">			DataSourceUtils.releaseConnection(con, getDataSource());</span>
+<span class="nc" id="L373">			con = null;</span>
+<span class="nc" id="L374">			throw translateException(&quot;ConnectionCallback&quot;, sql, ex);</span>
+		}
+		finally {
+<span class="fc" id="L377">			DataSourceUtils.releaseConnection(con, getDataSource());</span>
+		}
+	}
+
+	/**
+	 * Create a close-suppressing proxy for the given JDBC Connection.
+	 * Called by the {@code execute} method.
+	 * &lt;p&gt;The proxy also prepares returned JDBC Statements, applying
+	 * statement settings such as fetch size, max rows, and query timeout.
+	 * @param con the JDBC Connection to create a proxy for
+	 * @return the Connection proxy
+	 * @see java.sql.Connection#close()
+	 * @see #execute(ConnectionCallback)
+	 * @see #applyStatementSettings
+	 */
+	protected Connection createConnectionProxy(Connection con) {
+<span class="fc" id="L393">		return (Connection) Proxy.newProxyInstance(</span>
+<span class="fc" id="L394">				ConnectionProxy.class.getClassLoader(),</span>
+				new Class&lt;?&gt;[] {ConnectionProxy.class},
+				new CloseSuppressingInvocationHandler(con));
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Methods dealing with static SQL (java.sql.Statement)
+	//-------------------------------------------------------------------------
+
+	private &lt;T extends @Nullable Object&gt; T execute(StatementCallback&lt;T&gt; action, boolean closeResources) throws DataAccessException {
+<span class="fc" id="L405">		Assert.notNull(action, &quot;Callback object must not be null&quot;);</span>
+
+<span class="fc" id="L407">		Connection con = DataSourceUtils.getConnection(obtainDataSource());</span>
+<span class="fc" id="L408">		Statement stmt = null;</span>
+		try {
+<span class="fc" id="L410">			stmt = con.createStatement();</span>
+<span class="fc" id="L411">			applyStatementSettings(stmt);</span>
+<span class="fc" id="L412">			T result = action.doInStatement(stmt);</span>
+<span class="fc" id="L413">			handleWarnings(stmt);</span>
+<span class="fc" id="L414">			return result;</span>
+		}
+<span class="fc" id="L416">		catch (SQLException ex) {</span>
+			// Release Connection early, to avoid potential connection pool deadlock
+			// in the case when the exception translator hasn't been initialized yet.
+<span class="pc bpc" id="L419" title="1 of 2 branches missed.">			if (stmt != null) {</span>
+<span class="fc" id="L420">				handleWarnings(stmt, ex);</span>
+			}
+<span class="fc" id="L422">			String sql = getSql(action);</span>
+<span class="fc" id="L423">			JdbcUtils.closeStatement(stmt);</span>
+<span class="fc" id="L424">			stmt = null;</span>
+<span class="fc" id="L425">			DataSourceUtils.releaseConnection(con, getDataSource());</span>
+<span class="fc" id="L426">			con = null;</span>
+<span class="fc" id="L427">			throw translateException(&quot;StatementCallback&quot;, sql, ex);</span>
+		}
+		finally {
+<span class="fc bfc" id="L430" title="All 2 branches covered.">			if (closeResources) {</span>
+<span class="fc" id="L431">				JdbcUtils.closeStatement(stmt);</span>
+<span class="fc" id="L432">				DataSourceUtils.releaseConnection(con, getDataSource());</span>
+			}
+		}
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T execute(StatementCallback&lt;T&gt; action) throws DataAccessException {
+<span class="nc" id="L439">		return execute(action, true);</span>
+	}
+
+	@Override
+	public void execute(String sql) throws DataAccessException {
+<span class="pc bpc" id="L444" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L445">			logger.debug(&quot;Executing SQL statement [&quot; + sql + &quot;]&quot;);</span>
+		}
+
+		// Callback to execute the statement.
+<span class="fc" id="L449">		class ExecuteStatementCallback implements StatementCallback&lt;@Nullable Object&gt;, SqlProvider {</span>
+			@Override
+			public @Nullable Object doInStatement(Statement stmt) throws SQLException {
+<span class="fc" id="L452">				stmt.execute(sql);</span>
+<span class="fc" id="L453">				return null;</span>
+			}
+			@Override
+			public String getSql() {
+<span class="nc" id="L457">				return sql;</span>
+			}
+		}
+
+<span class="fc" id="L461">		execute(new ExecuteStatementCallback(), true);</span>
+<span class="fc" id="L462">	}</span>
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T query(String sql, ResultSetExtractor&lt;T&gt; rse) throws DataAccessException {
+<span class="fc" id="L466">		Assert.notNull(sql, &quot;SQL must not be null&quot;);</span>
+<span class="fc" id="L467">		Assert.notNull(rse, &quot;ResultSetExtractor must not be null&quot;);</span>
+<span class="pc bpc" id="L468" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L469">			logger.debug(&quot;Executing SQL query [&quot; + sql + &quot;]&quot;);</span>
+		}
+
+		// Callback to execute the query.
+<span class="fc" id="L473">		class QueryStatementCallback implements StatementCallback&lt;T&gt;, SqlProvider {</span>
+			@Override
+			public T doInStatement(Statement stmt) throws SQLException {
+<span class="fc" id="L476">				ResultSet rs = null;</span>
+				try {
+<span class="fc" id="L478">					rs = stmt.executeQuery(sql);</span>
+<span class="fc" id="L479">					return rse.extractData(rs);</span>
+				}
+				finally {
+<span class="fc" id="L482">					JdbcUtils.closeResultSet(rs);</span>
+				}
+			}
+			@Override
+			public String getSql() {
+<span class="fc" id="L487">				return sql;</span>
+			}
+		}
+
+<span class="fc" id="L491">		return execute(new QueryStatementCallback(), true);</span>
+	}
+
+	@Override
+	public void query(String sql, RowCallbackHandler rch) throws DataAccessException {
+<span class="fc" id="L496">		query(sql, new RowCallbackHandlerResultSetExtractor(rch, this.maxRows));</span>
+<span class="fc" id="L497">	}</span>
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; List&lt;T&gt; query(String sql, RowMapper&lt;T&gt; rowMapper) throws DataAccessException {
+<span class="fc" id="L501">		return result(query(sql, new RowMapperResultSetExtractor&lt;&gt;(rowMapper, 0, this.maxRows)));</span>
+	}
+
+	@Override
+	public &lt;T&gt; Stream&lt;T&gt; queryForStream(String sql, RowMapper&lt;T&gt; rowMapper) throws DataAccessException {
+<span class="fc" id="L506">		class StreamStatementCallback implements StatementCallback&lt;Stream&lt;T&gt;&gt;, SqlProvider {</span>
+			@Override
+			public Stream&lt;T&gt; doInStatement(Statement stmt) throws SQLException {
+<span class="fc" id="L509">				ResultSet rs = stmt.executeQuery(sql);</span>
+<span class="fc" id="L510">				Connection con = stmt.getConnection();</span>
+<span class="fc" id="L511">				return new ResultSetSpliterator&lt;&gt;(rs, rowMapper, JdbcTemplate.this.maxRows).stream().onClose(() -&gt; {</span>
+<span class="fc" id="L512">					JdbcUtils.closeResultSet(rs);</span>
+<span class="fc" id="L513">					JdbcUtils.closeStatement(stmt);</span>
+<span class="fc" id="L514">					DataSourceUtils.releaseConnection(con, getDataSource());</span>
+<span class="fc" id="L515">				});</span>
+			}
+			@Override
+			public String getSql() {
+<span class="nc" id="L519">				return sql;</span>
+			}
+		}
+
+<span class="fc" id="L523">		return result(execute(new StreamStatementCallback(), false));</span>
+	}
+
+	@Override
+	public Map&lt;String, @Nullable Object&gt; queryForMap(String sql) throws DataAccessException {
+<span class="fc" id="L528">		return result(queryForObject(sql, getColumnMapRowMapper()));</span>
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T queryForObject(String sql, RowMapper&lt;T&gt; rowMapper) throws DataAccessException {
+<span class="fc" id="L533">		List&lt;T&gt; results = query(sql, rowMapper);</span>
+<span class="fc" id="L534">		return DataAccessUtils.nullableSingleResult(results);</span>
+	}
+
+	@Override
+	public &lt;T&gt; @Nullable T queryForObject(String sql, Class&lt;T&gt; requiredType) throws DataAccessException {
+<span class="fc" id="L539">		return queryForObject(sql, getSingleColumnRowMapper(requiredType));</span>
+	}
+
+	@Override
+	public &lt;T&gt; List&lt;@Nullable T&gt; queryForList(String sql, Class&lt;T&gt; elementType) throws DataAccessException {
+<span class="fc" id="L544">		return query(sql, getSingleColumnRowMapper(elementType));</span>
+	}
+
+	@Override
+	public List&lt;Map&lt;String, @Nullable Object&gt;&gt; queryForList(String sql) throws DataAccessException {
+<span class="fc" id="L549">		return query(sql, getColumnMapRowMapper());</span>
+	}
+
+	@Override
+	public SqlRowSet queryForRowSet(String sql) throws DataAccessException {
+<span class="nc" id="L554">		return result(query(sql, new SqlRowSetResultSetExtractor()));</span>
+	}
+
+	@Override
+	public int update(String sql) throws DataAccessException {
+<span class="fc" id="L559">		Assert.notNull(sql, &quot;SQL must not be null&quot;);</span>
+<span class="pc bpc" id="L560" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L561">			logger.debug(&quot;Executing SQL update [&quot; + sql + &quot;]&quot;);</span>
+		}
+
+		// Callback to execute the update statement.
+<span class="fc" id="L565">		class UpdateStatementCallback implements StatementCallback&lt;Integer&gt;, SqlProvider {</span>
+			@Override
+			public Integer doInStatement(Statement stmt) throws SQLException {
+<span class="fc" id="L568">				int rows = stmt.executeUpdate(sql);</span>
+<span class="pc bpc" id="L569" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L570">					logger.trace(&quot;SQL update affected &quot; + rows + &quot; rows&quot;);</span>
+				}
+<span class="fc" id="L572">				return rows;</span>
+			}
+			@Override
+			public String getSql() {
+<span class="fc" id="L576">				return sql;</span>
+			}
+		}
+
+<span class="fc" id="L580">		return updateCount(execute(new UpdateStatementCallback(), true));</span>
+	}
+
+	@Override
+	public int[] batchUpdate(String... sql) throws DataAccessException {
+<span class="fc" id="L585">		Assert.notEmpty(sql, &quot;SQL array must not be empty&quot;);</span>
+<span class="pc bpc" id="L586" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L587">			logger.debug(&quot;Executing SQL batch update of &quot; + sql.length + &quot; statements&quot;);</span>
+		}
+
+		// Callback to execute the batch update.
+<span class="fc" id="L591">		class BatchUpdateStatementCallback implements StatementCallback&lt;int[]&gt;, SqlProvider {</span>
+
+<span class="fc" id="L593">			private final StringBuilder currSql = new StringBuilder();</span>
+
+			@Override
+			public int[] doInStatement(Statement stmt) throws SQLException, DataAccessException {
+<span class="fc" id="L597">				int[] rowsAffected = new int[sql.length];</span>
+<span class="fc bfc" id="L598" title="All 2 branches covered.">				if (JdbcUtils.supportsBatchUpdates(stmt.getConnection())) {</span>
+<span class="fc bfc" id="L599" title="All 2 branches covered.">					for (String sqlStmt : sql) {</span>
+<span class="fc" id="L600">						appendSql(sqlStmt);</span>
+<span class="fc" id="L601">						stmt.addBatch(sqlStmt);</span>
+					}
+					try {
+<span class="fc" id="L604">						rowsAffected = stmt.executeBatch();</span>
+					}
+<span class="fc" id="L606">					catch (BatchUpdateException ex) {</span>
+<span class="fc" id="L607">						this.currSql.setLength(0);</span>
+<span class="fc" id="L608">						int[] updateCounts = ex.getUpdateCounts();</span>
+<span class="fc bfc" id="L609" title="All 2 branches covered.">						for (int i = 0; i &lt; ex.getUpdateCounts().length; i++) {</span>
+<span class="fc bfc" id="L610" title="All 2 branches covered.">							if (updateCounts[i] == Statement.EXECUTE_FAILED) {</span>
+<span class="fc" id="L611">								appendSql(sql[i]);</span>
+							}
+						}
+<span class="fc" id="L614">						throw ex;</span>
+<span class="fc" id="L615">					}</span>
+				}
+				else {
+<span class="fc bfc" id="L618" title="All 2 branches covered.">					for (int i = 0; i &lt; sql.length; i++) {</span>
+<span class="fc" id="L619">						this.currSql.setLength(0);</span>
+<span class="fc" id="L620">						this.currSql.append(sql[i]);</span>
+<span class="fc bfc" id="L621" title="All 2 branches covered.">						if (!stmt.execute(sql[i])) {</span>
+<span class="fc" id="L622">							rowsAffected[i] = stmt.getUpdateCount();</span>
+						}
+						else {
+<span class="fc" id="L625">							throw new InvalidDataAccessApiUsageException(&quot;Invalid batch SQL statement: &quot; + sql[i]);</span>
+						}
+					}
+				}
+<span class="fc" id="L629">				return rowsAffected;</span>
+			}
+
+			private void appendSql(String statement) {
+<span class="fc bfc" id="L633" title="All 2 branches covered.">				if (!this.currSql.isEmpty()) {</span>
+<span class="fc" id="L634">					this.currSql.append(&quot;; &quot;);</span>
+				}
+<span class="fc" id="L636">				this.currSql.append(statement);</span>
+<span class="fc" id="L637">			}</span>
+
+			@Override
+			public @Nullable String getSql() {
+<span class="fc" id="L641">				return this.currSql.toString();</span>
+			}
+		}
+
+<span class="fc" id="L645">		int[] result = execute(new BatchUpdateStatementCallback(), true);</span>
+<span class="pc bpc" id="L646" title="1 of 2 branches missed.">		Assert.state(result != null, &quot;No update counts&quot;);</span>
+<span class="fc" id="L647">		return result;</span>
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Methods dealing with prepared statements
+	//-------------------------------------------------------------------------
+
+	private &lt;T extends @Nullable Object&gt; T execute(PreparedStatementCreator psc, PreparedStatementCallback&lt;T&gt; action, boolean closeResources)
+			throws DataAccessException {
+
+<span class="fc" id="L658">		Assert.notNull(psc, &quot;PreparedStatementCreator must not be null&quot;);</span>
+<span class="fc" id="L659">		Assert.notNull(action, &quot;Callback object must not be null&quot;);</span>
+<span class="pc bpc" id="L660" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L661">			String sql = getSql(psc);</span>
+<span class="nc bnc" id="L662" title="All 2 branches missed.">			logger.debug(&quot;Executing prepared SQL statement&quot; + (sql != null ? &quot; [&quot; + sql + &quot;]&quot; : &quot;&quot;));</span>
+		}
+
+<span class="fc" id="L665">		Connection con = DataSourceUtils.getConnection(obtainDataSource());</span>
+<span class="fc" id="L666">		PreparedStatement ps = null;</span>
+		try {
+<span class="fc" id="L668">			ps = psc.createPreparedStatement(con);</span>
+<span class="fc" id="L669">			applyStatementSettings(ps);</span>
+<span class="fc" id="L670">			T result = action.doInPreparedStatement(ps);</span>
+<span class="fc" id="L671">			handleWarnings(ps);</span>
+<span class="fc" id="L672">			return result;</span>
+		}
+<span class="fc" id="L674">		catch (SQLException ex) {</span>
+			// Release Connection early, to avoid potential connection pool deadlock
+			// in the case when the exception translator hasn't been initialized yet.
+<span class="pc bpc" id="L677" title="1 of 2 branches missed.">			if (psc instanceof ParameterDisposer parameterDisposer) {</span>
+<span class="nc" id="L678">				parameterDisposer.cleanupParameters();</span>
+			}
+<span class="fc bfc" id="L680" title="All 2 branches covered.">			if (ps != null) {</span>
+<span class="fc" id="L681">				handleWarnings(ps, ex);</span>
+			}
+<span class="fc" id="L683">			String sql = getSql(psc);</span>
+<span class="fc" id="L684">			psc = null;</span>
+<span class="fc" id="L685">			JdbcUtils.closeStatement(ps);</span>
+<span class="fc" id="L686">			ps = null;</span>
+<span class="fc" id="L687">			DataSourceUtils.releaseConnection(con, getDataSource());</span>
+<span class="fc" id="L688">			con = null;</span>
+<span class="fc" id="L689">			throw translateException(&quot;PreparedStatementCallback&quot;, sql, ex);</span>
+		}
+		finally {
+<span class="fc bfc" id="L692" title="All 2 branches covered.">			if (closeResources) {</span>
+<span class="fc bfc" id="L693" title="All 2 branches covered.">				if (psc instanceof ParameterDisposer parameterDisposer) {</span>
+<span class="fc" id="L694">					parameterDisposer.cleanupParameters();</span>
+				}
+<span class="fc" id="L696">				JdbcUtils.closeStatement(ps);</span>
+<span class="fc" id="L697">				DataSourceUtils.releaseConnection(con, getDataSource());</span>
+			}
+		}
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T execute(PreparedStatementCreator psc, PreparedStatementCallback&lt;T&gt; action)
+			throws DataAccessException {
+
+<span class="fc" id="L706">		return execute(psc, action, true);</span>
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T execute(String sql, PreparedStatementCallback&lt;T&gt; action) throws DataAccessException {
+<span class="fc" id="L711">		return execute(new SimplePreparedStatementCreator(sql), action, true);</span>
+	}
+
+	/**
+	 * Query using a prepared statement, allowing for a PreparedStatementCreator
+	 * and a PreparedStatementSetter. Most other query methods use this method,
+	 * but application code will always work with either a creator or a setter.
+	 * @param psc a callback that creates a PreparedStatement given a Connection
+	 * @param pss a callback that knows how to set values on the prepared statement.
+	 * If this is {@code null}, the SQL will be assumed to contain no bind parameters.
+	 * @param rse a callback that will extract results
+	 * @return an arbitrary result object, as returned by the ResultSetExtractor
+	 * @throws DataAccessException if there is any problem
+	 */
+	public &lt;T extends @Nullable Object&gt; T query(
+			PreparedStatementCreator psc, @Nullable PreparedStatementSetter pss, ResultSetExtractor&lt;T&gt; rse)
+			throws DataAccessException {
+
+<span class="fc" id="L729">		Assert.notNull(rse, &quot;ResultSetExtractor must not be null&quot;);</span>
+<span class="fc" id="L730">		logger.debug(&quot;Executing prepared SQL query&quot;);</span>
+
+<span class="fc" id="L732">		return execute(psc, (PreparedStatementCallback&lt;T&gt;) ps -&gt; {</span>
+<span class="fc" id="L733">			ResultSet rs = null;</span>
+			try {
+<span class="fc bfc" id="L735" title="All 2 branches covered.">				if (pss != null) {</span>
+<span class="fc" id="L736">					pss.setValues(ps);</span>
+				}
+<span class="fc" id="L738">				rs = ps.executeQuery();</span>
+<span class="fc" id="L739">				return rse.extractData(rs);</span>
+			}
+			finally {
+<span class="fc" id="L742">				JdbcUtils.closeResultSet(rs);</span>
+<span class="fc bfc" id="L743" title="All 2 branches covered.">				if (pss instanceof ParameterDisposer parameterDisposer) {</span>
+<span class="fc" id="L744">					parameterDisposer.cleanupParameters();</span>
+				}
+			}
+		}, true);
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T query(PreparedStatementCreator psc, ResultSetExtractor&lt;T&gt; rse) throws DataAccessException {
+<span class="fc" id="L752">		return query(psc, null, rse);</span>
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T query(String sql, @Nullable PreparedStatementSetter pss, ResultSetExtractor&lt;T&gt; rse) throws DataAccessException {
+<span class="fc" id="L757">		return query(new SimplePreparedStatementCreator(sql), pss, rse);</span>
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T query(String sql, @Nullable Object @Nullable [] args, int[] argTypes, ResultSetExtractor&lt;T&gt; rse) throws DataAccessException {
+<span class="fc" id="L762">		return query(sql, newArgTypePreparedStatementSetter(args, argTypes), rse);</span>
+	}
+
+	@Deprecated(since = &quot;5.3&quot;)
+	@Override
+	public &lt;T extends @Nullable Object&gt; T query(String sql, @Nullable Object @Nullable [] args, ResultSetExtractor&lt;T&gt; rse) throws DataAccessException {
+<span class="nc" id="L768">		return query(sql, newArgPreparedStatementSetter(args), rse);</span>
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T query(String sql, ResultSetExtractor&lt;T&gt; rse, @Nullable Object @Nullable ... args) throws DataAccessException {
+<span class="nc" id="L773">		return query(sql, newArgPreparedStatementSetter(args), rse);</span>
+	}
+
+	@Override
+	public void query(PreparedStatementCreator psc, RowCallbackHandler rch) throws DataAccessException {
+<span class="fc" id="L778">		query(psc, new RowCallbackHandlerResultSetExtractor(rch, this.maxRows));</span>
+<span class="fc" id="L779">	}</span>
+
+	@Override
+	public void query(String sql, @Nullable PreparedStatementSetter pss, RowCallbackHandler rch) throws DataAccessException {
+<span class="fc" id="L783">		query(sql, pss, new RowCallbackHandlerResultSetExtractor(rch, this.maxRows));</span>
+<span class="fc" id="L784">	}</span>
+
+	@Override
+	public void query(String sql, @Nullable Object @Nullable [] args, int[] argTypes, RowCallbackHandler rch) throws DataAccessException {
+<span class="nc" id="L788">		query(sql, newArgTypePreparedStatementSetter(args, argTypes), rch);</span>
+<span class="nc" id="L789">	}</span>
+
+	@Deprecated(since = &quot;5.3&quot;)
+	@Override
+	public void query(String sql, @Nullable Object @Nullable [] args, RowCallbackHandler rch) throws DataAccessException {
+<span class="fc" id="L794">		query(sql, newArgPreparedStatementSetter(args), rch);</span>
+<span class="fc" id="L795">	}</span>
+
+	@Override
+	public void query(String sql, RowCallbackHandler rch, @Nullable Object @Nullable ... args) throws DataAccessException {
+<span class="nc" id="L799">		query(sql, newArgPreparedStatementSetter(args), rch);</span>
+<span class="nc" id="L800">	}</span>
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; List&lt;T&gt; query(PreparedStatementCreator psc, RowMapper&lt;T&gt; rowMapper) throws DataAccessException {
+<span class="fc" id="L804">		return result(query(psc, new RowMapperResultSetExtractor&lt;&gt;(rowMapper, 0, this.maxRows)));</span>
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; List&lt;T&gt; query(String sql, @Nullable PreparedStatementSetter pss, RowMapper&lt;T&gt; rowMapper) throws DataAccessException {
+<span class="fc" id="L809">		return result(query(sql, pss, new RowMapperResultSetExtractor&lt;&gt;(rowMapper, 0, this.maxRows)));</span>
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; List&lt;T&gt; query(String sql, @Nullable Object @Nullable [] args, int[] argTypes, RowMapper&lt;T&gt; rowMapper) throws DataAccessException {
+<span class="fc" id="L814">		return result(query(sql, args, argTypes, new RowMapperResultSetExtractor&lt;&gt;(rowMapper, 0, this.maxRows)));</span>
+	}
+
+	@Deprecated(since = &quot;5.3&quot;)
+	@Override
+	public &lt;T extends @Nullable Object&gt; List&lt;T&gt; query(String sql, @Nullable Object @Nullable [] args, RowMapper&lt;T&gt; rowMapper) throws DataAccessException {
+<span class="fc" id="L820">		return result(query(sql, newArgPreparedStatementSetter(args), new RowMapperResultSetExtractor&lt;&gt;(rowMapper, 0, this.maxRows)));</span>
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; List&lt;T&gt; query(String sql, RowMapper&lt;T&gt; rowMapper, @Nullable Object @Nullable ... args) throws DataAccessException {
+<span class="fc" id="L825">		return result(query(sql, newArgPreparedStatementSetter(args), new RowMapperResultSetExtractor&lt;&gt;(rowMapper, 0, this.maxRows)));</span>
+	}
+
+	/**
+	 * Query using a prepared statement, allowing for a PreparedStatementCreator
+	 * and a PreparedStatementSetter. Most other query methods use this method,
+	 * but application code will always work with either a creator or a setter.
+	 * @param psc a callback that creates a PreparedStatement given a Connection
+	 * @param pss a callback that knows how to set values on the prepared statement.
+	 * If this is {@code null}, the SQL will be assumed to contain no bind parameters.
+	 * @param rowMapper a callback that will map one object per row
+	 * @return the result Stream, containing mapped objects, needing to be
+	 * closed once fully processed (for example, through a try-with-resources clause)
+	 * @throws DataAccessException if the query fails
+	 * @since 5.3
+	 */
+	public &lt;T extends @Nullable Object&gt; Stream&lt;T&gt; queryForStream(PreparedStatementCreator psc, @Nullable PreparedStatementSetter pss,
+			RowMapper&lt;T&gt; rowMapper) throws DataAccessException {
+
+<span class="fc" id="L844">		return result(execute(psc, ps -&gt; {</span>
+<span class="fc bfc" id="L845" title="All 2 branches covered.">			if (pss != null) {</span>
+<span class="fc" id="L846">				pss.setValues(ps);</span>
+			}
+<span class="fc" id="L848">			ResultSet rs = ps.executeQuery();</span>
+<span class="fc" id="L849">			Connection con = ps.getConnection();</span>
+<span class="fc" id="L850">			return new ResultSetSpliterator&lt;&gt;(rs, rowMapper, this.maxRows).stream().onClose(() -&gt; {</span>
+<span class="fc" id="L851">				JdbcUtils.closeResultSet(rs);</span>
+<span class="fc bfc" id="L852" title="All 2 branches covered.">				if (pss instanceof ParameterDisposer parameterDisposer) {</span>
+<span class="fc" id="L853">					parameterDisposer.cleanupParameters();</span>
+				}
+<span class="fc" id="L855">				JdbcUtils.closeStatement(ps);</span>
+<span class="fc" id="L856">				DataSourceUtils.releaseConnection(con, getDataSource());</span>
+<span class="fc" id="L857">			});</span>
+		}, false));
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; Stream&lt;T&gt; queryForStream(PreparedStatementCreator psc, RowMapper&lt;T&gt; rowMapper) throws DataAccessException {
+<span class="fc" id="L863">		return queryForStream(psc, null, rowMapper);</span>
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; Stream&lt;T&gt; queryForStream(String sql, @Nullable PreparedStatementSetter pss, RowMapper&lt;T&gt; rowMapper) throws DataAccessException {
+<span class="nc" id="L868">		return queryForStream(new SimplePreparedStatementCreator(sql), pss, rowMapper);</span>
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; Stream&lt;T&gt; queryForStream(String sql, RowMapper&lt;T&gt; rowMapper, @Nullable Object @Nullable ... args) throws DataAccessException {
+<span class="fc" id="L873">		return queryForStream(new SimplePreparedStatementCreator(sql), newArgPreparedStatementSetter(args), rowMapper);</span>
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T queryForObject(String sql, @Nullable Object @Nullable [] args, int[] argTypes, RowMapper&lt;T&gt; rowMapper)
+			throws DataAccessException {
+
+<span class="nc" id="L880">		List&lt;T&gt; results = query(sql, args, argTypes, new RowMapperResultSetExtractor&lt;&gt;(rowMapper, 1));</span>
+<span class="nc" id="L881">		return DataAccessUtils.nullableSingleResult(results);</span>
+	}
+
+	@Deprecated(since = &quot;5.3&quot;)
+	@Override
+	public &lt;T extends @Nullable Object&gt; T queryForObject(String sql, @Nullable Object @Nullable [] args, RowMapper&lt;T&gt; rowMapper) throws DataAccessException {
+<span class="nc" id="L887">		List&lt;T&gt; results = query(sql, newArgPreparedStatementSetter(args), new RowMapperResultSetExtractor&lt;&gt;(rowMapper, 1));</span>
+<span class="nc" id="L888">		return DataAccessUtils.nullableSingleResult(results);</span>
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T queryForObject(String sql, RowMapper&lt;T&gt; rowMapper, @Nullable Object @Nullable ... args) throws DataAccessException {
+<span class="fc" id="L893">		List&lt;T&gt; results = query(sql, newArgPreparedStatementSetter(args), new RowMapperResultSetExtractor&lt;&gt;(rowMapper, 1));</span>
+<span class="fc" id="L894">		return DataAccessUtils.nullableSingleResult(results);</span>
+	}
+
+	@Override
+	public &lt;T&gt; @Nullable T queryForObject(String sql, @Nullable Object @Nullable [] args, int[] argTypes, Class&lt;T&gt; requiredType)
+			throws DataAccessException {
+
+<span class="nc" id="L901">		return queryForObject(sql, args, argTypes, getSingleColumnRowMapper(requiredType));</span>
+	}
+
+	@Deprecated(since = &quot;5.3&quot;)
+	@Override
+	public &lt;T&gt; @Nullable T queryForObject(String sql, @Nullable Object @Nullable [] args, Class&lt;T&gt; requiredType) throws DataAccessException {
+<span class="nc" id="L907">		return queryForObject(sql, getSingleColumnRowMapper(requiredType), args);</span>
+	}
+
+	@Override
+	public &lt;T&gt; @Nullable T queryForObject(String sql, Class&lt;T&gt; requiredType, @Nullable Object @Nullable ... args) throws DataAccessException {
+<span class="fc" id="L912">		return queryForObject(sql, getSingleColumnRowMapper(requiredType), args);</span>
+	}
+
+	@Override
+	public Map&lt;String, @Nullable Object&gt; queryForMap(String sql, @Nullable Object @Nullable [] args, int[] argTypes) throws DataAccessException {
+<span class="nc" id="L917">		return result(queryForObject(sql, args, argTypes, getColumnMapRowMapper()));</span>
+	}
+
+	@Override
+	public Map&lt;String, @Nullable Object&gt; queryForMap(String sql, @Nullable Object @Nullable ... args) throws DataAccessException {
+<span class="fc" id="L922">		return result(queryForObject(sql, getColumnMapRowMapper(), args));</span>
+	}
+
+	@Override
+	public &lt;T&gt; List&lt;@Nullable T&gt; queryForList(String sql, @Nullable Object @Nullable [] args, int[] argTypes, Class&lt;T&gt; elementType) throws DataAccessException {
+<span class="nc" id="L927">		return query(sql, args, argTypes, getSingleColumnRowMapper(elementType));</span>
+	}
+
+	@Deprecated(since = &quot;5.3&quot;)
+	@Override
+	public &lt;T&gt; List&lt;@Nullable T&gt; queryForList(String sql, @Nullable Object @Nullable [] args, Class&lt;T&gt; elementType) throws DataAccessException {
+<span class="nc" id="L933">		return query(sql, newArgPreparedStatementSetter(args), getSingleColumnRowMapper(elementType));</span>
+	}
+
+	@Override
+	public &lt;T&gt; List&lt;@Nullable T&gt; queryForList(String sql, Class&lt;T&gt; elementType, @Nullable Object @Nullable ... args) throws DataAccessException {
+<span class="fc" id="L938">		return query(sql, newArgPreparedStatementSetter(args), getSingleColumnRowMapper(elementType));</span>
+	}
+
+	@Override
+	public List&lt;Map&lt;String, @Nullable Object&gt;&gt; queryForList(String sql, @Nullable Object @Nullable [] args, int[] argTypes) throws DataAccessException {
+<span class="nc" id="L943">		return query(sql, args, argTypes, getColumnMapRowMapper());</span>
+	}
+
+	@Override
+	public List&lt;Map&lt;String, @Nullable Object&gt;&gt; queryForList(String sql, @Nullable Object @Nullable ... args) throws DataAccessException {
+<span class="fc" id="L948">		return query(sql, newArgPreparedStatementSetter(args), getColumnMapRowMapper());</span>
+	}
+
+	@Override
+	public SqlRowSet queryForRowSet(String sql, @Nullable Object @Nullable [] args, int[] argTypes) throws DataAccessException {
+<span class="nc" id="L953">		return result(query(sql, args, argTypes, new SqlRowSetResultSetExtractor()));</span>
+	}
+
+	@Override
+	public SqlRowSet queryForRowSet(String sql, @Nullable Object @Nullable ... args) throws DataAccessException {
+<span class="nc" id="L958">		return result(query(sql, newArgPreparedStatementSetter(args), new SqlRowSetResultSetExtractor()));</span>
+	}
+
+	protected int update(PreparedStatementCreator psc, @Nullable PreparedStatementSetter pss)
+			throws DataAccessException {
+
+<span class="fc" id="L964">		logger.debug(&quot;Executing prepared SQL update&quot;);</span>
+
+<span class="fc" id="L966">		return updateCount(execute(psc, ps -&gt; {</span>
+			try {
+<span class="fc bfc" id="L968" title="All 2 branches covered.">				if (pss != null) {</span>
+<span class="fc" id="L969">					pss.setValues(ps);</span>
+				}
+<span class="fc" id="L971">				int rows = ps.executeUpdate();</span>
+<span class="pc bpc" id="L972" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L973">					logger.trace(&quot;SQL update affected &quot; + rows + &quot; rows&quot;);</span>
+				}
+<span class="fc" id="L975">				return rows;</span>
+			}
+			finally {
+<span class="fc bfc" id="L978" title="All 2 branches covered.">				if (pss instanceof ParameterDisposer parameterDisposer) {</span>
+<span class="fc" id="L979">					parameterDisposer.cleanupParameters();</span>
+				}
+			}
+		}, true));
+	}
+
+	@Override
+	public int update(PreparedStatementCreator psc) throws DataAccessException {
+<span class="fc" id="L987">		return update(psc, (PreparedStatementSetter) null);</span>
+	}
+
+	@Override
+	public int update(PreparedStatementCreator psc, KeyHolder generatedKeyHolder)
+			throws DataAccessException {
+
+<span class="fc" id="L994">		Assert.notNull(generatedKeyHolder, &quot;KeyHolder must not be null&quot;);</span>
+<span class="fc" id="L995">		logger.debug(&quot;Executing SQL update and returning generated keys&quot;);</span>
+
+<span class="fc" id="L997">		return updateCount(execute(psc, ps -&gt; {</span>
+<span class="fc" id="L998">			int rows = ps.executeUpdate();</span>
+<span class="fc" id="L999">			generatedKeyHolder.getKeyList().clear();</span>
+<span class="fc" id="L1000">			storeGeneratedKeys(generatedKeyHolder, ps, 1);</span>
+<span class="pc bpc" id="L1001" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1002">				logger.trace(&quot;SQL update affected &quot; + rows + &quot; rows and returned &quot; + generatedKeyHolder.getKeyList().size() + &quot; keys&quot;);</span>
+			}
+<span class="fc" id="L1004">			return rows;</span>
+		}, true));
+	}
+
+	@Override
+	public int update(String sql, @Nullable PreparedStatementSetter pss) throws DataAccessException {
+<span class="fc" id="L1010">		return update(new SimplePreparedStatementCreator(sql), pss);</span>
+	}
+
+	@Override
+	public int update(String sql, @Nullable Object @Nullable [] args, int[] argTypes) throws DataAccessException {
+<span class="nc" id="L1015">		return update(sql, newArgTypePreparedStatementSetter(args, argTypes));</span>
+	}
+
+	@Override
+	public int update(String sql, @Nullable Object @Nullable ... args) throws DataAccessException {
+<span class="fc" id="L1020">		return update(sql, newArgPreparedStatementSetter(args));</span>
+	}
+
+	@Override
+	public int[] batchUpdate(PreparedStatementCreator psc, BatchPreparedStatementSetter pss,
+			KeyHolder generatedKeyHolder) throws DataAccessException {
+
+<span class="fc" id="L1027">		int[] result = execute(psc, getPreparedStatementCallback(pss, generatedKeyHolder));</span>
+
+<span class="pc bpc" id="L1029" title="1 of 2 branches missed.">		Assert.state(result != null, &quot;No result array&quot;);</span>
+<span class="fc" id="L1030">		return result;</span>
+	}
+
+	@Override
+	public int[] batchUpdate(String sql, BatchPreparedStatementSetter pss) throws DataAccessException {
+<span class="pc bpc" id="L1035" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1036">			logger.debug(&quot;Executing SQL batch update [&quot; + sql + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L1038">		int batchSize = pss.getBatchSize();</span>
+<span class="fc bfc" id="L1039" title="All 2 branches covered.">		if (batchSize == 0) {</span>
+<span class="fc" id="L1040">			return new int[0];</span>
+		}
+
+<span class="fc" id="L1043">		int[] result = execute(sql, getPreparedStatementCallback(pss, null));</span>
+<span class="pc bpc" id="L1044" title="1 of 2 branches missed.">		Assert.state(result != null, &quot;No result array&quot;);</span>
+<span class="fc" id="L1045">		return result;</span>
+	}
+
+	@Override
+	public int[] batchUpdate(String sql, List&lt;Object[]&gt; batchArgs) throws DataAccessException {
+<span class="fc" id="L1050">		return batchUpdate(sql, batchArgs, new int[0]);</span>
+	}
+
+	@Override
+	public int[] batchUpdate(String sql, List&lt;Object[]&gt; batchArgs, int[] argTypes) throws DataAccessException {
+<span class="fc bfc" id="L1055" title="All 2 branches covered.">		if (batchArgs.isEmpty()) {</span>
+<span class="fc" id="L1056">			return new int[0];</span>
+		}
+
+<span class="fc" id="L1059">		return batchUpdate(</span>
+				sql,
+<span class="fc" id="L1061">				new BatchPreparedStatementSetter() {</span>
+					@Override
+					public void setValues(PreparedStatement ps, int i) throws SQLException {
+<span class="fc" id="L1064">						Object[] values = batchArgs.get(i);</span>
+<span class="fc" id="L1065">						int colIndex = 0;</span>
+<span class="fc bfc" id="L1066" title="All 2 branches covered.">						for (Object value : values) {</span>
+<span class="fc" id="L1067">							colIndex++;</span>
+<span class="pc bpc" id="L1068" title="1 of 2 branches missed.">							if (value instanceof SqlParameterValue paramValue) {</span>
+<span class="nc" id="L1069">								StatementCreatorUtils.setParameterValue(ps, colIndex, paramValue, paramValue.getValue());</span>
+							}
+							else {
+								int colType;
+<span class="fc bfc" id="L1073" title="All 2 branches covered.">								if (argTypes.length &lt; colIndex) {</span>
+<span class="fc" id="L1074">									colType = SqlTypeValue.TYPE_UNKNOWN;</span>
+								}
+								else {
+<span class="fc" id="L1077">									colType = argTypes[colIndex - 1];</span>
+								}
+<span class="fc" id="L1079">								StatementCreatorUtils.setParameterValue(ps, colIndex, colType, value);</span>
+							}
+						}
+<span class="fc" id="L1082">					}</span>
+					@Override
+					public int getBatchSize() {
+<span class="fc" id="L1085">						return batchArgs.size();</span>
+					}
+				});
+	}
+
+	@Override
+	public &lt;T&gt; int[][] batchUpdate(String sql, Collection&lt;T&gt; batchArgs, int batchSize,
+			ParameterizedPreparedStatementSetter&lt;T&gt; pss) throws DataAccessException {
+
+<span class="pc bpc" id="L1094" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1095">			logger.debug(&quot;Executing SQL batch update [&quot; + sql + &quot;] with a batch size of &quot; + batchSize);</span>
+		}
+<span class="fc" id="L1097">		int[][] result = execute(sql, (PreparedStatementCallback&lt;int[][]&gt;) ps -&gt; {</span>
+<span class="fc" id="L1098">			List&lt;int[]&gt; rowsAffected = new ArrayList&lt;&gt;();</span>
+			try {
+<span class="fc" id="L1100">				boolean batchSupported = JdbcUtils.supportsBatchUpdates(ps.getConnection());</span>
+<span class="fc" id="L1101">				int n = 0;</span>
+<span class="fc bfc" id="L1102" title="All 2 branches covered.">				for (T obj : batchArgs) {</span>
+<span class="fc" id="L1103">					pss.setValues(ps, obj);</span>
+<span class="fc" id="L1104">					n++;</span>
+<span class="pc bpc" id="L1105" title="1 of 2 branches missed.">					if (batchSupported) {</span>
+<span class="fc" id="L1106">						ps.addBatch();</span>
+<span class="fc bfc" id="L1107" title="All 4 branches covered.">						if (n % batchSize == 0 || n == batchArgs.size()) {</span>
+<span class="pc bpc" id="L1108" title="1 of 2 branches missed.">							if (logger.isTraceEnabled()) {</span>
+<span class="nc bnc" id="L1109" title="All 2 branches missed.">								int batchIdx = (n % batchSize == 0) ? n / batchSize : (n / batchSize) + 1;</span>
+<span class="nc bnc" id="L1110" title="All 2 branches missed.">								int items = n - ((n % batchSize == 0) ? n / batchSize - 1 : (n / batchSize)) * batchSize;</span>
+<span class="nc" id="L1111">								logger.trace(&quot;Sending SQL batch update #&quot; + batchIdx + &quot; with &quot; + items + &quot; items&quot;);</span>
+							}
+							try {
+<span class="fc" id="L1114">								int[] updateCounts = ps.executeBatch();</span>
+<span class="fc" id="L1115">								rowsAffected.add(updateCounts);</span>
+							}
+<span class="fc" id="L1117">							catch (BatchUpdateException ex) {</span>
+<span class="fc" id="L1118">								throw new AggregatedBatchUpdateException(rowsAffected.toArray(int[][]::new), ex);</span>
+<span class="fc" id="L1119">							}</span>
+						}
+					}
+					else {
+<span class="nc" id="L1123">						int i = ps.executeUpdate();</span>
+<span class="nc" id="L1124">						rowsAffected.add(new int[] {i});</span>
+					}
+<span class="fc" id="L1126">				}</span>
+<span class="fc" id="L1127">				int[][] result1 = new int[rowsAffected.size()][];</span>
+<span class="fc bfc" id="L1128" title="All 2 branches covered.">				for (int i = 0; i &lt; result1.length; i++) {</span>
+<span class="fc" id="L1129">					result1[i] = rowsAffected.get(i);</span>
+				}
+<span class="fc" id="L1131">				return result1;</span>
+			}
+			finally {
+<span class="pc bpc" id="L1134" title="1 of 2 branches missed.">				if (pss instanceof ParameterDisposer parameterDisposer) {</span>
+<span class="nc" id="L1135">					parameterDisposer.cleanupParameters();</span>
+				}
+			}
+		});
+
+<span class="pc bpc" id="L1140" title="1 of 2 branches missed.">		Assert.state(result != null, &quot;No result array&quot;);</span>
+<span class="fc" id="L1141">		return result;</span>
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Methods dealing with callable statements
+	//-------------------------------------------------------------------------
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T execute(CallableStatementCreator csc, CallableStatementCallback&lt;T&gt; action)
+			throws DataAccessException {
+
+<span class="fc" id="L1153">		Assert.notNull(csc, &quot;CallableStatementCreator must not be null&quot;);</span>
+<span class="fc" id="L1154">		Assert.notNull(action, &quot;Callback object must not be null&quot;);</span>
+<span class="pc bpc" id="L1155" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1156">			String sql = getSql(csc);</span>
+<span class="nc bnc" id="L1157" title="All 2 branches missed.">			logger.debug(&quot;Calling stored procedure&quot; + (sql != null ? &quot; [&quot; + sql + &quot;]&quot; : &quot;&quot;));</span>
+		}
+
+<span class="fc" id="L1160">		Connection con = DataSourceUtils.getConnection(obtainDataSource());</span>
+<span class="fc" id="L1161">		CallableStatement cs = null;</span>
+		try {
+<span class="fc" id="L1163">			cs = csc.createCallableStatement(con);</span>
+<span class="fc" id="L1164">			applyStatementSettings(cs);</span>
+<span class="fc" id="L1165">			T result = action.doInCallableStatement(cs);</span>
+<span class="fc" id="L1166">			handleWarnings(cs);</span>
+<span class="fc" id="L1167">			return result;</span>
+		}
+<span class="fc" id="L1169">		catch (SQLException ex) {</span>
+			// Release Connection early, to avoid potential connection pool deadlock
+			// in the case when the exception translator hasn't been initialized yet.
+<span class="pc bpc" id="L1172" title="1 of 2 branches missed.">			if (csc instanceof ParameterDisposer parameterDisposer) {</span>
+<span class="fc" id="L1173">				parameterDisposer.cleanupParameters();</span>
+			}
+<span class="pc bpc" id="L1175" title="1 of 2 branches missed.">			if (cs != null) {</span>
+<span class="fc" id="L1176">				handleWarnings(cs, ex);</span>
+			}
+<span class="fc" id="L1178">			String sql = getSql(csc);</span>
+<span class="fc" id="L1179">			csc = null;</span>
+<span class="fc" id="L1180">			JdbcUtils.closeStatement(cs);</span>
+<span class="fc" id="L1181">			cs = null;</span>
+<span class="fc" id="L1182">			DataSourceUtils.releaseConnection(con, getDataSource());</span>
+<span class="fc" id="L1183">			con = null;</span>
+<span class="fc" id="L1184">			throw translateException(&quot;CallableStatementCallback&quot;, sql, ex);</span>
+		}
+		finally {
+<span class="fc bfc" id="L1187" title="All 2 branches covered.">			if (csc instanceof ParameterDisposer parameterDisposer) {</span>
+<span class="fc" id="L1188">				parameterDisposer.cleanupParameters();</span>
+			}
+<span class="fc" id="L1190">			JdbcUtils.closeStatement(cs);</span>
+<span class="fc" id="L1191">			DataSourceUtils.releaseConnection(con, getDataSource());</span>
+		}
+	}
+
+	@Override
+	public &lt;T extends @Nullable Object&gt; T execute(String callString, CallableStatementCallback&lt;T&gt; action) throws DataAccessException {
+<span class="nc" id="L1197">		return execute(new SimpleCallableStatementCreator(callString), action);</span>
+	}
+
+	@Override
+	public Map&lt;String, @Nullable Object&gt; call(CallableStatementCreator csc, List&lt;SqlParameter&gt; declaredParameters)
+			throws DataAccessException {
+
+<span class="fc" id="L1204">		List&lt;SqlParameter&gt; updateCountParameters = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L1205">		List&lt;SqlParameter&gt; resultSetParameters = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L1206">		List&lt;SqlParameter&gt; callParameters = new ArrayList&lt;&gt;();</span>
+
+<span class="fc bfc" id="L1208" title="All 2 branches covered.">		for (SqlParameter parameter : declaredParameters) {</span>
+<span class="fc bfc" id="L1209" title="All 2 branches covered.">			if (parameter.isResultsParameter()) {</span>
+<span class="pc bpc" id="L1210" title="1 of 2 branches missed.">				if (parameter instanceof SqlReturnResultSet) {</span>
+<span class="fc" id="L1211">					resultSetParameters.add(parameter);</span>
+				}
+				else {
+<span class="nc" id="L1214">					updateCountParameters.add(parameter);</span>
+				}
+			}
+			else {
+<span class="fc" id="L1218">				callParameters.add(parameter);</span>
+			}
+<span class="fc" id="L1220">		}</span>
+
+<span class="fc" id="L1222">		Map&lt;String, @Nullable Object&gt; result = execute(csc, cs -&gt; {</span>
+<span class="fc" id="L1223">			boolean retVal = cs.execute();</span>
+<span class="fc" id="L1224">			int updateCount = cs.getUpdateCount();</span>
+<span class="pc bpc" id="L1225" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1226">				logger.trace(&quot;CallableStatement.execute() returned '&quot; + retVal + &quot;'&quot;);</span>
+<span class="nc" id="L1227">				logger.trace(&quot;CallableStatement.getUpdateCount() returned &quot; + updateCount);</span>
+			}
+<span class="fc" id="L1229">			Map&lt;String, @Nullable Object&gt; resultsMap = createResultsMap();</span>
+<span class="pc bpc" id="L1230" title="1 of 4 branches missed.">			if (retVal || updateCount != -1) {</span>
+<span class="fc" id="L1231">				resultsMap.putAll(extractReturnedResults(cs, updateCountParameters, resultSetParameters, updateCount));</span>
+			}
+<span class="fc" id="L1233">			resultsMap.putAll(extractOutputParameters(cs, callParameters));</span>
+<span class="fc" id="L1234">			return resultsMap;</span>
+		});
+
+<span class="pc bpc" id="L1237" title="1 of 2 branches missed.">		Assert.state(result != null, &quot;No result map&quot;);</span>
+<span class="fc" id="L1238">		return result;</span>
+	}
+
+	/**
+	 * Extract returned ResultSets from the completed stored procedure.
+	 * @param cs a JDBC wrapper for the stored procedure
+	 * @param updateCountParameters the parameter list of declared update count parameters for the stored procedure
+	 * @param resultSetParameters the parameter list of declared resultSet parameters for the stored procedure
+	 * @return a Map that contains returned results
+	 */
+	protected Map&lt;String, @Nullable Object&gt; extractReturnedResults(CallableStatement cs,
+			@Nullable List&lt;SqlParameter&gt; updateCountParameters, @Nullable List&lt;SqlParameter&gt; resultSetParameters,
+			int updateCount) throws SQLException {
+
+<span class="fc" id="L1252">		Map&lt;String, @Nullable Object&gt; results = new LinkedHashMap&lt;&gt;(4);</span>
+<span class="fc" id="L1253">		int rsIndex = 0;</span>
+<span class="fc" id="L1254">		int updateIndex = 0;</span>
+		boolean moreResults;
+<span class="fc bfc" id="L1256" title="All 2 branches covered.">		if (!isSkipResultsProcessing()) {</span>
+			do {
+<span class="fc bfc" id="L1258" title="All 2 branches covered.">				if (updateCount == -1) {</span>
+<span class="pc bpc" id="L1259" title="1 of 4 branches missed.">					if (resultSetParameters != null &amp;&amp; resultSetParameters.size() &gt; rsIndex) {</span>
+<span class="fc" id="L1260">						SqlReturnResultSet declaredRsParam = (SqlReturnResultSet) resultSetParameters.get(rsIndex);</span>
+<span class="fc" id="L1261">						results.putAll(processResultSet(cs.getResultSet(), declaredRsParam));</span>
+<span class="fc" id="L1262">						rsIndex++;</span>
+<span class="fc" id="L1263">					}</span>
+					else {
+<span class="fc bfc" id="L1265" title="All 2 branches covered.">						if (!isSkipUndeclaredResults()) {</span>
+<span class="fc" id="L1266">							String rsName = RETURN_RESULT_SET_PREFIX + (rsIndex + 1);</span>
+<span class="fc" id="L1267">							SqlReturnResultSet undeclaredRsParam = new SqlReturnResultSet(rsName, getColumnMapRowMapper());</span>
+<span class="pc bpc" id="L1268" title="1 of 2 branches missed.">							if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1269">								logger.trace(&quot;Added default SqlReturnResultSet parameter named '&quot; + rsName + &quot;'&quot;);</span>
+							}
+<span class="fc" id="L1271">							results.putAll(processResultSet(cs.getResultSet(), undeclaredRsParam));</span>
+<span class="fc" id="L1272">							rsIndex++;</span>
+<span class="fc" id="L1273">						}</span>
+					}
+				}
+				else {
+<span class="pc bpc" id="L1277" title="2 of 4 branches missed.">					if (updateCountParameters != null &amp;&amp; updateCountParameters.size() &gt; updateIndex) {</span>
+<span class="nc" id="L1278">						SqlReturnUpdateCount ucParam = (SqlReturnUpdateCount) updateCountParameters.get(updateIndex);</span>
+<span class="nc" id="L1279">						String declaredUcName = ucParam.getName();</span>
+<span class="nc" id="L1280">						results.put(declaredUcName, updateCount);</span>
+<span class="nc" id="L1281">						updateIndex++;</span>
+<span class="nc" id="L1282">					}</span>
+					else {
+<span class="pc bpc" id="L1284" title="1 of 2 branches missed.">						if (!isSkipUndeclaredResults()) {</span>
+<span class="fc" id="L1285">							String undeclaredName = RETURN_UPDATE_COUNT_PREFIX + (updateIndex + 1);</span>
+<span class="pc bpc" id="L1286" title="1 of 2 branches missed.">							if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1287">								logger.trace(&quot;Added default SqlReturnUpdateCount parameter named '&quot; + undeclaredName + &quot;'&quot;);</span>
+							}
+<span class="fc" id="L1289">							results.put(undeclaredName, updateCount);</span>
+<span class="fc" id="L1290">							updateIndex++;</span>
+						}
+					}
+				}
+<span class="fc" id="L1294">				moreResults = cs.getMoreResults();</span>
+<span class="fc" id="L1295">				updateCount = cs.getUpdateCount();</span>
+<span class="pc bpc" id="L1296" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1297">					logger.trace(&quot;CallableStatement.getUpdateCount() returned &quot; + updateCount);</span>
+				}
+			}
+<span class="fc bfc" id="L1300" title="All 4 branches covered.">			while (moreResults || updateCount != -1);</span>
+		}
+<span class="fc" id="L1302">		return results;</span>
+	}
+
+	/**
+	 * Extract output parameters from the completed stored procedure.
+	 * @param cs the JDBC wrapper for the stored procedure
+	 * @param parameters parameter list for the stored procedure
+	 * @return a Map that contains returned results
+	 */
+	protected Map&lt;String, @Nullable Object&gt; extractOutputParameters(CallableStatement cs, List&lt;SqlParameter&gt; parameters)
+			throws SQLException {
+
+<span class="fc" id="L1314">		Map&lt;String, @Nullable Object&gt; results = CollectionUtils.newLinkedHashMap(parameters.size());</span>
+<span class="fc" id="L1315">		int sqlColIndex = 1;</span>
+<span class="fc bfc" id="L1316" title="All 2 branches covered.">		for (SqlParameter param : parameters) {</span>
+<span class="fc bfc" id="L1317" title="All 2 branches covered.">			if (param instanceof SqlOutParameter outParam) {</span>
+<span class="pc bpc" id="L1318" title="1 of 2 branches missed.">				Assert.state(outParam.getName() != null, &quot;Anonymous parameters not allowed&quot;);</span>
+<span class="fc" id="L1319">				SqlReturnType returnType = outParam.getSqlReturnType();</span>
+<span class="pc bpc" id="L1320" title="1 of 2 branches missed.">				if (returnType != null) {</span>
+<span class="nc" id="L1321">					Object out = returnType.getTypeValue(cs, sqlColIndex, outParam.getSqlType(), outParam.getTypeName());</span>
+<span class="nc" id="L1322">					results.put(outParam.getName(), out);</span>
+<span class="nc" id="L1323">				}</span>
+				else {
+<span class="fc" id="L1325">					Object out = cs.getObject(sqlColIndex);</span>
+<span class="pc bpc" id="L1326" title="1 of 2 branches missed.">					if (out instanceof ResultSet resultSet) {</span>
+<span class="nc bnc" id="L1327" title="All 2 branches missed.">						if (outParam.isResultSetSupported()) {</span>
+<span class="nc" id="L1328">							results.putAll(processResultSet(resultSet, outParam));</span>
+						}
+						else {
+<span class="nc" id="L1331">							String rsName = outParam.getName();</span>
+<span class="nc" id="L1332">							SqlReturnResultSet rsParam = new SqlReturnResultSet(rsName, getColumnMapRowMapper());</span>
+<span class="nc" id="L1333">							results.putAll(processResultSet(resultSet, rsParam));</span>
+<span class="nc bnc" id="L1334" title="All 2 branches missed.">							if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1335">								logger.trace(&quot;Added default SqlReturnResultSet parameter named '&quot; + rsName + &quot;'&quot;);</span>
+							}
+<span class="nc" id="L1337">						}</span>
+					}
+					else {
+<span class="fc" id="L1340">						results.put(outParam.getName(), out);</span>
+					}
+				}
+			}
+<span class="pc bpc" id="L1344" title="1 of 2 branches missed.">			if (!param.isResultsParameter()) {</span>
+<span class="fc" id="L1345">				sqlColIndex++;</span>
+			}
+<span class="fc" id="L1347">		}</span>
+<span class="fc" id="L1348">		return results;</span>
+	}
+
+	/**
+	 * Process the given ResultSet from a stored procedure.
+	 * @param rs the ResultSet to process
+	 * @param param the corresponding stored procedure parameter
+	 * @return a Map that contains returned results
+	 */
+	@SuppressWarnings(&quot;NullAway&quot;) // See https://github.com/uber/NullAway/issues/950
+	protected Map&lt;@Nullable String, @Nullable Object&gt; processResultSet(
+			@Nullable ResultSet rs, ResultSetSupportingSqlParameter param) throws SQLException {
+
+<span class="pc bpc" id="L1361" title="1 of 2 branches missed.">		if (rs != null) {</span>
+			try {
+<span class="fc bfc" id="L1363" title="All 2 branches covered.">				if (param.getRowMapper() != null) {</span>
+<span class="fc" id="L1364">					RowMapper&lt;? extends @Nullable Object&gt; rowMapper = param.getRowMapper();</span>
+<span class="fc" id="L1365">					Object data = (new RowMapperResultSetExtractor&lt;&gt;(rowMapper)).extractData(rs);</span>
+<span class="fc" id="L1366">					return Collections.singletonMap(param.getName(), data);</span>
+				}
+<span class="pc bpc" id="L1368" title="1 of 2 branches missed.">				else if (param.getRowCallbackHandler() != null) {</span>
+<span class="fc" id="L1369">					RowCallbackHandler rch = param.getRowCallbackHandler();</span>
+<span class="fc" id="L1370">					(new RowCallbackHandlerResultSetExtractor(rch, -1)).extractData(rs);</span>
+<span class="fc" id="L1371">					return Collections.singletonMap(param.getName(),</span>
+							&quot;ResultSet returned from stored procedure was processed&quot;);
+				}
+<span class="nc bnc" id="L1374" title="All 2 branches missed.">				else if (param.getResultSetExtractor() != null) {</span>
+<span class="nc" id="L1375">					Object data = param.getResultSetExtractor().extractData(rs);</span>
+<span class="nc" id="L1376">					return Collections.singletonMap(param.getName(), data);</span>
+				}
+			}
+			finally {
+<span class="fc" id="L1380">				JdbcUtils.closeResultSet(rs);</span>
+			}
+		}
+<span class="nc" id="L1383">		return Collections.emptyMap();</span>
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Implementation hooks and helper methods
+	//-------------------------------------------------------------------------
+
+	/**
+	 * Create a new RowMapper for reading columns as key-value pairs.
+	 * @return the RowMapper to use
+	 * @see ColumnMapRowMapper
+	 */
+	protected RowMapper&lt;Map&lt;String, @Nullable Object&gt;&gt; getColumnMapRowMapper() {
+<span class="fc" id="L1397">		return new ColumnMapRowMapper();</span>
+	}
+
+	/**
+	 * Create a new RowMapper for reading result objects from a single column.
+	 * @param requiredType the type that each result object is expected to match
+	 * @return the RowMapper to use
+	 * @see SingleColumnRowMapper
+	 */
+	protected &lt;T&gt; RowMapper&lt;@Nullable T&gt; getSingleColumnRowMapper(Class&lt;T&gt; requiredType) {
+<span class="fc" id="L1407">		return new SingleColumnRowMapper&lt;&gt;(requiredType);</span>
+	}
+
+	/**
+	 * Create a Map instance to be used as the results map.
+	 * &lt;p&gt;If {@link #resultsMapCaseInsensitive} has been set to true,
+	 * a {@link LinkedCaseInsensitiveMap} will be created; otherwise, a
+	 * {@link LinkedHashMap} will be created.
+	 * @return the results Map instance
+	 * @see #setResultsMapCaseInsensitive
+	 * @see #isResultsMapCaseInsensitive
+	 */
+	protected Map&lt;String, @Nullable Object&gt; createResultsMap() {
+<span class="fc bfc" id="L1420" title="All 2 branches covered.">		if (isResultsMapCaseInsensitive()) {</span>
+<span class="fc" id="L1421">			return new LinkedCaseInsensitiveMap&lt;&gt;();</span>
+		}
+		else {
+<span class="fc" id="L1424">			return new LinkedHashMap&lt;&gt;();</span>
+		}
+	}
+
+	/**
+	 * Prepare the given JDBC Statement (or PreparedStatement or CallableStatement),
+	 * applying statement settings such as fetch size, max rows, and query timeout.
+	 * @param stmt the JDBC Statement to prepare
+	 * @throws SQLException if thrown by JDBC API
+	 * @see #setFetchSize
+	 * @see #setMaxRows
+	 * @see #setQueryTimeout
+	 * @see org.springframework.jdbc.datasource.DataSourceUtils#applyTransactionTimeout
+	 */
+	protected void applyStatementSettings(Statement stmt) throws SQLException {
+<span class="fc" id="L1439">		int fetchSize = getFetchSize();</span>
+<span class="fc bfc" id="L1440" title="All 2 branches covered.">		if (fetchSize != -1) {</span>
+<span class="fc" id="L1441">			stmt.setFetchSize(fetchSize);</span>
+		}
+<span class="fc" id="L1443">		int maxRows = getMaxRows();</span>
+<span class="fc bfc" id="L1444" title="All 2 branches covered.">		if (maxRows != -1) {</span>
+<span class="fc" id="L1445">			stmt.setMaxRows(maxRows);</span>
+		}
+<span class="fc" id="L1447">		DataSourceUtils.applyTimeout(stmt, getDataSource(), getQueryTimeout());</span>
+<span class="fc" id="L1448">	}</span>
+
+	/**
+	 * Create a new arg-based PreparedStatementSetter using the args passed in.
+	 * &lt;p&gt;By default, we'll create an {@link ArgumentPreparedStatementSetter}.
+	 * This method allows for the creation to be overridden by subclasses.
+	 * @param args object array with arguments
+	 * @return the new PreparedStatementSetter to use
+	 */
+	protected PreparedStatementSetter newArgPreparedStatementSetter(@Nullable Object @Nullable [] args) {
+<span class="fc" id="L1458">		return new ArgumentPreparedStatementSetter(args);</span>
+	}
+
+	/**
+	 * Create a new arg-type-based PreparedStatementSetter using the args and types passed in.
+	 * &lt;p&gt;By default, we'll create an {@link ArgumentTypePreparedStatementSetter}.
+	 * This method allows for the creation to be overridden by subclasses.
+	 * @param args object array with arguments
+	 * @param argTypes int array of SQLTypes for the associated arguments
+	 * @return the new PreparedStatementSetter to use
+	 */
+	protected PreparedStatementSetter newArgTypePreparedStatementSetter(@Nullable Object @Nullable [] args, int[] argTypes) {
+<span class="fc" id="L1470">		return new ArgumentTypePreparedStatementSetter(args, argTypes);</span>
+	}
+
+	/**
+	 * Handle warnings before propagating a primary {@code SQLException}
+	 * from executing the given statement.
+	 * &lt;p&gt;Calls regular {@link #handleWarnings(Statement)} but catches
+	 * {@link SQLWarningException} in order to chain the {@link SQLWarning}
+	 * into the primary exception instead.
+	 * @param stmt the current JDBC statement
+	 * @param ex the primary exception after failed statement execution
+	 * @since 5.3.29
+	 * @see #handleWarnings(Statement)
+	 * @see SQLException#setNextException
+	 */
+	protected void handleWarnings(Statement stmt, SQLException ex) {
+		try {
+<span class="fc" id="L1487">			handleWarnings(stmt);</span>
+		}
+<span class="nc" id="L1489">		catch (SQLWarningException nonIgnoredWarning) {</span>
+<span class="nc" id="L1490">			ex.setNextException(nonIgnoredWarning.getSQLWarning());</span>
+		}
+<span class="nc" id="L1492">		catch (SQLException warningsEx) {</span>
+<span class="nc" id="L1493">			logger.debug(&quot;Failed to retrieve warnings&quot;, warningsEx);</span>
+		}
+<span class="nc" id="L1495">		catch (Throwable warningsEx) {</span>
+<span class="nc" id="L1496">			logger.debug(&quot;Failed to process warnings&quot;, warningsEx);</span>
+<span class="pc" id="L1497">		}</span>
+<span class="fc" id="L1498">	}</span>
+
+	/**
+	 * Handle the warnings for the given JDBC statement, if any.
+	 * &lt;p&gt;Throws a {@link SQLWarningException} if we're not ignoring warnings,
+	 * otherwise logs the warnings at debug level.
+	 * @param stmt the current JDBC statement
+	 * @throws SQLException in case of warnings retrieval failure
+	 * @throws SQLWarningException for a concrete warning to raise
+	 * (when not ignoring warnings)
+	 * @see #setIgnoreWarnings
+	 * @see #handleWarnings(SQLWarning)
+	 */
+	protected void handleWarnings(Statement stmt) throws SQLException, SQLWarningException {
+<span class="pc bpc" id="L1512" title="1 of 2 branches missed.">		if (isIgnoreWarnings()) {</span>
+<span class="pc bpc" id="L1513" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1514">				SQLWarning warningToLog = stmt.getWarnings();</span>
+<span class="nc bnc" id="L1515" title="All 2 branches missed.">				while (warningToLog != null) {</span>
+<span class="nc" id="L1516">					logger.debug(&quot;SQLWarning ignored: SQL state '&quot; + warningToLog.getSQLState() + &quot;', error code '&quot; +</span>
+<span class="nc" id="L1517">							warningToLog.getErrorCode() + &quot;', message [&quot; + warningToLog.getMessage() + &quot;]&quot;);</span>
+<span class="nc" id="L1518">					warningToLog = warningToLog.getNextWarning();</span>
+				}
+<span class="nc" id="L1520">			}</span>
+		}
+		else {
+<span class="nc" id="L1523">			handleWarnings(stmt.getWarnings());</span>
+		}
+<span class="fc" id="L1525">	}</span>
+
+	/**
+	 * Throw a {@link SQLWarningException} if encountering an actual warning.
+	 * @param warning the warnings object from the current statement.
+	 * May be {@code null}, in which case this method does nothing.
+	 * @throws SQLWarningException in case of an actual warning to be raised
+	 */
+	protected void handleWarnings(@Nullable SQLWarning warning) throws SQLWarningException {
+<span class="pc bpc" id="L1534" title="1 of 2 branches missed.">		if (warning != null) {</span>
+<span class="fc" id="L1535">			throw new SQLWarningException(&quot;Warning not ignored&quot;, warning);</span>
+		}
+<span class="nc" id="L1537">	}</span>
+
+	/**
+	 * Translate the given {@link SQLException} into a generic {@link DataAccessException}.
+	 * @param task readable text describing the task being attempted
+	 * @param sql the SQL query or update that caused the problem (may be {@code null})
+	 * @param ex the offending {@code SQLException}
+	 * @return a DataAccessException wrapping the {@code SQLException} (never {@code null})
+	 * @since 5.0
+	 * @see #getExceptionTranslator()
+	 */
+	protected DataAccessException translateException(String task, @Nullable String sql, SQLException ex) {
+<span class="fc" id="L1549">		DataAccessException dae = getExceptionTranslator().translate(task, sql, ex);</span>
+<span class="fc bfc" id="L1550" title="All 2 branches covered.">		return (dae != null ? dae : new UncategorizedSQLException(task, sql, ex));</span>
+	}
+
+
+	/**
+	 * Determine SQL from potential provider object.
+	 * @param obj object which is potentially an SqlProvider
+	 * @return the SQL string, or {@code null} if not known
+	 * @see SqlProvider
+	 */
+	private static @Nullable String getSql(Object obj) {
+<span class="fc bfc" id="L1561" title="All 2 branches covered.">		return (obj instanceof SqlProvider sqlProvider ? sqlProvider.getSql() : null);</span>
+	}
+
+	private static &lt;T&gt; T result(@Nullable T result) {
+<span class="pc bpc" id="L1565" title="1 of 2 branches missed.">		Assert.state(result != null, &quot;No result&quot;);</span>
+<span class="fc" id="L1566">		return result;</span>
+	}
+
+	private static int updateCount(@Nullable Integer result) {
+<span class="pc bpc" id="L1570" title="1 of 2 branches missed.">		Assert.state(result != null, &quot;No update count&quot;);</span>
+<span class="fc" id="L1571">		return result;</span>
+	}
+
+	private void storeGeneratedKeys(KeyHolder generatedKeyHolder, PreparedStatement ps, int rowsExpected)
+			throws SQLException {
+
+<span class="fc" id="L1577">		List&lt;Map&lt;String, Object&gt;&gt; generatedKeys = generatedKeyHolder.getKeyList();</span>
+<span class="fc" id="L1578">		ResultSet keys = ps.getGeneratedKeys();</span>
+<span class="pc bpc" id="L1579" title="1 of 2 branches missed.">		if (keys != null) {</span>
+			try {
+<span class="fc" id="L1581">				RowMapperResultSetExtractor&lt;Map&lt;String, @Nullable Object&gt;&gt; rse =</span>
+<span class="fc" id="L1582">						new RowMapperResultSetExtractor&lt;&gt;(getColumnMapRowMapper(), rowsExpected);</span>
+<span class="fc" id="L1583">				generatedKeys.addAll(result(rse.extractData(keys)));</span>
+			}
+			finally {
+<span class="fc" id="L1586">				JdbcUtils.closeResultSet(keys);</span>
+			}
+		}
+<span class="fc" id="L1589">	}</span>
+
+	private PreparedStatementCallback&lt;int[]&gt; getPreparedStatementCallback(BatchPreparedStatementSetter pss,
+			@Nullable KeyHolder generatedKeyHolder) {
+<span class="fc" id="L1593">		return ps -&gt; {</span>
+			try {
+<span class="fc" id="L1595">				int batchSize = pss.getBatchSize();</span>
+				InterruptibleBatchPreparedStatementSetter ipss =
+<span class="fc bfc" id="L1597" title="All 2 branches covered.">						(pss instanceof InterruptibleBatchPreparedStatementSetter ibpss ? ibpss : null);</span>
+<span class="fc bfc" id="L1598" title="All 2 branches covered.">				if (generatedKeyHolder != null) {</span>
+<span class="fc" id="L1599">					generatedKeyHolder.getKeyList().clear();</span>
+				}
+<span class="fc bfc" id="L1601" title="All 2 branches covered.">				if (JdbcUtils.supportsBatchUpdates(ps.getConnection())) {</span>
+<span class="fc bfc" id="L1602" title="All 2 branches covered.">					for (int i = 0; i &lt; batchSize; i++) {</span>
+<span class="fc" id="L1603">						pss.setValues(ps, i);</span>
+<span class="fc bfc" id="L1604" title="All 4 branches covered.">						if (ipss != null &amp;&amp; ipss.isBatchExhausted(i)) {</span>
+<span class="fc" id="L1605">							break;</span>
+						}
+<span class="fc" id="L1607">						ps.addBatch();</span>
+					}
+<span class="fc" id="L1609">					int[] results = ps.executeBatch();</span>
+<span class="fc bfc" id="L1610" title="All 2 branches covered.">					if (generatedKeyHolder != null) {</span>
+<span class="fc" id="L1611">						storeGeneratedKeys(generatedKeyHolder, ps, batchSize);</span>
+					}
+<span class="fc" id="L1613">					return results;</span>
+				}
+				else {
+<span class="fc" id="L1616">					List&lt;Integer&gt; rowsAffected = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L1617" title="All 2 branches covered.">					for (int i = 0; i &lt; batchSize; i++) {</span>
+<span class="fc" id="L1618">						pss.setValues(ps, i);</span>
+<span class="fc bfc" id="L1619" title="All 4 branches covered.">						if (ipss != null &amp;&amp; ipss.isBatchExhausted(i)) {</span>
+<span class="fc" id="L1620">							break;</span>
+						}
+<span class="fc" id="L1622">						rowsAffected.add(ps.executeUpdate());</span>
+<span class="fc bfc" id="L1623" title="All 2 branches covered.">						if (generatedKeyHolder != null) {</span>
+<span class="fc" id="L1624">							storeGeneratedKeys(generatedKeyHolder, ps, 1);</span>
+						}
+					}
+<span class="fc" id="L1627">					int[] rowsAffectedArray = new int[rowsAffected.size()];</span>
+<span class="fc bfc" id="L1628" title="All 2 branches covered.">					for (int i = 0; i &lt; rowsAffectedArray.length; i++) {</span>
+<span class="fc" id="L1629">						rowsAffectedArray[i] = rowsAffected.get(i);</span>
+					}
+<span class="fc" id="L1631">					return rowsAffectedArray;</span>
+				}
+			}
+			finally {
+<span class="pc bpc" id="L1635" title="1 of 2 branches missed.">				if (pss instanceof ParameterDisposer parameterDisposer) {</span>
+<span class="nc" id="L1636">					parameterDisposer.cleanupParameters();</span>
+				}
+			}
+		};
+	}
+
+
+	/**
+	 * Invocation handler that suppresses close calls on JDBC Connections.
+	 * Also prepares returned Statement (Prepared/CallbackStatement) objects.
+	 * @see java.sql.Connection#close()
+	 */
+	private class CloseSuppressingInvocationHandler implements InvocationHandler {
+
+		private final Connection target;
+
+<span class="fc" id="L1652">		public CloseSuppressingInvocationHandler(Connection target) {</span>
+<span class="fc" id="L1653">			this.target = target;</span>
+<span class="fc" id="L1654">		}</span>
+
+		@Override
+		public @Nullable Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+			// Invocation on ConnectionProxy interface coming in...
+
+<span class="pc bpc" id="L1660" title="6 of 8 branches missed.">			return switch (method.getName()) {</span>
+				// Only consider equal when proxies are identical.
+<span class="nc bnc" id="L1662" title="All 2 branches missed.">				case &quot;equals&quot; -&gt; (proxy == args[0]);</span>
+				// Use hashCode of Connection proxy.
+<span class="nc" id="L1664">				case &quot;hashCode&quot; -&gt; System.identityHashCode(proxy);</span>
+				// Handle close method: suppress, not valid.
+<span class="nc" id="L1666">				case &quot;close&quot; -&gt; null;</span>
+<span class="nc" id="L1667">				case &quot;isClosed&quot; -&gt; false;</span>
+				// Handle getTargetConnection method: return underlying Connection.
+<span class="fc" id="L1669">				case &quot;getTargetConnection&quot; -&gt; this.target;</span>
+				case &quot;unwrap&quot; -&gt;
+<span class="nc bnc" id="L1671" title="All 2 branches missed.">						(((Class&lt;?&gt;) args[0]).isInstance(proxy) ? proxy : this.target.unwrap((Class&lt;?&gt;) args[0]));</span>
+				case &quot;isWrapperFor&quot; -&gt;
+<span class="nc bnc" id="L1673" title="All 4 branches missed.">						(((Class&lt;?&gt;) args[0]).isInstance(proxy) || this.target.isWrapperFor((Class&lt;?&gt;) args[0]));</span>
+				default -&gt; {
+					try {
+						// Invoke method on target Connection.
+<span class="fc" id="L1677">						Object retVal = method.invoke(this.target, args);</span>
+
+						// If return value is a JDBC Statement, apply statement settings
+						// (fetch size, max rows, transaction timeout).
+<span class="pc bpc" id="L1681" title="1 of 2 branches missed.">						if (retVal instanceof Statement statement) {</span>
+<span class="fc" id="L1682">							applyStatementSettings(statement);</span>
+						}
+
+<span class="fc" id="L1685">						yield retVal;</span>
+					}
+<span class="nc" id="L1687">					catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L1688">						throw ex.getTargetException();</span>
+					}
+				}
+			};
+		}
+	}
+
+
+	/**
+	 * Simple adapter for PreparedStatementCreator, allowing to use a plain SQL statement.
+	 */
+	private static class SimplePreparedStatementCreator implements PreparedStatementCreator, SqlProvider {
+
+		private final String sql;
+
+<span class="fc" id="L1703">		public SimplePreparedStatementCreator(String sql) {</span>
+<span class="fc" id="L1704">			Assert.notNull(sql, &quot;SQL must not be null&quot;);</span>
+<span class="fc" id="L1705">			this.sql = sql;</span>
+<span class="fc" id="L1706">		}</span>
+
+		@Override
+		public PreparedStatement createPreparedStatement(Connection con) throws SQLException {
+<span class="fc" id="L1710">			return con.prepareStatement(this.sql);</span>
+		}
+
+		@Override
+		public String getSql() {
+<span class="fc" id="L1715">			return this.sql;</span>
+		}
+	}
+
+
+	/**
+	 * Simple adapter for CallableStatementCreator, allowing to use a plain SQL statement.
+	 */
+	private static class SimpleCallableStatementCreator implements CallableStatementCreator, SqlProvider {
+
+		private final String callString;
+
+<span class="nc" id="L1727">		public SimpleCallableStatementCreator(String callString) {</span>
+<span class="nc" id="L1728">			Assert.notNull(callString, &quot;Call string must not be null&quot;);</span>
+<span class="nc" id="L1729">			this.callString = callString;</span>
+<span class="nc" id="L1730">		}</span>
+
+		@Override
+		public CallableStatement createCallableStatement(Connection con) throws SQLException {
+<span class="nc" id="L1734">			return con.prepareCall(this.callString);</span>
+		}
+
+		@Override
+		public String getSql() {
+<span class="nc" id="L1739">			return this.callString;</span>
+		}
+	}
+
+
+	/**
+	 * Adapter to enable use of a RowCallbackHandler inside a ResultSetExtractor.
+	 * &lt;p&gt;Uses a regular ResultSet, so we have to be careful when using it:
+	 * We don't use it for navigating since this could lead to unpredictable consequences.
+	 */
+	private static class RowCallbackHandlerResultSetExtractor implements ResultSetExtractor&lt;@Nullable Object&gt; {
+
+		private final RowCallbackHandler rch;
+
+		private final int maxRows;
+
+<span class="fc" id="L1755">		public RowCallbackHandlerResultSetExtractor(RowCallbackHandler rch, int maxRows) {</span>
+<span class="fc" id="L1756">			this.rch = rch;</span>
+<span class="fc" id="L1757">			this.maxRows = maxRows;</span>
+<span class="fc" id="L1758">		}</span>
+
+		@Override
+		public @Nullable Object extractData(ResultSet rs) throws SQLException {
+<span class="fc" id="L1762">			int processed = 0;</span>
+<span class="fc bfc" id="L1763" title="All 6 branches covered.">			while (rs.next() &amp;&amp; (this.maxRows == -1 || (processed++) &lt; this.maxRows)) {</span>
+<span class="fc" id="L1764">				this.rch.processRow(rs);</span>
+			}
+<span class="fc" id="L1766">			return null;</span>
+		}
+	}
+
+
+	/**
+	 * Spliterator for queryForStream adaptation of a ResultSet to a Stream.
+	 * @since 5.3
+	 */
+	private static class ResultSetSpliterator&lt;T&gt; implements Spliterator&lt;T&gt; {
+
+		private final ResultSet rs;
+
+		private final RowMapper&lt;T&gt; rowMapper;
+
+		private final int maxRows;
+
+<span class="fc" id="L1783">		private int rowNum = 0;</span>
+
+<span class="fc" id="L1785">		public ResultSetSpliterator(ResultSet rs, RowMapper&lt;T&gt; rowMapper, int maxRows) {</span>
+<span class="fc" id="L1786">			this.rs = rs;</span>
+<span class="fc" id="L1787">			this.rowMapper = rowMapper;</span>
+<span class="fc" id="L1788">			this.maxRows = maxRows;</span>
+<span class="fc" id="L1789">		}</span>
+
+		@Override
+		public boolean tryAdvance(Consumer&lt;? super T&gt; action) {
+			try {
+<span class="fc bfc" id="L1794" title="All 6 branches covered.">				if (this.rs.next() &amp;&amp; (this.maxRows == -1 || this.rowNum &lt; this.maxRows)) {</span>
+<span class="fc" id="L1795">					action.accept(this.rowMapper.mapRow(this.rs, this.rowNum++));</span>
+<span class="fc" id="L1796">					return true;</span>
+				}
+<span class="fc" id="L1798">				return false;</span>
+			}
+<span class="nc" id="L1800">			catch (SQLException ex) {</span>
+<span class="nc" id="L1801">				throw new InvalidResultSetAccessException(ex);</span>
+			}
+		}
+
+		@Override
+		public @Nullable Spliterator&lt;T&gt; trySplit() {
+<span class="nc" id="L1807">			return null;</span>
+		}
+
+		@Override
+		public long estimateSize() {
+<span class="nc" id="L1812">			return Long.MAX_VALUE;</span>
+		}
+
+		@Override
+		public int characteristics() {
+<span class="fc" id="L1817">			return Spliterator.ORDERED;</span>
+		}
+
+		public Stream&lt;T&gt; stream() {
+<span class="fc" id="L1821">			return StreamSupport.stream(this, false);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

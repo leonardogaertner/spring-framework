@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TransactionAwareConnectionFactoryProxy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.r2dbc.connection</a> &gt; <span class="el_source">TransactionAwareConnectionFactoryProxy.java</span></div><h1>TransactionAwareConnectionFactoryProxy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.r2dbc.connection;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+
+import io.r2dbc.spi.Connection;
+import io.r2dbc.spi.ConnectionFactory;
+import io.r2dbc.spi.Wrapped;
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Mono;
+
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * Proxy for a target R2DBC {@link ConnectionFactory}, adding awareness
+ * of Spring-managed transactions.
+ *
+ * &lt;p&gt;Data access code that should remain unaware of Spring's data access
+ * support can work with this proxy to seamlessly participate in
+ * Spring-managed transactions.
+ * Note that the transaction manager, for example {@link R2dbcTransactionManager},
+ * still needs to work with the underlying {@link ConnectionFactory},
+ * &lt;i&gt;not&lt;/i&gt; with this proxy.
+ *
+ * &lt;p&gt;&lt;b&gt;Make sure that {@link TransactionAwareConnectionFactoryProxy} is the outermost
+ * {@link ConnectionFactory} of a chain of {@link ConnectionFactory} proxies/adapters.&lt;/b&gt;
+ * {@link TransactionAwareConnectionFactoryProxy} can delegate either directly to the
+ * target connection pool or to some intermediary proxy/adapter.
+ *
+ * &lt;p&gt;Delegates to {@link ConnectionFactoryUtils} for automatically participating
+ * in thread-bound transactions, for example managed by {@link R2dbcTransactionManager}.
+ * {@link #create()} calls and {@code close} calls on returned {@link Connection}
+ * will behave properly within a transaction, i.e. always operate on the
+ * transactional Connection. If not within a transaction, normal {@link ConnectionFactory}
+ * behavior applies.
+ *
+ * &lt;p&gt; This proxy allows data access code to work with the plain R2DBC API. However,
+ * if possible, use Spring's {@link ConnectionFactoryUtils} or {@code DatabaseClient}
+ * to get transaction participation even without a proxy for the target
+ * {@link ConnectionFactory}, avoiding the need to define such a proxy in the first place.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; This {@link ConnectionFactory} proxy needs to return wrapped
+ * {@link Connection}s in order to handle close calls properly.
+ * Use {@link Wrapped#unwrap()} to retrieve the native R2DBC Connection.
+ *
+ * @author Mark Paluch
+ * @author Christoph Strobl
+ * @since 5.3
+ * @see ConnectionFactory#create
+ * @see Connection#close
+ * @see ConnectionFactoryUtils#doGetConnection
+ * @see ConnectionFactoryUtils#doReleaseConnection
+ */
+public class TransactionAwareConnectionFactoryProxy extends DelegatingConnectionFactory {
+
+	/**
+	 * Create a new {@link TransactionAwareConnectionFactoryProxy}.
+	 * @param targetConnectionFactory the target {@link ConnectionFactory}
+	 */
+	public TransactionAwareConnectionFactoryProxy(ConnectionFactory targetConnectionFactory) {
+<span class="fc" id="L79">		super(targetConnectionFactory);</span>
+<span class="fc" id="L80">	}</span>
+
+
+	/**
+	 * Delegates to {@link ConnectionFactoryUtils} for automatically participating
+	 * in Spring-managed transactions.
+	 * @return a transactional {@link Connection} if any, a new one else.
+	 * @see ConnectionFactoryUtils#doGetConnection
+	 */
+	@Override
+	public Mono&lt;Connection&gt; create() {
+<span class="fc" id="L91">		return getTransactionAwareConnectionProxy(getTargetConnectionFactory());</span>
+	}
+
+	/**
+	 * Wraps the given {@link Connection} with a proxy that delegates every method call
+	 * to it but delegates {@code close()} calls to {@link ConnectionFactoryUtils}.
+	 * @param targetConnectionFactory the {@link ConnectionFactory} that the {@link Connection} came from
+	 * @return the wrapped {@link Connection}.
+	 * @see Connection#close()
+	 * @see ConnectionFactoryUtils#doReleaseConnection
+	 */
+	protected Mono&lt;Connection&gt; getTransactionAwareConnectionProxy(ConnectionFactory targetConnectionFactory) {
+<span class="fc" id="L103">		return ConnectionFactoryUtils.getConnection(targetConnectionFactory)</span>
+<span class="fc" id="L104">				.map(connection -&gt; proxyConnection(connection, targetConnectionFactory));</span>
+	}
+
+	private static Connection proxyConnection(Connection connection, ConnectionFactory targetConnectionFactory) {
+<span class="fc" id="L108">		return (Connection) Proxy.newProxyInstance(TransactionAwareConnectionFactoryProxy.class.getClassLoader(),</span>
+				new Class&lt;?&gt;[] {Connection.class, Wrapped.class},
+				new TransactionAwareInvocationHandler(connection, targetConnectionFactory));
+	}
+
+
+	/**
+	 * Invocation handler that delegates close calls on R2DBC Connections to
+	 * {@link ConnectionFactoryUtils} for being aware of context-bound transactions.
+	 */
+	private static class TransactionAwareInvocationHandler implements InvocationHandler {
+
+		private final Connection connection;
+
+		private final ConnectionFactory targetConnectionFactory;
+
+<span class="fc" id="L124">		private boolean closed = false;</span>
+
+<span class="fc" id="L126">		TransactionAwareInvocationHandler(Connection connection, ConnectionFactory targetConnectionFactory) {</span>
+<span class="fc" id="L127">			this.connection = connection;</span>
+<span class="fc" id="L128">			this.targetConnectionFactory = targetConnectionFactory;</span>
+<span class="fc" id="L129">		}</span>
+
+		@Override
+		public @Nullable Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+<span class="fc bfc" id="L133" title="All 2 branches covered.">			if (ReflectionUtils.isObjectMethod(method)) {</span>
+<span class="pc bpc" id="L134" title="1 of 2 branches missed.">				if (ReflectionUtils.isToStringMethod(method)) {</span>
+<span class="nc" id="L135">					return proxyToString(proxy);</span>
+				}
+<span class="fc bfc" id="L137" title="All 2 branches covered.">				if (ReflectionUtils.isEqualsMethod(method)) {</span>
+<span class="fc bfc" id="L138" title="All 2 branches covered.">					return (proxy == args[0]);</span>
+				}
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">				if (ReflectionUtils.isHashCodeMethod(method)) {</span>
+<span class="fc" id="L141">					return System.identityHashCode(proxy);</span>
+				}
+			}
+
+<span class="pc bpc" id="L145" title="1 of 4 branches missed.">			return switch (method.getName()) {</span>
+<span class="fc" id="L146">				case &quot;unwrap&quot; -&gt; this.connection;</span>
+				// Handle close method: only close if not within a transaction.
+<span class="fc" id="L148">				case &quot;close&quot; -&gt; ConnectionFactoryUtils.doReleaseConnection(this.connection, this.targetConnectionFactory)</span>
+<span class="fc" id="L149">							.doOnSubscribe(n -&gt; this.closed = true);</span>
+<span class="nc" id="L150">				case &quot;isClosed&quot; -&gt; this.closed;</span>
+				default -&gt; {
+<span class="pc bpc" id="L152" title="1 of 2 branches missed.">					if (this.closed) {</span>
+<span class="fc" id="L153">						throw new IllegalStateException(&quot;Connection handle already closed&quot;);</span>
+					}
+
+					try {
+						// Invoke method on target Connection.
+<span class="nc" id="L158">						yield method.invoke(this.connection, args);</span>
+					}
+<span class="nc" id="L160">					catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L161">						throw ex.getTargetException();</span>
+					}
+				}
+			};
+		}
+
+		private String proxyToString(@Nullable Object proxy) {
+			// Allow for differentiating between the proxy and the raw Connection.
+<span class="nc" id="L169">			return &quot;Transaction-aware proxy for target Connection [&quot; + this.connection + &quot;]&quot;;</span>
+		}
+
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

@@ -1,0 +1,859 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>GroovyBeanDefinitionReader.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.groovy</a> &gt; <span class="el_source">GroovyBeanDefinitionReader.java</span></div><h1>GroovyBeanDefinitionReader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.groovy;
+
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import groovy.lang.Binding;
+import groovy.lang.Closure;
+import groovy.lang.GString;
+import groovy.lang.GroovyObject;
+import groovy.lang.GroovyObjectSupport;
+import groovy.lang.GroovyShell;
+import groovy.lang.GroovySystem;
+import groovy.lang.MetaClass;
+import org.codehaus.groovy.runtime.DefaultGroovyMethods;
+import org.codehaus.groovy.runtime.InvokerHelper;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.MutablePropertyValues;
+import org.springframework.beans.factory.BeanDefinitionStoreException;
+import org.springframework.beans.factory.config.RuntimeBeanReference;
+import org.springframework.beans.factory.parsing.BeanDefinitionParsingException;
+import org.springframework.beans.factory.parsing.Location;
+import org.springframework.beans.factory.parsing.Problem;
+import org.springframework.beans.factory.support.AbstractBeanDefinition;
+import org.springframework.beans.factory.support.AbstractBeanDefinitionReader;
+import org.springframework.beans.factory.support.BeanDefinitionRegistry;
+import org.springframework.beans.factory.support.GenericBeanDefinition;
+import org.springframework.beans.factory.support.ManagedList;
+import org.springframework.beans.factory.support.ManagedMap;
+import org.springframework.beans.factory.xml.BeanDefinitionParserDelegate;
+import org.springframework.beans.factory.xml.NamespaceHandler;
+import org.springframework.beans.factory.xml.XmlBeanDefinitionReader;
+import org.springframework.beans.factory.xml.XmlReaderContext;
+import org.springframework.core.io.DescriptiveResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.EncodedResource;
+import org.springframework.util.Assert;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * A Groovy-based reader for Spring bean definitions: like a Groovy builder,
+ * but more of a DSL for Spring configuration.
+ *
+ * &lt;p&gt;This bean definition reader also understands XML bean definition files,
+ * allowing for seamless mixing and matching with Groovy bean definition files.
+ *
+ * &lt;p&gt;Typically applied to a
+ * {@link org.springframework.beans.factory.support.DefaultListableBeanFactory}
+ * or a {@link org.springframework.context.support.GenericApplicationContext},
+ * but can be used against any {@link BeanDefinitionRegistry} implementation.
+ *
+ * &lt;h3&gt;Example Syntax&lt;/h3&gt;
+ * &lt;pre class=&quot;code&quot;&gt;
+ * import org.hibernate.SessionFactory
+ * import org.apache.commons.dbcp.BasicDataSource
+ *
+ * def reader = new GroovyBeanDefinitionReader(myApplicationContext)
+ * reader.beans {
+ *     dataSource(BasicDataSource) {                  // &amp;lt;--- invokeMethod
+ *         driverClassName = &quot;org.hsqldb.jdbcDriver&quot;
+ *         url = &quot;jdbc:hsqldb:mem:grailsDB&quot;
+ *         username = &quot;sa&quot;                            // &amp;lt;-- setProperty
+ *         password = &quot;&quot;
+ *         settings = [mynew:&quot;setting&quot;]
+ *     }
+ *     sessionFactory(SessionFactory) {
+ *         dataSource = dataSource                    // &amp;lt;-- getProperty for retrieving references
+ *     }
+ *     myService(MyService) {
+ *         nestedBean = { AnotherBean bean -&amp;gt;         // &amp;lt;-- setProperty with closure for nested bean
+ *             dataSource = dataSource
+ *         }
+ *     }
+ * }&lt;/pre&gt;
+ *
+ * &lt;p&gt;You can also load resources containing beans defined in a Groovy script using
+ * either the {@link #loadBeanDefinitions(Resource...)} or
+ * {@link #loadBeanDefinitions(String...)} method, with a script looking similar to
+ * the following.
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * import org.hibernate.SessionFactory
+ * import org.apache.commons.dbcp.BasicDataSource
+ *
+ * beans {
+ *     dataSource(BasicDataSource) {
+ *         driverClassName = &quot;org.hsqldb.jdbcDriver&quot;
+ *         url = &quot;jdbc:hsqldb:mem:grailsDB&quot;
+ *         username = &quot;sa&quot;
+ *         password = &quot;&quot;
+ *         settings = [mynew:&quot;setting&quot;]
+ *     }
+ *     sessionFactory(SessionFactory) {
+ *         dataSource = dataSource
+ *     }
+ *     myService(MyService) {
+ *         nestedBean = { AnotherBean bean -&amp;gt;
+ *             dataSource = dataSource
+ *         }
+ *     }
+ * }&lt;/pre&gt;
+ *
+ * @author Jeff Brown
+ * @author Graeme Rocher
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 4.0
+ * @see BeanDefinitionRegistry
+ * @see org.springframework.beans.factory.support.DefaultListableBeanFactory
+ * @see org.springframework.context.support.GenericApplicationContext
+ * @see org.springframework.context.support.GenericGroovyApplicationContext
+ */
+public class GroovyBeanDefinitionReader extends AbstractBeanDefinitionReader implements GroovyObject {
+
+	/**
+	 * Standard {@code XmlBeanDefinitionReader} created with default
+	 * settings for loading bean definitions from XML files.
+	 */
+	private final XmlBeanDefinitionReader standardXmlBeanDefinitionReader;
+
+	/**
+	 * Groovy DSL {@code XmlBeanDefinitionReader} for loading bean definitions
+	 * via the Groovy DSL, typically configured with XML validation disabled.
+	 */
+	private final XmlBeanDefinitionReader groovyDslXmlBeanDefinitionReader;
+
+<span class="pc" id="L148">	private final Map&lt;String, String&gt; namespaces = new HashMap&lt;&gt;();</span>
+
+<span class="pc" id="L150">	private final Map&lt;String, DeferredProperty&gt; deferredProperties = new HashMap&lt;&gt;();</span>
+
+<span class="pc" id="L152">	private MetaClass metaClass = GroovySystem.getMetaClassRegistry().getMetaClass(getClass());</span>
+
+	private @Nullable Binding binding;
+
+	private @Nullable GroovyBeanDefinitionWrapper currentBeanDefinition;
+
+
+	/**
+	 * Create a new {@code GroovyBeanDefinitionReader} for the given
+	 * {@link BeanDefinitionRegistry}.
+	 * @param registry the {@code BeanDefinitionRegistry} to load bean definitions into
+	 */
+	public GroovyBeanDefinitionReader(BeanDefinitionRegistry registry) {
+<span class="fc" id="L165">		super(registry);</span>
+<span class="fc" id="L166">		this.standardXmlBeanDefinitionReader = new XmlBeanDefinitionReader(registry);</span>
+<span class="fc" id="L167">		this.groovyDslXmlBeanDefinitionReader = new XmlBeanDefinitionReader(registry);</span>
+<span class="fc" id="L168">		this.groovyDslXmlBeanDefinitionReader.setValidating(false);</span>
+<span class="fc" id="L169">	}</span>
+
+	/**
+	 * Create a new {@code GroovyBeanDefinitionReader} based on the given
+	 * {@link XmlBeanDefinitionReader}, loading bean definitions into its
+	 * {@code BeanDefinitionRegistry} and delegating Groovy DSL loading to it.
+	 * &lt;p&gt;The supplied {@code XmlBeanDefinitionReader} should typically
+	 * be pre-configured with XML validation disabled.
+	 * @param xmlBeanDefinitionReader the {@code XmlBeanDefinitionReader} to
+	 * derive the registry from and to delegate Groovy DSL loading to
+	 */
+	public GroovyBeanDefinitionReader(XmlBeanDefinitionReader xmlBeanDefinitionReader) {
+<span class="nc" id="L181">		super(xmlBeanDefinitionReader.getRegistry());</span>
+<span class="nc" id="L182">		this.standardXmlBeanDefinitionReader = new XmlBeanDefinitionReader(xmlBeanDefinitionReader.getRegistry());</span>
+<span class="nc" id="L183">		this.groovyDslXmlBeanDefinitionReader = xmlBeanDefinitionReader;</span>
+<span class="nc" id="L184">	}</span>
+
+
+	@Override
+	public void setMetaClass(MetaClass metaClass) {
+<span class="nc" id="L189">		this.metaClass = metaClass;</span>
+<span class="nc" id="L190">	}</span>
+
+	@Override
+	public MetaClass getMetaClass() {
+<span class="fc" id="L194">		return this.metaClass;</span>
+	}
+
+	/**
+	 * Set the binding, i.e. the Groovy variables available in the scope
+	 * of a {@code GroovyBeanDefinitionReader} closure.
+	 */
+	public void setBinding(Binding binding) {
+<span class="nc" id="L202">		this.binding = binding;</span>
+<span class="nc" id="L203">	}</span>
+
+	/**
+	 * Return a specified binding for Groovy variables, if any.
+	 */
+	public @Nullable Binding getBinding() {
+<span class="fc" id="L209">		return this.binding;</span>
+	}
+
+
+	// TRADITIONAL BEAN DEFINITION READER METHODS
+
+	/**
+	 * Load bean definitions from the specified Groovy script or XML file.
+	 * &lt;p&gt;Note that {@code &quot;.xml&quot;} files will be parsed as XML content; all other kinds
+	 * of resources will be parsed as Groovy scripts.
+	 * @param resource the resource descriptor for the Groovy script or XML file
+	 * @return the number of bean definitions found
+	 * @throws BeanDefinitionStoreException in case of loading or parsing errors
+	 */
+	@Override
+	public int loadBeanDefinitions(Resource resource) throws BeanDefinitionStoreException {
+<span class="fc" id="L225">		return loadBeanDefinitions(new EncodedResource(resource));</span>
+	}
+
+	/**
+	 * Load bean definitions from the specified Groovy script or XML file.
+	 * &lt;p&gt;Note that {@code &quot;.xml&quot;} files will be parsed as XML content; all other kinds
+	 * of resources will be parsed as Groovy scripts.
+	 * @param encodedResource the resource descriptor for the Groovy script or XML file,
+	 * allowing specification of an encoding to use for parsing the file
+	 * @return the number of bean definitions found
+	 * @throws BeanDefinitionStoreException in case of loading or parsing errors
+	 */
+	public int loadBeanDefinitions(EncodedResource encodedResource) throws BeanDefinitionStoreException {
+		// Check for XML files and redirect them to the &quot;standard&quot; XmlBeanDefinitionReader
+<span class="fc" id="L239">		String filename = encodedResource.getResource().getFilename();</span>
+<span class="fc bfc" id="L240" title="All 2 branches covered.">		if (StringUtils.endsWithIgnoreCase(filename, &quot;.xml&quot;)) {</span>
+<span class="fc" id="L241">			return this.standardXmlBeanDefinitionReader.loadBeanDefinitions(encodedResource);</span>
+		}
+
+<span class="pc bpc" id="L244" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L245">			logger.trace(&quot;Loading Groovy bean definitions from &quot; + encodedResource);</span>
+		}
+
+		@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L249">		Closure&lt;Object&gt; beans = new Closure&lt;&gt;(this) {</span>
+			@Override
+			public @Nullable Object call(Object... args) {
+<span class="fc" id="L252">				invokeBeanDefiningClosure((Closure&lt;?&gt;) args[0]);</span>
+<span class="fc" id="L253">				return null;</span>
+			}
+		};
+<span class="fc" id="L256">		Binding binding = new Binding() {</span>
+			@Override
+			public void setVariable(String name, Object value) {
+<span class="pc bpc" id="L259" title="1 of 2 branches missed.">				if (currentBeanDefinition != null) {</span>
+<span class="nc" id="L260">					applyPropertyToBeanDefinition(name, value);</span>
+				}
+				else {
+<span class="fc" id="L263">					super.setVariable(name, value);</span>
+				}
+<span class="fc" id="L265">			}</span>
+		};
+<span class="fc" id="L267">		binding.setVariable(&quot;beans&quot;, beans);</span>
+
+<span class="fc" id="L269">		int countBefore = getRegistry().getBeanDefinitionCount();</span>
+		try {
+<span class="fc" id="L271">			GroovyShell shell = new GroovyShell(getBeanClassLoader(), binding);</span>
+<span class="fc" id="L272">			shell.evaluate(encodedResource.getReader(), &quot;beans&quot;);</span>
+		}
+<span class="fc" id="L274">		catch (Throwable ex) {</span>
+<span class="fc" id="L275">			throw new BeanDefinitionParsingException(new Problem(&quot;Error evaluating Groovy script: &quot; + ex.getMessage(),</span>
+<span class="fc" id="L276">					new Location(encodedResource.getResource()), null, ex));</span>
+<span class="fc" id="L277">		}</span>
+
+<span class="fc" id="L279">		int count = getRegistry().getBeanDefinitionCount() - countBefore;</span>
+<span class="pc bpc" id="L280" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L281">			logger.debug(&quot;Loaded &quot; + count + &quot; bean definitions from &quot; + encodedResource);</span>
+		}
+<span class="fc" id="L283">		return count;</span>
+	}
+
+
+	// METHODS FOR CONSUMPTION IN A GROOVY CLOSURE
+
+	/**
+	 * Defines a set of beans for the given block or closure.
+	 * @param closure the block or closure
+	 * @return this {@code GroovyBeanDefinitionReader} instance
+	 */
+	public GroovyBeanDefinitionReader beans(Closure&lt;?&gt; closure) {
+<span class="fc" id="L295">		return invokeBeanDefiningClosure(closure);</span>
+	}
+
+	/**
+	 * Define an inner bean definition.
+	 * @param type the bean type
+	 * @return the bean definition
+	 */
+	public GenericBeanDefinition bean(Class&lt;?&gt; type) {
+<span class="nc" id="L304">		GenericBeanDefinition beanDefinition = new GenericBeanDefinition();</span>
+<span class="nc" id="L305">		beanDefinition.setBeanClass(type);</span>
+<span class="nc" id="L306">		return beanDefinition;</span>
+	}
+
+	/**
+	 * Define an inner bean definition.
+	 * @param type the bean type
+	 * @param args the constructors arguments and closure configurer
+	 * @return the bean definition
+	 */
+	public AbstractBeanDefinition bean(Class&lt;?&gt; type, Object...args) {
+<span class="fc" id="L316">		GroovyBeanDefinitionWrapper current = this.currentBeanDefinition;</span>
+		try {
+<span class="fc" id="L318">			Closure&lt;?&gt; callable = null;</span>
+<span class="fc" id="L319">			Collection&lt;Object&gt; constructorArgs = null;</span>
+<span class="pc bpc" id="L320" title="1 of 2 branches missed.">			if (!ObjectUtils.isEmpty(args)) {</span>
+<span class="fc" id="L321">				int index = args.length;</span>
+<span class="fc" id="L322">				Object lastArg = args[index - 1];</span>
+<span class="pc bpc" id="L323" title="1 of 2 branches missed.">				if (lastArg instanceof Closure&lt;?&gt; closure) {</span>
+<span class="fc" id="L324">					callable = closure;</span>
+<span class="fc" id="L325">					index--;</span>
+				}
+<span class="fc" id="L327">				constructorArgs = resolveConstructorArguments(args, 0, index);</span>
+			}
+<span class="fc" id="L329">			this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(null, type, constructorArgs);</span>
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">			if (callable != null) {</span>
+<span class="fc" id="L331">				callable.call(this.currentBeanDefinition);</span>
+			}
+<span class="fc" id="L333">			return this.currentBeanDefinition.getBeanDefinition();</span>
+		}
+		finally {
+<span class="fc" id="L336">			this.currentBeanDefinition = current;</span>
+		}
+	}
+
+	/**
+	 * Define a Spring XML namespace definition to use.
+	 * @param definition the namespace definition
+	 */
+	public void xmlns(Map&lt;String, String&gt; definition) {
+<span class="pc bpc" id="L345" title="1 of 2 branches missed.">		if (!definition.isEmpty()) {</span>
+<span class="fc bfc" id="L346" title="All 2 branches covered.">			for (Map.Entry&lt;String,String&gt; entry : definition.entrySet()) {</span>
+<span class="fc" id="L347">				String namespace = entry.getKey();</span>
+<span class="fc" id="L348">				String uri = entry.getValue();</span>
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">				if (uri == null) {</span>
+<span class="nc" id="L350">					throw new IllegalArgumentException(&quot;Namespace definition must supply a non-null URI&quot;);</span>
+				}
+<span class="fc" id="L352">				NamespaceHandler namespaceHandler =</span>
+<span class="fc" id="L353">						this.groovyDslXmlBeanDefinitionReader.getNamespaceHandlerResolver().resolve(uri);</span>
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">				if (namespaceHandler == null) {</span>
+<span class="nc" id="L355">					throw new BeanDefinitionParsingException(new Problem(&quot;No namespace handler found for URI: &quot; + uri,</span>
+							new Location(new DescriptiveResource((&quot;Groovy&quot;)))));
+				}
+<span class="fc" id="L358">				this.namespaces.put(namespace, uri);</span>
+<span class="fc" id="L359">			}</span>
+		}
+<span class="fc" id="L361">	}</span>
+
+	/**
+	 * Import Spring bean definitions from either XML or Groovy sources into the
+	 * current bean builder instance.
+	 * @param resourcePattern the resource pattern
+	 */
+	public void importBeans(String resourcePattern) throws IOException {
+<span class="fc" id="L369">		loadBeanDefinitions(resourcePattern);</span>
+<span class="fc" id="L370">	}</span>
+
+
+	// INTERNAL HANDLING OF GROOVY CLOSURES AND PROPERTIES
+
+	/**
+	 * This method overrides method invocation to create beans for each method name that
+	 * takes a class argument.
+	 */
+	@Override
+	public Object invokeMethod(String name, Object arg) {
+<span class="fc" id="L381">		Object[] args = (Object[])arg;</span>
+<span class="pc bpc" id="L382" title="5 of 6 branches missed.">		if (&quot;beans&quot;.equals(name) &amp;&amp; args.length == 1 &amp;&amp; args[0] instanceof Closure&lt;?&gt; closure) {</span>
+<span class="nc" id="L383">			return beans(closure);</span>
+		}
+<span class="fc bfc" id="L385" title="All 2 branches covered.">		else if (&quot;ref&quot;.equals(name)) {</span>
+			String refName;
+<span class="pc bpc" id="L387" title="1 of 2 branches missed.">			if (args[0] == null) {</span>
+<span class="nc" id="L388">				throw new IllegalArgumentException(&quot;Argument to ref() is not a valid bean or was not found&quot;);</span>
+			}
+<span class="pc bpc" id="L390" title="1 of 2 branches missed.">			if (args[0] instanceof RuntimeBeanReference runtimeBeanReference) {</span>
+<span class="nc" id="L391">				refName = runtimeBeanReference.getBeanName();</span>
+			}
+			else {
+<span class="fc" id="L394">				refName = args[0].toString();</span>
+			}
+<span class="fc" id="L396">			boolean parentRef = false;</span>
+<span class="pc bpc" id="L397" title="1 of 4 branches missed.">			if (args.length &gt; 1 &amp;&amp; args[1] instanceof Boolean bool) {</span>
+<span class="fc" id="L398">				parentRef = bool;</span>
+			}
+<span class="fc" id="L400">			return new RuntimeBeanReference(refName, parentRef);</span>
+		}
+<span class="pc bpc" id="L402" title="2 of 6 branches missed.">		else if (this.namespaces.containsKey(name) &amp;&amp; args.length &gt; 0 &amp;&amp; args[0] instanceof Closure) {</span>
+<span class="fc" id="L403">			GroovyDynamicElementReader reader = createDynamicElementReader(name);</span>
+<span class="fc" id="L404">			reader.invokeMethod(&quot;doCall&quot;, args);</span>
+<span class="fc" id="L405">		}</span>
+<span class="pc bpc" id="L406" title="1 of 4 branches missed.">		else if (args.length &gt; 0 &amp;&amp; args[0] instanceof Closure) {</span>
+			// abstract bean definition
+<span class="fc" id="L408">			return invokeBeanDefiningMethod(name, args);</span>
+		}
+<span class="pc bpc" id="L410" title="1 of 8 branches missed.">		else if (args.length &gt; 0 &amp;&amp;</span>
+				(args[0] instanceof Class || args[0] instanceof RuntimeBeanReference || args[0] instanceof Map)) {
+<span class="fc" id="L412">			return invokeBeanDefiningMethod(name, args);</span>
+		}
+<span class="pc bpc" id="L414" title="2 of 4 branches missed.">		else if (args.length &gt; 1 &amp;&amp; args[args.length -1] instanceof Closure) {</span>
+<span class="fc" id="L415">			return invokeBeanDefiningMethod(name, args);</span>
+		}
+<span class="fc" id="L417">		MetaClass mc = DefaultGroovyMethods.getMetaClass(getRegistry());</span>
+<span class="pc bpc" id="L418" title="1 of 2 branches missed.">		if (!mc.respondsTo(getRegistry(), name, args).isEmpty()){</span>
+<span class="nc" id="L419">			return mc.invokeMethod(getRegistry(), name, args);</span>
+		}
+<span class="fc" id="L421">		return this;</span>
+	}
+
+	private boolean addDeferredProperty(String property, Object newValue) {
+<span class="fc bfc" id="L425" title="All 4 branches covered.">		if (newValue instanceof List || newValue instanceof Map) {</span>
+<span class="pc bpc" id="L426" title="1 of 2 branches missed.">			Assert.state(this.currentBeanDefinition != null, &quot;No current bean definition set&quot;);</span>
+<span class="fc" id="L427">			this.deferredProperties.put(this.currentBeanDefinition.getBeanName() + '.' + property,</span>
+					new DeferredProperty(this.currentBeanDefinition, property, newValue));
+<span class="fc" id="L429">			return true;</span>
+		}
+<span class="fc" id="L431">		return false;</span>
+	}
+
+	private void finalizeDeferredProperties() {
+<span class="fc bfc" id="L435" title="All 2 branches covered.">		for (DeferredProperty dp : this.deferredProperties.values()) {</span>
+<span class="fc bfc" id="L436" title="All 2 branches covered.">			if (dp.value instanceof List&lt;?&gt; list) {</span>
+<span class="fc" id="L437">				dp.value = manageListIfNecessary(list);</span>
+			}
+<span class="pc bpc" id="L439" title="1 of 2 branches missed.">			else if (dp.value instanceof Map&lt;?, ?&gt; map) {</span>
+<span class="fc" id="L440">				dp.value = manageMapIfNecessary(map);</span>
+			}
+<span class="fc" id="L442">			dp.apply();</span>
+<span class="fc" id="L443">		}</span>
+<span class="fc" id="L444">		this.deferredProperties.clear();</span>
+<span class="fc" id="L445">	}</span>
+
+	/**
+	 * When a method argument is only a closure it is a set of bean definitions.
+	 * @param callable the closure argument
+	 * @return this {@code GroovyBeanDefinitionReader} instance
+	 */
+	protected GroovyBeanDefinitionReader invokeBeanDefiningClosure(Closure&lt;?&gt; callable) {
+<span class="fc" id="L453">		callable.setDelegate(this);</span>
+<span class="fc" id="L454">		callable.call();</span>
+<span class="fc" id="L455">		finalizeDeferredProperties();</span>
+<span class="fc" id="L456">		return this;</span>
+	}
+
+	/**
+	 * This method is called when a bean definition node is called.
+	 * @param beanName the name of the bean to define
+	 * @param args the arguments to the bean. The first argument is the class name, the last
+	 * argument is sometimes a closure. All the arguments in between are constructor arguments.
+	 * @return the bean definition wrapper
+	 */
+	private GroovyBeanDefinitionWrapper invokeBeanDefiningMethod(String beanName, Object[] args) {
+<span class="fc" id="L467">		boolean hasClosureArgument = (args[args.length - 1] instanceof Closure);</span>
+<span class="fc bfc" id="L468" title="All 2 branches covered.">		if (args[0] instanceof Class&lt;?&gt; beanClass) {</span>
+<span class="fc bfc" id="L469" title="All 2 branches covered.">			if (hasClosureArgument) {</span>
+<span class="fc bfc" id="L470" title="All 2 branches covered.">				if (args.length - 1 != 1) {</span>
+<span class="fc" id="L471">					this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(</span>
+<span class="fc" id="L472">							beanName, beanClass, resolveConstructorArguments(args, 1, args.length - 1));</span>
+				}
+				else {
+<span class="fc" id="L475">					this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(beanName, beanClass);</span>
+				}
+			}
+			else {
+<span class="fc" id="L479">				this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(</span>
+<span class="fc" id="L480">						beanName, beanClass, resolveConstructorArguments(args, 1, args.length));</span>
+			}
+		}
+<span class="fc bfc" id="L483" title="All 2 branches covered.">		else if (args[0] instanceof RuntimeBeanReference runtimeBeanReference) {</span>
+<span class="fc" id="L484">			this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(beanName);</span>
+<span class="fc" id="L485">			this.currentBeanDefinition.getBeanDefinition().setFactoryBeanName(runtimeBeanReference.getBeanName());</span>
+		}
+<span class="fc bfc" id="L487" title="All 2 branches covered.">		else if (args[0] instanceof Map&lt;?, ?&gt; namedArgs) {</span>
+			// named constructor arguments
+<span class="pc bpc" id="L489" title="1 of 4 branches missed.">			if (args.length &gt; 1 &amp;&amp; args[1] instanceof Class&lt;?&gt; clazz) {</span>
+<span class="fc" id="L490">				List&lt;Object&gt; constructorArgs =</span>
+<span class="pc bpc" id="L491" title="1 of 2 branches missed.">						resolveConstructorArguments(args, 2, (hasClosureArgument ? args.length - 1 : args.length));</span>
+<span class="fc" id="L492">				this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(beanName, clazz, constructorArgs);</span>
+<span class="fc bfc" id="L493" title="All 2 branches covered.">				for (Map.Entry&lt;?, ?&gt; entity : namedArgs.entrySet()) {</span>
+<span class="fc" id="L494">					String propName = (String) entity.getKey();</span>
+<span class="fc" id="L495">					setProperty(propName, entity.getValue());</span>
+<span class="fc" id="L496">				}</span>
+<span class="fc" id="L497">			}</span>
+			// factory method syntax
+			else {
+<span class="fc" id="L500">				this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(beanName);</span>
+				// First arg is the map containing factoryBean : factoryMethod
+<span class="fc" id="L502">				Map.Entry&lt;?, ?&gt; factoryBeanEntry = namedArgs.entrySet().iterator().next();</span>
+				// If we have a closure body, that will be the last argument.
+				// In between are the constructor args
+<span class="fc bfc" id="L505" title="All 2 branches covered.">				int constructorArgsTest = (hasClosureArgument ? 2 : 1);</span>
+				// If we have more than this number of args, we have constructor args
+<span class="fc bfc" id="L507" title="All 2 branches covered.">				if (args.length &gt; constructorArgsTest){</span>
+					// factory-method requires args
+<span class="fc bfc" id="L509" title="All 2 branches covered.">					int endOfConstructArgs = (hasClosureArgument ? args.length - 1 : args.length);</span>
+<span class="fc" id="L510">					this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(beanName, null,</span>
+<span class="fc" id="L511">							resolveConstructorArguments(args, 1, endOfConstructArgs));</span>
+<span class="fc" id="L512">				}</span>
+				else {
+<span class="fc" id="L514">					this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(beanName);</span>
+				}
+<span class="fc" id="L516">				this.currentBeanDefinition.getBeanDefinition().setFactoryBeanName(factoryBeanEntry.getKey().toString());</span>
+<span class="fc" id="L517">				this.currentBeanDefinition.getBeanDefinition().setFactoryMethodName(factoryBeanEntry.getValue().toString());</span>
+<span class="fc" id="L518">			}</span>
+
+		}
+<span class="fc bfc" id="L521" title="All 2 branches covered.">		else if (args[0] instanceof Closure) {</span>
+<span class="fc" id="L522">			this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(beanName);</span>
+<span class="fc" id="L523">			this.currentBeanDefinition.getBeanDefinition().setAbstract(true);</span>
+		}
+		else {
+<span class="fc" id="L526">			List&lt;Object&gt; constructorArgs =</span>
+<span class="pc bpc" id="L527" title="1 of 2 branches missed.">					resolveConstructorArguments(args, 0, (hasClosureArgument ? args.length - 1 : args.length));</span>
+<span class="fc" id="L528">			this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(beanName, null, constructorArgs);</span>
+		}
+
+<span class="fc bfc" id="L531" title="All 2 branches covered.">		if (hasClosureArgument) {</span>
+<span class="fc" id="L532">			Closure&lt;?&gt; callable = (Closure&lt;?&gt;) args[args.length - 1];</span>
+<span class="fc" id="L533">			callable.setDelegate(this);</span>
+<span class="fc" id="L534">			callable.setResolveStrategy(Closure.DELEGATE_FIRST);</span>
+<span class="fc" id="L535">			callable.call(this.currentBeanDefinition);</span>
+		}
+
+<span class="fc" id="L538">		GroovyBeanDefinitionWrapper beanDefinition = this.currentBeanDefinition;</span>
+<span class="fc" id="L539">		this.currentBeanDefinition = null;</span>
+<span class="fc" id="L540">		beanDefinition.getBeanDefinition().setAttribute(GroovyBeanDefinitionWrapper.class.getName(), beanDefinition);</span>
+<span class="fc" id="L541">		getRegistry().registerBeanDefinition(beanName, beanDefinition.getBeanDefinition());</span>
+<span class="fc" id="L542">		return beanDefinition;</span>
+	}
+
+	protected List&lt;Object&gt; resolveConstructorArguments(Object[] args, int start, int end) {
+<span class="fc" id="L546">		Object[] constructorArgs = Arrays.copyOfRange(args, start, end);</span>
+<span class="fc bfc" id="L547" title="All 2 branches covered.">		for (int i = 0; i &lt; constructorArgs.length; i++) {</span>
+<span class="pc bpc" id="L548" title="1 of 2 branches missed.">			if (constructorArgs[i] instanceof GString) {</span>
+<span class="nc" id="L549">				constructorArgs[i] = constructorArgs[i].toString();</span>
+			}
+<span class="fc bfc" id="L551" title="All 2 branches covered.">			else if (constructorArgs[i] instanceof List&lt;?&gt; list) {</span>
+<span class="fc" id="L552">				constructorArgs[i] = manageListIfNecessary(list);</span>
+			}
+<span class="fc bfc" id="L554" title="All 2 branches covered.">			else if (constructorArgs[i] instanceof Map&lt;?, ?&gt; map){</span>
+<span class="fc" id="L555">				constructorArgs[i] = manageMapIfNecessary(map);</span>
+			}
+		}
+<span class="fc" id="L558">		return List.of(constructorArgs);</span>
+	}
+
+	/**
+	 * Checks whether there are any {@link RuntimeBeanReference RuntimeBeanReferences}
+	 * inside the {@link Map} and converts it to a {@link ManagedMap} if necessary.
+	 * @param map the original Map
+	 * @return either the original map or a managed copy of it
+	 */
+	private Object manageMapIfNecessary(Map&lt;?, ?&gt; map) {
+<span class="fc" id="L568">		boolean containsRuntimeRefs = false;</span>
+<span class="fc bfc" id="L569" title="All 2 branches covered.">		for (Object element : map.values()) {</span>
+<span class="fc bfc" id="L570" title="All 2 branches covered.">			if (element instanceof RuntimeBeanReference) {</span>
+<span class="fc" id="L571">				containsRuntimeRefs = true;</span>
+<span class="fc" id="L572">				break;</span>
+			}
+<span class="fc" id="L574">		}</span>
+<span class="fc bfc" id="L575" title="All 2 branches covered.">		if (containsRuntimeRefs) {</span>
+<span class="fc" id="L576">			Map&lt;Object, Object&gt; managedMap = new ManagedMap&lt;&gt;();</span>
+<span class="fc" id="L577">			managedMap.putAll(map);</span>
+<span class="fc" id="L578">			return managedMap;</span>
+		}
+<span class="fc" id="L580">		return map;</span>
+	}
+
+	/**
+	 * Checks whether there are any {@link RuntimeBeanReference RuntimeBeanReferences}
+	 * inside the {@link List} and converts it to a {@link ManagedList} if necessary.
+	 * @param list the original List
+	 * @return either the original list or a managed copy of it
+	 */
+	private Object manageListIfNecessary(List&lt;?&gt; list) {
+<span class="fc" id="L590">		boolean containsRuntimeRefs = false;</span>
+<span class="fc bfc" id="L591" title="All 2 branches covered.">		for (Object element : list) {</span>
+<span class="fc bfc" id="L592" title="All 2 branches covered.">			if (element instanceof RuntimeBeanReference) {</span>
+<span class="fc" id="L593">				containsRuntimeRefs = true;</span>
+<span class="fc" id="L594">				break;</span>
+			}
+<span class="fc" id="L596">		}</span>
+<span class="fc bfc" id="L597" title="All 2 branches covered.">		if (containsRuntimeRefs) {</span>
+<span class="fc" id="L598">			List&lt;Object&gt; managedList = new ManagedList&lt;&gt;();</span>
+<span class="fc" id="L599">			managedList.addAll(list);</span>
+<span class="fc" id="L600">			return managedList;</span>
+		}
+<span class="fc" id="L602">		return list;</span>
+	}
+
+	/**
+	 * This method overrides property setting in the scope of the {@code GroovyBeanDefinitionReader}
+	 * to set properties on the current bean definition.
+	 */
+	@Override
+	public void setProperty(String name, Object value) {
+<span class="pc bpc" id="L611" title="1 of 2 branches missed.">		if (this.currentBeanDefinition != null) {</span>
+<span class="fc" id="L612">			applyPropertyToBeanDefinition(name, value);</span>
+		}
+<span class="fc" id="L614">	}</span>
+
+	protected void applyPropertyToBeanDefinition(String name, Object value) {
+<span class="pc bpc" id="L617" title="1 of 2 branches missed.">		if (value instanceof GString) {</span>
+<span class="nc" id="L618">			value = value.toString();</span>
+		}
+<span class="fc bfc" id="L620" title="All 2 branches covered.">		if (addDeferredProperty(name, value)) {</span>
+<span class="fc" id="L621">			return;</span>
+		}
+<span class="fc bfc" id="L623" title="All 2 branches covered.">		else if (value instanceof Closure&lt;?&gt; callable) {</span>
+<span class="fc" id="L624">			GroovyBeanDefinitionWrapper current = this.currentBeanDefinition;</span>
+			try {
+<span class="fc" id="L626">				Class&lt;?&gt; parameterType = callable.getParameterTypes()[0];</span>
+<span class="fc bfc" id="L627" title="All 2 branches covered.">				if (Object.class == parameterType) {</span>
+<span class="fc" id="L628">					this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(&quot;&quot;);</span>
+<span class="fc" id="L629">					callable.call(this.currentBeanDefinition);</span>
+				}
+				else {
+<span class="fc" id="L632">					this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(null, parameterType);</span>
+<span class="fc" id="L633">					callable.call((Object) null);</span>
+				}
+
+<span class="fc" id="L636">				value = this.currentBeanDefinition.getBeanDefinition();</span>
+			}
+			finally {
+<span class="fc" id="L639">				this.currentBeanDefinition = current;</span>
+			}
+		}
+<span class="pc bpc" id="L642" title="1 of 2 branches missed.">		Assert.state(this.currentBeanDefinition != null, &quot;No current bean definition set&quot;);</span>
+<span class="fc" id="L643">		this.currentBeanDefinition.addProperty(name, value);</span>
+<span class="fc" id="L644">	}</span>
+
+	/**
+	 * This method overrides property retrieval in the scope of the
+	 * {@code GroovyBeanDefinitionReader}. A property retrieval will either:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;Retrieve a variable from the bean builder's binding if it exists
+	 * &lt;li&gt;Retrieve a RuntimeBeanReference for a specific bean if it exists
+	 * &lt;li&gt;Otherwise just delegate to MetaClass.getProperty which will resolve
+	 * properties from the {@code GroovyBeanDefinitionReader} itself
+	 * &lt;/ul&gt;
+	 */
+	@Override
+	public @Nullable Object getProperty(String name) {
+<span class="fc" id="L658">		Binding binding = getBinding();</span>
+<span class="pc bpc" id="L659" title="3 of 4 branches missed.">		if (binding != null &amp;&amp; binding.hasVariable(name)) {</span>
+<span class="nc" id="L660">			return binding.getVariable(name);</span>
+		}
+		else {
+<span class="fc bfc" id="L663" title="All 2 branches covered.">			if (this.namespaces.containsKey(name)) {</span>
+<span class="fc" id="L664">				return createDynamicElementReader(name);</span>
+			}
+<span class="pc bpc" id="L666" title="1 of 2 branches missed.">			if (getRegistry().containsBeanDefinition(name)) {</span>
+<span class="fc" id="L667">				GroovyBeanDefinitionWrapper beanDefinition = (GroovyBeanDefinitionWrapper)</span>
+<span class="fc" id="L668">						getRegistry().getBeanDefinition(name).getAttribute(GroovyBeanDefinitionWrapper.class.getName());</span>
+<span class="pc bpc" id="L669" title="1 of 2 branches missed.">				if (beanDefinition != null) {</span>
+<span class="fc" id="L670">					return new GroovyRuntimeBeanReference(name, beanDefinition, false);</span>
+				}
+				else {
+<span class="nc" id="L673">					return new RuntimeBeanReference(name, false);</span>
+				}
+			}
+			// This is to deal with the case where the property setter is the last
+			// statement in a closure (hence the return value)
+<span class="nc bnc" id="L678" title="All 2 branches missed.">			else if (this.currentBeanDefinition != null) {</span>
+<span class="nc" id="L679">				MutablePropertyValues pvs = this.currentBeanDefinition.getBeanDefinition().getPropertyValues();</span>
+<span class="nc bnc" id="L680" title="All 2 branches missed.">				if (pvs.contains(name)) {</span>
+<span class="nc" id="L681">					return pvs.get(name);</span>
+				}
+				else {
+<span class="nc" id="L684">					DeferredProperty dp = this.deferredProperties.get(this.currentBeanDefinition.getBeanName() + name);</span>
+<span class="nc bnc" id="L685" title="All 2 branches missed.">					if (dp != null) {</span>
+<span class="nc" id="L686">						return dp.value;</span>
+					}
+					else {
+<span class="nc" id="L689">						return getMetaClass().getProperty(this, name);</span>
+					}
+				}
+			}
+			else {
+<span class="nc" id="L694">				return getMetaClass().getProperty(this, name);</span>
+			}
+		}
+	}
+
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	private GroovyDynamicElementReader createDynamicElementReader(String namespace) {
+<span class="fc" id="L701">		XmlReaderContext readerContext = this.groovyDslXmlBeanDefinitionReader.createReaderContext(</span>
+				new DescriptiveResource(&quot;Groovy&quot;));
+<span class="fc" id="L703">		BeanDefinitionParserDelegate delegate = new BeanDefinitionParserDelegate(readerContext);</span>
+<span class="fc bfc" id="L704" title="All 2 branches covered.">		boolean decorating = (this.currentBeanDefinition != null);</span>
+<span class="fc bfc" id="L705" title="All 2 branches covered.">		if (!decorating) {</span>
+<span class="fc" id="L706">			this.currentBeanDefinition = new GroovyBeanDefinitionWrapper(namespace);</span>
+		}
+<span class="fc" id="L708">		return new GroovyDynamicElementReader(namespace, this.namespaces, delegate, this.currentBeanDefinition, decorating) {</span>
+			@Override
+			protected void afterInvocation() {
+<span class="fc bfc" id="L711" title="All 2 branches covered.">				if (!this.decorating) {</span>
+<span class="fc" id="L712">					currentBeanDefinition = null;</span>
+				}
+<span class="fc" id="L714">			}</span>
+		};
+	}
+
+
+	/**
+	 * This class is used to defer the adding of a property to a bean definition
+	 * until later. This is for a case where you assign a property to a list that
+	 * may not contain bean references at that point of assignment, but may later;
+	 * hence, it would need to be managed.
+	 */
+	private static class DeferredProperty {
+
+		private final GroovyBeanDefinitionWrapper beanDefinition;
+
+		private final String name;
+
+		public @Nullable Object value;
+
+<span class="fc" id="L733">		public DeferredProperty(GroovyBeanDefinitionWrapper beanDefinition, String name, @Nullable Object value) {</span>
+<span class="fc" id="L734">			this.beanDefinition = beanDefinition;</span>
+<span class="fc" id="L735">			this.name = name;</span>
+<span class="fc" id="L736">			this.value = value;</span>
+<span class="fc" id="L737">		}</span>
+
+		public void apply() {
+<span class="fc" id="L740">			this.beanDefinition.addProperty(this.name, this.value);</span>
+<span class="fc" id="L741">		}</span>
+	}
+
+
+	/**
+	 * A RuntimeBeanReference that takes care of adding new properties to runtime references.
+	 */
+	private class GroovyRuntimeBeanReference extends RuntimeBeanReference implements GroovyObject {
+
+		private final GroovyBeanDefinitionWrapper beanDefinition;
+
+		private MetaClass metaClass;
+
+<span class="fc" id="L754">		public GroovyRuntimeBeanReference(String beanName, GroovyBeanDefinitionWrapper beanDefinition, boolean toParent) {</span>
+<span class="fc" id="L755">			super(beanName, toParent);</span>
+<span class="fc" id="L756">			this.beanDefinition = beanDefinition;</span>
+<span class="fc" id="L757">			this.metaClass = InvokerHelper.getMetaClass(this);</span>
+<span class="fc" id="L758">		}</span>
+
+		@Override
+		public MetaClass getMetaClass() {
+<span class="fc" id="L762">			return this.metaClass;</span>
+		}
+
+		@Override
+		public @Nullable Object getProperty(String property) {
+<span class="nc bnc" id="L767" title="All 2 branches missed.">			if (property.equals(&quot;beanName&quot;)) {</span>
+<span class="nc" id="L768">				return getBeanName();</span>
+			}
+<span class="nc bnc" id="L770" title="All 2 branches missed.">			else if (property.equals(&quot;source&quot;)) {</span>
+<span class="nc" id="L771">				return getSource();</span>
+			}
+			else {
+<span class="nc" id="L774">				return new GroovyPropertyValue(</span>
+<span class="nc" id="L775">						property, this.beanDefinition.getBeanDefinition().getPropertyValues().get(property));</span>
+			}
+		}
+
+		@Override
+		public Object invokeMethod(String name, Object args) {
+<span class="nc" id="L781">			return this.metaClass.invokeMethod(this, name, args);</span>
+		}
+
+		@Override
+		public void setMetaClass(MetaClass metaClass) {
+<span class="nc" id="L786">			this.metaClass = metaClass;</span>
+<span class="nc" id="L787">		}</span>
+
+		@Override
+		public void setProperty(String property, Object newValue) {
+<span class="nc bnc" id="L791" title="All 2 branches missed.">			if (!addDeferredProperty(property, newValue)) {</span>
+<span class="nc" id="L792">				this.beanDefinition.getBeanDefinition().getPropertyValues().add(property, newValue);</span>
+			}
+<span class="nc" id="L794">		}</span>
+
+
+		/**
+		 * Wraps a bean definition property and ensures that any RuntimeBeanReference
+		 * additions to it are deferred for resolution later.
+		 */
+		private class GroovyPropertyValue extends GroovyObjectSupport {
+
+			private final String propertyName;
+
+			private final @Nullable Object propertyValue;
+
+<span class="nc" id="L807">			public GroovyPropertyValue(String propertyName, @Nullable Object propertyValue) {</span>
+<span class="nc" id="L808">				this.propertyName = propertyName;</span>
+<span class="nc" id="L809">				this.propertyValue = propertyValue;</span>
+<span class="nc" id="L810">			}</span>
+
+			@SuppressWarnings(&quot;unused&quot;)
+			public void leftShift(Object value) {
+<span class="nc" id="L814">				InvokerHelper.invokeMethod(this.propertyValue, &quot;leftShift&quot;, value);</span>
+<span class="nc" id="L815">				updateDeferredProperties(value);</span>
+<span class="nc" id="L816">			}</span>
+
+			@SuppressWarnings(&quot;unused&quot;)
+			public boolean add(Object value) {
+<span class="nc" id="L820">				boolean retVal = (Boolean) InvokerHelper.invokeMethod(this.propertyValue, &quot;add&quot;, value);</span>
+<span class="nc" id="L821">				updateDeferredProperties(value);</span>
+<span class="nc" id="L822">				return retVal;</span>
+			}
+
+			@SuppressWarnings(&quot;unused&quot;)
+			public boolean addAll(Collection&lt;?&gt; values) {
+<span class="nc" id="L827">				boolean retVal = (Boolean) InvokerHelper.invokeMethod(this.propertyValue, &quot;addAll&quot;, values);</span>
+<span class="nc bnc" id="L828" title="All 2 branches missed.">				for (Object value : values) {</span>
+<span class="nc" id="L829">					updateDeferredProperties(value);</span>
+<span class="nc" id="L830">				}</span>
+<span class="nc" id="L831">				return retVal;</span>
+			}
+
+			@Override
+			public Object invokeMethod(String name, Object args) {
+<span class="nc" id="L836">				return InvokerHelper.invokeMethod(this.propertyValue, name, args);</span>
+			}
+
+			@Override
+			public Object getProperty(String name) {
+<span class="nc" id="L841">				return InvokerHelper.getProperty(this.propertyValue, name);</span>
+			}
+
+			@Override
+			public void setProperty(String name, Object value) {
+<span class="nc" id="L846">				InvokerHelper.setProperty(this.propertyValue, name, value);</span>
+<span class="nc" id="L847">			}</span>
+
+			private void updateDeferredProperties(Object value) {
+<span class="nc bnc" id="L850" title="All 2 branches missed.">				if (value instanceof RuntimeBeanReference) {</span>
+<span class="nc" id="L851">					deferredProperties.put(beanDefinition.getBeanName(),</span>
+							new DeferredProperty(beanDefinition, this.propertyName, this.propertyValue));
+				}
+<span class="nc" id="L854">			}</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReactorClientHttpRequestFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.client</a> &gt; <span class="el_source">ReactorClientHttpRequestFactory.java</span></div><h1>ReactorClientHttpRequestFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.client;
+
+import java.io.IOException;
+import java.net.URI;
+import java.time.Duration;
+import java.util.concurrent.Executor;
+import java.util.function.Function;
+
+import io.netty.channel.ChannelOption;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import reactor.core.scheduler.Schedulers;
+import reactor.netty.http.client.HttpClient;
+import reactor.netty.resources.ConnectionProvider;
+import reactor.netty.resources.LoopResources;
+
+import org.springframework.context.SmartLifecycle;
+import org.springframework.http.HttpMethod;
+import org.springframework.util.Assert;
+
+/**
+ * Reactor-Netty implementation of {@link ClientHttpRequestFactory}.
+ *
+ * &lt;p&gt;This class implements {@link SmartLifecycle} and can be optionally declared
+ * as a Spring-managed bean in order to support JVM Checkpoint Restore.
+ *
+ * @author Arjen Poutsma
+ * @author Juergen Hoeller
+ * @author Sebastien Deleuze
+ * @author Brian Clozel
+ * @since 6.2
+ */
+public class ReactorClientHttpRequestFactory implements ClientHttpRequestFactory, SmartLifecycle {
+
+<span class="fc" id="L52">	private static final Log logger = LogFactory.getLog(ReactorClientHttpRequestFactory.class);</span>
+
+<span class="fc" id="L54">	private static final Function&lt;HttpClient, HttpClient&gt; defaultInitializer =</span>
+<span class="fc" id="L55">			client -&gt; client.compress(true)</span>
+<span class="fc" id="L56">					.responseTimeout(Duration.ofSeconds(10))</span>
+<span class="fc" id="L57">					.proxyWithSystemProperties();</span>
+
+
+	private final @Nullable ReactorResourceFactory resourceFactory;
+
+	private final @Nullable Function&lt;HttpClient, HttpClient&gt; mapper;
+
+	private @Nullable Executor executor;
+
+	private @Nullable Integer connectTimeout;
+
+	private @Nullable Duration readTimeout;
+
+	private @Nullable Duration exchangeTimeout;
+
+	private volatile @Nullable HttpClient httpClient;
+
+<span class="pc" id="L74">	private final Object lifecycleMonitor = new Object();</span>
+
+
+	/**
+	 * Constructor with default client, created via {@link HttpClient#create()},
+	 * and with {@link HttpClient#compress compression} and
+	 * {@link HttpClient#proxyWithSystemProperties() proxyWithSystemProperties} enabled.
+	 */
+	public ReactorClientHttpRequestFactory() {
+<span class="fc" id="L83">		this(defaultInitializer.apply(HttpClient.create()));</span>
+<span class="fc" id="L84">	}</span>
+
+	/**
+	 * Constructor with a given {@link HttpClient} instance.
+	 * @param client the client to use
+	 */
+<span class="fc" id="L90">	public ReactorClientHttpRequestFactory(HttpClient client) {</span>
+<span class="fc" id="L91">		Assert.notNull(client, &quot;HttpClient must not be null&quot;);</span>
+<span class="fc" id="L92">		this.resourceFactory = null;</span>
+<span class="fc" id="L93">		this.mapper = null;</span>
+<span class="fc" id="L94">		this.httpClient = client;</span>
+<span class="fc" id="L95">	}</span>
+
+	/**
+	 * Constructor with externally managed Reactor Netty resources, including
+	 * {@link LoopResources} for event loop threads, and {@link ConnectionProvider}
+	 * for connection pooling.
+	 * &lt;p&gt;Generally, it is recommended to share resources for event loop
+	 * concurrency. This can be achieved either by participating in the JVM-wide,
+	 * global resources held in {@link reactor.netty.http.HttpResources}, or by
+	 * using a specific, shared set of resources through a
+	 * {@link ReactorResourceFactory} bean. The latter can ensure that resources
+	 * are shut down when the Spring ApplicationContext is stopped/closed and
+	 * restarted again (e.g. JVM checkpoint restore).
+	 * @param resourceFactory the resource factory to get resources from
+	 * @param mapper for further initialization of the client
+	 */
+	public ReactorClientHttpRequestFactory(
+<span class="nc" id="L112">			ReactorResourceFactory resourceFactory, Function&lt;HttpClient, HttpClient&gt; mapper) {</span>
+
+<span class="nc" id="L114">		this.resourceFactory = resourceFactory;</span>
+<span class="nc" id="L115">		this.mapper = mapper;</span>
+<span class="nc bnc" id="L116" title="All 2 branches missed.">		if (resourceFactory.isRunning()) {</span>
+<span class="nc" id="L117">			this.httpClient = createHttpClient(resourceFactory, mapper);</span>
+		}
+<span class="nc" id="L119">	}</span>
+
+	private HttpClient createHttpClient(ReactorResourceFactory factory, Function&lt;HttpClient, HttpClient&gt; mapper) {
+<span class="nc" id="L122">		HttpClient client = HttpClient.create(factory.getConnectionProvider());</span>
+<span class="nc" id="L123">		client = defaultInitializer.andThen(mapper).apply(client);</span>
+<span class="nc" id="L124">		client = client.runOn(factory.getLoopResources());</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">		if (this.connectTimeout != null) {</span>
+<span class="nc" id="L126">			client = client.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, this.connectTimeout);</span>
+		}
+<span class="nc bnc" id="L128" title="All 2 branches missed.">		if (this.readTimeout != null) {</span>
+<span class="nc" id="L129">			client = client.responseTimeout(this.readTimeout);</span>
+		}
+<span class="nc" id="L131">		return client;</span>
+	}
+
+	/**
+	 * Set the {@code Executor} to use for performing blocking I/O operations.
+	 * &lt;p&gt;If no executor is provided, the request will use an {@link Schedulers#boundedElastic() elastic scheduler}.
+	 * @param executor the executor to use.
+	 * @since 6.2.13
+	 */
+	public void setExecutor(Executor executor) {
+<span class="nc" id="L141">		Assert.notNull(executor, &quot;Executor must not be null&quot;);</span>
+<span class="nc" id="L142">		this.executor = executor;</span>
+<span class="nc" id="L143">	}</span>
+
+	/**
+	 * Set the connect timeout value on the underlying client.
+	 * Effectively, a shortcut for
+	 * {@code httpClient.option(CONNECT_TIMEOUT_MILLIS, timeout)}.
+	 * &lt;p&gt;By default, set to 30 seconds.
+	 * @param connectTimeout the timeout value in millis; use 0 to never time out.
+	 * @see HttpClient#option(ChannelOption, Object)
+	 * @see ChannelOption#CONNECT_TIMEOUT_MILLIS
+	 * @see &lt;a href=&quot;https://projectreactor.io/docs/netty/release/reference/index.html#connection-timeout&quot;&gt;Connection Timeout&lt;/a&gt;
+	 */
+	public void setConnectTimeout(int connectTimeout) {
+<span class="nc bnc" id="L156" title="All 2 branches missed.">		Assert.isTrue(connectTimeout &gt;= 0, &quot;Timeout must be a non-negative value&quot;);</span>
+<span class="nc" id="L157">		this.connectTimeout = connectTimeout;</span>
+<span class="nc" id="L158">		HttpClient httpClient = this.httpClient;</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">		if (httpClient != null) {</span>
+<span class="nc" id="L160">			this.httpClient = httpClient.option(ChannelOption.CONNECT_TIMEOUT_MILLIS, this.connectTimeout);</span>
+		}
+<span class="nc" id="L162">	}</span>
+
+	/**
+	 * Variant of {@link #setConnectTimeout(int)} with a {@link Duration} value.
+	 */
+	public void setConnectTimeout(Duration connectTimeout) {
+<span class="nc" id="L168">		Assert.notNull(connectTimeout, &quot;ConnectTimeout must not be null&quot;);</span>
+<span class="nc" id="L169">		setConnectTimeout((int) connectTimeout.toMillis());</span>
+<span class="nc" id="L170">	}</span>
+
+	/**
+	 * Set the read timeout value on the underlying client.
+	 * Effectively, a shortcut for {@link HttpClient#responseTimeout(Duration)}.
+	 * &lt;p&gt;By default, set to 10 seconds.
+	 * @param timeout the read timeout value in millis; must be &gt; 0.
+	 */
+	public void setReadTimeout(Duration timeout) {
+<span class="nc" id="L179">		Assert.notNull(timeout, &quot;ReadTimeout must not be null&quot;);</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">		Assert.isTrue(timeout.toMillis() &gt; 0, &quot;Timeout must be a positive value&quot;);</span>
+<span class="nc" id="L181">		this.readTimeout = timeout;</span>
+<span class="nc" id="L182">		HttpClient httpClient = this.httpClient;</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">		if (httpClient != null) {</span>
+<span class="nc" id="L184">			this.httpClient = httpClient.responseTimeout(timeout);</span>
+		}
+<span class="nc" id="L186">	}</span>
+
+	/**
+	 * Variant of {@link #setReadTimeout(Duration)} with a long value.
+	 */
+	public void setReadTimeout(long readTimeout) {
+<span class="nc" id="L192">		setReadTimeout(Duration.ofMillis(readTimeout));</span>
+<span class="nc" id="L193">	}</span>
+
+
+	@Override
+	public ClientHttpRequest createRequest(URI uri, HttpMethod httpMethod) throws IOException {
+<span class="fc" id="L198">		HttpClient client = this.httpClient;</span>
+<span class="pc bpc" id="L199" title="1 of 2 branches missed.">		if (client == null) {</span>
+<span class="nc bnc" id="L200" title="All 4 branches missed.">			Assert.state(this.resourceFactory != null &amp;&amp; this.mapper != null,</span>
+					&quot;Expected HttpClient or ResourceFactory and mapper&quot;);
+<span class="nc" id="L202">			client = createHttpClient(this.resourceFactory, this.mapper);</span>
+		}
+<span class="fc" id="L204">		return new ReactorClientHttpRequest(client, httpMethod, uri, this.executor, this.exchangeTimeout);</span>
+	}
+
+
+	@Override
+	public void start() {
+<span class="nc bnc" id="L210" title="All 4 branches missed.">		if (this.resourceFactory != null &amp;&amp; this.mapper != null) {</span>
+<span class="nc" id="L211">			synchronized (this.lifecycleMonitor) {</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">				if (this.httpClient == null) {</span>
+<span class="nc" id="L213">					this.httpClient = createHttpClient(this.resourceFactory, this.mapper);</span>
+				}
+<span class="nc" id="L215">			}</span>
+		}
+		else {
+<span class="nc" id="L218">			logger.warn(&quot;Restarting a ReactorClientHttpRequestFactory bean is only supported &quot; +</span>
+					&quot;with externally managed Reactor Netty resources&quot;);
+		}
+<span class="nc" id="L221">	}</span>
+
+	@Override
+	public void stop() {
+<span class="nc bnc" id="L225" title="All 4 branches missed.">		if (this.resourceFactory != null &amp;&amp; this.mapper != null) {</span>
+<span class="nc" id="L226">			synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L227">				this.httpClient = null;</span>
+<span class="nc" id="L228">			}</span>
+		}
+<span class="nc" id="L230">	}</span>
+
+	@Override
+	public boolean isRunning() {
+<span class="nc bnc" id="L234" title="All 2 branches missed.">		return (this.httpClient != null);</span>
+	}
+
+	@Override
+	public int getPhase() {
+<span class="nc" id="L239">		return 1; // start after ReactorResourceFactory (0)</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

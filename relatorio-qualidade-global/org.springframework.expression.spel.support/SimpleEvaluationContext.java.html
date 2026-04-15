@@ -1,0 +1,463 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SimpleEvaluationContext.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.support</a> &gt; <span class="el_source">SimpleEvaluationContext.java</span></div><h1>SimpleEvaluationContext.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.support;
+
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Supplier;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.convert.ConversionService;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.expression.BeanResolver;
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.IndexAccessor;
+import org.springframework.expression.MethodResolver;
+import org.springframework.expression.OperatorOverloader;
+import org.springframework.expression.PropertyAccessor;
+import org.springframework.expression.TypeComparator;
+import org.springframework.expression.TypeConverter;
+import org.springframework.expression.TypeLocator;
+import org.springframework.expression.TypedValue;
+import org.springframework.expression.spel.SpelEvaluationException;
+import org.springframework.expression.spel.SpelMessage;
+
+/**
+ * A basic implementation of {@link EvaluationContext} that focuses on a subset
+ * of essential SpEL features and customization options, targeting simple
+ * condition evaluation and in particular data binding scenarios.
+ *
+ * &lt;p&gt;In many cases, the full extent of the SpEL language is not required and
+ * should be meaningfully restricted. Examples include but are not limited to
+ * data binding expressions, property-based filters, and others. To that effect,
+ * {@code SimpleEvaluationContext} is tailored to support only a subset of the
+ * SpEL language syntax, for example, excluding references to Java types, constructors,
+ * and bean references.
+ *
+ * &lt;p&gt;When creating a {@code SimpleEvaluationContext} you need to choose the level of
+ * support that you need for data binding in SpEL expressions:
+ * &lt;ul&gt;
+ * &lt;li&gt;Data binding for read-only access&lt;/li&gt;
+ * &lt;li&gt;Data binding for read and write access&lt;/li&gt;
+ * &lt;li&gt;A custom {@code PropertyAccessor} (typically not reflection-based), potentially
+ * combined with a {@link DataBindingPropertyAccessor}&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;Conveniently, {@link SimpleEvaluationContext#forReadOnlyDataBinding()} enables
+ * read-only access to properties via {@link DataBindingPropertyAccessor}. Similarly,
+ * {@link SimpleEvaluationContext#forReadWriteDataBinding()} enables read and write access
+ * to properties. Alternatively, configure custom accessors via
+ * {@link SimpleEvaluationContext#forPropertyAccessors}, potentially
+ * {@linkplain Builder#withAssignmentDisabled() disable assignment}, and optionally
+ * activate method resolution and/or a type converter through the builder.
+ *
+ * &lt;p&gt;Note that {@code SimpleEvaluationContext} is typically not configured
+ * with a default root object. Instead it is meant to be created once and
+ * used repeatedly through {@code getValue} calls on a predefined
+ * {@link org.springframework.expression.Expression} with both an
+ * {@code EvaluationContext} and a root object as arguments:
+ * {@link org.springframework.expression.Expression#getValue(EvaluationContext, Object)}.
+ *
+ * &lt;p&gt;In addition to support for setting and looking up variables as defined in
+ * the {@link EvaluationContext} API, {@code SimpleEvaluationContext} also
+ * provides support for {@linkplain #setVariable(String, Object) registering} and
+ * {@linkplain #lookupVariable(String) looking up} functions as variables. Since
+ * functions share a common namespace with the variables in this evaluation
+ * context, care must be taken to ensure that function names and variable names
+ * do not overlap.
+ *
+ * &lt;p&gt;For more power and flexibility, in particular for internal configuration
+ * scenarios, consider using {@link StandardEvaluationContext} instead.
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 4.3.15
+ * @see #forReadOnlyDataBinding()
+ * @see #forReadWriteDataBinding()
+ * @see #forPropertyAccessors
+ * @see StandardEvaluationContext
+ * @see StandardTypeConverter
+ * @see DataBindingPropertyAccessor
+ * @see DataBindingMethodResolver
+ */
+public final class SimpleEvaluationContext implements EvaluationContext {
+
+<span class="fc" id="L104">	private static final TypeLocator typeNotFoundTypeLocator = typeName -&gt; {</span>
+<span class="nc" id="L105">		throw new SpelEvaluationException(SpelMessage.TYPE_NOT_FOUND, typeName);</span>
+	};
+
+
+	private final TypedValue rootObject;
+
+	private final List&lt;PropertyAccessor&gt; propertyAccessors;
+
+	private final List&lt;IndexAccessor&gt; indexAccessors;
+
+	private final List&lt;MethodResolver&gt; methodResolvers;
+
+	private final TypeConverter typeConverter;
+
+<span class="fc" id="L119">	private final TypeComparator typeComparator = StandardTypeComparator.INSTANCE;</span>
+
+<span class="fc" id="L121">	private final OperatorOverloader operatorOverloader = StandardOperatorOverloader.INSTANCE;</span>
+
+<span class="fc" id="L123">	private final Map&lt;String, Object&gt; variables = new HashMap&lt;&gt;();</span>
+
+	private final boolean assignmentEnabled;
+
+
+	private SimpleEvaluationContext(List&lt;PropertyAccessor&gt; propertyAccessors, List&lt;IndexAccessor&gt; indexAccessors,
+			List&lt;MethodResolver&gt; resolvers, @Nullable TypeConverter converter, @Nullable TypedValue rootObject,
+<span class="fc" id="L130">			boolean assignmentEnabled) {</span>
+
+<span class="fc" id="L132">		this.propertyAccessors = propertyAccessors;</span>
+<span class="fc" id="L133">		this.indexAccessors = indexAccessors;</span>
+<span class="fc" id="L134">		this.methodResolvers = resolvers;</span>
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">		this.typeConverter = (converter != null ? converter : new StandardTypeConverter());</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">		this.rootObject = (rootObject != null ? rootObject : TypedValue.NULL);</span>
+<span class="fc" id="L137">		this.assignmentEnabled = assignmentEnabled;</span>
+<span class="fc" id="L138">	}</span>
+
+
+	/**
+	 * Return the specified root object, if any.
+	 */
+	@Override
+	public TypedValue getRootObject() {
+<span class="fc" id="L146">		return this.rootObject;</span>
+	}
+
+	/**
+	 * Return the specified {@link PropertyAccessor} delegates, if any.
+	 * @see #forPropertyAccessors
+	 */
+	@Override
+	public List&lt;PropertyAccessor&gt; getPropertyAccessors() {
+<span class="fc" id="L155">		return this.propertyAccessors;</span>
+	}
+
+	/**
+	 * Return the specified {@link IndexAccessor} delegates, if any.
+	 * @since 6.2
+	 * @see Builder#withIndexAccessors(IndexAccessor...)
+	 */
+	@Override
+	public List&lt;IndexAccessor&gt; getIndexAccessors() {
+<span class="fc" id="L165">		return this.indexAccessors;</span>
+	}
+
+	/**
+	 * Return the specified {@link MethodResolver} delegates, if any.
+	 * @see Builder#withMethodResolvers
+	 */
+	@Override
+	public List&lt;MethodResolver&gt; getMethodResolvers() {
+<span class="fc" id="L174">		return this.methodResolvers;</span>
+	}
+
+	/**
+	 * {@code SimpleEvaluationContext} does not support the use of bean references.
+	 * @return always {@code null}
+	 */
+	@Override
+	public @Nullable BeanResolver getBeanResolver() {
+<span class="nc" id="L183">		return null;</span>
+	}
+
+	/**
+	 * {@code SimpleEvaluationContext} does not support use of type references.
+	 * @return {@code TypeLocator} implementation that raises a
+	 * {@link SpelEvaluationException} with {@link SpelMessage#TYPE_NOT_FOUND}
+	 */
+	@Override
+	public TypeLocator getTypeLocator() {
+<span class="nc" id="L193">		return typeNotFoundTypeLocator;</span>
+	}
+
+	/**
+	 * The configured {@link TypeConverter}.
+	 * &lt;p&gt;By default this is {@link StandardTypeConverter}.
+	 * @see Builder#withTypeConverter
+	 * @see Builder#withConversionService
+	 */
+	@Override
+	public TypeConverter getTypeConverter() {
+<span class="fc" id="L204">		return this.typeConverter;</span>
+	}
+
+	/**
+	 * Return an instance of {@link StandardTypeComparator}.
+	 */
+	@Override
+	public TypeComparator getTypeComparator() {
+<span class="fc" id="L212">		return this.typeComparator;</span>
+	}
+
+	/**
+	 * Return an instance of {@link StandardOperatorOverloader}.
+	 */
+	@Override
+	public OperatorOverloader getOperatorOverloader() {
+<span class="nc" id="L220">		return this.operatorOverloader;</span>
+	}
+
+	/**
+	 * {@code SimpleEvaluationContext} does not support variable assignment within
+	 * expressions.
+	 * @throws SpelEvaluationException with {@link SpelMessage#VARIABLE_ASSIGNMENT_NOT_SUPPORTED}
+	 * @since 5.2.24
+	 */
+	@Override
+	public TypedValue assignVariable(String name, Supplier&lt;TypedValue&gt; valueSupplier) {
+<span class="fc" id="L231">		throw new SpelEvaluationException(SpelMessage.VARIABLE_ASSIGNMENT_NOT_SUPPORTED, &quot;#&quot; + name);</span>
+	}
+
+	/**
+	 * Set a named variable or function in this evaluation context to the specified
+	 * value.
+	 * &lt;p&gt;A function can be registered as a {@link java.lang.reflect.Method} or
+	 * a {@link java.lang.invoke.MethodHandle}.
+	 * &lt;p&gt;Note that variables and functions share a common namespace in this
+	 * evaluation context. See the {@linkplain SimpleEvaluationContext
+	 * class-level documentation} for details.
+	 * @param name the name of the variable or function to set
+	 * @param value the value to be placed in the variable or function
+	 * @see #lookupVariable(String)
+	 */
+	@Override
+	public void setVariable(String name, @Nullable Object value) {
+<span class="fc" id="L248">		this.variables.put(name, value);</span>
+<span class="fc" id="L249">	}</span>
+
+	/**
+	 * Look up a named variable or function within this evaluation context.
+	 * &lt;p&gt;Note that variables and functions share a common namespace in this
+	 * evaluation context. See the {@linkplain SimpleEvaluationContext
+	 * class-level documentation} for details.
+	 * @param name the name of the variable or function to look up
+	 * @return the value of the variable or function, or {@code null} if not found
+	 */
+	@Override
+	public @Nullable Object lookupVariable(String name) {
+<span class="fc" id="L261">		return this.variables.get(name);</span>
+	}
+
+	/**
+	 * Determine if assignment is enabled within expressions evaluated by this evaluation
+	 * context.
+	 * &lt;p&gt;If this method returns {@code false}, the assignment ({@code =}), increment
+	 * ({@code ++}), and decrement ({@code --}) operators are disabled.
+	 * @return {@code true} if assignment is enabled; {@code false} otherwise
+	 * @since 5.3.38
+	 * @see #forReadOnlyDataBinding()
+	 * @see Builder#withAssignmentDisabled()
+	 */
+	@Override
+	public boolean isAssignmentEnabled() {
+<span class="fc" id="L276">		return this.assignmentEnabled;</span>
+	}
+
+	/**
+	 * Create a {@code SimpleEvaluationContext} for the specified {@link PropertyAccessor}
+	 * delegates: typically a custom {@code PropertyAccessor} specific to a use case &amp;mdash;
+	 * for example, for attribute resolution in a custom data structure &amp;mdash; potentially
+	 * combined with a {@link DataBindingPropertyAccessor} if property dereferences are
+	 * needed as well.
+	 * &lt;p&gt;By default, assignment is enabled within expressions evaluated by the context
+	 * created via this factory method; however, assignment can be disabled via
+	 * {@link Builder#withAssignmentDisabled()}.
+	 * @param accessors the accessor delegates to use
+	 * @see DataBindingPropertyAccessor#forReadOnlyAccess()
+	 * @see DataBindingPropertyAccessor#forReadWriteAccess()
+	 * @see #isAssignmentEnabled()
+	 * @see Builder#withAssignmentDisabled()
+	 */
+	public static Builder forPropertyAccessors(PropertyAccessor... accessors) {
+<span class="fc bfc" id="L295" title="All 2 branches covered.">		for (PropertyAccessor accessor : accessors) {</span>
+<span class="pc bpc" id="L296" title="1 of 2 branches missed.">			if (accessor.getClass() == ReflectivePropertyAccessor.class) {</span>
+<span class="nc" id="L297">				throw new IllegalArgumentException(&quot;SimpleEvaluationContext is not designed for use with a plain &quot; +</span>
+						&quot;ReflectivePropertyAccessor. Consider using DataBindingPropertyAccessor or a custom subclass.&quot;);
+			}
+		}
+<span class="fc" id="L301">		return new Builder(accessors);</span>
+	}
+
+	/**
+	 * Create a {@code SimpleEvaluationContext} for read-only access to
+	 * public properties via {@link DataBindingPropertyAccessor}.
+	 * &lt;p&gt;Assignment is disabled within expressions evaluated by the context created via
+	 * this factory method.
+	 * @see DataBindingPropertyAccessor#forReadOnlyAccess()
+	 * @see #forPropertyAccessors
+	 * @see #isAssignmentEnabled()
+	 * @see Builder#withAssignmentDisabled()
+	 */
+	public static Builder forReadOnlyDataBinding() {
+<span class="fc" id="L315">		return new Builder(DataBindingPropertyAccessor.forReadOnlyAccess()).withAssignmentDisabled();</span>
+	}
+
+	/**
+	 * Create a {@code SimpleEvaluationContext} for read-write access to
+	 * public properties via {@link DataBindingPropertyAccessor}.
+	 * &lt;p&gt;By default, assignment is enabled within expressions evaluated by the context
+	 * created via this factory method. Assignment can be disabled via
+	 * {@link Builder#withAssignmentDisabled()}; however, it is preferable to use
+	 * {@link #forReadOnlyDataBinding()} if you desire read-only access.
+	 * @see DataBindingPropertyAccessor#forReadWriteAccess()
+	 * @see #forPropertyAccessors
+	 * @see #isAssignmentEnabled()
+	 * @see Builder#withAssignmentDisabled()
+	 */
+	public static Builder forReadWriteDataBinding() {
+<span class="fc" id="L331">		return new Builder(DataBindingPropertyAccessor.forReadWriteAccess());</span>
+	}
+
+
+	/**
+	 * Builder for {@code SimpleEvaluationContext}.
+	 */
+	public static final class Builder {
+
+		private final List&lt;PropertyAccessor&gt; propertyAccessors;
+
+<span class="fc" id="L342">		private List&lt;IndexAccessor&gt; indexAccessors = Collections.emptyList();</span>
+
+<span class="fc" id="L344">		private List&lt;MethodResolver&gt; resolvers = Collections.emptyList();</span>
+
+		private @Nullable TypeConverter typeConverter;
+
+		private @Nullable TypedValue rootObject;
+
+<span class="fc" id="L350">		private boolean assignmentEnabled = true;</span>
+
+
+<span class="fc" id="L353">		private Builder(PropertyAccessor... accessors) {</span>
+<span class="fc" id="L354">			this.propertyAccessors = Arrays.asList(accessors);</span>
+<span class="fc" id="L355">		}</span>
+
+
+		/**
+		 * Disable assignment within expressions evaluated by this evaluation context.
+		 * @since 5.3.38
+		 * @see SimpleEvaluationContext#isAssignmentEnabled()
+		 */
+		public Builder withAssignmentDisabled() {
+<span class="fc" id="L364">			this.assignmentEnabled = false;</span>
+<span class="fc" id="L365">			return this;</span>
+		}
+
+		/**
+		 * Register the specified {@link IndexAccessor} delegates.
+		 * @param indexAccessors the index accessors to use
+		 * @since 6.2
+		 */
+		public Builder withIndexAccessors(IndexAccessor... indexAccessors) {
+<span class="fc" id="L374">			this.indexAccessors = Arrays.asList(indexAccessors);</span>
+<span class="fc" id="L375">			return this;</span>
+		}
+
+		/**
+		 * Register the specified {@link MethodResolver} delegates for
+		 * a combination of property access and method resolution.
+		 * @param resolvers the resolver delegates to use
+		 * @see #withInstanceMethods()
+		 * @see SimpleEvaluationContext#forPropertyAccessors
+		 */
+		public Builder withMethodResolvers(MethodResolver... resolvers) {
+<span class="nc bnc" id="L386" title="All 2 branches missed.">			for (MethodResolver resolver : resolvers) {</span>
+<span class="nc bnc" id="L387" title="All 2 branches missed.">				if (resolver.getClass() == ReflectiveMethodResolver.class) {</span>
+<span class="nc" id="L388">					throw new IllegalArgumentException(&quot;SimpleEvaluationContext is not designed for use with a plain &quot; +</span>
+							&quot;ReflectiveMethodResolver. Consider using DataBindingMethodResolver or a custom subclass.&quot;);
+				}
+			}
+<span class="nc" id="L392">			this.resolvers = Arrays.asList(resolvers);</span>
+<span class="nc" id="L393">			return this;</span>
+		}
+
+		/**
+		 * Register a {@link DataBindingMethodResolver} for instance method invocation purposes
+		 * (i.e. not supporting static methods) in addition to the specified property accessors,
+		 * typically in combination with a {@link DataBindingPropertyAccessor}.
+		 * @see #withMethodResolvers
+		 * @see SimpleEvaluationContext#forReadOnlyDataBinding()
+		 * @see SimpleEvaluationContext#forReadWriteDataBinding()
+		 */
+		public Builder withInstanceMethods() {
+<span class="fc" id="L405">			this.resolvers = Collections.singletonList(DataBindingMethodResolver.forInstanceMethodInvocation());</span>
+<span class="fc" id="L406">			return this;</span>
+		}
+
+		/**
+		 * Register a custom {@link ConversionService}.
+		 * &lt;p&gt;By default a {@link StandardTypeConverter} backed by a
+		 * {@link org.springframework.core.convert.support.DefaultConversionService} is used.
+		 * @see #withTypeConverter
+		 * @see StandardTypeConverter#StandardTypeConverter(ConversionService)
+		 */
+		public Builder withConversionService(ConversionService conversionService) {
+<span class="nc" id="L417">			this.typeConverter = new StandardTypeConverter(conversionService);</span>
+<span class="nc" id="L418">			return this;</span>
+		}
+
+		/**
+		 * Register a custom {@link TypeConverter}.
+		 * &lt;p&gt;By default a {@link StandardTypeConverter} backed by a
+		 * {@link org.springframework.core.convert.support.DefaultConversionService} is used.
+		 * @see #withConversionService
+		 * @see StandardTypeConverter#StandardTypeConverter()
+		 */
+		public Builder withTypeConverter(TypeConverter converter) {
+<span class="nc" id="L429">			this.typeConverter = converter;</span>
+<span class="nc" id="L430">			return this;</span>
+		}
+
+		/**
+		 * Specify a default root object to resolve against.
+		 * &lt;p&gt;Default is none, expecting an object argument at evaluation time.
+		 * @see org.springframework.expression.Expression#getValue(EvaluationContext)
+		 * @see org.springframework.expression.Expression#getValue(EvaluationContext, Object)
+		 */
+		public Builder withRootObject(Object rootObject) {
+<span class="fc" id="L440">			this.rootObject = new TypedValue(rootObject);</span>
+<span class="fc" id="L441">			return this;</span>
+		}
+
+		/**
+		 * Specify a typed root object to resolve against.
+		 * &lt;p&gt;Default is none, expecting an object argument at evaluation time.
+		 * @see org.springframework.expression.Expression#getValue(EvaluationContext)
+		 * @see org.springframework.expression.Expression#getValue(EvaluationContext, Object)
+		 */
+		public Builder withTypedRootObject(Object rootObject, TypeDescriptor typeDescriptor) {
+<span class="fc" id="L451">			this.rootObject = new TypedValue(rootObject, typeDescriptor);</span>
+<span class="fc" id="L452">			return this;</span>
+		}
+
+		public SimpleEvaluationContext build() {
+<span class="fc" id="L456">			return new SimpleEvaluationContext(this.propertyAccessors, this.indexAccessors,</span>
+					this.resolvers, this.typeConverter, this.rootObject, this.assignmentEnabled);
+		}
+
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

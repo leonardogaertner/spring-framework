@@ -1,0 +1,537 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ForwardedHeaderFilter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.filter</a> &gt; <span class="el_source">ForwardedHeaderFilter.java</span></div><h1>ForwardedHeaderFilter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.filter;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.Locale;
+import java.util.Set;
+import java.util.function.Supplier;
+
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
+import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpServletResponseWrapper;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.server.ServerHttpRequest;
+import org.springframework.http.server.ServletServerHttpRequest;
+import org.springframework.util.Assert;
+import org.springframework.util.LinkedCaseInsensitiveMap;
+import org.springframework.util.StringUtils;
+import org.springframework.web.util.ForwardedHeaderUtils;
+import org.springframework.web.util.UriComponents;
+import org.springframework.web.util.UriComponentsBuilder;
+import org.springframework.web.util.UrlPathHelper;
+import org.springframework.web.util.WebUtils;
+
+/**
+ * Extract values from &quot;Forwarded&quot; and &quot;X-Forwarded-*&quot; headers, wrap the request
+ * and response, and make they reflect the client-originated protocol and
+ * address in the following methods:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@link HttpServletRequest#getServerName() getServerName()}
+ * &lt;li&gt;{@link HttpServletRequest#getServerPort() getServerPort()}
+ * &lt;li&gt;{@link HttpServletRequest#getScheme() getScheme()}
+ * &lt;li&gt;{@link HttpServletRequest#isSecure() isSecure()}
+ * &lt;li&gt;{@link HttpServletResponse#sendRedirect(String) sendRedirect(String)}.
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;There are security considerations for forwarded headers since an application
+ * cannot know if the headers were added by a proxy, as intended, or by a malicious
+ * client. This is why a proxy at the boundary of trust should be configured to
+ * remove untrusted Forwarded headers that come from the outside.
+ *
+ * &lt;p&gt;You can also configure the ForwardedHeaderFilter with {@link #setRemoveOnly removeOnly},
+ * in which case it removes but does not use the headers.
+ *
+ * @author Rossen Stoyanchev
+ * @author Eddú Meléndez
+ * @author Rob Winch
+ * @author Brian Clozel
+ * @author Mengqi Xu
+ * @since 4.3
+ * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc7239&quot;&gt;https://tools.ietf.org/html/rfc7239&lt;/a&gt;
+ * @see &lt;a href=&quot;https://docs.spring.io/spring-framework/reference/web/webmvc/filters.html#filters-forwarded-headers&quot;&gt;Forwarded Headers&lt;/a&gt;
+ */
+<span class="nc" id="L81">public class ForwardedHeaderFilter extends OncePerRequestFilter {</span>
+
+<span class="nc" id="L83">	private static final Log logger = LogFactory.getLog(ForwardedHeaderFilter.class);</span>
+
+<span class="nc" id="L85">	private static final Set&lt;String&gt; FORWARDED_HEADER_NAMES =</span>
+<span class="nc" id="L86">			Collections.newSetFromMap(new LinkedCaseInsensitiveMap&lt;&gt;(10, Locale.ROOT));</span>
+
+	static {
+<span class="nc" id="L89">		FORWARDED_HEADER_NAMES.add(&quot;Forwarded&quot;);</span>
+<span class="nc" id="L90">		FORWARDED_HEADER_NAMES.add(&quot;X-Forwarded-Host&quot;);</span>
+<span class="nc" id="L91">		FORWARDED_HEADER_NAMES.add(&quot;X-Forwarded-Port&quot;);</span>
+<span class="nc" id="L92">		FORWARDED_HEADER_NAMES.add(&quot;X-Forwarded-Proto&quot;);</span>
+<span class="nc" id="L93">		FORWARDED_HEADER_NAMES.add(&quot;X-Forwarded-Prefix&quot;);</span>
+<span class="nc" id="L94">		FORWARDED_HEADER_NAMES.add(&quot;X-Forwarded-Ssl&quot;);</span>
+<span class="nc" id="L95">		FORWARDED_HEADER_NAMES.add(&quot;X-Forwarded-For&quot;);</span>
+<span class="nc" id="L96">	}</span>
+
+
+	private boolean removeOnly;
+
+	private boolean relativeRedirects;
+
+
+	/**
+	 * Enables mode in which any &quot;Forwarded&quot; or &quot;X-Forwarded-*&quot; headers are
+	 * removed only and the information in them ignored.
+	 * @param removeOnly whether to discard and ignore forwarded headers
+	 * @since 4.3.9
+	 */
+	public void setRemoveOnly(boolean removeOnly) {
+<span class="nc" id="L111">		this.removeOnly = removeOnly;</span>
+<span class="nc" id="L112">	}</span>
+
+	/**
+	 * Use this property to enable relative redirects as explained in
+	 * {@link RelativeRedirectFilter}, and also using the same response wrapper
+	 * as that filter does, or if both are configured, only one will wrap.
+	 * &lt;p&gt;By default, if this property is set to false, in which case calls to
+	 * {@link HttpServletResponse#sendRedirect(String)} are overridden in order
+	 * to turn relative into absolute URLs, also taking into account forwarded
+	 * headers.
+	 * @param relativeRedirects whether to use relative redirects
+	 * @since 4.3.10
+	 */
+	public void setRelativeRedirects(boolean relativeRedirects) {
+<span class="nc" id="L126">		this.relativeRedirects = relativeRedirects;</span>
+<span class="nc" id="L127">	}</span>
+
+
+	@Override
+	protected boolean shouldNotFilter(HttpServletRequest request) {
+<span class="nc bnc" id="L132" title="All 2 branches missed.">		for (String headerName : FORWARDED_HEADER_NAMES) {</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">			if (request.getHeader(headerName) != null) {</span>
+<span class="nc" id="L134">				return false;</span>
+			}
+<span class="nc" id="L136">		}</span>
+<span class="nc" id="L137">		return true;</span>
+	}
+
+	@Override
+	protected boolean shouldNotFilterAsyncDispatch() {
+<span class="nc" id="L142">		return false;</span>
+	}
+
+	@Override
+	protected boolean shouldNotFilterErrorDispatch() {
+<span class="nc" id="L147">		return false;</span>
+	}
+
+	@Override
+	protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
+			FilterChain filterChain) throws ServletException, IOException {
+
+<span class="nc bnc" id="L154" title="All 2 branches missed.">		if (this.removeOnly) {</span>
+<span class="nc" id="L155">			ForwardedHeaderRemovingRequest wrappedRequest = new ForwardedHeaderRemovingRequest(request);</span>
+<span class="nc" id="L156">			filterChain.doFilter(wrappedRequest, response);</span>
+<span class="nc" id="L157">		}</span>
+		else {
+<span class="nc" id="L159">			HttpServletRequest wrappedRequest = null;</span>
+<span class="nc" id="L160">			HttpServletResponse wrappedResponse = null;</span>
+			try {
+<span class="nc" id="L162">				wrappedRequest = new ForwardedHeaderExtractingRequest(request);</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">				wrappedResponse = this.relativeRedirects ?</span>
+<span class="nc" id="L164">						RelativeRedirectResponseWrapper.wrapIfNecessary(response, HttpStatus.SEE_OTHER) :</span>
+<span class="nc" id="L165">						new ForwardedHeaderExtractingResponse(response, wrappedRequest);</span>
+			}
+<span class="nc" id="L167">			catch (Throwable ex) {</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L169">					logger.debug(&quot;Failed to apply forwarded headers to &quot; + formatRequest(request), ex);</span>
+				}
+<span class="nc" id="L171">				response.sendError(HttpServletResponse.SC_BAD_REQUEST);</span>
+<span class="nc" id="L172">				return;</span>
+<span class="nc" id="L173">			}</span>
+<span class="nc" id="L174">			filterChain.doFilter(wrappedRequest, wrappedResponse);</span>
+		}
+<span class="nc" id="L176">	}</span>
+
+	/**
+	 * Format the request for logging purposes including HTTP method and URL.
+	 * @param request the request to format
+	 * @return the String to display, never empty or {@code null}
+	 */
+	protected String formatRequest(HttpServletRequest request) {
+<span class="nc" id="L184">		return &quot;HTTP &quot; + request.getMethod() + &quot; \&quot;&quot; + request.getRequestURI() + &quot;\&quot;&quot;;</span>
+	}
+
+	@Override
+	protected void doFilterNestedErrorDispatch(HttpServletRequest request, HttpServletResponse response,
+			FilterChain filterChain) throws ServletException, IOException {
+
+<span class="nc" id="L191">		doFilterInternal(request, response, filterChain);</span>
+<span class="nc" id="L192">	}</span>
+
+
+	/**
+	 * Hide &quot;Forwarded&quot; or &quot;X-Forwarded-*&quot; headers.
+	 */
+	private static class ForwardedHeaderRemovingRequest extends HttpServletRequestWrapper {
+
+		private final Set&lt;String&gt; headerNames;
+
+		public ForwardedHeaderRemovingRequest(HttpServletRequest request) {
+<span class="nc" id="L203">			super(request);</span>
+<span class="nc" id="L204">			this.headerNames = headerNames(request);</span>
+<span class="nc" id="L205">		}</span>
+
+		private static Set&lt;String&gt; headerNames(HttpServletRequest request) {
+<span class="nc" id="L208">			Set&lt;String&gt; headerNames = Collections.newSetFromMap(new LinkedCaseInsensitiveMap&lt;&gt;(Locale.ROOT));</span>
+<span class="nc" id="L209">			Enumeration&lt;String&gt; names = request.getHeaderNames();</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">			while (names.hasMoreElements()) {</span>
+<span class="nc" id="L211">				String name = names.nextElement();</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">				if (!FORWARDED_HEADER_NAMES.contains(name)) {</span>
+<span class="nc" id="L213">					headerNames.add(name);</span>
+				}
+<span class="nc" id="L215">			}</span>
+<span class="nc" id="L216">			return Collections.unmodifiableSet(headerNames);</span>
+		}
+
+		// Override header accessors to not expose forwarded headers
+
+		@Override
+		public @Nullable String getHeader(String name) {
+<span class="nc bnc" id="L223" title="All 2 branches missed.">			if (FORWARDED_HEADER_NAMES.contains(name)) {</span>
+<span class="nc" id="L224">				return null;</span>
+			}
+<span class="nc" id="L226">			return super.getHeader(name);</span>
+		}
+
+		@Override
+		public Enumeration&lt;String&gt; getHeaders(String name) {
+<span class="nc bnc" id="L231" title="All 2 branches missed.">			if (FORWARDED_HEADER_NAMES.contains(name)) {</span>
+<span class="nc" id="L232">				return Collections.emptyEnumeration();</span>
+			}
+<span class="nc" id="L234">			return super.getHeaders(name);</span>
+		}
+
+		@Override
+		public Enumeration&lt;String&gt; getHeaderNames() {
+<span class="nc" id="L239">			return Collections.enumeration(this.headerNames);</span>
+		}
+	}
+
+
+	/**
+	 * Extract and use &quot;Forwarded&quot; or &quot;X-Forwarded-*&quot; headers.
+	 */
+	private static class ForwardedHeaderExtractingRequest extends ForwardedHeaderRemovingRequest {
+
+		private final @Nullable String scheme;
+
+		private final boolean secure;
+
+		private final @Nullable String host;
+
+		private final int port;
+
+		private final @Nullable InetSocketAddress remoteAddress;
+
+		private final @Nullable InetSocketAddress localAddress;
+
+		private final ForwardedPrefixExtractor forwardedPrefixExtractor;
+
+		ForwardedHeaderExtractingRequest(HttpServletRequest servletRequest) {
+<span class="nc" id="L264">			super(servletRequest);</span>
+
+<span class="nc" id="L266">			ServerHttpRequest request = new ServletServerHttpRequest(servletRequest);</span>
+<span class="nc" id="L267">			URI uri = request.getURI();</span>
+<span class="nc" id="L268">			HttpHeaders headers = request.getHeaders();</span>
+<span class="nc" id="L269">			UriComponents uriComponents = ForwardedHeaderUtils.adaptFromForwardedHeaders(uri, headers).build();</span>
+<span class="nc" id="L270">			int port = uriComponents.getPort();</span>
+
+<span class="nc" id="L272">			this.scheme = uriComponents.getScheme();</span>
+<span class="nc bnc" id="L273" title="All 4 branches missed.">			this.secure = &quot;https&quot;.equals(this.scheme) || &quot;wss&quot;.equals(this.scheme);</span>
+<span class="nc" id="L274">			this.host = uriComponents.getHost();</span>
+<span class="nc bnc" id="L275" title="All 4 branches missed.">			this.port = (port == -1 ? (this.secure ? 443 : 80) : port);</span>
+
+<span class="nc" id="L277">			this.remoteAddress = ForwardedHeaderUtils.parseForwardedFor(uri, headers, request.getRemoteAddress());</span>
+<span class="nc" id="L278">			this.localAddress = ForwardedHeaderUtils.parseForwardedBy(uri, headers, request.getLocalAddress());</span>
+
+			// Use Supplier as Tomcat updates delegate request on FORWARD
+<span class="nc" id="L281">			Supplier&lt;HttpServletRequest&gt; requestSupplier = () -&gt; (HttpServletRequest) getRequest();</span>
+
+<span class="nc" id="L283">			this.forwardedPrefixExtractor = new ForwardedPrefixExtractor(</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">					requestSupplier, (this.scheme + &quot;://&quot; + this.host + (port == -1 ? &quot;&quot; : &quot;:&quot; + port)));</span>
+<span class="nc" id="L285">		}</span>
+
+		@Override
+		public @Nullable String getScheme() {
+<span class="nc" id="L289">			return this.scheme;</span>
+		}
+
+		@Override
+		public @Nullable String getServerName() {
+<span class="nc" id="L294">			return this.host;</span>
+		}
+
+		@Override
+		public int getServerPort() {
+<span class="nc" id="L299">			return this.port;</span>
+		}
+
+		@Override
+		public boolean isSecure() {
+<span class="nc" id="L304">			return this.secure;</span>
+		}
+
+		@Override
+		public String getContextPath() {
+<span class="nc" id="L309">			return this.forwardedPrefixExtractor.getContextPath();</span>
+		}
+
+		@Override
+		public String getRequestURI() {
+<span class="nc" id="L314">			return this.forwardedPrefixExtractor.getRequestUri();</span>
+		}
+
+		@Override
+		public StringBuffer getRequestURL() {
+<span class="nc" id="L319">			return this.forwardedPrefixExtractor.getRequestUrl();</span>
+		}
+
+		@Override
+		public @Nullable String getRemoteHost() {
+<span class="nc bnc" id="L324" title="All 2 branches missed.">			return (this.remoteAddress != null ? this.remoteAddress.getHostString() : super.getRemoteHost());</span>
+		}
+
+		@Override
+		public @Nullable String getRemoteAddr() {
+<span class="nc bnc" id="L329" title="All 2 branches missed.">			return (this.remoteAddress != null ? this.remoteAddress.getHostString() : super.getRemoteAddr());</span>
+		}
+
+		@Override
+		public int getRemotePort() {
+<span class="nc bnc" id="L334" title="All 2 branches missed.">			return (this.remoteAddress != null ? this.remoteAddress.getPort() : super.getRemotePort());</span>
+		}
+
+		@Override
+		public @Nullable String getLocalAddr() {
+<span class="nc bnc" id="L339" title="All 2 branches missed.">			return (this.localAddress != null ? this.localAddress.getHostString() : super.getLocalAddr());</span>
+		}
+
+		@Override
+		public int getLocalPort() {
+<span class="nc bnc" id="L344" title="All 2 branches missed.">			return (this.localAddress != null ? this.localAddress.getPort() : super.getLocalPort());</span>
+		}
+
+		@SuppressWarnings(&quot;DataFlowIssue&quot;)
+		@Override
+		public @Nullable Object getAttribute(String name) {
+<span class="nc bnc" id="L350" title="All 2 branches missed.">			if (name.equals(WebUtils.ERROR_REQUEST_URI_ATTRIBUTE)) {</span>
+<span class="nc" id="L351">				return this.forwardedPrefixExtractor.getErrorRequestUri();</span>
+			}
+<span class="nc" id="L353">			return super.getAttribute(name);</span>
+		}
+	}
+
+
+	/**
+	 * Responsible for the contextPath, requestURI, and requestURL with forwarded
+	 * headers in mind, and also taking into account changes to the path of the
+	 * underlying delegate request (for example, on a Servlet FORWARD).
+	 */
+	private static class ForwardedPrefixExtractor {
+
+		private final Supplier&lt;HttpServletRequest&gt; delegate;
+
+		private final String baseUrl;
+
+		private String actualRequestUri;
+
+		private final @Nullable String forwardedPrefix;
+
+		private @Nullable String requestUri;
+
+		private String requestUrl;
+
+		/**
+		 * Constructor with required information.
+		 * @param delegate supplier for the current
+		 * {@link HttpServletRequestWrapper#getRequest() delegate request} which
+		 * may change during a forward (for example, Tomcat.
+		 * @param baseUrl the host, scheme, and port based on forwarded headers
+		 */
+<span class="nc" id="L384">		public ForwardedPrefixExtractor(Supplier&lt;HttpServletRequest&gt; delegate, String baseUrl) {</span>
+<span class="nc" id="L385">			this.delegate = delegate;</span>
+<span class="nc" id="L386">			this.baseUrl = baseUrl;</span>
+<span class="nc" id="L387">			this.actualRequestUri = delegate.get().getRequestURI();</span>
+
+			// Keep call order
+<span class="nc" id="L390">			this.forwardedPrefix = initForwardedPrefix(delegate.get());</span>
+<span class="nc" id="L391">			this.requestUri = initRequestUri();</span>
+<span class="nc" id="L392">			this.requestUrl = initRequestUrl();</span>
+<span class="nc" id="L393">		}</span>
+
+		private static @Nullable String initForwardedPrefix(HttpServletRequest request) {
+<span class="nc" id="L396">			String result = null;</span>
+<span class="nc" id="L397">			Enumeration&lt;String&gt; names = request.getHeaderNames();</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">			while (names.hasMoreElements()) {</span>
+<span class="nc" id="L399">				String name = names.nextElement();</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">				if (&quot;X-Forwarded-Prefix&quot;.equalsIgnoreCase(name)) {</span>
+<span class="nc" id="L401">					result = request.getHeader(name);</span>
+				}
+<span class="nc" id="L403">			}</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">			if (result != null) {</span>
+<span class="nc" id="L405">				StringBuilder prefix = new StringBuilder(result.length());</span>
+<span class="nc" id="L406">				String[] rawPrefixes = StringUtils.tokenizeToStringArray(result, &quot;,&quot;);</span>
+<span class="nc bnc" id="L407" title="All 2 branches missed.">				for (String rawPrefix : rawPrefixes) {</span>
+<span class="nc" id="L408">					int endIndex = rawPrefix.length();</span>
+<span class="nc bnc" id="L409" title="All 4 branches missed.">					while (endIndex &gt; 0 &amp;&amp; rawPrefix.charAt(endIndex - 1) == '/') {</span>
+<span class="nc" id="L410">						endIndex--;</span>
+					}
+<span class="nc bnc" id="L412" title="All 2 branches missed.">					prefix.append((endIndex != rawPrefix.length() ? rawPrefix.substring(0, endIndex) : rawPrefix));</span>
+				}
+<span class="nc" id="L414">				return prefix.toString();</span>
+			}
+<span class="nc" id="L416">			return null;</span>
+		}
+
+		private @Nullable String initRequestUri() {
+<span class="nc bnc" id="L420" title="All 2 branches missed.">			if (this.forwardedPrefix != null) {</span>
+<span class="nc" id="L421">				return this.forwardedPrefix +</span>
+<span class="nc" id="L422">						UrlPathHelper.rawPathInstance.getPathWithinApplication(this.delegate.get());</span>
+			}
+<span class="nc" id="L424">			return null;</span>
+		}
+
+		private String initRequestUrl() {
+<span class="nc bnc" id="L428" title="All 2 branches missed.">			return (this.baseUrl + (this.requestUri != null ? this.requestUri : this.delegate.get().getRequestURI()));</span>
+		}
+
+
+		public String getContextPath() {
+<span class="nc bnc" id="L433" title="All 2 branches missed.">			return (this.forwardedPrefix != null ? this.forwardedPrefix : this.delegate.get().getContextPath());</span>
+		}
+
+		public String getRequestUri() {
+<span class="nc bnc" id="L437" title="All 2 branches missed.">			if (this.requestUri == null) {</span>
+<span class="nc" id="L438">				return this.delegate.get().getRequestURI();</span>
+			}
+<span class="nc" id="L440">			recalculatePathsIfNecessary();</span>
+<span class="nc" id="L441">			return this.requestUri;</span>
+		}
+
+		public StringBuffer getRequestUrl() {
+<span class="nc" id="L445">			recalculatePathsIfNecessary();</span>
+<span class="nc" id="L446">			return new StringBuffer(this.requestUrl);</span>
+		}
+
+		private void recalculatePathsIfNecessary() {
+			// Path of delegate request changed, for example, FORWARD on Tomcat
+<span class="nc bnc" id="L451" title="All 2 branches missed.">			if (!this.actualRequestUri.equals(this.delegate.get().getRequestURI())) {</span>
+<span class="nc" id="L452">				this.actualRequestUri = this.delegate.get().getRequestURI();</span>
+				// Keep call order
+<span class="nc" id="L454">				this.requestUri = initRequestUri();</span>
+<span class="nc" id="L455">				this.requestUrl = initRequestUrl();</span>
+			}
+<span class="nc" id="L457">		}</span>
+
+		public @Nullable String getErrorRequestUri() {
+<span class="nc" id="L460">			HttpServletRequest request = this.delegate.get();</span>
+<span class="nc" id="L461">			String requestUri = (String) request.getAttribute(WebUtils.ERROR_REQUEST_URI_ATTRIBUTE);</span>
+<span class="nc bnc" id="L462" title="All 4 branches missed.">			if (this.forwardedPrefix == null || requestUri == null) {</span>
+<span class="nc" id="L463">				return requestUri;</span>
+			}
+<span class="nc" id="L465">			ErrorPathRequest errorRequest = new ErrorPathRequest(request);</span>
+<span class="nc" id="L466">			return this.forwardedPrefix + UrlPathHelper.rawPathInstance.getPathWithinApplication(errorRequest);</span>
+		}
+	}
+
+
+	private static class ForwardedHeaderExtractingResponse extends HttpServletResponseWrapper {
+
+		private static final String FOLDER_SEPARATOR = &quot;/&quot;;
+
+		private final HttpServletRequest request;
+
+		ForwardedHeaderExtractingResponse(HttpServletResponse response, HttpServletRequest request) {
+<span class="nc" id="L478">			super(response);</span>
+<span class="nc" id="L479">			this.request = request;</span>
+<span class="nc" id="L480">		}</span>
+
+		@Override
+		public void sendRedirect(String location) throws IOException {
+<span class="nc" id="L484">			UriComponentsBuilder builder = UriComponentsBuilder.fromUriString(location);</span>
+<span class="nc" id="L485">			UriComponents uriComponents = builder.build();</span>
+
+			// Absolute location
+<span class="nc bnc" id="L488" title="All 2 branches missed.">			if (uriComponents.getScheme() != null) {</span>
+<span class="nc" id="L489">				super.sendRedirect(location);</span>
+<span class="nc" id="L490">				return;</span>
+			}
+
+			// Network-path reference
+<span class="nc bnc" id="L494" title="All 2 branches missed.">			if (location.startsWith(&quot;//&quot;)) {</span>
+<span class="nc" id="L495">				String scheme = this.request.getScheme();</span>
+<span class="nc" id="L496">				super.sendRedirect(builder.scheme(scheme).toUriString());</span>
+<span class="nc" id="L497">				return;</span>
+			}
+
+<span class="nc" id="L500">			String path = uriComponents.getPath();</span>
+<span class="nc bnc" id="L501" title="All 2 branches missed.">			if (path != null) {</span>
+				// Relative to Servlet container root or to current request
+<span class="nc bnc" id="L503" title="All 2 branches missed.">				path = (path.startsWith(FOLDER_SEPARATOR) ? path :</span>
+<span class="nc" id="L504">						StringUtils.applyRelativePath(this.request.getRequestURI(), path));</span>
+			}
+
+<span class="nc" id="L507">			ServletServerHttpRequest httpRequest = new ServletServerHttpRequest(this.request);</span>
+<span class="nc" id="L508">			URI uri = httpRequest.getURI();</span>
+<span class="nc" id="L509">			HttpHeaders headers = httpRequest.getHeaders();</span>
+
+<span class="nc" id="L511">			String result = ForwardedHeaderUtils.adaptFromForwardedHeaders(uri, headers)</span>
+<span class="nc" id="L512">					.replacePath(path)</span>
+<span class="nc" id="L513">					.replaceQuery(uriComponents.getQuery())</span>
+<span class="nc" id="L514">					.fragment(uriComponents.getFragment())</span>
+<span class="nc" id="L515">					.build().normalize().toUriString();</span>
+
+<span class="nc" id="L517">			super.sendRedirect(result);</span>
+<span class="nc" id="L518">		}</span>
+	}
+
+
+	private static class ErrorPathRequest extends HttpServletRequestWrapper {
+
+		ErrorPathRequest(ServletRequest request) {
+<span class="nc" id="L525">			super((HttpServletRequest) request);</span>
+<span class="nc" id="L526">		}</span>
+
+		@Override
+		public String getRequestURI() {
+<span class="nc" id="L530">			String requestUri = (String) getAttribute(WebUtils.ERROR_REQUEST_URI_ATTRIBUTE);</span>
+<span class="nc bnc" id="L531" title="All 2 branches missed.">			Assert.isTrue(requestUri != null, &quot;Expected ERROR requestUri attribute&quot;);</span>
+<span class="nc" id="L532">			return requestUri;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

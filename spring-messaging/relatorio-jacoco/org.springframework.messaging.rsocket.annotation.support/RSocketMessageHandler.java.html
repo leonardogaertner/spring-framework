@@ -1,0 +1,511 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RSocketMessageHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.rsocket.annotation.support</a> &gt; <span class="el_source">RSocketMessageHandler.java</span></div><h1>RSocketMessageHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.rsocket.annotation.support;
+
+import java.lang.reflect.AnnotatedElement;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+
+import io.rsocket.ConnectionSetupPayload;
+import io.rsocket.RSocket;
+import io.rsocket.SocketAcceptor;
+import io.rsocket.frame.FrameType;
+import io.rsocket.metadata.WellKnownMimeType;
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Mono;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.codec.Decoder;
+import org.springframework.core.codec.Encoder;
+import org.springframework.core.io.buffer.PooledDataBuffer;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageDeliveryException;
+import org.springframework.messaging.handler.CompositeMessageCondition;
+import org.springframework.messaging.handler.DestinationPatternsMessageCondition;
+import org.springframework.messaging.handler.HandlerMethod;
+import org.springframework.messaging.handler.MessageCondition;
+import org.springframework.messaging.handler.annotation.MessageMapping;
+import org.springframework.messaging.handler.annotation.reactive.MessageMappingMessageHandler;
+import org.springframework.messaging.handler.annotation.reactive.PayloadMethodArgumentResolver;
+import org.springframework.messaging.handler.invocation.reactive.HandlerMethodReturnValueHandler;
+import org.springframework.messaging.rsocket.MetadataExtractor;
+import org.springframework.messaging.rsocket.RSocketRequester;
+import org.springframework.messaging.rsocket.RSocketStrategies;
+import org.springframework.messaging.rsocket.annotation.ConnectMapping;
+import org.springframework.messaging.rsocket.service.RSocketExchange;
+import org.springframework.util.Assert;
+import org.springframework.util.MimeType;
+import org.springframework.util.MimeTypeUtils;
+import org.springframework.util.RouteMatcher;
+import org.springframework.util.StringUtils;
+
+/**
+ * Extension of {@link MessageMappingMessageHandler} to handle RSocket
+ * requests with {@link MessageMapping @MessageMapping} and
+ * {@link ConnectMapping @ConnectMapping} methods, also supporting use of
+ * {@link RSocketExchange @RSocketExchange}.
+ *
+ * &lt;p&gt;For server scenarios this class can be declared as a bean in Spring
+ * configuration and that would detect {@code @MessageMapping} methods in
+ * {@code @Controller} beans. What beans are checked can be changed through a
+ * {@link #setHandlerPredicate(Predicate) handlerPredicate}. Given an instance
+ * of this class, you can then use {@link #responder()} to obtain a
+ * {@link SocketAcceptor} adapter to register with the
+ * {@link io.rsocket.core.RSocketServer}.
+ *
+ * &lt;p&gt;For a client, possibly in the same process as a server, consider using the
+ * static factory method {@link #responder(RSocketStrategies, Object...)} to
+ * obtain a client responder to be registered via
+ * {@link org.springframework.messaging.rsocket.RSocketRequester.Builder#rsocketConnector
+ * RSocketRequester.Builder}.
+ *
+ * &lt;p&gt;For {@code @MessageMapping} and {@code @RSocketExchange} methods,
+ * this class automatically determines the RSocket interaction type
+ * based on the input and output cardinality of the method. See the
+ * &lt;a href=&quot;https://docs.spring.io/spring/docs/current/spring-framework-reference/web-reactive.html#rsocket-annot-responders&quot;&gt;
+ * &quot;Annotated Responders&quot;&lt;/a&gt; section of the Spring Framework reference for more details.
+ *
+ * @author Rossen Stoyanchev
+ * @author Olga Maciaszek-Sharma
+ * @since 5.2
+ */
+public class RSocketMessageHandler extends MessageMappingMessageHandler {
+
+<span class="fc" id="L95">	private final List&lt;Encoder&lt;?&gt;&gt; encoders = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L97">	private RSocketStrategies strategies = RSocketStrategies.create();</span>
+
+	private @Nullable MimeType defaultDataMimeType;
+
+<span class="fc" id="L101">	private MimeType defaultMetadataMimeType = MimeTypeUtils.parseMimeType(</span>
+<span class="fc" id="L102">			WellKnownMimeType.MESSAGE_RSOCKET_COMPOSITE_METADATA.getString());</span>
+
+
+<span class="fc" id="L105">	public RSocketMessageHandler() {</span>
+<span class="fc" id="L106">		setRSocketStrategies(this.strategies);</span>
+<span class="fc" id="L107">	}</span>
+
+
+	/**
+	 * Configure the encoders to use for encoding handler method return values.
+	 * &lt;p&gt;When {@link #setRSocketStrategies(RSocketStrategies) rsocketStrategies}
+	 * is set, this property is re-initialized with the encoders in it, and
+	 * likewise when this property is set the {@code RSocketStrategies} are
+	 * mutated to change the encoders in it.
+	 * &lt;p&gt;By default this is set to the
+	 * {@linkplain org.springframework.messaging.rsocket.RSocketStrategies.Builder#encoder(Encoder[]) defaults}
+	 * from {@code RSocketStrategies}.
+	 */
+	public void setEncoders(List&lt;? extends Encoder&lt;?&gt;&gt; encoders) {
+<span class="fc" id="L121">		this.encoders.clear();</span>
+<span class="fc" id="L122">		this.encoders.addAll(encoders);</span>
+<span class="fc" id="L123">		this.strategies = this.strategies.mutate()</span>
+<span class="fc" id="L124">				.encoders(list -&gt; {</span>
+<span class="fc" id="L125">					list.clear();</span>
+<span class="fc" id="L126">					list.addAll(encoders);</span>
+<span class="fc" id="L127">				})</span>
+<span class="fc" id="L128">				.build();</span>
+<span class="fc" id="L129">	}</span>
+
+	/**
+	 * Return the configured {@link #setEncoders(List) encoders}.
+	 */
+	public List&lt;? extends Encoder&lt;?&gt;&gt; getEncoders() {
+<span class="fc" id="L135">		return this.encoders;</span>
+	}
+
+	/**
+	 * {@inheritDoc}
+	 * &lt;p&gt;When {@link #setRSocketStrategies(RSocketStrategies) rsocketStrategies}
+	 * is set, this property is re-initialized with the decoders in it, and
+	 * likewise when this property is set the {@code RSocketStrategies} are
+	 * mutated to change the decoders in them.
+	 * &lt;p&gt;By default this is set to the
+	 * {@linkplain org.springframework.messaging.rsocket.RSocketStrategies.Builder#decoder(Decoder[]) defaults}
+	 * from {@code RSocketStrategies}.
+	 */
+	@Override
+	public void setDecoders(List&lt;? extends Decoder&lt;?&gt;&gt; decoders) {
+<span class="fc" id="L150">		super.setDecoders(decoders);</span>
+<span class="fc" id="L151">		this.strategies = this.strategies.mutate()</span>
+<span class="fc" id="L152">				.decoders(list -&gt; {</span>
+<span class="fc" id="L153">					list.clear();</span>
+<span class="fc" id="L154">					list.addAll(decoders);</span>
+<span class="fc" id="L155">				})</span>
+<span class="fc" id="L156">				.build();</span>
+<span class="fc" id="L157">	}</span>
+
+	/**
+	 * {@inheritDoc}
+	 * &lt;p&gt;When {@link #setRSocketStrategies(RSocketStrategies) rsocketStrategies}
+	 * is set, this property is re-initialized with the route matcher in it, and
+	 * likewise when this property is set the {@code RSocketStrategies} are
+	 * mutated to change the matcher in it.
+	 * &lt;p&gt;By default this is set to the
+	 * {@linkplain org.springframework.messaging.rsocket.RSocketStrategies.Builder#routeMatcher(RouteMatcher) defaults}
+	 * from {@code RSocketStrategies}.
+	 */
+	@Override
+	public void setRouteMatcher(@Nullable RouteMatcher routeMatcher) {
+<span class="fc" id="L171">		super.setRouteMatcher(routeMatcher);</span>
+<span class="fc" id="L172">		this.strategies = this.strategies.mutate().routeMatcher(routeMatcher).build();</span>
+<span class="fc" id="L173">	}</span>
+
+	/**
+	 * Configure the registry for adapting various reactive types.
+	 * &lt;p&gt;When {@link #setRSocketStrategies(RSocketStrategies) rsocketStrategies}
+	 * is set, this property is re-initialized with the registry in it, and
+	 * likewise when this property is set the {@code RSocketStrategies} are
+	 * mutated to change the registry in it.
+	 * &lt;p&gt;By default this is set to the
+	 * {@link org.springframework.messaging.rsocket.RSocketStrategies.Builder#reactiveAdapterStrategy(ReactiveAdapterRegistry) defaults}
+	 * from {@code RSocketStrategies}.
+	 */
+	@Override
+	public void setReactiveAdapterRegistry(ReactiveAdapterRegistry registry) {
+<span class="fc" id="L187">		super.setReactiveAdapterRegistry(registry);</span>
+<span class="fc" id="L188">		this.strategies = this.strategies.mutate().reactiveAdapterStrategy(registry).build();</span>
+<span class="fc" id="L189">	}</span>
+
+	/**
+	 * Configure a {@link MetadataExtractor} to extract the route along with
+	 * other metadata.
+	 * &lt;p&gt;When {@link #setRSocketStrategies(RSocketStrategies) rsocketStrategies}
+	 * is set, this property is re-initialized with the extractor in it, and
+	 * likewise when this property is set the {@code RSocketStrategies} are
+	 * mutated to change the extractor in it.
+	 * &lt;p&gt;By default this is set to the
+	 * {@link org.springframework.messaging.rsocket.RSocketStrategies.Builder#metadataExtractor(MetadataExtractor) defaults}
+	 * from {@code RSocketStrategies}.
+	 * @param extractor the extractor to use
+	 */
+	public void setMetadataExtractor(MetadataExtractor extractor) {
+<span class="fc" id="L204">		this.strategies = this.strategies.mutate().metadataExtractor(extractor).build();</span>
+<span class="fc" id="L205">	}</span>
+
+	/**
+	 * Return the configured {@link #setMetadataExtractor MetadataExtractor}.
+	 */
+	public MetadataExtractor getMetadataExtractor() {
+<span class="fc" id="L211">		return this.strategies.metadataExtractor();</span>
+	}
+
+	/**
+	 * Configure this handler through an {@link RSocketStrategies} instance which
+	 * can be re-used to initialize a client-side {@link RSocketRequester}.
+	 * &lt;p&gt;When this property is set, in turn it sets the following:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;{@link #setDecoders(List)}
+	 * &lt;li&gt;{@link #setEncoders(List)}
+	 * &lt;li&gt;{@link #setRouteMatcher(RouteMatcher)}
+	 * &lt;li&gt;{@link #setMetadataExtractor(MetadataExtractor)}
+	 * &lt;li&gt;{@link #setReactiveAdapterRegistry(ReactiveAdapterRegistry)}
+	 * &lt;/ul&gt;
+	 * &lt;p&gt;By default this is set to {@link RSocketStrategies#create()} which in
+	 * turn sets default settings for all related properties.
+	 */
+	public void setRSocketStrategies(RSocketStrategies rsocketStrategies) {
+<span class="fc" id="L229">		this.strategies = rsocketStrategies;</span>
+<span class="fc" id="L230">		this.encoders.clear();</span>
+<span class="fc" id="L231">		this.encoders.addAll(this.strategies.encoders());</span>
+<span class="fc" id="L232">		super.setDecoders(this.strategies.decoders());</span>
+<span class="fc" id="L233">		super.setRouteMatcher(this.strategies.routeMatcher());</span>
+<span class="fc" id="L234">		super.setReactiveAdapterRegistry(this.strategies.reactiveAdapterRegistry());</span>
+<span class="fc" id="L235">	}</span>
+
+	/**
+	 * Return the {@link #setRSocketStrategies configured} {@code RSocketStrategies}.
+	 */
+	public RSocketStrategies getRSocketStrategies() {
+<span class="fc" id="L241">		return this.strategies;</span>
+	}
+
+	/**
+	 * Configure the default content type to use for data payloads if the
+	 * {@code SETUP} frame did not specify one.
+	 * &lt;p&gt;By default this is not set.
+	 * @param mimeType the MimeType to use
+	 */
+	public void setDefaultDataMimeType(@Nullable MimeType mimeType) {
+<span class="nc" id="L251">		this.defaultDataMimeType = mimeType;</span>
+<span class="nc" id="L252">	}</span>
+
+	/**
+	 * Return the configured
+	 * {@link #setDefaultDataMimeType defaultDataMimeType}, or {@code null}.
+	 */
+	public @Nullable MimeType getDefaultDataMimeType() {
+<span class="nc" id="L259">		return this.defaultDataMimeType;</span>
+	}
+
+	/**
+	 * Configure the default {@code MimeType} for payload data if the
+	 * {@code SETUP} frame did not specify one.
+	 * &lt;p&gt;By default this is set to {@code &quot;message/x.rsocket.composite-metadata.v0&quot;}
+	 * @param mimeType the MimeType to use
+	 */
+	public void setDefaultMetadataMimeType(MimeType mimeType) {
+<span class="nc" id="L269">		Assert.notNull(mimeType, &quot;'metadataMimeType' is required&quot;);</span>
+<span class="nc" id="L270">		this.defaultMetadataMimeType = mimeType;</span>
+<span class="nc" id="L271">	}</span>
+
+	/**
+	 * Return the configured
+	 * {@link #setDefaultMetadataMimeType defaultMetadataMimeType}.
+	 */
+	public MimeType getDefaultMetadataMimeType() {
+<span class="nc" id="L278">		return this.defaultMetadataMimeType;</span>
+	}
+
+
+	@Override
+	public void afterPropertiesSet() {
+
+		// Add argument resolver before parent initializes argument resolution
+<span class="fc" id="L286">		getArgumentResolverConfigurer().addCustomResolver(new RSocketRequesterMethodArgumentResolver());</span>
+
+<span class="fc" id="L288">		super.afterPropertiesSet();</span>
+
+<span class="fc" id="L290">		getHandlerMethods().forEach((composite, handler) -&gt; {</span>
+<span class="fc bfc" id="L291" title="All 2 branches covered.">			if (composite.getMessageConditions().contains(RSocketFrameTypeMessageCondition.CONNECT_CONDITION)) {</span>
+<span class="fc" id="L292">				MethodParameter returnType = handler.getReturnType();</span>
+<span class="fc bfc" id="L293" title="All 2 branches covered.">				if (getCardinality(returnType) &gt; 0) {</span>
+<span class="fc" id="L294">					throw new IllegalStateException(</span>
+							&quot;Invalid @ConnectMapping method. &quot; +
+									&quot;Return type must be void or a void async type: &quot; + handler);
+				}
+			}
+<span class="fc" id="L299">		});</span>
+<span class="fc" id="L300">	}</span>
+
+	@Override
+	protected List&lt;? extends HandlerMethodReturnValueHandler&gt; initReturnValueHandlers() {
+<span class="fc" id="L304">		List&lt;HandlerMethodReturnValueHandler&gt; handlers = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L305">		handlers.add(new RSocketPayloadReturnValueHandler(this.encoders, getReactiveAdapterRegistry()));</span>
+<span class="fc" id="L306">		handlers.addAll(getReturnValueHandlerConfigurer().getCustomHandlers());</span>
+<span class="fc" id="L307">		return handlers;</span>
+	}
+
+
+	@Override
+	protected @Nullable CompositeMessageCondition getCondition(AnnotatedElement element) {
+<span class="fc" id="L313">		MessageMapping ann1 = AnnotatedElementUtils.findMergedAnnotation(element, MessageMapping.class);</span>
+<span class="pc bpc" id="L314" title="1 of 4 branches missed.">		if (ann1 != null &amp;&amp; ann1.value().length &gt; 0) {</span>
+<span class="fc" id="L315">			return new CompositeMessageCondition(</span>
+					RSocketFrameTypeMessageCondition.EMPTY_CONDITION,
+<span class="fc" id="L317">					new DestinationPatternsMessageCondition(processDestinations(ann1.value()), obtainRouteMatcher()));</span>
+		}
+<span class="fc" id="L319">		ConnectMapping ann2 = AnnotatedElementUtils.findMergedAnnotation(element, ConnectMapping.class);</span>
+<span class="fc bfc" id="L320" title="All 2 branches covered.">		if (ann2 != null) {</span>
+<span class="fc" id="L321">			String[] patterns = processDestinations(ann2.value());</span>
+<span class="fc" id="L322">			return new CompositeMessageCondition(</span>
+					RSocketFrameTypeMessageCondition.CONNECT_CONDITION,
+<span class="fc" id="L324">					new DestinationPatternsMessageCondition(patterns, obtainRouteMatcher()));</span>
+		}
+<span class="fc" id="L326">		RSocketExchange ann3 = AnnotatedElementUtils.findMergedAnnotation(element, RSocketExchange.class);</span>
+<span class="pc bpc" id="L327" title="1 of 4 branches missed.">		if (ann3 != null &amp;&amp; StringUtils.hasText(ann3.value())) {</span>
+<span class="fc" id="L328">			String[] destinations = new String[]{ann3.value()};</span>
+<span class="fc" id="L329">			return new CompositeMessageCondition(</span>
+					RSocketFrameTypeMessageCondition.EMPTY_CONDITION,
+<span class="fc" id="L331">					new DestinationPatternsMessageCondition(processDestinations(destinations),</span>
+<span class="fc" id="L332">							obtainRouteMatcher())</span>
+			);
+		}
+<span class="fc" id="L335">		return null;</span>
+	}
+
+	@Override
+	protected CompositeMessageCondition extendMapping(CompositeMessageCondition composite, HandlerMethod handler) {
+
+<span class="fc" id="L341">		List&lt;MessageCondition&lt;?&gt;&gt; conditions = composite.getMessageConditions();</span>
+<span class="pc bpc" id="L342" title="1 of 2 branches missed.">		Assert.isTrue(conditions.size() == 2 &amp;&amp;</span>
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">						conditions.get(0) instanceof RSocketFrameTypeMessageCondition &amp;&amp;</span>
+<span class="pc bpc" id="L344" title="1 of 2 branches missed.">						conditions.get(1) instanceof DestinationPatternsMessageCondition,</span>
+				&quot;Unexpected message condition types&quot;);
+
+<span class="fc bfc" id="L347" title="All 2 branches covered.">		if (conditions.get(0) != RSocketFrameTypeMessageCondition.EMPTY_CONDITION) {</span>
+<span class="fc" id="L348">			return composite;</span>
+		}
+
+<span class="fc" id="L351">		int responseCardinality = getCardinality(handler.getReturnType());</span>
+<span class="fc" id="L352">		int requestCardinality = 0;</span>
+<span class="fc bfc" id="L353" title="All 2 branches covered.">		for (MethodParameter parameter : handler.getMethodParameters()) {</span>
+<span class="fc bfc" id="L354" title="All 2 branches covered.">			if (getArgumentResolvers().getArgumentResolver(parameter) instanceof PayloadMethodArgumentResolver) {</span>
+<span class="fc" id="L355">				requestCardinality = getCardinality(parameter);</span>
+			}
+		}
+
+<span class="fc" id="L359">		return new CompositeMessageCondition(</span>
+<span class="fc" id="L360">				RSocketFrameTypeMessageCondition.getCondition(requestCardinality, responseCardinality),</span>
+<span class="fc" id="L361">				conditions.get(1));</span>
+	}
+
+	private int getCardinality(MethodParameter parameter) {
+<span class="fc" id="L365">		Class&lt;?&gt; clazz = parameter.getParameterType();</span>
+<span class="fc" id="L366">		ReactiveAdapter adapter = getReactiveAdapterRegistry().getAdapter(clazz);</span>
+<span class="fc bfc" id="L367" title="All 2 branches covered.">		if (adapter == null) {</span>
+<span class="fc bfc" id="L368" title="All 2 branches covered.">			return clazz.equals(void.class) ? 0 : 1;</span>
+		}
+<span class="fc bfc" id="L370" title="All 2 branches covered.">		else if (parameter.nested().getNestedParameterType().equals(Void.class)) {</span>
+<span class="fc" id="L371">			return 0;</span>
+		}
+		else {
+<span class="fc bfc" id="L374" title="All 2 branches covered.">			return adapter.isMultiValue() ? 2 : 1;</span>
+		}
+	}
+
+	@Override
+	protected void handleNoMatch(RouteMatcher.@Nullable Route destination, Message&lt;?&gt; message) {
+<span class="fc" id="L380">		FrameType frameType = RSocketFrameTypeMessageCondition.getFrameType(message);</span>
+<span class="fc bfc" id="L381" title="All 4 branches covered.">		if (frameType == FrameType.SETUP || frameType == FrameType.METADATA_PUSH) {</span>
+<span class="fc bfc" id="L382" title="All 4 branches covered.">			if (frameType == FrameType.SETUP &amp;&amp; message.getPayload() instanceof PooledDataBuffer pooledDataBuffer) {</span>
+<span class="fc" id="L383">				pooledDataBuffer.release();</span>
+			}
+<span class="fc" id="L385">			return;  // optional handling</span>
+		}
+<span class="fc bfc" id="L387" title="All 2 branches covered.">		if (frameType == FrameType.REQUEST_FNF) {</span>
+			// Can't propagate error to client, so just log
+<span class="fc" id="L389">			logger.warn(&quot;No handler for fireAndForget to '&quot; + destination + &quot;'&quot;);</span>
+<span class="fc" id="L390">			return;</span>
+		}
+
+<span class="fc" id="L393">		Set&lt;FrameType&gt; frameTypes = getHandlerMethods().keySet().stream()</span>
+<span class="fc" id="L394">				.map(CompositeMessageCondition::getMessageConditions)</span>
+<span class="fc bfc" id="L395" title="All 2 branches covered.">				.filter(conditions -&gt; conditions.get(1).getMatchingCondition(message) != null)</span>
+<span class="fc" id="L396">				.map(conditions -&gt; (RSocketFrameTypeMessageCondition) conditions.get(0))</span>
+<span class="fc" id="L397">				.flatMap(condition -&gt; condition.getFrameTypes().stream())</span>
+<span class="fc" id="L398">				.collect(Collectors.toSet());</span>
+
+<span class="fc bfc" id="L400" title="All 2 branches covered.">		throw new MessageDeliveryException(frameTypes.isEmpty() ?</span>
+<span class="fc" id="L401">				&quot;No handler for destination '&quot; + destination + &quot;'&quot; :</span>
+				&quot;Destination '&quot; + destination + &quot;' does not support &quot; + frameType + &quot;. &quot; +
+<span class="fc" id="L403">						&quot;Supported interaction(s): &quot; + frameTypes);</span>
+	}
+
+	/**
+	 * Return an RSocket {@link SocketAcceptor} backed by this
+	 * {@code RSocketMessageHandler} instance that can be plugged in as a
+	 * {@link io.rsocket.core.RSocketConnector#acceptor(SocketAcceptor) client} or
+	 * {@link io.rsocket.core.RSocketServer#acceptor(SocketAcceptor) server}
+	 * RSocket responder.
+	 * &lt;p&gt;The initial {@link ConnectionSetupPayload} is handled through
+	 * {@link ConnectMapping @ConnectionMapping} methods that can be asynchronous
+	 * and return {@code Mono&lt;Void&gt;} with an error signal preventing the
+	 * connection. Such a method can also start requests to the client but that
+	 * must be done decoupled from handling and from the current thread.
+	 * &lt;p&gt;Subsequent requests on the connection can be handled with
+	 * {@link MessageMapping MessageMapping}
+	 * and {@link RSocketExchange RSocketExchange} methods.
+	 */
+	public SocketAcceptor responder() {
+<span class="fc" id="L422">		return (setupPayload, sendingRSocket) -&gt; {</span>
+			MessagingRSocket responder;
+			try {
+<span class="fc" id="L425">				responder = createResponder(setupPayload, sendingRSocket);</span>
+			}
+<span class="nc" id="L427">			catch (Throwable ex) {</span>
+<span class="nc" id="L428">				return Mono.error(ex);</span>
+<span class="fc" id="L429">			}</span>
+<span class="fc" id="L430">			return responder.handleConnectionSetupPayload(setupPayload).then(Mono.just(responder));</span>
+		};
+	}
+
+	private MessagingRSocket createResponder(ConnectionSetupPayload setupPayload, RSocket rsocket) {
+<span class="fc" id="L435">		String str = setupPayload.dataMimeType();</span>
+<span class="pc bpc" id="L436" title="1 of 2 branches missed.">		MimeType dataMimeType = StringUtils.hasText(str) ? MimeTypeUtils.parseMimeType(str) : this.defaultDataMimeType;</span>
+<span class="fc" id="L437">		Assert.notNull(dataMimeType, &quot;No `dataMimeType` in ConnectionSetupPayload and no default value&quot;);</span>
+<span class="pc" id="L438">		Assert.isTrue(isDataMimeTypeSupported(dataMimeType), () -&gt; &quot;Data MimeType '&quot; + dataMimeType + &quot;' not supported&quot;);</span>
+
+<span class="fc" id="L440">		str = setupPayload.metadataMimeType();</span>
+<span class="pc bpc" id="L441" title="1 of 2 branches missed.">		MimeType metaMimeType = StringUtils.hasText(str) ? MimeTypeUtils.parseMimeType(str) : this.defaultMetadataMimeType;</span>
+<span class="fc" id="L442">		Assert.notNull(metaMimeType, &quot;No `metadataMimeType` in ConnectionSetupPayload and no default value&quot;);</span>
+
+<span class="fc" id="L444">		RSocketRequester requester = RSocketRequester.wrap(rsocket, dataMimeType, metaMimeType, this.strategies);</span>
+<span class="fc" id="L445">		return new MessagingRSocket(dataMimeType, metaMimeType, getMetadataExtractor(),</span>
+<span class="fc" id="L446">				requester, this, obtainRouteMatcher(), this.strategies);</span>
+	}
+
+	private boolean isDataMimeTypeSupported(MimeType dataMimeType) {
+<span class="pc bpc" id="L450" title="1 of 2 branches missed.">		for (Encoder&lt;?&gt; encoder : getEncoders()) {</span>
+<span class="pc bpc" id="L451" title="1 of 2 branches missed.">			for (MimeType encodable : encoder.getEncodableMimeTypes()) {</span>
+<span class="pc bpc" id="L452" title="1 of 2 branches missed.">				if (encodable.isCompatibleWith(dataMimeType)) {</span>
+<span class="fc" id="L453">					return true;</span>
+				}
+<span class="nc" id="L455">			}</span>
+<span class="nc" id="L456">		}</span>
+<span class="nc" id="L457">		return false;</span>
+	}
+
+	/**
+	 * Static factory method to create an RSocket {@link SocketAcceptor}
+	 * backed by handlers with annotated methods. Effectively a shortcut for:
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * RSocketMessageHandler handler = new RSocketMessageHandler();
+	 * handler.setHandlers(handlers);
+	 * handler.setRSocketStrategies(strategies);
+	 * handler.afterPropertiesSet();
+	 *
+	 * SocketAcceptor acceptor = handler.responder();
+	 * &lt;/pre&gt;
+	 * &lt;p&gt;This is intended for programmatic creation and registration of a
+	 * client-side responder. For example:
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * SocketAcceptor responder =
+	 *         RSocketMessageHandler.responder(strategies, new ClientHandler());
+	 *
+	 * RSocketRequester.builder()
+	 *         .rsocketConnector(connector -&amp;gt; connector.acceptor(responder))
+	 *         .connectTcp(&quot;localhost&quot;, server.address().getPort());
+	 * &lt;/pre&gt;
+	 *
+	 * &lt;p&gt;Note that the given handlers do not need to have any stereotype
+	 * annotations such as {@code @Controller} which helps to avoid overlap with
+	 * server side handlers that may be used in the same application. However,
+	 * for more advanced scenarios, for example, discovering handlers through a custom
+	 * stereotype annotation, consider declaring {@code RSocketMessageHandler}
+	 * as a bean, and then obtain the responder from it.
+	 * @param strategies the strategies to set on the created
+	 * {@code RSocketMessageHandler}
+	 * @param candidateHandlers a list of Objects and/or Classes with annotated
+	 * handler methods; used to call {@link #setHandlers(List)} with
+	 * on the created {@code RSocketMessageHandler}
+	 * @return a configurer that may be passed into
+	 * {@link org.springframework.messaging.rsocket.RSocketRequester.Builder#rsocketConnector}
+	 * @since 5.2.6
+	 */
+	public static SocketAcceptor responder(RSocketStrategies strategies, Object... candidateHandlers) {
+<span class="fc" id="L498">		Assert.notEmpty(candidateHandlers, &quot;No handlers&quot;);</span>
+<span class="fc" id="L499">		List&lt;Object&gt; handlers = new ArrayList&lt;&gt;(candidateHandlers.length);</span>
+<span class="fc bfc" id="L500" title="All 2 branches covered.">		for (Object obj : candidateHandlers) {</span>
+<span class="pc bpc" id="L501" title="1 of 2 branches missed.">			handlers.add(obj instanceof Class&lt;?&gt; clazz ? BeanUtils.instantiateClass(clazz) : obj);</span>
+		}
+<span class="fc" id="L503">		RSocketMessageHandler handler = new RSocketMessageHandler();</span>
+<span class="fc" id="L504">		handler.setHandlers(handlers);</span>
+<span class="fc" id="L505">		handler.setRSocketStrategies(strategies);</span>
+<span class="fc" id="L506">		handler.afterPropertiesSet();</span>
+<span class="fc" id="L507">		return handler.responder();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

@@ -1,0 +1,3122 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WhatWgUrlParser.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.util</a> &gt; <span class="el_source">WhatWgUrlParser.java</span></div><h1>WhatWgUrlParser.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.util;
+
+import java.net.IDN;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Iterator;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Objects;
+import java.util.function.Consumer;
+import java.util.function.IntPredicate;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.util.Assert;
+
+/**
+ * Implementation of the
+ * &lt;a href=&quot;https://url.spec.whatwg.org/#url-parsing&quot;&gt;URL parsing&lt;/a&gt; algorithm
+ * of the WhatWG URL Living standard. Browsers use this algorithm to align on
+ * lenient parsing of user typed URLs that may deviate from RFC syntax.
+ * Use this, via {@link UriComponentsBuilder.ParserType#WHAT_WG}, if you need to
+ * leniently handle URLs that don't confirm to RFC syntax, or for alignment
+ * with browser behavior.
+ *
+ * &lt;p&gt;Comments in this class correlate to the parsing algorithm.
+ * The implementation differs from the spec in the following ways:
+ * &lt;ul&gt;
+ * &lt;li&gt;Supports URI template variables within URI components.
+ * &lt;li&gt;Consequently, the port is a String and not an integer.
+ * &lt;li&gt;Prepends '/' to each segment to ensure trailing slashes are significant.
+ * &lt;/ul&gt;
+ * All of these modifications have been indicated through comments that start
+ * with {@code EXTRA}.
+ *
+ * @author Arjen Poutsma
+ * @since 6.2
+ */
+@SuppressWarnings({&quot;SameParameterValue&quot;, &quot;BooleanMethodIsAlwaysInverted&quot;})
+final class WhatWgUrlParser {
+
+<span class="nc" id="L63">	public static final UrlRecord EMPTY_RECORD = new UrlRecord();</span>
+
+<span class="nc" id="L65">	private static final Log logger = LogFactory.getLog(WhatWgUrlParser.class);</span>
+
+	private static final int EOF = -1;
+
+	private static final int MAX_PORT = 65535;
+
+
+	private final StringBuilder input;
+
+	private final @Nullable UrlRecord base;
+
+	private @Nullable Charset encoding;
+
+	private final @Nullable Consumer&lt;String&gt; validationErrorHandler;
+
+	private int pointer;
+
+	private final StringBuilder buffer;
+
+	private @Nullable State state;
+
+	private @Nullable State stateOverride;
+
+	private boolean atSignSeen;
+
+	private boolean passwordTokenSeen;
+
+	private boolean insideBrackets;
+
+	private int openCurlyBracketCount;
+
+<span class="nc" id="L96">	private boolean stopMainLoop = false;</span>
+
+
+	private WhatWgUrlParser(
+			String input, @Nullable UrlRecord base, @Nullable Charset encoding,
+<span class="nc" id="L101">			@Nullable Consumer&lt;String&gt; validationErrorHandler) {</span>
+
+<span class="nc" id="L103">		this.input = new StringBuilder(input);</span>
+<span class="nc" id="L104">		this.base = base;</span>
+<span class="nc" id="L105">		this.encoding = encoding;</span>
+<span class="nc" id="L106">		this.validationErrorHandler = validationErrorHandler;</span>
+<span class="nc" id="L107">		this.buffer = new StringBuilder(this.input.length() / 2);</span>
+<span class="nc" id="L108">	}</span>
+
+
+	/**
+	 * Parse the given input into a URL record.
+	 * @param input the scalar value string
+	 * @param base the optional base URL to resolve relative URLs against. If
+	 * {@code null}, relative URLs cannot be parsed.
+	 * @param encoding the optional encoding to use. If {@code null}, no
+	 * encoding is performed.
+	 * @param validationErrorHandler optional consumer for non-fatal URL
+	 * validation messages
+	 * @return a URL record, as defined in the
+	 * &lt;a href=&quot;https://url.spec.whatwg.org/#concept-url&quot;&gt;living URL
+	 * specification&lt;/a&gt;
+	 * @throws InvalidUrlException if the {@code input} does not contain a
+	 * parsable URL
+	 */
+	public static UrlRecord parse(String input, @Nullable UrlRecord base,
+			@Nullable Charset encoding, @Nullable Consumer&lt;String&gt; validationErrorHandler)
+			throws InvalidUrlException {
+
+<span class="nc" id="L130">		Assert.notNull(input, &quot;Input must not be null&quot;);</span>
+
+<span class="nc" id="L132">		WhatWgUrlParser parser = new WhatWgUrlParser(input, base, encoding, validationErrorHandler);</span>
+<span class="nc" id="L133">		return parser.basicUrlParser(null, null);</span>
+	}
+
+	/**
+	 * The basic URL parser takes a scalar value string input, with an optional
+	 * null or base URL base (default null), an optional encoding (default UTF-8),
+	 * and optionally, a UrlRecord and/or State overrides to start from.
+	 */
+	private UrlRecord basicUrlParser(@Nullable UrlRecord url, @Nullable State stateOverride) {
+		// If url is not given:
+<span class="nc bnc" id="L143" title="All 2 branches missed.">		if (url == null) {</span>
+			// Set url to a new URL.
+<span class="nc" id="L145">			url = new UrlRecord();</span>
+<span class="nc" id="L146">			sanitizeInput(true);</span>
+		}
+		else {
+<span class="nc" id="L149">			sanitizeInput(false);</span>
+		}
+
+		// Let state be state override if given, or scheme start state otherwise.
+<span class="nc bnc" id="L153" title="All 2 branches missed.">		this.state = (stateOverride != null ? stateOverride : State.SCHEME_START);</span>
+<span class="nc" id="L154">		this.stateOverride = stateOverride;</span>
+
+		// Keep running the following state machine by switching on state.
+		// If after a run pointer points to the EOF code point, go to the next step.
+		// Otherwise, increase pointer by 1 and continue with the state machine.
+<span class="nc bnc" id="L159" title="All 4 branches missed.">		while (!this.stopMainLoop &amp;&amp; this.pointer &lt;= this.input.length()) {</span>
+			int c;
+<span class="nc bnc" id="L161" title="All 2 branches missed.">			if (this.pointer &lt; this.input.length()) {</span>
+<span class="nc" id="L162">				c = this.input.codePointAt(this.pointer);</span>
+			}
+			else {
+<span class="nc" id="L165">				c = EOF;</span>
+			}
+<span class="nc bnc" id="L167" title="All 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">				logger.trace(&quot;current: &quot; + (c != EOF ? Character.toString(c) : &quot;EOF&quot;) +</span>
+						&quot; ptr: &quot; + this.pointer + &quot; Buffer: &quot; + this.buffer + &quot; State: &quot; + this.state);
+			}
+<span class="nc" id="L171">			this.state.handle(c, url, this);</span>
+<span class="nc" id="L172">			this.pointer++;</span>
+<span class="nc" id="L173">		}</span>
+<span class="nc" id="L174">		return url;</span>
+	}
+
+	void sanitizeInput(boolean removeC0ControlOrSpace) {
+<span class="nc" id="L178">		boolean strip = true;</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">		for (int i = 0; i &lt; this.input.length(); i++) {</span>
+<span class="nc" id="L180">			int c = this.input.codePointAt(i);</span>
+<span class="nc bnc" id="L181" title="All 4 branches missed.">			boolean isSpaceOrC0 = (c == ' ' || isC0Control(c));</span>
+<span class="nc bnc" id="L182" title="All 4 branches missed.">			boolean isTabOrNL = (c == '\t' || isNewline(c));</span>
+<span class="nc bnc" id="L183" title="All 6 branches missed.">			if ((strip &amp;&amp; isSpaceOrC0) || isTabOrNL) {</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">				if (validate()) {</span>
+					// If input contains leading (or trailing) C0 control or space, invalid-URL-unit validation error.
+					// If input contains ASCII tab or newline, invalid-URL-unit validation error.
+<span class="nc" id="L187">					validationError(&quot;Code point \&quot;&quot; + c + &quot;\&quot; is not a URL unit.&quot;);</span>
+				}
+				// Remove any leading C0 control or space from input.
+<span class="nc bnc" id="L190" title="All 4 branches missed.">				if (removeC0ControlOrSpace &amp;&amp; isSpaceOrC0) {</span>
+<span class="nc" id="L191">					this.input.deleteCharAt(i);</span>
+				}
+<span class="nc bnc" id="L193" title="All 2 branches missed.">				else if (isTabOrNL) {</span>
+					// Remove all ASCII tab or newline from input.
+<span class="nc" id="L195">					this.input.deleteCharAt(i);</span>
+				}
+<span class="nc" id="L197">				i--;</span>
+			}
+			else {
+<span class="nc" id="L200">				strip = false;</span>
+			}
+		}
+<span class="nc bnc" id="L203" title="All 2 branches missed.">		if (removeC0ControlOrSpace) {</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">			for (int i = this.input.length() - 1; i &gt;= 0; i--) {</span>
+<span class="nc" id="L205">				int c = this.input.codePointAt(i);</span>
+<span class="nc bnc" id="L206" title="All 4 branches missed.">				if (c == ' ' || isC0Control(c)) {</span>
+<span class="nc bnc" id="L207" title="All 2 branches missed.">					if (validate()) {</span>
+						// If input contains (leading or) trailing C0 control or space, invalid-URL-unit validation error.
+<span class="nc" id="L209">						validationError(&quot;Code point \&quot;&quot; + c + &quot;\&quot; is not a URL unit.&quot;);</span>
+					}
+					// Remove any trailing C0 control or space from input.
+<span class="nc" id="L212">					this.input.deleteCharAt(i);</span>
+				}
+				else {
+					break;
+				}
+			}
+		}
+<span class="nc" id="L219">	}</span>
+
+	private void setState(State newState) {
+<span class="nc bnc" id="L222" title="All 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+			String c;
+<span class="nc bnc" id="L224" title="All 2 branches missed.">			if (this.pointer &lt; this.input.length()) {</span>
+<span class="nc" id="L225">				c = Character.toString(this.input.codePointAt(this.pointer));</span>
+			}
+			else {
+<span class="nc" id="L228">				c = &quot;EOF&quot;;</span>
+			}
+<span class="nc" id="L230">			logger.trace(&quot;Changing state from &quot; + this.state + &quot; to &quot; + newState + &quot; (cur: &quot; + c + &quot;)&quot;);</span>
+		}
+<span class="nc" id="L232">		this.state = newState;</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">		this.openCurlyBracketCount = (this.buffer.toString().equals(&quot;{&quot;) ? this.openCurlyBracketCount : 0);</span>
+<span class="nc" id="L234">	}</span>
+
+	private boolean processCurlyBrackets(int c) {
+<span class="nc bnc" id="L237" title="All 2 branches missed.">		if (c == '{') {</span>
+<span class="nc" id="L238">			this.openCurlyBracketCount++;</span>
+<span class="nc" id="L239">			return true;</span>
+		}
+<span class="nc bnc" id="L241" title="All 2 branches missed.">		if (c == '}') {</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">			if (this.openCurlyBracketCount &gt; 0) {</span>
+<span class="nc" id="L243">				this.openCurlyBracketCount--;</span>
+<span class="nc" id="L244">				return true;</span>
+			}
+<span class="nc" id="L246">			return false;</span>
+		}
+<span class="nc bnc" id="L248" title="All 4 branches missed.">		return (this.openCurlyBracketCount &gt; 0 &amp;&amp; c != EOF);</span>
+	}
+
+	private static LinkedList&lt;String&gt; strictSplit(String input, int delimiter) {
+		// Let position be a position variable for input, initially pointing at the start of input.
+<span class="nc" id="L253">		int position = 0;</span>
+		// Let tokens be a list of strings, initially empty.
+<span class="nc" id="L255">		LinkedList&lt;String&gt; tokens = new LinkedList&lt;&gt;();</span>
+		// Let token be the result of collecting a sequence of code points that are not equal to delimiter from input, given position.
+<span class="nc" id="L257">		int delIdx = input.indexOf(delimiter, position);</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">		String token = (delIdx != EOF) ? input.substring(position, delIdx) : input.substring(position);</span>
+<span class="nc" id="L259">		position = delIdx;</span>
+		// Append token to tokens.
+<span class="nc" id="L261">		tokens.add(token);</span>
+		// While position is not past the end of input:
+<span class="nc bnc" id="L263" title="All 2 branches missed.">		while (position != EOF) {</span>
+			// Assert: the code point at position within input is delimiter.
+<span class="nc bnc" id="L265" title="All 2 branches missed.">			Assert.state(input.codePointAt(position) == delimiter, &quot;Codepoint is not a delimiter&quot;);</span>
+			// Advance position by 1.
+<span class="nc" id="L267">			position++;</span>
+<span class="nc" id="L268">			delIdx = input.indexOf(delimiter, position);</span>
+			// Let token be the result of collecting a sequence of code points
+			// that are not equal to delimiter from input, given position.
+<span class="nc bnc" id="L271" title="All 2 branches missed.">			token = (delIdx != EOF) ? input.substring(position, delIdx) : input.substring(position);</span>
+<span class="nc" id="L272">			position = delIdx;</span>
+			// Append token to tokens.
+<span class="nc" id="L274">			tokens.add(token);</span>
+		}
+<span class="nc" id="L276">		return tokens;</span>
+	}
+
+	private static String domainToAscii(String domain, boolean beStrict) {
+		// If beStrict is false, domain is an ASCII string, and strictly splitting domain on U+002E (.)
+		// does not produce any item that starts with an ASCII case-insensitive match for &quot;xn--&quot;,
+		// this step is equivalent to ASCII lowercasing domain.
+<span class="nc bnc" id="L283" title="All 4 branches missed.">		if (!beStrict &amp;&amp; containsOnlyAscii(domain)) {</span>
+<span class="nc" id="L284">			int dotIdx = domain.indexOf('.');</span>
+<span class="nc" id="L285">			boolean onlyLowerCase = true;</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">			while (dotIdx != -1) {</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">				if (domain.length() - dotIdx &gt; 4) {</span>
+					// ASCII case-insensitive match for &quot;xn--&quot;
+<span class="nc" id="L289">					int ch0 = domain.codePointAt(dotIdx + 1);</span>
+<span class="nc" id="L290">					int ch1 = domain.codePointAt(dotIdx + 2);</span>
+<span class="nc" id="L291">					int ch2 = domain.codePointAt(dotIdx + 3);</span>
+<span class="nc" id="L292">					int ch3 = domain.codePointAt(dotIdx + 4);</span>
+<span class="nc bnc" id="L293" title="All 12 branches missed.">					if ((ch0 == 'x' || ch0 == 'X') &amp;&amp;</span>
+							(ch1 == 'n' || ch1 == 'N') &amp;&amp;
+							ch2 == '-' &amp;&amp; ch3 == '_') {
+<span class="nc" id="L296">						onlyLowerCase = false;</span>
+<span class="nc" id="L297">						break;</span>
+					}
+				}
+<span class="nc" id="L300">				dotIdx = domain.indexOf('.', dotIdx + 1);</span>
+			}
+<span class="nc bnc" id="L302" title="All 2 branches missed.">			if (onlyLowerCase) {</span>
+<span class="nc" id="L303">				return domain.toLowerCase(Locale.ENGLISH);</span>
+			}
+		}
+		// Let result be the result of running Unicode ToASCII (https://www.unicode.org/reports/tr46/#ToASCII)
+		// with domain_name set to domain, UseSTD3ASCIIRules set to beStrict, CheckHyphens set to false,
+		// CheckBidi set to true, CheckJoiners set to true, Transitional_Processing set to false,
+		// and VerifyDnsLength set to beStrict. [UTS46]
+<span class="nc" id="L310">		int flag = 0;</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">		if (beStrict) {</span>
+<span class="nc" id="L312">			flag |= IDN.USE_STD3_ASCII_RULES;</span>
+		}
+		// Implementation note: implementing Unicode ToASCII is beyond the scope of this parser,
+		// we use java.net.IDN.toASCII
+		try {
+<span class="nc" id="L317">			return IDN.toASCII(domain, flag);</span>
+		}
+<span class="nc" id="L319">		catch (IllegalArgumentException ex) {</span>
+<span class="nc" id="L320">			throw new InvalidUrlException(</span>
+<span class="nc" id="L321">					&quot;Could not convert \&quot;&quot; + domain + &quot;\&quot; to ASCII: &quot; + ex.getMessage(), ex);</span>
+		}
+	}
+
+	private boolean validate() {
+<span class="nc bnc" id="L326" title="All 2 branches missed.">		return this.validationErrorHandler != null;</span>
+	}
+
+	private void validationError(@Nullable String additionalInfo) {
+<span class="nc bnc" id="L330" title="All 2 branches missed.">		if (this.validationErrorHandler != null) {</span>
+<span class="nc" id="L331">			StringBuilder message = new StringBuilder(&quot;URL validation error for URL [&quot;);</span>
+<span class="nc" id="L332">			message.append(this.input);</span>
+<span class="nc" id="L333">			message.append(&quot;]@&quot;);</span>
+<span class="nc" id="L334">			message.append(this.pointer);</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">			if (additionalInfo != null) {</span>
+<span class="nc" id="L336">				message.append(&quot;. &quot;);</span>
+<span class="nc" id="L337">				message.append(additionalInfo);</span>
+			}
+<span class="nc" id="L339">			this.validationErrorHandler.accept(message.toString());</span>
+		}
+<span class="nc" id="L341">	}</span>
+
+
+	private void failure(@Nullable String additionalInfo) {
+<span class="nc" id="L345">		StringBuilder message = new StringBuilder(&quot;URL parsing failure for URL [&quot;);</span>
+<span class="nc" id="L346">		message.append(this.input);</span>
+<span class="nc" id="L347">		message.append(&quot;] @ &quot;);</span>
+<span class="nc" id="L348">		message.append(this.pointer);</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">		if (additionalInfo != null) {</span>
+<span class="nc" id="L350">			message.append(&quot;. &quot;);</span>
+<span class="nc" id="L351">			message.append(additionalInfo);</span>
+		}
+<span class="nc" id="L353">		throw new InvalidUrlException(message.toString());</span>
+	}
+
+	/**
+	 * The C0 control percent-encode set are the C0 controls and all code points greater than U+007E (~).
+	 */
+	private static boolean c0ControlPercentEncodeSet(int ch) {
+<span class="nc bnc" id="L360" title="All 4 branches missed.">		return (isC0Control(ch) || Integer.compareUnsigned(ch, '~') &gt; 0);</span>
+	}
+
+	/**
+	 * The fragment percent-encode set is the C0 control percent-encode set and
+	 * U+0020 SPACE, U+0022 (&quot;), U+003C (&lt;), U+003E (&gt;), and U+0060 (`).
+	 */
+	private static boolean fragmentPercentEncodeSet(int ch) {
+<span class="nc bnc" id="L368" title="All 12 branches missed.">		return (c0ControlPercentEncodeSet(ch) || ch == ' ' || ch == '&quot;' || ch == '&lt;' || ch == '&gt;' || ch == '`');</span>
+	}
+
+	/**
+	 * The query percent-encode set is the C0 control percent-encode set and
+	 * U+0020 SPACE, U+0022 (&quot;), U+0023 (#), U+003C (&lt;), and U+003E (&gt;).
+	 */
+	private static boolean queryPercentEncodeSet(int ch) {
+<span class="nc bnc" id="L376" title="All 12 branches missed.">		return (c0ControlPercentEncodeSet(ch) || ch == ' ' || ch == '&quot;' || ch == '#' || ch == '&lt;' || ch == '&gt;');</span>
+	}
+
+	/**
+	 * The special-query percent-encode set is the query percent-encode set and U+0027 (').
+	 */
+	private static boolean specialQueryPercentEncodeSet(int ch) {
+<span class="nc bnc" id="L383" title="All 4 branches missed.">		return (queryPercentEncodeSet(ch) || ch == '\'');</span>
+	}
+
+
+	/**
+	 * The path percent-encode set is the query percent-encode set and
+	 * U+003F (?), U+0060 (`), U+007B ({), and U+007D (}).
+	 */
+	private static boolean pathPercentEncodeSet(int ch) {
+<span class="nc bnc" id="L392" title="All 10 branches missed.">		return (queryPercentEncodeSet(ch) || ch == '?' || ch == '`' || ch == '{' || ch == '}');</span>
+	}
+
+	/**
+	 * The userinfo percent-encode set is the path percent-encode set and
+	 * U+002F (/), U+003A (:), U+003B (;), U+003D (=), U+0040 (@),
+	 * U+005B ([) to U+005E (^), inclusive, and U+007C (|).
+	 */
+	private static boolean userinfoPercentEncodeSet(int ch) {
+<span class="nc bnc" id="L401" title="All 12 branches missed.">		return (pathPercentEncodeSet(ch) || ch == '/' || ch == ':' || ch == ';' || ch == '=' || ch == '@' ||</span>
+<span class="nc bnc" id="L402" title="All 6 branches missed.">				(Integer.compareUnsigned(ch, '[') &gt;= 0 &amp;&amp; Integer.compareUnsigned(ch, '^') &lt;= 0) || ch == '|');</span>
+	}
+
+	private static boolean isC0Control(int ch) {
+<span class="nc bnc" id="L406" title="All 4 branches missed.">		return (ch &gt;= 0 &amp;&amp; ch &lt;= 0x1F);</span>
+	}
+
+	private static boolean isNewline(int ch) {
+<span class="nc bnc" id="L410" title="All 4 branches missed.">		return (ch == '\r' || ch == '\n');</span>
+	}
+
+	private static boolean isAsciiAlpha(int ch) {
+<span class="nc bnc" id="L414" title="All 8 branches missed.">		return (ch &gt;= 'A' &amp;&amp; ch &lt;= 'Z') || (ch &gt;= 'a' &amp;&amp; ch &lt;= 'z');</span>
+	}
+
+	private static boolean containsOnlyAsciiDigits(CharSequence string) {
+<span class="nc bnc" id="L418" title="All 2 branches missed.">		for (int i=0; i&lt; string.length(); i++ ) {</span>
+<span class="nc" id="L419">			int ch = codePointAt(string, i);</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">			if (!isAsciiDigit(ch)) {</span>
+<span class="nc" id="L421">				return false;</span>
+			}
+		}
+<span class="nc" id="L424">		return true;</span>
+	}
+
+	private static boolean containsOnlyAscii(String string) {
+<span class="nc bnc" id="L428" title="All 2 branches missed.">		for (int i = 0; i &lt; string.length(); i++) {</span>
+<span class="nc" id="L429">			int ch = string.codePointAt(i);</span>
+<span class="nc bnc" id="L430" title="All 2 branches missed.">			if (!isAsciiCodePoint(ch)) {</span>
+<span class="nc" id="L431">				return false;</span>
+			}
+		}
+<span class="nc" id="L434">		return true;</span>
+	}
+
+	private static boolean isAsciiCodePoint(int ch) {
+		// An ASCII code point is a code point in the range U+0000 NULL to U+007F DELETE, inclusive.
+<span class="nc bnc" id="L439" title="All 4 branches missed.">		return (Integer.compareUnsigned(ch, 0) &gt;= 0 &amp;&amp; Integer.compareUnsigned(ch, 127) &lt;= 0);</span>
+	}
+
+	private static boolean isAsciiDigit(int ch) {
+<span class="nc bnc" id="L443" title="All 4 branches missed.">		return (ch &gt;= '0' &amp;&amp; ch &lt;= '9');</span>
+	}
+
+	private static boolean isAsciiAlphaNumeric(int ch) {
+<span class="nc bnc" id="L447" title="All 4 branches missed.">		return (isAsciiAlpha(ch) || isAsciiDigit(ch));</span>
+	}
+
+	private static boolean isAsciiHexDigit(int ch) {
+<span class="nc bnc" id="L451" title="All 10 branches missed.">		return (isAsciiDigit(ch) || (ch &gt;= 'A' &amp;&amp; ch &lt;= 'F') || (ch &gt;= 'a' &amp;&amp; ch &lt;= 'f'));</span>
+	}
+
+	private static boolean isForbiddenDomain(int ch) {
+<span class="nc bnc" id="L455" title="All 8 branches missed.">		return (isForbiddenHost(ch) || isC0Control(ch) || ch == '%' || ch == 0x7F);</span>
+	}
+
+	private static boolean isForbiddenHost(int ch) {
+<span class="nc bnc" id="L459" title="All 32 branches missed.">		return (ch == 0x00 || ch == '\t' || isNewline(ch) || ch == ' ' || ch == '#' ||</span>
+				ch == '/' || ch == ':' || ch == '&lt;' || ch == '&gt;' || ch == '?' || ch == '@' ||
+				ch == '[' || ch == '\\' || ch == ']' || ch == '^' || ch == '|');
+	}
+
+	private static boolean isNonCharacter(int ch) {
+<span class="nc bnc" id="L465" title="All 72 branches missed.">		return ((ch &gt;= 0xFDD0 &amp;&amp; ch &lt;= 0xFDEF) || ch == 0xFFFE || ch == 0xFFFF || ch == 0x1FFFE || ch == 0x1FFFF ||</span>
+				ch == 0x2FFFE || ch == 0x2FFFF || ch == 0x3FFFE || ch == 0x3FFFF || ch == 0x4FFFE || ch == 0x4FFFF ||
+				ch == 0x5FFFE || ch == 0x5FFFF || ch == 0x6FFFE || ch == 0x6FFFF || ch == 0x7FFFE || ch == 0x7FFFF ||
+				ch == 0x8FFFE || ch == 0x8FFFF || ch == 0x9FFFE || ch == 0x9FFFF || ch == 0xAFFFE || ch == 0xAFFFF ||
+				ch == 0xBFFFE || ch == 0xBFFFF || ch == 0xCFFFE || ch == 0xCFFFF || ch == 0xDFFFE || ch == 0xDFFFF ||
+				ch == 0xEFFFE || ch == 0xEFFFF || ch == 0xFFFFE || ch == 0xFFFFF || ch == 0x10FFFE || ch == 0x10FFFF);
+	}
+
+	@SuppressWarnings(&quot;BooleanMethodIsAlwaysInverted&quot;)
+	private static boolean isUrlCodePoint(int ch) {
+<span class="nc bnc" id="L475" title="All 44 branches missed.">		return (isAsciiAlphaNumeric(ch) ||</span>
+				ch == '!' || ch == '$' || ch == '&amp;' || ch == '\'' || ch == '(' || ch == ')' ||
+				ch == '*' || ch == '+' || ch == ',' || ch == '-' || ch == '.' || ch == '/' ||
+				ch == ':' || ch == ';' || ch == '=' || ch == '?' || ch == '@' || ch == '_' || ch == '~' ||
+<span class="nc bnc" id="L479" title="All 4 branches missed.">				(ch &gt;= 0x00A0 &amp;&amp; ch &lt;= 0x10FFFD &amp;&amp; !Character.isSurrogate((char) ch) &amp;&amp; !isNonCharacter(ch)));</span>
+	}
+
+	private static boolean isSpecialScheme(String scheme) {
+<span class="nc bnc" id="L483" title="All 4 branches missed.">		return (&quot;ftp&quot;.equals(scheme) || &quot;file&quot;.equals(scheme) ||</span>
+<span class="nc bnc" id="L484" title="All 4 branches missed.">				&quot;http&quot;.equals(scheme) || &quot;https&quot;.equals(scheme) ||</span>
+<span class="nc bnc" id="L485" title="All 4 branches missed.">				&quot;ws&quot;.equals(scheme) || &quot;wss&quot;.equals(scheme));</span>
+	}
+
+
+	private static int defaultPort(@Nullable String scheme) {
+<span class="nc bnc" id="L490" title="All 2 branches missed.">		if (scheme != null) {</span>
+<span class="nc bnc" id="L491" title="All 4 branches missed.">			return switch (scheme) {</span>
+<span class="nc" id="L492">				case &quot;ftp&quot; -&gt; 21;</span>
+<span class="nc" id="L493">				case &quot;http&quot;, &quot;ws&quot; -&gt; 80;</span>
+<span class="nc" id="L494">				case &quot;https&quot;, &quot;wss&quot; -&gt; 443;</span>
+<span class="nc" id="L495">				default -&gt; -1;</span>
+			};
+		}
+		else {
+<span class="nc" id="L499">			return -1;</span>
+		}
+	}
+
+	private void append(String s) {
+<span class="nc" id="L504">		this.buffer.append(s);</span>
+<span class="nc" id="L505">	}</span>
+
+	private void append(char ch) {
+<span class="nc" id="L508">		this.buffer.append(ch);</span>
+<span class="nc" id="L509">	}</span>
+
+	private void append(int ch) {
+<span class="nc" id="L512">		this.buffer.appendCodePoint(ch);</span>
+<span class="nc" id="L513">	}</span>
+
+	private void prepend(String s) {
+<span class="nc" id="L516">		this.buffer.insert(0, s);</span>
+<span class="nc" id="L517">	}</span>
+
+	private void emptyBuffer() {
+<span class="nc" id="L520">		this.buffer.setLength(0);</span>
+<span class="nc" id="L521">	}</span>
+
+	private int remaining(int deltaPos) {
+<span class="nc" id="L524">		int pos = this.pointer + deltaPos + 1;</span>
+<span class="nc bnc" id="L525" title="All 2 branches missed.">		return (pos &lt; this.input.length() ? this.input.codePointAt(pos) : EOF);</span>
+	}
+
+	private static String percentDecode(String input) {
+		try {
+<span class="nc" id="L530">			return UriUtils.decode(input, StandardCharsets.UTF_8);</span>
+		}
+<span class="nc" id="L532">		catch (IllegalArgumentException ex) {</span>
+<span class="nc" id="L533">			throw new InvalidUrlException(&quot;Could not decode \&quot;&quot; + input + &quot;\&quot;: &quot; + ex.getMessage(), ex);</span>
+		}
+	}
+
+	private @Nullable String percentEncode(int c, IntPredicate percentEncodeSet) {
+<span class="nc bnc" id="L538" title="All 2 branches missed.">		if (this.encoding == null) {</span>
+<span class="nc" id="L539">			return null;</span>
+		}
+		else {
+<span class="nc" id="L542">			return percentEncode(Character.toString(c), percentEncodeSet);</span>
+		}
+	}
+
+	private String percentEncode(String input, IntPredicate percentEncodeSet) {
+<span class="nc bnc" id="L547" title="All 2 branches missed.">		if (this.encoding == null) {</span>
+<span class="nc" id="L548">			return input;</span>
+		}
+		else {
+<span class="nc" id="L551">			byte[] bytes = input.getBytes(this.encoding);</span>
+<span class="nc" id="L552">			boolean original = true;</span>
+<span class="nc bnc" id="L553" title="All 2 branches missed.">			for (byte b : bytes) {</span>
+<span class="nc bnc" id="L554" title="All 2 branches missed.">				if (percentEncodeSet.test(b)) {</span>
+<span class="nc" id="L555">					original = false;</span>
+<span class="nc" id="L556">					break;</span>
+				}
+			}
+<span class="nc bnc" id="L559" title="All 2 branches missed.">			if (original) {</span>
+<span class="nc" id="L560">				return input;</span>
+			}
+<span class="nc" id="L562">			StringBuilder output = new StringBuilder();</span>
+<span class="nc bnc" id="L563" title="All 2 branches missed.">			for (byte b : bytes) {</span>
+<span class="nc bnc" id="L564" title="All 2 branches missed.">				if (!percentEncodeSet.test(b)) {</span>
+<span class="nc" id="L565">					output.append((char)b);</span>
+				}
+				else {
+<span class="nc" id="L568">					output.append('%');</span>
+<span class="nc" id="L569">					char hex1 = Character.toUpperCase(Character.forDigit((b &gt;&gt; 4) &amp; 0xF, 16));</span>
+<span class="nc" id="L570">					char hex2 = Character.toUpperCase(Character.forDigit(b &amp; 0xF, 16));</span>
+<span class="nc" id="L571">					output.append(hex1);</span>
+<span class="nc" id="L572">					output.append(hex2);</span>
+				}
+			}
+<span class="nc" id="L575">			return output.toString();</span>
+		}
+	}
+
+	/**
+	 * A single-dot URL path segment is a URL path segment that is &quot;[/].&quot; or
+	 * an ASCII case-insensitive match for &quot;[/]%2e&quot;.
+	 */
+	private static boolean isSingleDotPathSegment(StringBuilder b) {
+<span class="nc" id="L584">		int len = b.length();</span>
+<span class="nc bnc" id="L585" title="All 5 branches missed.">		switch (len) {</span>
+			case 1 -&gt; {
+<span class="nc" id="L587">				int ch0 = b.codePointAt(0);</span>
+<span class="nc bnc" id="L588" title="All 2 branches missed.">				return ch0 == '.';</span>
+			}
+			case 2 -&gt; {
+<span class="nc" id="L591">				int ch0 = b.codePointAt(0);</span>
+<span class="nc" id="L592">				int ch1 = b.codePointAt(1);</span>
+<span class="nc bnc" id="L593" title="All 4 branches missed.">				return ch0 == '/' &amp;&amp; ch1 == '.';</span>
+			}
+			case 3 -&gt; {
+				//  ASCII case-insensitive match for &quot;%2e&quot;.
+<span class="nc" id="L597">				int ch0 = b.codePointAt(0);</span>
+<span class="nc" id="L598">				int ch1 = b.codePointAt(1);</span>
+<span class="nc" id="L599">				int ch2 = b.codePointAt(2);</span>
+<span class="nc bnc" id="L600" title="All 8 branches missed.">				return ch0 == '%' &amp;&amp; ch1 == '2' &amp;&amp; (ch2 == 'e' || ch2 == 'E');</span>
+			}
+			case 4 -&gt; {
+				//  ASCII case-insensitive match for &quot;/%2e&quot;.
+<span class="nc" id="L604">				int ch0 = b.codePointAt(0);</span>
+<span class="nc" id="L605">				int ch1 = b.codePointAt(1);</span>
+<span class="nc" id="L606">				int ch2 = b.codePointAt(2);</span>
+<span class="nc" id="L607">				int ch3 = b.codePointAt(3);</span>
+<span class="nc bnc" id="L608" title="All 10 branches missed.">				return ch0 == '/' &amp;&amp; ch1 == '%' &amp;&amp; ch2 == '2' &amp;&amp; (ch3 == 'e' || ch3 == 'E');</span>
+			}
+			default -&gt; {
+<span class="nc" id="L611">				return false;</span>
+			}
+		}
+	}
+
+	/**
+	 * A double-dot URL path segment is a URL path segment that is &quot;[/]..&quot; or
+	 * an ASCII case-insensitive match for &quot;/.%2e&quot;, &quot;/%2e.&quot;, or &quot;/%2e%2e&quot;.
+	 */
+	private static boolean isDoubleDotPathSegment(StringBuilder b) {
+<span class="nc" id="L621">		int len = b.length();</span>
+<span class="nc bnc" id="L622" title="All 7 branches missed.">		switch (len) {</span>
+			case 2 -&gt; {
+<span class="nc" id="L624">				int ch0 = b.codePointAt(0);</span>
+<span class="nc" id="L625">				int ch1 = b.codePointAt(1);</span>
+<span class="nc bnc" id="L626" title="All 4 branches missed.">				return (ch0 == '.' &amp;&amp; ch1 == '.');</span>
+			}
+			case 3 -&gt; {
+<span class="nc" id="L629">				int ch0 = b.codePointAt(0);</span>
+<span class="nc" id="L630">				int ch1 = b.codePointAt(1);</span>
+<span class="nc" id="L631">				int ch2 = b.codePointAt(2);</span>
+<span class="nc bnc" id="L632" title="All 6 branches missed.">				return (ch0 == '/' &amp;&amp; ch1 == '.' &amp;&amp; ch2 == '.');</span>
+			}
+			case 4 -&gt; {
+<span class="nc" id="L635">				int ch0 = b.codePointAt(0);</span>
+<span class="nc" id="L636">				int ch1 = b.codePointAt(1);</span>
+<span class="nc" id="L637">				int ch2 = b.codePointAt(2);</span>
+<span class="nc" id="L638">				int ch3 = b.codePointAt(3);</span>
+				// case-insensitive match for &quot;.%2e&quot; or &quot;%2e.&quot;
+<span class="nc bnc" id="L640" title="All 20 branches missed.">				return (ch0 == '.' &amp;&amp; ch1 == '%' &amp;&amp; ch2 == '2' &amp;&amp; (ch3 == 'e' || ch3 == 'E') ||</span>
+						(ch0 == '%' &amp;&amp; ch1 == '2' &amp;&amp; (ch2 == 'e' || ch2 == 'E') &amp;&amp; ch3 == '.'));
+			}
+			case 5 -&gt; {
+<span class="nc" id="L644">				int ch0 = b.codePointAt(0);</span>
+<span class="nc" id="L645">				int ch1 = b.codePointAt(1);</span>
+<span class="nc" id="L646">				int ch2 = b.codePointAt(2);</span>
+<span class="nc" id="L647">				int ch3 = b.codePointAt(3);</span>
+<span class="nc" id="L648">				int ch4 = b.codePointAt(4);</span>
+				// case-insensitive match for &quot;/.%2e&quot; or &quot;/%2e.&quot;
+<span class="nc bnc" id="L650" title="All 22 branches missed.">				return (ch0 == '/' &amp;&amp;</span>
+						(ch1 == '.' &amp;&amp; ch2 == '%' &amp;&amp; ch3 == '2' &amp;&amp; (ch4 == 'e' || ch4 == 'E') ||
+								(ch1 == '%' &amp;&amp; ch2 == '2' &amp;&amp; (ch3 == 'e' || ch3 == 'E') &amp;&amp; ch4 == '.')));
+			}
+			case 6 -&gt; {
+<span class="nc" id="L655">				int ch0 = b.codePointAt(0);</span>
+<span class="nc" id="L656">				int ch1 = b.codePointAt(1);</span>
+<span class="nc" id="L657">				int ch2 = b.codePointAt(2);</span>
+<span class="nc" id="L658">				int ch3 = b.codePointAt(3);</span>
+<span class="nc" id="L659">				int ch4 = b.codePointAt(4);</span>
+<span class="nc" id="L660">				int ch5 = b.codePointAt(5);</span>
+				// case-insensitive match for &quot;%2e%2e&quot;.
+<span class="nc bnc" id="L662" title="All 16 branches missed.">				return (ch0 == '%' &amp;&amp; ch1 == '2' &amp;&amp; (ch2 == 'e' || ch2 == 'E') &amp;&amp;</span>
+						ch3 == '%' &amp;&amp; ch4 == '2' &amp;&amp; (ch5 == 'e' || ch5 == 'E'));
+			}
+			case 7 -&gt; {
+<span class="nc" id="L666">				int ch0 = b.codePointAt(0);</span>
+<span class="nc" id="L667">				int ch1 = b.codePointAt(1);</span>
+<span class="nc" id="L668">				int ch2 = b.codePointAt(2);</span>
+<span class="nc" id="L669">				int ch3 = b.codePointAt(3);</span>
+<span class="nc" id="L670">				int ch4 = b.codePointAt(4);</span>
+<span class="nc" id="L671">				int ch5 = b.codePointAt(5);</span>
+<span class="nc" id="L672">				int ch6 = b.codePointAt(6);</span>
+				// case-insensitive match for &quot;/%2e%2e&quot;.
+<span class="nc bnc" id="L674" title="All 18 branches missed.">				return (ch0 == '/' &amp;&amp; ch1 == '%' &amp;&amp; ch2 == '2' &amp;&amp; (ch3 == 'e' || ch3 == 'E') &amp;&amp;</span>
+						ch4 == '%' &amp;&amp; ch5 == '2' &amp;&amp; (ch6 == 'e' || ch6 == 'E'));
+			}
+			default -&gt; {
+<span class="nc" id="L678">				return false;</span>
+			}
+		}
+	}
+
+
+	/**
+	 * A Windows drive letter is two code points, of which the first is an ASCII alpha
+	 * and the second is either U+003A {@code (:)} or U+007C {@code (|)}.
+	 * A normalized Windows drive letter is a Windows drive letter of which
+	 * the second code point is U+003A {@code (:)}.
+	 */
+	private static boolean isWindowsDriveLetter(CharSequence input, boolean normalized) {
+<span class="nc bnc" id="L691" title="All 2 branches missed.">		if (input.length() != 2) {</span>
+<span class="nc" id="L692">			return false;</span>
+		}
+<span class="nc" id="L694">		return isWindowsDriveLetterInternal(input, normalized);</span>
+	}
+
+	/**
+	 * A string starts with a Windows drive letter if all the following are true:
+	 * its length is greater than or equal to 2
+	 * its first two code points are a Windows drive letter
+	 * its length is 2 or its third code point is U+002F (/), U+005C (\), U+003F (?), or U+0023 (#).
+	 */
+	private static boolean startsWithWindowsDriveLetter(String input) {
+<span class="nc" id="L704">		int len = input.length();</span>
+<span class="nc bnc" id="L705" title="All 2 branches missed.">		if (len &lt; 2) {</span>
+<span class="nc" id="L706">			return false;</span>
+		}
+<span class="nc bnc" id="L708" title="All 2 branches missed.">		if (!isWindowsDriveLetterInternal(input, false)) {</span>
+<span class="nc" id="L709">			return false;</span>
+		}
+<span class="nc bnc" id="L711" title="All 2 branches missed.">		if (len == 2) {</span>
+<span class="nc" id="L712">			return true;</span>
+		}
+		else {
+<span class="nc" id="L715">			int ch2 = input.codePointAt(2);</span>
+<span class="nc bnc" id="L716" title="All 8 branches missed.">			return (ch2 == '/' || ch2 == '\\' || ch2 == '?' || ch2 == '#');</span>
+		}
+	}
+
+	private static boolean isWindowsDriveLetterInternal(CharSequence s, boolean normalized) {
+<span class="nc" id="L721">		int ch0 = codePointAt(s, 0);</span>
+<span class="nc bnc" id="L722" title="All 2 branches missed.">		if (!isAsciiAlpha(ch0)) {</span>
+<span class="nc" id="L723">			return false;</span>
+		}
+		else {
+<span class="nc" id="L726">			int ch1 = codePointAt(s, 1);</span>
+<span class="nc bnc" id="L727" title="All 2 branches missed.">			if (normalized) {</span>
+<span class="nc bnc" id="L728" title="All 2 branches missed.">				return ch1 == ':';</span>
+			}
+			else {
+<span class="nc bnc" id="L731" title="All 4 branches missed.">				return ch1 == ':' || ch1 == '|';</span>
+			}
+		}
+	}
+
+	private static int codePointAt(CharSequence s, int index) {
+<span class="nc bnc" id="L737" title="All 2 branches missed.">		if (s instanceof String string) {</span>
+<span class="nc" id="L738">			return string.codePointAt(index);</span>
+		}
+<span class="nc bnc" id="L740" title="All 2 branches missed.">		else if (s instanceof StringBuilder builder) {</span>
+<span class="nc" id="L741">			return builder.codePointAt(index);</span>
+		}
+		else {
+<span class="nc" id="L744">			throw new IllegalStateException();</span>
+		}
+	}
+
+
+<span class="nc" id="L749">	private enum State {</span>
+
+<span class="nc" id="L751">		SCHEME_START {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If c is an ASCII alpha, append c, lowercased, to buffer, and set state to scheme state.
+<span class="nc bnc" id="L755" title="All 2 branches missed.">				if (isAsciiAlpha(c)) {</span>
+<span class="nc bnc" id="L756" title="All 2 branches missed.">					p.append(p.openCurlyBracketCount == 0 ? Character.toLowerCase((char) c) : c);</span>
+<span class="nc" id="L757">					p.setState(SCHEME);</span>
+				}
+				// EXTRA: if c is '{', append to buffer and continue as SCHEME
+<span class="nc bnc" id="L760" title="All 2 branches missed.">				else if (c == '{') {</span>
+<span class="nc" id="L761">					p.openCurlyBracketCount++;</span>
+<span class="nc" id="L762">					p.append(c);</span>
+<span class="nc" id="L763">					p.setState(SCHEME);</span>
+				}
+				// Otherwise, if state override is not given,
+				// set state to no scheme state and decrease pointer by 1.
+<span class="nc bnc" id="L767" title="All 2 branches missed.">				else if (p.stateOverride == null) {</span>
+<span class="nc" id="L768">					p.setState(NO_SCHEME);</span>
+<span class="nc" id="L769">					p.pointer--;</span>
+				}
+				// Otherwise, return failure.
+				else {
+<span class="nc" id="L773">					p.failure(null);</span>
+				}
+<span class="nc" id="L775">			}</span>
+		},
+<span class="nc" id="L777">		SCHEME {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If c is an ASCII alphanumeric, U+002B (+), U+002D (-), or U+002E (.), append c, lowercased, to buffer.
+<span class="nc bnc" id="L781" title="All 8 branches missed.">				if (isAsciiAlphaNumeric(c) || (c == '+' || c == '-' || c == '.')) {</span>
+<span class="nc bnc" id="L782" title="All 2 branches missed.">					p.append(p.openCurlyBracketCount == 0 ? Character.toLowerCase((char) c) : c);</span>
+				}
+				// Otherwise, if c is U+003A (:), then:
+<span class="nc bnc" id="L785" title="All 2 branches missed.">				else if (c == ':') {</span>
+					// If state override is given, then:
+<span class="nc bnc" id="L787" title="All 2 branches missed.">					if (p.stateOverride != null) {</span>
+<span class="nc" id="L788">						boolean urlSpecialScheme = url.isSpecial();</span>
+<span class="nc" id="L789">						String bufferString = p.buffer.toString();</span>
+<span class="nc" id="L790">						boolean bufferSpecialScheme = isSpecialScheme(bufferString);</span>
+						// If url’s scheme is a special scheme and buffer is not a special scheme, then return.
+<span class="nc bnc" id="L792" title="All 4 branches missed.">						if (urlSpecialScheme &amp;&amp; !bufferSpecialScheme) {</span>
+<span class="nc" id="L793">							return;</span>
+						}
+						// If url’s scheme is not a special scheme and buffer is a special scheme, then return.
+<span class="nc bnc" id="L796" title="All 4 branches missed.">						if (!urlSpecialScheme &amp;&amp; bufferSpecialScheme) {</span>
+<span class="nc" id="L797">							return;</span>
+						}
+						// If url includes credentials or has a non-null port, and buffer is &quot;file&quot;, then return.
+<span class="nc bnc" id="L800" title="All 6 branches missed.">						if ((url.includesCredentials() || url.port() != null) &amp;&amp; &quot;file&quot;.equals(bufferString)) {</span>
+<span class="nc" id="L801">							return;</span>
+						}
+						// If url’s scheme is &quot;file&quot; and its host is an empty host, then return.
+<span class="nc bnc" id="L804" title="All 2 branches missed.">						if (&quot;file&quot;.equals(url.scheme()) &amp;&amp;</span>
+<span class="nc bnc" id="L805" title="All 4 branches missed.">								(url.host() == null || url.host() == EmptyHost.INSTANCE)) {</span>
+<span class="nc" id="L806">							return;</span>
+						}
+					}
+					// Set url’s scheme to buffer.
+<span class="nc" id="L810">					url.scheme = p.buffer.toString();</span>
+					// If state override is given, then:
+<span class="nc bnc" id="L812" title="All 2 branches missed.">					if (p.stateOverride != null) {</span>
+						// If url’s port is url’s scheme’s default port, then set url’s port to null.
+<span class="nc bnc" id="L814" title="All 4 branches missed.">						if (url.port instanceof IntPort intPort &amp;&amp; intPort.value() == defaultPort(url.scheme)) {</span>
+<span class="nc" id="L815">							url.port = null;</span>
+							// Return.
+<span class="nc" id="L817">							p.stopMainLoop = true;</span>
+<span class="nc" id="L818">							return;</span>
+						}
+					}
+					// Set buffer to the empty string.
+<span class="nc" id="L822">					p.emptyBuffer();</span>
+					// If url’s scheme is &quot;file&quot;, then:
+<span class="nc bnc" id="L824" title="All 2 branches missed.">					if (url.scheme.equals(&quot;file&quot;)) {</span>
+						// If remaining does not start with &quot;//&quot;,
+						// special-scheme-missing-following-solidus validation error.
+<span class="nc bnc" id="L827" title="All 6 branches missed.">						if (p.validate() &amp;&amp; (p.remaining(0) != '/' || p.remaining(1) != '/')) {</span>
+<span class="nc" id="L828">							p.validationError(&quot;\&quot;file\&quot; scheme not followed by \&quot;//\&quot;.&quot;);</span>
+						}
+						// Set state to file state.
+<span class="nc" id="L831">						p.setState(FILE);</span>
+					}
+					// Otherwise, if url is special, base is non-null, and base’s scheme is url’s scheme:
+<span class="nc bnc" id="L834" title="All 6 branches missed.">					else if (url.isSpecial() &amp;&amp; p.base != null &amp;&amp; p.base.scheme().equals(url.scheme)) {</span>
+						// Assert: base is special (and therefore does not have an opaque path).
+<span class="nc bnc" id="L836" title="All 2 branches missed.">						Assert.state(!p.base.path().isOpaque(), &quot;Opaque path not expected&quot;);</span>
+						// Set state to special relative or authority state.
+<span class="nc" id="L838">						p.setState(SPECIAL_RELATIVE_OR_AUTHORITY);</span>
+					}
+					// Otherwise, if url is special, set state to special authority slashes state.
+<span class="nc bnc" id="L841" title="All 2 branches missed.">					else if (url.isSpecial()) {</span>
+<span class="nc" id="L842">						p.setState(SPECIAL_AUTHORITY_SLASHES);</span>
+					}
+					// Otherwise, if remaining starts with an U+002F (/),
+					// set state to path or authority state and increase pointer by 1.
+<span class="nc bnc" id="L846" title="All 2 branches missed.">					else if (p.remaining(0) == '/') {</span>
+<span class="nc" id="L847">						p.setState(PATH_OR_AUTHORITY);</span>
+<span class="nc" id="L848">						p.pointer++;</span>
+					}
+					// Otherwise, set url’s path to the empty string and set state to opaque path state.
+					else {
+<span class="nc" id="L852">						url.path = new PathSegment(&quot;&quot;);</span>
+<span class="nc" id="L853">						p.setState(OPAQUE_PATH);</span>
+					}
+				}
+				// EXTRA: if c is within URI variable, keep appending
+<span class="nc bnc" id="L857" title="All 2 branches missed.">				else if (p.processCurlyBrackets(c)) {</span>
+<span class="nc" id="L858">					p.append(c);</span>
+				}
+				// Otherwise, if state override is not given, set buffer to the empty string,
+				// state to no scheme state, and start over (from the first code point in input).
+<span class="nc bnc" id="L862" title="All 2 branches missed.">				else if (p.stateOverride == null) {</span>
+<span class="nc" id="L863">					p.emptyBuffer();</span>
+<span class="nc" id="L864">					p.setState(NO_SCHEME);</span>
+<span class="nc" id="L865">					p.pointer = -1;</span>
+				}
+				// Otherwise, return failure.
+				else {
+<span class="nc" id="L869">					p.failure(null);</span>
+				}
+
+<span class="nc" id="L872">			}</span>
+		},
+<span class="nc" id="L874">		NO_SCHEME {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If base is null, or base has an opaque path and c is not U+0023 (#),
+				// missing-scheme-non-relative-URL validation error, return failure.
+<span class="nc bnc" id="L879" title="All 6 branches missed.">				if (p.base == null || p.base.path().isOpaque() &amp;&amp; c != '#') {</span>
+<span class="nc" id="L880">					p.failure(&quot;The input is missing a scheme, because it does not begin with an ASCII alpha \&quot;&quot; +</span>
+<span class="nc bnc" id="L881" title="All 2 branches missed.">							(c != EOF ? Character.toString(c) : &quot;&quot;) + &quot;\&quot;, and no base URL was provided.&quot;);</span>
+				}
+				// Otherwise, if base has an opaque path and c is U+0023 (#),
+				// set url’s scheme to base’s scheme, url’s path to base’s path,
+				// url’s query to base’s query, url’s fragment to the empty string,
+				// and set state to fragment state.
+<span class="nc bnc" id="L887" title="All 4 branches missed.">				else if (p.base.path().isOpaque() &amp;&amp; c == '#') {</span>
+<span class="nc" id="L888">					url.scheme = p.base.scheme();</span>
+<span class="nc" id="L889">					url.path = p.base.path();</span>
+<span class="nc" id="L890">					url.query = p.base.query;</span>
+<span class="nc" id="L891">					url.fragment = new StringBuilder();</span>
+<span class="nc" id="L892">					p.setState(FRAGMENT);</span>
+				}
+				// Otherwise, if base’s scheme is not &quot;file&quot;,
+				// set state to relative state and decrease pointer by 1.
+<span class="nc bnc" id="L896" title="All 2 branches missed.">				else if (!&quot;file&quot;.equals(p.base.scheme())) {</span>
+<span class="nc" id="L897">					p.setState(RELATIVE);</span>
+<span class="nc" id="L898">					p.pointer--;</span>
+				}
+				// Otherwise, set state to file state and decrease pointer by 1.
+				else {
+<span class="nc" id="L902">					p.setState(FILE);</span>
+<span class="nc" id="L903">					p.pointer--;</span>
+				}
+<span class="nc" id="L905">			}</span>
+		},
+<span class="nc" id="L907">		SPECIAL_RELATIVE_OR_AUTHORITY {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If c is U+002F (/) and remaining starts with U+002F (/),
+				// then set state to special authority ignore slashes state and
+				// increase pointer by 1.
+<span class="nc bnc" id="L913" title="All 4 branches missed.">				if (c == '/' &amp;&amp; p.remaining(0) == '/') {</span>
+<span class="nc" id="L914">					p.setState(SPECIAL_AUTHORITY_IGNORE_SLASHES);</span>
+<span class="nc" id="L915">					p.pointer++;</span>
+				}
+				// Otherwise, special-scheme-missing-following-solidus validation error,
+				// set state to relative state and decrease pointer by 1.
+				else {
+<span class="nc bnc" id="L920" title="All 2 branches missed.">					if (p.validate()) {</span>
+<span class="nc" id="L921">						p.validationError(&quot;The input’s scheme is not followed by \&quot;//\&quot;.&quot;);</span>
+					}
+<span class="nc" id="L923">					p.setState(RELATIVE);</span>
+<span class="nc" id="L924">					p.pointer--;</span>
+				}
+<span class="nc" id="L926">			}</span>
+		},
+<span class="nc" id="L928">		PATH_OR_AUTHORITY {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If c is U+002F (/), then set state to authority state.
+<span class="nc bnc" id="L932" title="All 2 branches missed.">				if (c == '/') {</span>
+<span class="nc" id="L933">					p.setState(AUTHORITY);</span>
+				}
+				// Otherwise, set state to path state, and decrease pointer by 1.
+				else {
+<span class="nc" id="L937">					p.setState(PATH);</span>
+<span class="nc" id="L938">					p.pointer--;</span>
+				}
+<span class="nc" id="L940">			}</span>
+		},
+<span class="nc" id="L942">		RELATIVE {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// Assert: base’s scheme is not &quot;file&quot;.
+<span class="nc bnc" id="L946" title="All 4 branches missed.">				Assert.state(p.base != null &amp;&amp; !&quot;file&quot;.equals(p.base.scheme()),</span>
+						&quot;Base scheme not provided or supported&quot;);
+				// Set url’s scheme to base’s scheme.
+<span class="nc" id="L949">				url.scheme = p.base.scheme;</span>
+				// If c is U+002F (/), then set state to relative slash state.
+<span class="nc bnc" id="L951" title="All 2 branches missed.">				if (c == '/') {</span>
+					// EXTRA : append '/' to let the path segment start with /
+<span class="nc" id="L953">					p.append('/');</span>
+<span class="nc" id="L954">					p.setState(RELATIVE_SLASH);</span>
+				}
+				// Otherwise, if url is special and c is U+005C (\),
+				// invalid-reverse-solidus validation error, set state to relative slash state.
+<span class="nc bnc" id="L958" title="All 4 branches missed.">				else if (url.isSpecial() &amp;&amp; c == '\\') {</span>
+<span class="nc bnc" id="L959" title="All 2 branches missed.">					if (p.validate()) {</span>
+<span class="nc" id="L960">						p.validationError(&quot;URL uses \\ instead of /.&quot;);</span>
+					}
+					// EXTRA : append '/' to let the path segment start with /
+<span class="nc" id="L963">					p.append('/');</span>
+<span class="nc" id="L964">					p.setState(RELATIVE_SLASH);</span>
+				}
+				// Otherwise
+				else {
+					// Set url’s username to base’s username, url’s password to base’s password,
+					// url’s host to base’s host, url’s port to base’s port,
+					// url’s path to a clone of base’s path, and url’s query to base’s query.
+<span class="nc bnc" id="L971" title="All 2 branches missed.">					url.username = ((p.base.username != null) ? new StringBuilder(p.base.username) : null);</span>
+<span class="nc bnc" id="L972" title="All 2 branches missed.">					url.password = ((p.base.password != null) ? new StringBuilder(p.base.password) : null);</span>
+<span class="nc" id="L973">					url.host = p.base.host();</span>
+<span class="nc" id="L974">					url.port = p.base.port();</span>
+<span class="nc" id="L975">					url.path = p.base.path().clone();</span>
+<span class="nc" id="L976">					url.query = p.base.query;</span>
+					// If c is U+003F (?), then set url’s query to the empty string, and state to query state.
+<span class="nc bnc" id="L978" title="All 2 branches missed.">					if (c == '?') {</span>
+<span class="nc" id="L979">						url.query = new StringBuilder();</span>
+<span class="nc" id="L980">						p.setState(QUERY);</span>
+					}
+					// Otherwise, if c is U+0023 (#), set url’s fragment to the empty string and state to fragment state.
+<span class="nc bnc" id="L983" title="All 2 branches missed.">					else if (c == '#') {</span>
+<span class="nc" id="L984">						url.fragment = new StringBuilder();</span>
+<span class="nc" id="L985">						p.setState(FRAGMENT);</span>
+					}
+					// Otherwise, if c is not the EOF code point:
+<span class="nc bnc" id="L988" title="All 2 branches missed.">					else if (c != EOF) {</span>
+						// Set url’s query to null.
+<span class="nc" id="L990">						url.query = null;</span>
+						// Shorten url’s path.
+<span class="nc" id="L992">						url.shortenPath();</span>
+						// Set state to path state and decrease pointer by 1.
+<span class="nc" id="L994">						p.setState(PATH);</span>
+<span class="nc" id="L995">						p.pointer--;</span>
+					}
+				}
+<span class="nc" id="L998">			}</span>
+		},
+<span class="nc" id="L1000">		RELATIVE_SLASH {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If url is special and c is U+002F (/) or U+005C (\), then:
+<span class="nc bnc" id="L1004" title="All 6 branches missed.">				if (url.isSpecial() &amp;&amp; (c == '/' || c == '\\')) {</span>
+					// If c is U+005C (\), invalid-reverse-solidus validation error.
+<span class="nc bnc" id="L1006" title="All 4 branches missed.">					if (p.validate() &amp;&amp; c == '\\') {</span>
+<span class="nc" id="L1007">						p.validationError(&quot;URL uses \\ instead of /.&quot;);</span>
+					}
+					// Set state to special authority ignore slashes state.
+<span class="nc" id="L1010">					p.setState(SPECIAL_AUTHORITY_IGNORE_SLASHES);</span>
+				}
+				// Otherwise, if c is U+002F (/), then set state to authority state.
+<span class="nc bnc" id="L1013" title="All 2 branches missed.">				else if (c == '/') {</span>
+					// EXTRA: empty buffer to remove appended slash, since this is not a path
+<span class="nc" id="L1015">					p.emptyBuffer();</span>
+<span class="nc" id="L1016">					p.setState(AUTHORITY);</span>
+				}
+				// Otherwise, set url’s username to base’s username, url’s password to base’s password,
+				// url’s host to base’s host, url’s port to base’s port, state to path state,
+				// and then, decrease pointer by 1.
+				else {
+<span class="nc bnc" id="L1022" title="All 2 branches missed.">					Assert.state(p.base != null, &quot;No base URL available&quot;);</span>
+<span class="nc bnc" id="L1023" title="All 2 branches missed.">					url.username = (p.base.username != null) ? new StringBuilder(p.base.username) : null;</span>
+<span class="nc bnc" id="L1024" title="All 2 branches missed.">					url.password = (p.base.password != null) ? new StringBuilder(p.base.password) : null;</span>
+<span class="nc" id="L1025">					url.host = p.base.host();</span>
+<span class="nc" id="L1026">					url.port = p.base.port();</span>
+<span class="nc" id="L1027">					p.setState(PATH);</span>
+<span class="nc" id="L1028">					p.pointer--;</span>
+				}
+
+<span class="nc" id="L1031">			}</span>
+		},
+<span class="nc" id="L1033">		SPECIAL_AUTHORITY_SLASHES {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If c is U+002F (/) and remaining starts with U+002F (/),
+				// then set state to special authority ignore slashes state and
+				// increase pointer by 1.
+<span class="nc bnc" id="L1039" title="All 4 branches missed.">				if (c == '/' &amp;&amp; p.remaining(0) == '/') {</span>
+<span class="nc" id="L1040">					p.setState(SPECIAL_AUTHORITY_IGNORE_SLASHES);</span>
+<span class="nc" id="L1041">					p.pointer++;</span>
+				}
+				// Otherwise, special-scheme-missing-following-solidus validation error,
+				// set state to special authority ignore slashes state and decrease pointer by 1.
+				else {
+<span class="nc bnc" id="L1046" title="All 2 branches missed.">					if (p.validate()) {</span>
+<span class="nc" id="L1047">						p.validationError(&quot;Scheme \&quot;&quot; + url.scheme + &quot;\&quot; not followed by \&quot;//\&quot;.&quot;);</span>
+					}
+<span class="nc" id="L1049">					p.setState(SPECIAL_AUTHORITY_IGNORE_SLASHES);</span>
+<span class="nc" id="L1050">					p.pointer--;</span>
+				}
+<span class="nc" id="L1052">			}</span>
+		},
+<span class="nc" id="L1054">		SPECIAL_AUTHORITY_IGNORE_SLASHES {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If c is neither U+002F (/) nor U+005C (\),
+				// then set state to authority state and decrease pointer by 1.
+<span class="nc bnc" id="L1059" title="All 4 branches missed.">				if (c != '/' &amp;&amp; c != '\\') {</span>
+<span class="nc" id="L1060">					p.setState(AUTHORITY);</span>
+<span class="nc" id="L1061">					p.pointer--;</span>
+				}
+				// Otherwise, special-scheme-missing-following-solidus validation error.
+				else {
+<span class="nc bnc" id="L1065" title="All 2 branches missed.">					if (p.validate()) {</span>
+<span class="nc" id="L1066">						p.validationError(&quot;Scheme \&quot;&quot; + url.scheme + &quot;\&quot; not followed by \&quot;//\&quot;.&quot;);</span>
+					}
+				}
+<span class="nc" id="L1069">			}</span>
+		},
+<span class="nc" id="L1071">		AUTHORITY {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If c is U+0040 (@), then:
+<span class="nc bnc" id="L1075" title="All 2 branches missed.">				if (c == '@') {</span>
+					// Invalid-credentials validation error.
+<span class="nc bnc" id="L1077" title="All 2 branches missed.">					if (p.validate()) {</span>
+<span class="nc" id="L1078">						p.validationError(&quot;Invalid credentials&quot;);</span>
+					}
+					// If atSignSeen is true, then prepend &quot;%40&quot; to buffer.
+<span class="nc bnc" id="L1081" title="All 2 branches missed.">					if (p.atSignSeen) {</span>
+<span class="nc" id="L1082">						p.prepend(&quot;%40&quot;);</span>
+					}
+					// Set atSignSeen to true.
+<span class="nc" id="L1085">					p.atSignSeen = true;</span>
+
+<span class="nc" id="L1087">					int bufferLen = p.buffer.length();</span>
+					// For each codePoint in buffer:
+<span class="nc bnc" id="L1089" title="All 2 branches missed.">					for (int i = 0; i &lt; bufferLen; i++) {</span>
+<span class="nc" id="L1090">						int codePoint = p.buffer.codePointAt(i);</span>
+						// If codePoint is U+003A (:) and passwordTokenSeen is false,
+						// then set passwordTokenSeen to true and continue.
+<span class="nc bnc" id="L1093" title="All 4 branches missed.">						if (codePoint == ':' &amp;&amp; !p.passwordTokenSeen) {</span>
+<span class="nc" id="L1094">							p.passwordTokenSeen = true;</span>
+<span class="nc" id="L1095">							continue;</span>
+						}
+						// Let encodedCodePoints be the result of running UTF-8 percent-encode codePoint
+						// using the userinfo percent-encode set.
+<span class="nc" id="L1099">						String encodedCodePoints = p.percentEncode(codePoint, WhatWgUrlParser::userinfoPercentEncodeSet);</span>
+						// If passwordTokenSeen is true, then append encodedCodePoints to url’s password.
+<span class="nc bnc" id="L1101" title="All 2 branches missed.">						if (p.passwordTokenSeen) {</span>
+<span class="nc bnc" id="L1102" title="All 2 branches missed.">							if (encodedCodePoints != null) {</span>
+<span class="nc" id="L1103">								url.appendToPassword(encodedCodePoints);</span>
+							}
+							else {
+<span class="nc" id="L1106">								url.appendToPassword(codePoint);</span>
+							}
+						}
+						// Otherwise, append encodedCodePoints to url’s username.
+						else {
+<span class="nc bnc" id="L1111" title="All 2 branches missed.">							if (encodedCodePoints != null) {</span>
+<span class="nc" id="L1112">								url.appendToUsername(encodedCodePoints);</span>
+							}
+							else {
+<span class="nc" id="L1115">								url.appendToUsername(codePoint);</span>
+							}
+						}
+					}
+					// Set buffer to the empty string.
+<span class="nc" id="L1120">					p.emptyBuffer();</span>
+<span class="nc" id="L1121">				}</span>
+				// Otherwise, if one of the following is true:
+				// - c is the EOF code point, U+002F (/), U+003F (?), or U+0023 (#)
+				// - url is special and c is U+005C (\)
+<span class="nc bnc" id="L1125" title="All 12 branches missed.">				else if ((c == EOF || c == '/' || c == '?' || c == '#') || (url.isSpecial() &amp;&amp; c == '\\')) {</span>
+					// If atSignSeen is true and buffer is the empty string,
+					// host-missing validation error, return failure.
+<span class="nc bnc" id="L1128" title="All 4 branches missed.">					if (p.atSignSeen &amp;&amp; p.buffer.isEmpty()) {</span>
+<span class="nc" id="L1129">						p.failure(&quot;Missing host.&quot;);</span>
+					}
+					// Decrease pointer by buffer’s code point length + 1,
+					// set buffer to the empty string, and set state to host state.
+<span class="nc" id="L1133">					p.pointer -= p.buffer.length() + 1;</span>
+<span class="nc" id="L1134">					p.emptyBuffer();</span>
+<span class="nc" id="L1135">					p.setState(HOST);</span>
+				}
+				// Otherwise, append c to buffer.
+				else {
+<span class="nc" id="L1139">					p.append(c);</span>
+				}
+<span class="nc" id="L1141">			}</span>
+		},
+<span class="nc" id="L1143">		HOST {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If state override is given and url’s scheme is &quot;file&quot;,
+				// then decrease pointer by 1 and set state to file host state.
+<span class="nc bnc" id="L1148" title="All 4 branches missed.">				if (p.stateOverride != null &amp;&amp; &quot;file&quot;.equals(url.scheme())) {</span>
+<span class="nc" id="L1149">					p.pointer--;</span>
+<span class="nc" id="L1150">					p.setState(FILE_HOST);</span>
+				}
+				// Otherwise, if c is U+003A (:) and insideBrackets is false, then:
+<span class="nc bnc" id="L1153" title="All 4 branches missed.">				else if (c == ':' &amp;&amp; !p.insideBrackets) {</span>
+					// If buffer is the empty string, host-missing validation error, return failure.
+<span class="nc bnc" id="L1155" title="All 2 branches missed.">					if (p.buffer.isEmpty()) {</span>
+<span class="nc" id="L1156">						p.failure(&quot;Missing host.&quot;);</span>
+					}
+					// If state override is given and state override is hostname state, then return.
+<span class="nc bnc" id="L1159" title="All 2 branches missed.">					if (p.stateOverride == HOST) {</span>
+<span class="nc" id="L1160">						p.stopMainLoop = true;</span>
+<span class="nc" id="L1161">						return;</span>
+					}
+					// Let host be the result of host parsing buffer with url is not special.
+					// Set url’s host to host, buffer to the empty string, and state to port state.
+<span class="nc bnc" id="L1165" title="All 2 branches missed.">					url.host = Host.parse(p.buffer.toString(), !url.isSpecial(), p);</span>
+<span class="nc" id="L1166">					p.emptyBuffer();</span>
+<span class="nc" id="L1167">					p.setState(PORT);</span>
+				}
+				// Otherwise, if one of the following is true:
+				// - c is the EOF code point, U+002F (/), U+003F (?), or U+0023 (#)
+				// - url is special and c is U+005C (\)
+<span class="nc bnc" id="L1172" title="All 8 branches missed.">				else if ( (c == EOF || c == '/' || c == '?' || c == '#') ||</span>
+<span class="nc bnc" id="L1173" title="All 4 branches missed.">						(url.isSpecial() &amp;&amp; c == '\\')) {</span>
+					// then decrease pointer by 1, and then:
+<span class="nc" id="L1175">					p.pointer--;</span>
+					// If url is special and buffer is the empty string,
+					// host-missing validation error, return failure.
+<span class="nc bnc" id="L1178" title="All 4 branches missed.">					if (url.isSpecial() &amp;&amp; p.buffer.isEmpty()) {</span>
+<span class="nc" id="L1179">						p.failure(&quot;The input has a special scheme, but does not contain a host.&quot;);</span>
+					}
+					// Otherwise, if state override is given, buffer is the empty string,
+					// and either url includes credentials or url’s port is non-null, return.
+<span class="nc bnc" id="L1183" title="All 4 branches missed.">					else if (p.stateOverride != null &amp;&amp; p.buffer.isEmpty() &amp;&amp;</span>
+<span class="nc bnc" id="L1184" title="All 4 branches missed.">							(url.includesCredentials() || url.port() != null )) {</span>
+<span class="nc" id="L1185">						p.stopMainLoop = true;</span>
+<span class="nc" id="L1186">						return;</span>
+					}
+					// EXTRA: if buffer is not empty
+<span class="nc bnc" id="L1189" title="All 2 branches missed.">					if (!p.buffer.isEmpty()) {</span>
+						// Let host be the result of host parsing buffer with url is not special.
+						// Set url’s host to host, buffer to the empty string, and state to path start state.
+<span class="nc bnc" id="L1192" title="All 2 branches missed.">						url.host = Host.parse(p.buffer.toString(), !url.isSpecial(), p);</span>
+					}
+					else {
+<span class="nc" id="L1195">						url.host = EmptyHost.INSTANCE;</span>
+					}
+<span class="nc" id="L1197">					p.emptyBuffer();</span>
+<span class="nc" id="L1198">					p.setState(PATH_START);</span>
+					// If state override is given, then return.
+<span class="nc bnc" id="L1200" title="All 2 branches missed.">					if (p.stateOverride != null) {</span>
+<span class="nc" id="L1201">						p.stopMainLoop = true;</span>
+					}
+				}
+				// Otherwise:
+				else {
+					// If c is U+005B ([), then set insideBrackets to true.
+<span class="nc bnc" id="L1207" title="All 2 branches missed.">					if (c == '[') {</span>
+<span class="nc" id="L1208">						p.insideBrackets = true;</span>
+					}
+					// If c is U+005D (]), then set insideBrackets to false.
+<span class="nc bnc" id="L1211" title="All 2 branches missed.">					else if (c == ']') {</span>
+<span class="nc" id="L1212">						p.insideBrackets = false;</span>
+					}
+					// Append c to buffer.
+<span class="nc" id="L1215">					p.append(c);</span>
+				}
+<span class="nc" id="L1217">			}</span>
+		},
+<span class="nc" id="L1219">		PORT {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If c is an ASCII digit, append c to buffer.
+<span class="nc bnc" id="L1223" title="All 2 branches missed.">				if (isAsciiDigit(c)) {</span>
+<span class="nc" id="L1224">					p.append(c);</span>
+				}
+				// Otherwise, if one of the following is true:
+				// - c is the EOF code point, U+002F (/), U+003F (?), or U+0023 (#)
+				// - url is special and c is U+005C (\)
+				// - state override is given
+<span class="nc bnc" id="L1230" title="All 8 branches missed.">				else if (c == EOF || c == '/' || c == '?' || c == '#' ||</span>
+<span class="nc bnc" id="L1231" title="All 6 branches missed.">						(url.isSpecial() &amp;&amp; c == '\\') ||</span>
+						(p.stateOverride != null)) {
+					// If buffer is not the empty string, then:
+<span class="nc bnc" id="L1234" title="All 2 branches missed.">					if (!p.buffer.isEmpty()) {</span>
+						// EXTRA: if buffer contains only ASCII digits, then
+<span class="nc bnc" id="L1236" title="All 2 branches missed.">						if (containsOnlyAsciiDigits(p.buffer)) {</span>
+							try {
+								// Let port be the mathematical integer value that is represented
+								// by buffer in radix-10 using ASCII digits for digits with values 0 through 9.
+<span class="nc" id="L1240">								int port = Integer.parseInt(p.buffer, 0, p.buffer.length(), 10);</span>
+								// If port is greater than 2^16 − 1,
+								// port-out-of-range validation error, return failure.
+<span class="nc bnc" id="L1243" title="All 2 branches missed.">								if (port &gt; MAX_PORT) {</span>
+<span class="nc" id="L1244">									p.failure(&quot;Port \&quot;&quot; + port + &quot;\&quot; is out of range&quot;);</span>
+								}
+<span class="nc" id="L1246">								int defaultPort = defaultPort(url.scheme);</span>
+								// Set url’s port to null, if port is url’s scheme’s default port; otherwise to port.
+<span class="nc bnc" id="L1248" title="All 4 branches missed.">								if (defaultPort != -1 &amp;&amp; port == defaultPort) {</span>
+<span class="nc" id="L1249">									url.port = null;</span>
+								}
+								else {
+<span class="nc" id="L1252">									url.port = new IntPort(port);</span>
+								}
+							}
+<span class="nc" id="L1255">							catch (NumberFormatException ex) {</span>
+<span class="nc" id="L1256">								p.failure(ex.getMessage());</span>
+<span class="nc" id="L1257">							}</span>
+						}
+						// EXTRA: otherwise, set url's port to buffer
+						else {
+<span class="nc" id="L1261">							url.port = new StringPort(p.buffer.toString());</span>
+						}
+						// Set buffer to the empty string.
+<span class="nc" id="L1264">						p.emptyBuffer();</span>
+					}
+					// If state override is given, then return.
+<span class="nc bnc" id="L1267" title="All 2 branches missed.">					if (p.stateOverride != null) {</span>
+<span class="nc" id="L1268">						p.stopMainLoop = true;</span>
+<span class="nc" id="L1269">						return;</span>
+					}
+					// Set state to path start state and decrease pointer by 1.
+<span class="nc" id="L1272">					p.setState(PATH_START);</span>
+<span class="nc" id="L1273">					p.pointer--;</span>
+				}
+				// EXTRA: if c is within URI variable, keep appending
+<span class="nc bnc" id="L1276" title="All 2 branches missed.">				else if (p.processCurlyBrackets(c)) {</span>
+<span class="nc" id="L1277">					p.append(c);</span>
+				}
+				// Otherwise, port-invalid validation error, return failure.
+				else {
+<span class="nc" id="L1281">					p.failure(&quot;Invalid port: \&quot;&quot; + Character.toString(c) + &quot;\&quot;&quot;);</span>
+				}
+<span class="nc" id="L1283">			}</span>
+		},
+<span class="nc" id="L1285">		FILE {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// Set url’s scheme to &quot;file&quot;.
+<span class="nc" id="L1289">				url.scheme = &quot;file&quot;;</span>
+				// Set url’s host to the empty string.
+<span class="nc" id="L1291">				url.host = EmptyHost.INSTANCE;</span>
+				// If c is U+002F (/) or U+005C (\), then:
+<span class="nc bnc" id="L1293" title="All 4 branches missed.">				if (c == '/' || c == '\\') {</span>
+					// If c is U+005C (\), invalid-reverse-solidus validation error.
+<span class="nc bnc" id="L1295" title="All 4 branches missed.">					if (p.validate() &amp;&amp; c == '\\') {</span>
+<span class="nc" id="L1296">						p.validationError(&quot;URL uses \\ instead of /.&quot;);</span>
+					}
+					// Set state to file slash state.
+<span class="nc" id="L1299">					p.setState(FILE_SLASH);</span>
+				}
+				// Otherwise, if base is non-null and base’s scheme is &quot;file&quot;:
+<span class="nc bnc" id="L1302" title="All 4 branches missed.">				else if (p.base != null &amp;&amp; p.base.scheme().equals(&quot;file&quot;)) {</span>
+					// Set url’s host to base’s host, url’s path to a clone of base’s path,
+					// and url’s query to base’s query.
+<span class="nc" id="L1305">					url.host = p.base.host;</span>
+<span class="nc" id="L1306">					url.path = p.base.path().clone();</span>
+<span class="nc" id="L1307">					url.query = p.base.query;</span>
+					// If c is U+003F (?), then set url’s query to the empty string and state to query state.
+<span class="nc bnc" id="L1309" title="All 2 branches missed.">					if (c == '?') {</span>
+<span class="nc" id="L1310">						url.query = new StringBuilder();</span>
+<span class="nc" id="L1311">						p.setState(QUERY);</span>
+					}
+					// Otherwise, if c is U+0023 (#), set url’s fragment to
+					// the empty string and state to fragment state.
+<span class="nc bnc" id="L1315" title="All 2 branches missed.">					else if (c == '#') {</span>
+<span class="nc" id="L1316">						url.fragment = new StringBuilder();</span>
+<span class="nc" id="L1317">						p.setState(FRAGMENT);</span>
+					}
+					// Otherwise, if c is not the EOF code point:
+<span class="nc bnc" id="L1320" title="All 2 branches missed.">					else if (c != EOF) {</span>
+						// Set url’s query to null.
+<span class="nc" id="L1322">						url.query = null;</span>
+						// If the code point substring from pointer to the end of input does not start with
+						// a Windows drive letter, then shorten url’s path.
+<span class="nc" id="L1325">						String substring = p.input.substring(p.pointer);</span>
+<span class="nc bnc" id="L1326" title="All 2 branches missed.">						if (!startsWithWindowsDriveLetter(substring)) {</span>
+<span class="nc" id="L1327">							url.shortenPath();</span>
+						}
+						// Otherwise:
+						else {
+							// File-invalid-Windows-drive-letter validation error.
+<span class="nc bnc" id="L1332" title="All 2 branches missed.">							if (p.validate()) {</span>
+<span class="nc" id="L1333">								p.validationError(&quot;The input is a relative-URL string that starts with &quot; +</span>
+										&quot;a Windows drive letter and the base URL’s scheme is \&quot;file\&quot;.&quot;);
+							}
+							// Set url’s path to « ».
+<span class="nc" id="L1337">							url.path = new PathSegments();</span>
+						}
+						// Set state to path state and decrease pointer by 1.
+<span class="nc" id="L1340">						p.setState(PATH);</span>
+<span class="nc" id="L1341">						p.pointer--;</span>
+<span class="nc" id="L1342">					}</span>
+				}
+				// Otherwise, set state to path state, and decrease pointer by 1.
+				else {
+<span class="nc" id="L1346">					p.setState(PATH);</span>
+<span class="nc" id="L1347">					p.pointer--;</span>
+				}
+<span class="nc" id="L1349">			}</span>
+		},
+<span class="nc" id="L1351">		FILE_SLASH {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If c is U+002F (/) or U+005C (\), then:
+<span class="nc bnc" id="L1355" title="All 4 branches missed.">				if (c == '/' || c == '\\') {</span>
+					// If c is U+005C (\), invalid-reverse-solidus validation error.
+<span class="nc bnc" id="L1357" title="All 4 branches missed.">					if (p.validate() &amp;&amp; c == '\\') {</span>
+<span class="nc" id="L1358">						p.validationError(&quot;URL uses \\ instead of /.&quot;);</span>
+					}
+					// Set state to file host state.
+<span class="nc" id="L1361">					p.setState(FILE_HOST);</span>
+				}
+				// Otherwise:
+				else {
+					// If base is non-null and base’s scheme is &quot;file&quot;, then:
+<span class="nc bnc" id="L1366" title="All 4 branches missed.">					if (p.base != null &amp;&amp; p.base.scheme.equals(&quot;file&quot;)) {</span>
+						// Set url’s host to base’s host.
+<span class="nc" id="L1368">						url.host = p.base.host;</span>
+						// If the code point substring from pointer to the end of input does not start with
+						// a Windows drive letter and base’s path[0] is a normalized Windows drive letter,
+						// then append base’s path[0] to url’s path.
+<span class="nc" id="L1372">						String substring = p.input.substring(p.pointer);</span>
+<span class="nc bnc" id="L1373" title="All 2 branches missed.">						if (!startsWithWindowsDriveLetter(substring) &amp;&amp;</span>
+<span class="nc bnc" id="L1374" title="All 2 branches missed.">								p.base.path instanceof PathSegments basePath &amp;&amp;</span>
+<span class="nc bnc" id="L1375" title="All 2 branches missed.">								!basePath.isEmpty() &amp;&amp;</span>
+<span class="nc bnc" id="L1376" title="All 2 branches missed.">								isWindowsDriveLetter(basePath.get(0), true)) {</span>
+<span class="nc" id="L1377">							url.path.append(basePath.get(0));</span>
+						}
+					}
+					// Set state to path state, and decrease pointer by 1.
+<span class="nc" id="L1381">					p.setState(PATH);</span>
+<span class="nc" id="L1382">					p.pointer--;</span>
+				}
+<span class="nc" id="L1384">			}</span>
+		},
+<span class="nc" id="L1386">		FILE_HOST {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If c is the EOF code point, U+002F (/), U+005C (\), U+003F (?), or U+0023 (#),
+				// then decrease pointer by 1 and then:
+<span class="nc bnc" id="L1391" title="All 10 branches missed.">				if (c == EOF || c == '/' || c == '\\' || c == '?' || c == '#') {</span>
+<span class="nc" id="L1392">					p.pointer--;</span>
+					// If state override is not given and buffer is a Windows drive letter,
+					// file-invalid-Windows-drive-letter-host validation error, set state to path state.
+<span class="nc bnc" id="L1395" title="All 4 branches missed.">					if (p.stateOverride == null &amp;&amp; isWindowsDriveLetter(p.buffer, false)) {</span>
+<span class="nc" id="L1396">						p.validationError(&quot;A file: URL’s host is a Windows drive letter.&quot;);</span>
+<span class="nc" id="L1397">						p.setState(PATH);</span>
+					}
+					// Otherwise, if buffer is the empty string, then:
+<span class="nc bnc" id="L1400" title="All 2 branches missed.">					else if (p.buffer.isEmpty()) {</span>
+						// Set url’s host to the empty string.
+<span class="nc" id="L1402">						url.host = EmptyHost.INSTANCE;</span>
+						// If state override is given, then return.
+<span class="nc bnc" id="L1404" title="All 2 branches missed.">						if (p.stateOverride != null) {</span>
+<span class="nc" id="L1405">							p.stopMainLoop = true;</span>
+<span class="nc" id="L1406">							return;</span>
+						}
+						// Set state to path start state.
+<span class="nc" id="L1409">						p.setState(PATH_START);</span>
+					}
+					// Otherwise, run these steps:
+					else {
+						// Let host be the result of host parsing buffer with url is not special.
+<span class="nc bnc" id="L1414" title="All 2 branches missed.">						Host host = Host.parse(p.buffer.toString(), !url.isSpecial(), p);</span>
+						// If host is &quot;localhost&quot;, then set host to the empty string.
+<span class="nc bnc" id="L1416" title="All 4 branches missed.">						if (host instanceof Domain domain &amp;&amp; domain.domain().equals(&quot;localhost&quot;)) {</span>
+<span class="nc" id="L1417">							host = EmptyHost.INSTANCE;</span>
+						}
+						// Set url’s host to host.
+<span class="nc" id="L1420">						url.host = host;</span>
+						// If state override is given, then return.
+<span class="nc bnc" id="L1422" title="All 2 branches missed.">						if (p.stateOverride != null) {</span>
+<span class="nc" id="L1423">							p.stopMainLoop = true;</span>
+<span class="nc" id="L1424">							return;</span>
+						}
+						// Set buffer to the empty string and state to path start state.
+<span class="nc" id="L1427">						p.emptyBuffer();</span>
+<span class="nc" id="L1428">						p.setState(PATH_START);</span>
+<span class="nc" id="L1429">					}</span>
+				}
+				// Otherwise, append c to buffer.
+				else {
+<span class="nc" id="L1433">					p.append(c);</span>
+				}
+<span class="nc" id="L1435">			}</span>
+		},
+<span class="nc" id="L1437">		PATH_START {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If url is special, then:
+<span class="nc bnc" id="L1441" title="All 2 branches missed.">				if (url.isSpecial()) {</span>
+					// If c is U+005C (\), invalid-reverse-solidus validation error.
+<span class="nc bnc" id="L1443" title="All 4 branches missed.">					if (p.validate() &amp;&amp; c == '\\') {</span>
+<span class="nc" id="L1444">						p.validationError(&quot;URL uses \&quot;\\\&quot; instead of \&quot;/\&quot;&quot;);</span>
+					}
+					// Set state to path state.
+<span class="nc" id="L1447">					p.setState(PATH);</span>
+					// If c is neither U+002F (/) nor U+005C (\), then decrease pointer by 1.
+<span class="nc bnc" id="L1449" title="All 4 branches missed.">					if (c != '/' &amp;&amp; c != '\\') {</span>
+<span class="nc" id="L1450">						p.pointer--;</span>
+					}
+					else {
+<span class="nc" id="L1453">						p.append('/');</span>
+					}
+				}
+				// Otherwise, if state override is not given and if c is U+003F (?),
+				// set url’s query to the empty string and state to query state.
+<span class="nc bnc" id="L1458" title="All 4 branches missed.">				else if (p.stateOverride == null &amp;&amp; c == '?') {</span>
+<span class="nc" id="L1459">					url.query = new StringBuilder();</span>
+<span class="nc" id="L1460">					p.setState(QUERY);</span>
+				}
+				// Otherwise, if state override is not given and if c is U+0023 (#),
+				// set url’s fragment to the empty string and state to fragment state.
+<span class="nc bnc" id="L1464" title="All 4 branches missed.">				else if (p.stateOverride == null &amp;&amp; c =='#') {</span>
+<span class="nc" id="L1465">					url.fragment = new StringBuilder();</span>
+<span class="nc" id="L1466">					p.setState(FRAGMENT);</span>
+				}
+				// Otherwise, if c is not the EOF code point:
+<span class="nc bnc" id="L1469" title="All 2 branches missed.">				else if (c != EOF) {</span>
+					// Set state to path state.
+<span class="nc" id="L1471">					p.setState(PATH);</span>
+					// If c is not U+002F (/), then decrease pointer by 1.
+<span class="nc bnc" id="L1473" title="All 2 branches missed.">					if (c != '/') {</span>
+<span class="nc" id="L1474">						p.pointer--;</span>
+					}
+					// EXTRA: otherwise append '/' to let the path segment start with /
+					else {
+<span class="nc" id="L1478">						p.append('/');</span>
+					}
+				}
+				// Otherwise, if state override is given and url’s host is null,
+				// append the empty string to url’s path.
+<span class="nc bnc" id="L1483" title="All 4 branches missed.">				else if (p.stateOverride != null &amp;&amp; url.host() == null) {</span>
+<span class="nc" id="L1484">					url.path().append(&quot;&quot;);</span>
+				}
+<span class="nc" id="L1486">			}</span>
+		},
+<span class="nc" id="L1488">		PATH {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If one of the following is true:
+				// - c is the EOF code point or U+002F (/)
+				// - url is special and c is U+005C (\)
+				// - state override is not given and c is U+003F (?) or U+0023 (#)
+				// then:
+<span class="nc bnc" id="L1496" title="All 4 branches missed.">				if (c == EOF || c == '/' ||</span>
+<span class="nc bnc" id="L1497" title="All 10 branches missed.">						(url.isSpecial() &amp;&amp; c == '\\') ||</span>
+						(p.stateOverride == null &amp;&amp; (c == '?' || c == '#'))) {
+					// If url is special and c is U+005C (\), invalid-reverse-solidus validation error.
+<span class="nc bnc" id="L1500" title="All 6 branches missed.">					if (p.validate() &amp;&amp; url.isSpecial() &amp;&amp; c == '\\') {</span>
+<span class="nc" id="L1501">						p.validationError(&quot;URL uses \&quot;\\\&quot; instead of \&quot;/\&quot;&quot;);</span>
+					}
+					// If buffer is a double-dot URL path segment, then:
+<span class="nc bnc" id="L1504" title="All 2 branches missed.">					if (isDoubleDotPathSegment(p.buffer)) {</span>
+						// Shorten url’s path.
+<span class="nc" id="L1506">						url.shortenPath();</span>
+						// If neither c is U+002F (/), nor url is special and c is U+005C (\),
+						// append the empty string to url’s path.
+<span class="nc bnc" id="L1509" title="All 6 branches missed.">						if (c != '/' &amp;&amp; !(url.isSpecial() &amp;&amp; c == '\\')) {</span>
+<span class="nc" id="L1510">							url.path.append(&quot;&quot;);</span>
+						}
+					}
+					else {
+<span class="nc" id="L1514">						boolean singlePathSegment = isSingleDotPathSegment(p.buffer);</span>
+						// Otherwise, if buffer is a single-dot URL path segment and if neither c is U+002F (/),
+						// nor url is special and c is U+005C (\), append the empty string to url’s path.
+<span class="nc bnc" id="L1517" title="All 8 branches missed.">						if (singlePathSegment &amp;&amp; c != '/' &amp;&amp; !(url.isSpecial() &amp;&amp; c == '\\')) {</span>
+<span class="nc" id="L1518">							url.path.append(&quot;&quot;);</span>
+						}
+						// Otherwise, if buffer is not a single-dot URL path segment, then:
+<span class="nc bnc" id="L1521" title="All 2 branches missed.">						else if (!singlePathSegment) {</span>
+							// If url’s scheme is &quot;file&quot;, url’s path is empty, and buffer is
+							// a Windows drive letter, then replace the second code point in buffer with U+003A (:).
+<span class="nc bnc" id="L1524" title="All 6 branches missed.">							if (&quot;file&quot;.equals(url.scheme) &amp;&amp; url.path.isEmpty() &amp;&amp; isWindowsDriveLetter(p.buffer, false)) {</span>
+<span class="nc" id="L1525">								p.buffer.setCharAt(1, ':');</span>
+							}
+							// Append buffer to url’s path.
+<span class="nc" id="L1528">							url.path.append(p.buffer.toString());</span>
+						}
+					}
+					// Set buffer to the empty string.
+<span class="nc" id="L1532">					p.emptyBuffer();</span>
+<span class="nc bnc" id="L1533" title="All 6 branches missed.">					if ( c == '/' || url.isSpecial() &amp;&amp; c == '\\') {</span>
+<span class="nc" id="L1534">						p.append('/');</span>
+					}
+					// If c is U+003F (?), then set url’s query to the empty string and state to query state.
+<span class="nc bnc" id="L1537" title="All 2 branches missed.">					if (c == '?') {</span>
+<span class="nc" id="L1538">						url.query = new StringBuilder();</span>
+<span class="nc" id="L1539">						p.setState(QUERY);</span>
+					}
+					// If c is U+0023 (#), then set url’s fragment to the empty string and state to fragment state.
+<span class="nc bnc" id="L1542" title="All 2 branches missed.">					if (c == '#') {</span>
+<span class="nc" id="L1543">						url.fragment = new StringBuilder();</span>
+<span class="nc" id="L1544">						p.setState(FRAGMENT);</span>
+					}
+				}
+				// Otherwise, run these steps:
+				else {
+<span class="nc bnc" id="L1549" title="All 2 branches missed.">					if (p.validate()) {</span>
+						// If c is not a URL code point and not U+0025 (%), invalid-URL-unit validation error.
+<span class="nc bnc" id="L1551" title="All 4 branches missed.">						if (!isUrlCodePoint(c) &amp;&amp; c != '%') {</span>
+<span class="nc" id="L1552">							p.validationError(&quot;Invalid URL Unit: \&quot;&quot; + (char) c + &quot;\&quot;&quot;);</span>
+						}
+						// If c is U+0025 (%) and remaining does not start with two ASCII hex digits,
+						// invalid-URL-unit validation error.
+<span class="nc bnc" id="L1556" title="All 2 branches missed.">						else if (c == '%' &amp;&amp;</span>
+<span class="nc bnc" id="L1557" title="All 2 branches missed.">								(p.pointer &gt;= p.input.length() - 2 ||</span>
+<span class="nc bnc" id="L1558" title="All 2 branches missed.">										!isAsciiHexDigit(p.input.codePointAt(p.pointer + 1)) ||</span>
+<span class="nc bnc" id="L1559" title="All 2 branches missed.">										!isAsciiHexDigit(p.input.codePointAt(p.pointer + 2)))) {</span>
+<span class="nc" id="L1560">							p.validationError(&quot;Invalid URL Unit: \&quot;&quot; + (char) c + &quot;\&quot;&quot;);</span>
+						}
+					}
+					// UTF-8 percent-encode c using the path percent-encode set and append the result to buffer.
+<span class="nc" id="L1564">					String encoded = p.percentEncode(c, WhatWgUrlParser::pathPercentEncodeSet);</span>
+<span class="nc bnc" id="L1565" title="All 2 branches missed.">					if (encoded != null) {</span>
+<span class="nc" id="L1566">						p.append(encoded);</span>
+					}
+					else {
+<span class="nc" id="L1569">						p.append(c);</span>
+					}
+				}
+<span class="nc" id="L1572">			}</span>
+		},
+<span class="nc" id="L1574">		OPAQUE_PATH {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If c is U+003F (?), then set url’s query to the empty string and state to query state.
+<span class="nc bnc" id="L1578" title="All 2 branches missed.">				if (c == '?') {</span>
+<span class="nc" id="L1579">					url.query = new StringBuilder();</span>
+<span class="nc" id="L1580">					p.setState(QUERY);</span>
+				}
+				// Otherwise, if c is U+0023 (#), then set url’s fragment to
+				// the empty string and state to fragment state.
+<span class="nc bnc" id="L1584" title="All 2 branches missed.">				else if (c == '#') {</span>
+<span class="nc" id="L1585">					url.fragment = new StringBuilder();</span>
+<span class="nc" id="L1586">					p.setState(FRAGMENT);</span>
+				}
+				// Otherwise:
+				else {
+<span class="nc bnc" id="L1590" title="All 2 branches missed.">					if (p.validate()) {</span>
+						// If c is not the EOF code point, not a URL code point, and not U+0025 (%),
+						// invalid-URL-unit validation error.
+<span class="nc bnc" id="L1593" title="All 6 branches missed.">						if (c != EOF &amp;&amp; !isUrlCodePoint(c) &amp;&amp; c != '%') {</span>
+<span class="nc" id="L1594">							p.validationError(&quot;Invalid URL Unit: \&quot;&quot; + (char) c + &quot;\&quot;&quot;);</span>
+						}
+						// If c is U+0025 (%) and remaining does not start with two ASCII hex digits,
+						// invalid-URL-unit validation error.
+<span class="nc bnc" id="L1598" title="All 2 branches missed.">						else if (c == '%' &amp;&amp;</span>
+<span class="nc bnc" id="L1599" title="All 2 branches missed.">								(p.pointer &gt;= p.input.length() - 2 ||</span>
+<span class="nc bnc" id="L1600" title="All 2 branches missed.">										!isAsciiHexDigit(p.input.codePointAt(p.pointer + 1)) ||</span>
+<span class="nc bnc" id="L1601" title="All 2 branches missed.">										!isAsciiHexDigit(p.input.codePointAt(p.pointer + 2)))) {</span>
+<span class="nc" id="L1602">							p.validationError(&quot;Invalid URL Unit: \&quot;&quot; + (char) c + &quot;\&quot;&quot;);</span>
+						}
+					}
+					// If c is not the EOF code point, UTF-8 percent-encode c using
+					// the C0 control percent-encode set and append the result to url’s path.
+<span class="nc bnc" id="L1607" title="All 2 branches missed.">					if (c != EOF) {</span>
+<span class="nc" id="L1608">						String encoded = p.percentEncode(c, WhatWgUrlParser::c0ControlPercentEncodeSet);</span>
+<span class="nc bnc" id="L1609" title="All 2 branches missed.">						if (encoded != null) {</span>
+<span class="nc" id="L1610">							url.path.append(encoded);</span>
+						}
+						else {
+<span class="nc" id="L1613">							url.path.append(c);</span>
+						}
+					}
+				}
+<span class="nc" id="L1617">			}</span>
+		},
+<span class="nc" id="L1619">		QUERY {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If encoding is not UTF-8 and one of the following is true:
+				// - url is not special
+				// - url’s scheme is &quot;ws&quot; or &quot;wss&quot;
+				//  then set encoding to UTF-8.
+<span class="nc bnc" id="L1626" title="All 2 branches missed.">				if (p.encoding != null &amp;&amp;</span>
+<span class="nc bnc" id="L1627" title="All 2 branches missed.">						!StandardCharsets.UTF_8.equals(p.encoding) &amp;&amp;</span>
+<span class="nc bnc" id="L1628" title="All 6 branches missed.">						(!url.isSpecial() || &quot;ws&quot;.equals(url.scheme) || &quot;wss&quot;.equals(url.scheme))) {</span>
+<span class="nc" id="L1629">					p.encoding = StandardCharsets.UTF_8;</span>
+				}
+				// If one of the following is true:
+				// - state override is not given and c is U+0023 (#)
+				// - c is the EOF code point
+<span class="nc bnc" id="L1634" title="All 6 branches missed.">				if ( (p.stateOverride == null &amp;&amp; c == '#') || c == EOF) {</span>
+					// Let queryPercentEncodeSet be the special-query percent-encode set if url is special;
+					// otherwise the query percent-encode set.
+<span class="nc bnc" id="L1637" title="All 2 branches missed.">					IntPredicate queryPercentEncodeSet = (url.isSpecial() ?</span>
+<span class="nc" id="L1638">							WhatWgUrlParser::specialQueryPercentEncodeSet : WhatWgUrlParser::queryPercentEncodeSet);</span>
+					// Percent-encode after encoding, with encoding, buffer, and queryPercentEncodeSet,
+					// and append the result to url’s query.
+<span class="nc" id="L1641">					String encoded = p.percentEncode(p.buffer.toString(), queryPercentEncodeSet);</span>
+<span class="nc bnc" id="L1642" title="All 2 branches missed.">					Assert.state(url.query != null, &quot;Url's query should not be null&quot;);</span>
+<span class="nc" id="L1643">					url.query.append(encoded);</span>
+					// Set buffer to the empty string.
+<span class="nc" id="L1645">					p.emptyBuffer();</span>
+					// If c is U+0023 (#), then set url’s fragment to the empty string and state to fragment state.
+<span class="nc bnc" id="L1647" title="All 2 branches missed.">					if (c == '#') {</span>
+<span class="nc" id="L1648">						url.fragment = new StringBuilder();</span>
+<span class="nc" id="L1649">						p.setState(FRAGMENT);</span>
+					}
+<span class="nc" id="L1651">				}</span>
+				// Otherwise, if c is not the EOF code point:
+				else {
+<span class="nc bnc" id="L1654" title="All 2 branches missed.">					if (p.validate()) {</span>
+						// If c is not a URL code point and not U+0025 (%), invalid-URL-unit validation error.
+<span class="nc bnc" id="L1656" title="All 4 branches missed.">						if (!isUrlCodePoint(c) &amp;&amp; c != '%') {</span>
+<span class="nc" id="L1657">							p.validationError(&quot;Invalid URL Unit: \&quot;&quot; + (char) c + &quot;\&quot;&quot;);</span>
+						}
+						// If c is U+0025 (%) and remaining does not start with two ASCII hex digits,
+						// invalid-URL-unit validation error.
+<span class="nc bnc" id="L1661" title="All 2 branches missed.">						else if (c == '%' &amp;&amp;</span>
+<span class="nc bnc" id="L1662" title="All 2 branches missed.">								(p.pointer &gt;= p.input.length() - 2 ||</span>
+<span class="nc bnc" id="L1663" title="All 2 branches missed.">										!isAsciiHexDigit(p.input.codePointAt(p.pointer + 1)) ||</span>
+<span class="nc bnc" id="L1664" title="All 2 branches missed.">										!isAsciiHexDigit(p.input.codePointAt(p.pointer + 2)))) {</span>
+<span class="nc" id="L1665">							p.validationError(&quot;Invalid URL Unit: \&quot;&quot; + (char) c + &quot;\&quot;&quot;);</span>
+						}
+					}
+					// Append c to buffer.
+<span class="nc" id="L1669">					p.append(c);</span>
+				}
+<span class="nc" id="L1671">			}</span>
+		},
+<span class="nc" id="L1673">		FRAGMENT {</span>
+			@Override
+			public void handle(int c, UrlRecord url, WhatWgUrlParser p) {
+				// If c is not the EOF code point, then:
+<span class="nc bnc" id="L1677" title="All 2 branches missed.">				if (c != EOF) {</span>
+<span class="nc bnc" id="L1678" title="All 2 branches missed.">					if (p.validate()) {</span>
+						// If c is not a URL code point and not U+0025 (%), invalid-URL-unit validation error.
+<span class="nc bnc" id="L1680" title="All 4 branches missed.">						if (!isUrlCodePoint(c) &amp;&amp; c != '%') {</span>
+<span class="nc" id="L1681">							p.validationError(&quot;Invalid URL Unit: \&quot;&quot; + (char) c + &quot;\&quot;&quot;);</span>
+						}
+						// If c is U+0025 (%) and remaining does not start with two ASCII hex digits,
+						// invalid-URL-unit validation error.
+<span class="nc bnc" id="L1685" title="All 2 branches missed.">						else if (c == '%' &amp;&amp;</span>
+<span class="nc bnc" id="L1686" title="All 2 branches missed.">								(p.pointer &gt;= p.input.length() - 2 ||</span>
+<span class="nc bnc" id="L1687" title="All 2 branches missed.">										!isAsciiHexDigit(p.input.codePointAt(p.pointer + 1)) ||</span>
+<span class="nc bnc" id="L1688" title="All 2 branches missed.">										!isAsciiHexDigit(p.input.codePointAt(p.pointer + 2)))) {</span>
+<span class="nc" id="L1689">							p.validationError(&quot;Invalid URL Unit: \&quot;&quot; + (char) c + &quot;\&quot;&quot;);</span>
+						}
+					}
+					// UTF-8 percent-encode c using the fragment percent-encode set and
+					// append the result to url’s fragment.
+<span class="nc" id="L1694">					String encoded = p.percentEncode(c, WhatWgUrlParser::fragmentPercentEncodeSet);</span>
+<span class="nc bnc" id="L1695" title="All 2 branches missed.">					Assert.state(url.fragment != null, &quot;Url's fragment should not be null&quot;);</span>
+<span class="nc bnc" id="L1696" title="All 2 branches missed.">					if (encoded != null) {</span>
+<span class="nc" id="L1697">						url.fragment.append(encoded);</span>
+					}
+					else {
+<span class="nc" id="L1700">						url.fragment.appendCodePoint(c);</span>
+					}
+				}
+<span class="nc" id="L1703">			}</span>
+		};
+
+		public abstract void handle(int c, UrlRecord url, WhatWgUrlParser p);
+
+	}
+
+
+	/**
+	 * A URL is a struct that represents a universal identifier.
+	 * To disambiguate from a valid URL string it can also be referred to as a
+	 * &lt;em&gt;URL record&lt;/em&gt;.
+	 */
+	static final class UrlRecord {
+
+<span class="nc" id="L1718">		private String scheme = &quot;&quot;;</span>
+
+<span class="nc" id="L1720">		private @Nullable StringBuilder username = null;</span>
+
+<span class="nc" id="L1722">		private @Nullable StringBuilder password = null;</span>
+
+<span class="nc" id="L1724">		private @Nullable Host host = null;</span>
+
+<span class="nc" id="L1726">		private @Nullable Port port = null;</span>
+
+<span class="nc" id="L1728">		private Path path = new PathSegments();</span>
+
+<span class="nc" id="L1730">		private @Nullable StringBuilder query = null;</span>
+
+<span class="nc" id="L1732">		private @Nullable StringBuilder fragment = null;</span>
+
+<span class="nc" id="L1734">		public UrlRecord() {</span>
+<span class="nc" id="L1735">		}</span>
+
+		/**
+		 * A URL is special if its scheme is a special scheme. A URL is not special if its scheme is not a special scheme.
+		 */
+		public boolean isSpecial() {
+<span class="nc" id="L1741">			return isSpecialScheme(this.scheme);</span>
+		}
+
+		/**
+		 * A URL includes credentials if its username or password is not the empty string.
+		 */
+		public boolean includesCredentials() {
+<span class="nc bnc" id="L1748" title="All 6 branches missed.">			return (this.username != null &amp;&amp; !this.username.isEmpty() ||</span>
+<span class="nc bnc" id="L1749" title="All 2 branches missed.">					this.password != null &amp;&amp; !this.password.isEmpty());</span>
+		}
+
+		/**
+		 * A URL has an opaque path if its path is a URL path segment.
+		 */
+		public boolean hasOpaquePath() {
+<span class="nc" id="L1756">			return path().isOpaque();</span>
+		}
+
+
+		/**
+		 * A URL’s scheme is an ASCII string that identifies the type of URL and
+		 * can be used to dispatch a URL for further processing after parsing.
+		 * It is initially the empty string.
+		 */
+		public String scheme() {
+<span class="nc" id="L1766">			return this.scheme;</span>
+		}
+
+		/**
+		 * The protocol getter steps are to return this’s URL’s scheme, followed by U+003A (:).
+		 */
+		@SuppressWarnings(&quot;unused&quot;)
+		public String protocol() {
+<span class="nc" id="L1774">			return scheme() + &quot;:&quot;;</span>
+		}
+
+		/**
+		 * A URL’s username is an ASCII string identifying a username.
+		 * It is initially the empty string.
+		 */
+		public String username() {
+<span class="nc bnc" id="L1782" title="All 2 branches missed.">			return (this.username != null ? this.username.toString() : &quot;&quot;);</span>
+		}
+
+		void appendToUsername(int codePoint) {
+<span class="nc bnc" id="L1786" title="All 2 branches missed.">			if (this.username == null) {</span>
+<span class="nc" id="L1787">				this.username = new StringBuilder(2);</span>
+			}
+<span class="nc" id="L1789">			this.username.appendCodePoint(codePoint);</span>
+<span class="nc" id="L1790">		}</span>
+
+		public void appendToUsername(String s) {
+<span class="nc bnc" id="L1793" title="All 2 branches missed.">			if (this.username == null) {</span>
+<span class="nc" id="L1794">				this.username = new StringBuilder(s);</span>
+			}
+			else {
+<span class="nc" id="L1797">				this.username.append(s);</span>
+			}
+<span class="nc" id="L1799">		}</span>
+
+		/**
+		 * A URL’s password is an ASCII string identifying a password. It is initially the empty string.
+		 */
+		public String password() {
+<span class="nc bnc" id="L1805" title="All 2 branches missed.">			return (this.password != null ? this.password.toString() : &quot;&quot;);</span>
+		}
+
+		void appendToPassword(int codePoint) {
+<span class="nc bnc" id="L1809" title="All 2 branches missed.">			if (this.password == null) {</span>
+<span class="nc" id="L1810">				this.password = new StringBuilder(2);</span>
+			}
+<span class="nc" id="L1812">			this.password.appendCodePoint(codePoint);</span>
+<span class="nc" id="L1813">		}</span>
+
+		void appendToPassword(String s) {
+<span class="nc bnc" id="L1816" title="All 2 branches missed.">			if (this.password == null) {</span>
+<span class="nc" id="L1817">				this.password = new StringBuilder(s);</span>
+			}
+			else {
+<span class="nc" id="L1820">				this.password.append(s);</span>
+			}
+<span class="nc" id="L1822">		}</span>
+
+		/**
+		 * Convenience method to return the full user info.
+		 */
+		public @Nullable String userInfo() {
+<span class="nc bnc" id="L1828" title="All 2 branches missed.">			if (!includesCredentials()) {</span>
+<span class="nc" id="L1829">				return null;</span>
+			}
+<span class="nc" id="L1831">			StringBuilder userInfo = new StringBuilder(username());</span>
+<span class="nc bnc" id="L1832" title="All 2 branches missed.">			if (!password().isEmpty()) {</span>
+<span class="nc" id="L1833">				userInfo.append(':');</span>
+<span class="nc" id="L1834">				userInfo.append(password());</span>
+			}
+<span class="nc" id="L1836">			return userInfo.toString();</span>
+		}
+
+		/**
+		 * A URL’s host is {@code null} or a {@linkplain Host host}.
+		 * It is initially {@code null}.
+		 */
+		public @Nullable Host host() {
+<span class="nc" id="L1844">			return this.host;</span>
+		}
+
+		/**
+		 *The host getter steps are:
+		 * &lt;ol&gt;
+		 * &lt;li&gt;Let url be this URL.
+		 * &lt;li&gt;If url’s host is null, then return the empty string.
+		 * &lt;li&gt;If url’s port is null, return url’s host, serialized.
+		 * &lt;li&gt;Return url’s host, serialized, followed by U+003A (:) and url’s port, serialized.
+		 * &lt;/ol&gt;
+		 */
+		@SuppressWarnings(&quot;unused&quot;)
+		public String hostString() {
+<span class="nc bnc" id="L1858" title="All 2 branches missed.">			if (host() == null) {</span>
+<span class="nc" id="L1859">				return &quot;&quot;;</span>
+			}
+<span class="nc" id="L1861">			StringBuilder builder = new StringBuilder(hostname());</span>
+<span class="nc" id="L1862">			Port port = port();</span>
+<span class="nc bnc" id="L1863" title="All 2 branches missed.">			if (port != null) {</span>
+<span class="nc" id="L1864">				builder.append(':');</span>
+<span class="nc" id="L1865">				builder.append(port);</span>
+			}
+<span class="nc" id="L1867">			return builder.toString();</span>
+		}
+
+		public String hostname() {
+<span class="nc" id="L1871">			Host host = host();</span>
+<span class="nc bnc" id="L1872" title="All 2 branches missed.">			return (host != null ? host.toString() : &quot;&quot;);</span>
+		}
+
+		/**
+		 * A URL’s port is either null, a string representing a 16-bit unsigned
+		 * integer, or a string containing a uri template.
+		 * &lt;p&gt;It is initially {@code null}.
+		 */
+		public @Nullable Port port() {
+<span class="nc" id="L1881">			return this.port;</span>
+		}
+
+		public String portString() {
+<span class="nc bnc" id="L1885" title="All 2 branches missed.">			return (port() != null ? port().toString() : &quot;&quot;);</span>
+		}
+
+		/**
+		 * A URL’s path is a URL {@linkplain Path path}, usually identifying a location.
+		 * &lt;p&gt;It is initially {@code « »}.
+		 */
+		public Path path() {
+<span class="nc" id="L1893">			return this.path;</span>
+		}
+
+		public String pathname() {
+<span class="nc" id="L1897">			return path().name();</span>
+		}
+
+		/**
+		 * To shorten a url’s path:
+		 * &lt;ol&gt;
+	 	 * &lt;li&gt;Assert: url does not have an opaque path.&lt;/li&gt;
+		 * &lt;li&gt;Let path be url’s path.&lt;/li&gt;
+		 * &lt;li&gt;If url’s scheme is &quot;file&quot;, path’s size is 1, and path[0] is a
+		 * normalized Windows drive letter, then return.&lt;/li&gt;
+		 * &lt;li&gt;Remove path’s last item, if any.&lt;/li&gt;
+		 * &lt;/ol&gt;
+		 */
+		public void shortenPath() {
+<span class="nc" id="L1911">			this.path.shorten(this.scheme);</span>
+<span class="nc" id="L1912">		}</span>
+
+		/**
+		 * A URL’s query is either {@code null} or an ASCII string.
+		 * &lt;p&gt;It is initially {@code null}.
+		 */
+		public @Nullable String query() {
+<span class="nc bnc" id="L1919" title="All 2 branches missed.">			return (this.query != null ? this.query.toString() : null);</span>
+		}
+
+		/**
+		 * The search getter steps are:
+		 * &lt;ol&gt;
+		 * &lt;li&gt;If this URL’s query is either null or the empty string, then return the empty string.
+		 * &lt;li&gt;Return U+003F (?), followed by this URL’s query.
+		 * &lt;/ol&gt;
+		 */
+		public String search() {
+<span class="nc" id="L1930">			String query = query();</span>
+<span class="nc bnc" id="L1931" title="All 2 branches missed.">			if (query == null) {</span>
+<span class="nc" id="L1932">				return &quot;&quot;;</span>
+			}
+			else {
+<span class="nc" id="L1935">				return &quot;?&quot; + query;</span>
+			}
+		}
+
+		/**
+		 * A URL’s fragment is either {@code null}  or an ASCII string
+		 * that can be used for further processing on the resource the URL’s
+		 * other components identify.
+		 * &lt;p&gt;It is initially {@code null}.
+		 */
+		public @Nullable String fragment() {
+<span class="nc bnc" id="L1946" title="All 2 branches missed.">			return (this.fragment != null ? this.fragment.toString() : null);</span>
+		}
+
+		/**
+		 * The hash getter steps are:
+		 * &lt;ol&gt;
+		 * &lt;li&gt;If this URL’s fragment is either null or the empty string, then return the empty string.
+		 * &lt;li&gt;Return U+0023 (#), followed by this’s URL’s fragment.
+		 * &lt;/ol&gt;
+		 */
+		@SuppressWarnings(&quot;unused&quot;)
+		public String hash() {
+<span class="nc" id="L1958">			String fragment = fragment();</span>
+<span class="nc bnc" id="L1959" title="All 4 branches missed.">			return (fragment != null &amp;&amp; !fragment.isEmpty() ? &quot;#&quot; + fragment : &quot;&quot;);</span>
+		}
+
+		public String href() {
+			// Let output be url’s scheme and U+003A (:) concatenated.
+<span class="nc" id="L1964">			StringBuilder output = new StringBuilder(scheme());</span>
+<span class="nc" id="L1965">			output.append(':');</span>
+<span class="nc" id="L1966">			Host host = host();</span>
+			// If url’s host is non-null:
+<span class="nc bnc" id="L1968" title="All 2 branches missed.">			if (host != null) {</span>
+				// Append &quot;//&quot; to output.
+<span class="nc" id="L1970">				output.append(&quot;//&quot;);</span>
+				// If url includes credentials, then:
+<span class="nc bnc" id="L1972" title="All 2 branches missed.">				if (includesCredentials()) {</span>
+					// Append url’s username to output.
+<span class="nc" id="L1974">					output.append(username());</span>
+<span class="nc" id="L1975">					String password = password();</span>
+					// If url’s password is not the empty string, then append U+003A (:),
+					// followed by url’s password, to output.
+<span class="nc bnc" id="L1978" title="All 2 branches missed.">					if (!password.isEmpty()) {</span>
+<span class="nc" id="L1979">						output.append(':');</span>
+<span class="nc" id="L1980">						output.append(password);</span>
+					}
+					// Append U+0040 (@) to output.
+<span class="nc" id="L1983">					output.append('@');</span>
+				}
+				// Append url’s host, serialized, to output.
+<span class="nc" id="L1986">				output.append(hostname());</span>
+<span class="nc" id="L1987">				Port port = port();</span>
+				// If url’s port is non-null, append U+003A (:) followed by url’s port, serialized, to output.
+<span class="nc bnc" id="L1989" title="All 2 branches missed.">				if (port != null) {</span>
+<span class="nc" id="L1990">					output.append(':');</span>
+<span class="nc" id="L1991">					output.append(port());</span>
+				}
+<span class="nc" id="L1993">			}</span>
+			// If url’s host is null, url does not have an opaque path, url’s path’s size is greater than 1,
+			// and url’s path[0] is the empty string, then append U+002F (/) followed by U+002E (.) to output.
+<span class="nc bnc" id="L1996" title="All 2 branches missed.">			else if (!hasOpaquePath() &amp;&amp;</span>
+<span class="nc bnc" id="L1997" title="All 2 branches missed.">					path() instanceof PathSegments pathSegments &amp;&amp;</span>
+<span class="nc bnc" id="L1998" title="All 2 branches missed.">					pathSegments.size() &gt; 1 &amp;&amp;</span>
+<span class="nc bnc" id="L1999" title="All 2 branches missed.">					pathSegments.get(0).isEmpty()) {</span>
+<span class="nc" id="L2000">				output.append(&quot;/.&quot;);</span>
+			}
+			// Append the result of URL path serializing url to output.
+<span class="nc" id="L2003">			output.append(pathname());</span>
+			// If url’s query is non-null, append U+003F (?), followed by url’s query, to output.
+<span class="nc" id="L2005">			String query = query();</span>
+<span class="nc bnc" id="L2006" title="All 2 branches missed.">			if (query != null) {</span>
+<span class="nc" id="L2007">				output.append('?');</span>
+<span class="nc" id="L2008">				output.append(query);</span>
+			}
+			// If exclude fragment is false and url’s fragment is non-null, then append U+0023 (#),
+			// followed by url’s fragment, to output.
+<span class="nc" id="L2012">			String fragment = fragment();</span>
+<span class="nc bnc" id="L2013" title="All 2 branches missed.">			if (fragment != null) {</span>
+<span class="nc" id="L2014">				output.append('#');</span>
+<span class="nc" id="L2015">				output.append(fragment);</span>
+			}
+			// Return output.
+<span class="nc" id="L2018">			return output.toString();</span>
+		}
+
+		@Override
+		public boolean equals(@Nullable Object obj) {
+<span class="nc bnc" id="L2023" title="All 2 branches missed.">			if (obj == this) {</span>
+<span class="nc" id="L2024">				return true;</span>
+			}
+<span class="nc bnc" id="L2026" title="All 4 branches missed.">			if (obj == null || getClass() != obj.getClass()) {</span>
+<span class="nc" id="L2027">				return false;</span>
+			}
+<span class="nc" id="L2029">			UrlRecord that = (UrlRecord) obj;</span>
+<span class="nc bnc" id="L2030" title="All 2 branches missed.">			return Objects.equals(this.scheme(), that.scheme()) &amp;&amp;</span>
+<span class="nc bnc" id="L2031" title="All 2 branches missed.">					Objects.equals(this.username(), that.username()) &amp;&amp;</span>
+<span class="nc bnc" id="L2032" title="All 2 branches missed.">					Objects.equals(this.password(), that.password()) &amp;&amp;</span>
+<span class="nc bnc" id="L2033" title="All 2 branches missed.">					Objects.equals(this.host(), that.host()) &amp;&amp;</span>
+<span class="nc bnc" id="L2034" title="All 2 branches missed.">					Objects.equals(this.port(), that.port()) &amp;&amp;</span>
+<span class="nc bnc" id="L2035" title="All 2 branches missed.">					Objects.equals(this.path(), that.path()) &amp;&amp;</span>
+<span class="nc bnc" id="L2036" title="All 2 branches missed.">					Objects.equals(this.query(), that.query()) &amp;&amp;</span>
+<span class="nc bnc" id="L2037" title="All 2 branches missed.">					Objects.equals(this.fragment(), that.fragment());</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L2042">			return Objects.hash(</span>
+					this.scheme, this.username, this.password, this.host, this.port,
+					this.path, this.query, this.fragment);
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L2049">			return &quot;UrlRecord[&quot; +</span>
+					&quot;scheme=&quot; + this.scheme + &quot;, &quot; +
+					&quot;username=&quot; + this.username + &quot;, &quot; +
+					&quot;password=&quot; + this.password + &quot;, &quot; +
+					&quot;host=&quot; + this.host + &quot;, &quot; +
+					&quot;port=&quot; + this.port + &quot;, &quot; +
+					&quot;path=&quot; + this.path + &quot;, &quot; +
+					&quot;query=&quot; + this.query + &quot;, &quot; +
+					&quot;fragment=&quot; + this.fragment + ']';
+		}
+
+	}
+
+
+	/**
+	 * A host is a domain, an IP address, an opaque host, or an empty host.
+	 * Typically, a host serves as a network address, but it is sometimes used as
+	 * opaque identifier in URLs where a network address is not necessary.
+	 */
+	sealed interface Host permits Domain, EmptyHost, IpAddressHost, OpaqueHost {
+
+		/**
+		 * The host parser takes a scalar value string input with an optional
+		 * boolean isOpaque (default false), and then runs these steps.
+		 * They return failure or a host.
+		 */
+		static Host parse(String input, boolean isOpaque, WhatWgUrlParser p) {
+			// If input starts with U+005B ([), then:
+<span class="nc bnc" id="L2077" title="All 4 branches missed.">			if (!input.isEmpty() &amp;&amp; input.codePointAt(0) == '[') {</span>
+<span class="nc" id="L2078">				int last = input.length() - 1;</span>
+				// If input does not end with U+005D (]), IPv6-unclosed validation error, return failure.
+<span class="nc bnc" id="L2080" title="All 2 branches missed.">				if (input.codePointAt(last) != ']') {</span>
+<span class="nc" id="L2081">					throw new InvalidUrlException(&quot;IPv6 address is missing the closing \&quot;]\&quot;).&quot;);</span>
+				}
+				// Return the result of IPv6 parsing input
+				// with its leading U+005B ([) and trailing U+005D (]) removed.
+<span class="nc" id="L2085">				String ipv6Host = input.substring(1, last);</span>
+<span class="nc" id="L2086">				return new IpAddressHost(Ipv6Address.parse(ipv6Host));</span>
+			}
+			// If isOpaque is true, then return the result of opaque-host parsing input.
+<span class="nc bnc" id="L2089" title="All 2 branches missed.">			if (isOpaque) {</span>
+<span class="nc" id="L2090">				return OpaqueHost.parse(input, p);</span>
+			}
+			// Assert: input is not the empty string.
+<span class="nc bnc" id="L2093" title="All 2 branches missed.">			Assert.state(!input.isEmpty(), &quot;Input should not be empty&quot;);</span>
+
+			// Let domain be the result of running UTF-8 decode without BOM on the percent-decoding of input.
+<span class="nc" id="L2096">			String domain = percentDecode(input);</span>
+			// Let asciiDomain be the result of running domain to ASCII with domain and false.
+<span class="nc" id="L2098">			String asciiDomain = domainToAscii(domain, false);</span>
+
+<span class="nc bnc" id="L2100" title="All 2 branches missed.">			for (int i=0; i &lt; asciiDomain.length(); i++) {</span>
+<span class="nc" id="L2101">				int ch = asciiDomain.codePointAt(i);</span>
+				// If asciiDomain contains a forbidden domain code point,
+				// domain-invalid-code-point validation error, return failure.
+<span class="nc bnc" id="L2104" title="All 2 branches missed.">				if (isForbiddenDomain(ch)) {</span>
+<span class="nc" id="L2105">					throw new InvalidUrlException(&quot;Invalid character \&quot;&quot; + ch + &quot;\&quot; in domain \&quot;&quot; + input + &quot;\&quot;&quot;);</span>
+				}
+			}
+			// If asciiDomain ends in a number, then return the result of IPv4 parsing asciiDomain.
+<span class="nc bnc" id="L2109" title="All 2 branches missed.">			if (endsInNumber(asciiDomain)) {</span>
+<span class="nc" id="L2110">				Ipv4Address address = Ipv4Address.parse(asciiDomain, p);</span>
+<span class="nc" id="L2111">				return new IpAddressHost(address);</span>
+			}
+			// Return asciiDomain.
+			else {
+<span class="nc" id="L2115">				return new Domain(asciiDomain);</span>
+			}
+		}
+
+		private static boolean endsInNumber(String input) {
+			// Let parts be the result of strictly splitting input on U+002E (.).
+<span class="nc" id="L2121">			LinkedList&lt;String&gt; parts = strictSplit(input, '.');</span>
+<span class="nc bnc" id="L2122" title="All 2 branches missed.">			if (parts.isEmpty()) {</span>
+<span class="nc" id="L2123">				return false;</span>
+			}
+			// If the last item in parts is the empty string, then:
+<span class="nc bnc" id="L2126" title="All 2 branches missed.">			if (parts.getLast().isEmpty()) {</span>
+				// If parts’s size is 1, then return false.
+<span class="nc bnc" id="L2128" title="All 2 branches missed.">				if (parts.size() == 1) {</span>
+<span class="nc" id="L2129">					return false;</span>
+				}
+				// Remove the last item from parts.
+<span class="nc" id="L2132">				parts.removeLast();</span>
+			}
+			// Let last be the last item in parts.
+<span class="nc" id="L2135">			String last = parts.getLast();</span>
+			// If last is non-empty and contains only ASCII digits, then return true.
+<span class="nc bnc" id="L2137" title="All 4 branches missed.">			if (!last.isEmpty() &amp;&amp; containsOnlyAsciiDigits(last)) {</span>
+<span class="nc" id="L2138">				return true;</span>
+			}
+			// If parsing last as an IPv4 number does not return failure, then return true.
+<span class="nc" id="L2141">			ParseIpv4NumberResult result = Ipv4Address.parseIpv4Number(last);</span>
+<span class="nc bnc" id="L2142" title="All 2 branches missed.">			return result != ParseIpv4NumberFailure.INSTANCE;</span>
+		}
+	}
+
+
+	/**
+	 * A domain is a non-empty ASCII string that identifies a realm within a network. [RFC1034].
+	 */
+	static final class Domain implements Host {
+
+		private final String domain;
+
+<span class="nc" id="L2154">		Domain(String domain) {</span>
+<span class="nc" id="L2155">			this.domain = domain;</span>
+<span class="nc" id="L2156">		}</span>
+
+		public String domain() {
+<span class="nc" id="L2159">			return this.domain;</span>
+		}
+
+		@Override
+		public boolean equals(@Nullable Object o) {
+<span class="nc bnc" id="L2164" title="All 2 branches missed.">			if (o == this) {</span>
+<span class="nc" id="L2165">				return true;</span>
+			}
+<span class="nc bnc" id="L2167" title="All 2 branches missed.">			else if (o instanceof Domain other) {</span>
+<span class="nc" id="L2168">				return this.domain.equals(other.domain);</span>
+			}
+			else {
+<span class="nc" id="L2171">				return false;</span>
+			}
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L2177">			return this.domain.hashCode();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L2182">			return this.domain;</span>
+		}
+
+	}
+
+
+	static final class IpAddressHost implements Host {
+
+		private final IpAddress address;
+
+		private final String addressString;
+
+<span class="nc" id="L2194">		IpAddressHost(IpAddress address) {</span>
+<span class="nc" id="L2195">			this.address = address;</span>
+<span class="nc bnc" id="L2196" title="All 2 branches missed.">			if (address instanceof Ipv6Address) {</span>
+<span class="nc" id="L2197">				this.addressString = &quot;[&quot; + address + &quot;]&quot;;</span>
+			}
+			else {
+<span class="nc" id="L2200">				this.addressString = address.toString();</span>
+			}
+<span class="nc" id="L2202">		}</span>
+
+		@SuppressWarnings(&quot;unused&quot;)
+		public IpAddress address() {
+<span class="nc" id="L2206">			return this.address;</span>
+		}
+
+		@Override
+		public boolean equals(@Nullable Object obj) {
+<span class="nc bnc" id="L2211" title="All 2 branches missed.">			if (obj == this) {</span>
+<span class="nc" id="L2212">				return true;</span>
+			}
+<span class="nc bnc" id="L2214" title="All 2 branches missed.">			else if (obj instanceof IpAddressHost other) {</span>
+<span class="nc" id="L2215">				return this.address.equals(other.address);</span>
+			}
+			else {
+<span class="nc" id="L2218">				return false;</span>
+			}
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L2224">			return this.address.hashCode();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L2229">			return this.addressString;</span>
+		}
+	}
+
+
+	static final class OpaqueHost implements Host {
+
+		private final String host;
+
+<span class="nc" id="L2238">		private OpaqueHost(String host) {</span>
+<span class="nc" id="L2239">			this.host = host;</span>
+<span class="nc" id="L2240">		}</span>
+
+		/**
+		 * The opaque-host parser takes a scalar value string input,
+		 * and then runs these steps. They return failure or an opaque host.
+		 */
+		public static OpaqueHost parse(String input, WhatWgUrlParser p) {
+<span class="nc bnc" id="L2247" title="All 2 branches missed.">			for (int i = 0; i &lt; input.length(); i++) {</span>
+<span class="nc" id="L2248">				int ch = input.codePointAt(i);</span>
+				// If input contains a forbidden host code point, h
+				// ost-invalid-code-point validation error, return failure.
+<span class="nc bnc" id="L2251" title="All 2 branches missed.">				if (isForbiddenHost(ch)) {</span>
+<span class="nc" id="L2252">					throw new InvalidUrlException(&quot;An opaque host contains a forbidden host code point.&quot;);</span>
+				}
+				// If input contains a code point that is not a URL code point and not U+0025 (%),
+				// invalid-URL-unit validation error.
+<span class="nc bnc" id="L2256" title="All 6 branches missed.">				if (p.validate() &amp;&amp; !isUrlCodePoint(ch) &amp;&amp; ch != '%') {</span>
+<span class="nc" id="L2257">					p.validationError(&quot;Code point \&quot;&quot; + ch + &quot;\&quot; is not a URL unit.&quot;);</span>
+				}
+				// If input contains a U+0025 (%) and the two code points following it
+				// are not ASCII hex digits, invalid-URL-unit validation error.
+<span class="nc bnc" id="L2261" title="All 4 branches missed.">				if (p.validate() &amp;&amp; ch == '%' &amp;&amp;</span>
+<span class="nc bnc" id="L2262" title="All 4 branches missed.">						(input.length() - i &lt; 2 || !isAsciiDigit(input.codePointAt(i + 1)) ||</span>
+<span class="nc bnc" id="L2263" title="All 2 branches missed.">								!isAsciiDigit(input.codePointAt(i + 2)))) {</span>
+<span class="nc" id="L2264">					p.validationError(&quot;Code point \&quot;&quot; + ch + &quot;\&quot; is not a URL unit.&quot;);</span>
+				}
+			}
+			// Return the result of running UTF-8 percent-encode on input
+			// using the C0 control percent-encode set.
+<span class="nc" id="L2269">			String encoded = p.percentEncode(input, WhatWgUrlParser::c0ControlPercentEncodeSet);</span>
+<span class="nc" id="L2270">			return new OpaqueHost(encoded);</span>
+		}
+
+		@Override
+		public boolean equals(@Nullable Object obj) {
+<span class="nc bnc" id="L2275" title="All 2 branches missed.">			if (obj == this) {</span>
+<span class="nc" id="L2276">				return true;</span>
+			}
+<span class="nc bnc" id="L2278" title="All 2 branches missed.">			else if (obj instanceof OpaqueHost other) {</span>
+<span class="nc" id="L2279">				return this.host.equals(other.host);</span>
+			}
+			else {
+<span class="nc" id="L2282">				return false;</span>
+			}
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L2288">			return this.host.hashCode();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L2293">			return this.host;</span>
+		}
+
+	}
+
+
+	static final class EmptyHost implements Host {
+
+<span class="nc" id="L2301">		static final EmptyHost INSTANCE = new EmptyHost();</span>
+
+		private EmptyHost() {
+		}
+
+		@Override
+		public boolean equals(@Nullable Object obj) {
+<span class="nc bnc" id="L2308" title="All 6 branches missed.">			return obj == this || obj != null &amp;&amp; getClass() == obj.getClass();</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L2313">			return 1;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L2318">			return &quot;&quot;;</span>
+		}
+
+	}
+
+
+	sealed interface IpAddress permits Ipv4Address, Ipv6Address {
+	}
+
+
+	static final class Ipv4Address implements IpAddress {
+
+		private final int address;
+
+		private final String string;
+
+<span class="nc" id="L2334">		Ipv4Address(int address) {</span>
+<span class="nc" id="L2335">			this.address = address;</span>
+<span class="nc" id="L2336">			this.string = serialize(address);</span>
+<span class="nc" id="L2337">		}</span>
+
+		/**
+		 * The IPv4 serializer takes an IPv4 address {@code address} and then runs these steps.
+		 * They return an ASCII string.
+		 */
+		private static String serialize(int address) {
+			//Let output be the empty string.
+<span class="nc" id="L2345">			StringBuilder output = new StringBuilder();</span>
+			//Let n be the value of address.
+<span class="nc" id="L2347">			int n = address;</span>
+			//For each i in the range 1 to 4, inclusive:
+<span class="nc bnc" id="L2349" title="All 2 branches missed.">			for (int i = 1; i &lt;= 4; i++) {</span>
+				// Prepend n % 256, serialized, to output.
+<span class="nc" id="L2351">				output.insert(0, Integer.toUnsignedString(Integer.remainderUnsigned(n, 256)));</span>
+				//If i is not 4, then prepend U+002E (.) to output.
+<span class="nc bnc" id="L2353" title="All 2 branches missed.">				if (i != 4) {</span>
+<span class="nc" id="L2354">					output.insert(0, '.');</span>
+				}
+				//Set n to floor(n / 256).
+<span class="nc" id="L2357">				n = Math.floorDiv(n, 256);</span>
+			}
+			//Return output.
+<span class="nc" id="L2360">			return output.toString();</span>
+		}
+
+		public static Ipv4Address parse(String input, WhatWgUrlParser p) {
+			// Let parts be the result of strictly splitting input on U+002E (.).
+<span class="nc" id="L2365">			List&lt;String&gt; parts = strictSplit(input, '.');</span>
+<span class="nc" id="L2366">			int partsSize = parts.size();</span>
+			// If the last item in parts is the empty string, then:
+<span class="nc bnc" id="L2368" title="All 2 branches missed.">			if (parts.get(partsSize - 1).isEmpty()) {</span>
+				// IPv4-empty-part validation error.
+<span class="nc" id="L2370">				p.validationError(&quot;IPv4 address ends with \&quot;.\&quot;&quot;);</span>
+				// If parts’s size is greater than 1, then remove the last item from parts.
+<span class="nc bnc" id="L2372" title="All 2 branches missed.">				if (partsSize &gt; 1) {</span>
+<span class="nc" id="L2373">					parts.remove(partsSize - 1);</span>
+<span class="nc" id="L2374">					partsSize--;</span>
+				}
+			}
+			// If parts’s size is greater than 4, IPv4-too-many-parts validation error, return failure.
+<span class="nc bnc" id="L2378" title="All 2 branches missed.">			if (partsSize &gt; 4) {</span>
+<span class="nc" id="L2379">				throw new InvalidUrlException(&quot;IPv4 address does not consist of exactly 4 parts.&quot;);</span>
+			}
+			// Let numbers be an empty list.
+<span class="nc" id="L2382">			List&lt;Integer&gt; numbers = new ArrayList&lt;&gt;(partsSize);</span>
+			// For each part of parts:
+<span class="nc bnc" id="L2384" title="All 2 branches missed.">			for (int i = 0; i &lt; partsSize; i++) {</span>
+<span class="nc" id="L2385">				String part = parts.get(i);</span>
+				// Let result be the result of parsing part.
+<span class="nc" id="L2387">				ParseIpv4NumberResult result = parseIpv4Number(part);</span>
+				// If result is failure, IPv4-non-numeric-part validation error, return failure.
+<span class="nc bnc" id="L2389" title="All 2 branches missed.">				if (result == ParseIpv4NumberFailure.INSTANCE) {</span>
+<span class="nc" id="L2390">					p.failure(&quot;An IPv4 address part is not numeric.&quot;);</span>
+				}
+				else {
+<span class="nc" id="L2393">					ParseIpv4NumberSuccess success = (ParseIpv4NumberSuccess) result;</span>
+<span class="nc bnc" id="L2394" title="All 4 branches missed.">					if (p.validate() &amp;&amp; success.validationError()) {</span>
+<span class="nc" id="L2395">						p.validationError(</span>
+								&quot;The IPv4 address contains numbers expressed using hexadecimal or octal digits.&quot;);
+					}
+					// Append result to numbers.
+<span class="nc" id="L2399">					numbers.add(success.number());</span>
+				}
+			}
+<span class="nc bnc" id="L2402" title="All 2 branches missed.">			for (Iterator&lt;Integer&gt; iterator = numbers.iterator(); iterator.hasNext(); ) {</span>
+<span class="nc" id="L2403">				Integer number = iterator.next();</span>
+				// If any item in numbers is greater than 255, IPv4-out-of-range-part validation error.
+<span class="nc bnc" id="L2405" title="All 4 branches missed.">				if (p.validate() &amp;&amp; number &gt; 255) {</span>
+<span class="nc" id="L2406">					p.validationError(&quot;An IPv4 address part exceeds 255.&quot;);</span>
+				}
+<span class="nc bnc" id="L2408" title="All 2 branches missed.">				if (iterator.hasNext()) {</span>
+					// If any but the last item in numbers is greater than 255, then return failure.
+<span class="nc bnc" id="L2410" title="All 2 branches missed.">					if (number &gt; 255) {</span>
+<span class="nc" id="L2411">						throw new InvalidUrlException(&quot;An IPv4 address part exceeds 255.&quot;);</span>
+					}
+				}
+				else {
+					// If the last item in numbers is greater than or equal to 256^(5 − numbers’s size),
+					// then return failure.
+<span class="nc" id="L2417">					double limit = Math.pow(256, (5 - numbers.size()));</span>
+<span class="nc bnc" id="L2418" title="All 2 branches missed.">					if (number &gt;= limit) {</span>
+<span class="nc" id="L2419">						throw new InvalidUrlException(</span>
+								&quot;IPv4 address part &quot; + number + &quot; exceeds &quot; + limit + &quot;.'&quot;);
+					}
+				}
+<span class="nc" id="L2423">			}</span>
+			// Let ipv4 be the last item in numbers.
+<span class="nc" id="L2425">			int ipv4 = numbers.get(numbers.size() - 1);</span>
+			// Remove the last item from numbers.
+<span class="nc" id="L2427">			numbers.remove(numbers.size() - 1);</span>
+			// Let counter be 0.
+<span class="nc" id="L2429">			int counter = 0;</span>
+			// For each n of numbers:
+<span class="nc bnc" id="L2431" title="All 2 branches missed.">			for (Integer n : numbers) {</span>
+				// Increment ipv4 by n × 256^(3 − counter).
+<span class="nc" id="L2433">				int increment = n * (int) Math.pow(256, 3 - counter);</span>
+<span class="nc" id="L2434">				ipv4 += increment;</span>
+				// Increment counter by 1.
+<span class="nc" id="L2436">				counter++;</span>
+<span class="nc" id="L2437">			}</span>
+			// Return ipv4.
+<span class="nc" id="L2439">			return new Ipv4Address(ipv4);</span>
+		}
+
+		/**
+		 * The IPv4 number parser takes an ASCII string input and then runs these steps.
+		 * They return failure or a tuple of a number and a boolean.
+		 */
+		private static ParseIpv4NumberResult parseIpv4Number(String input) {
+			// If input is the empty string, then return failure.
+<span class="nc bnc" id="L2448" title="All 2 branches missed.">			if (input.isEmpty()) {</span>
+<span class="nc" id="L2449">				return ParseIpv4NumberFailure.INSTANCE;</span>
+			}
+			// Let validationError be false.
+<span class="nc" id="L2452">			boolean validationError = false;</span>
+			// Let R be 10.
+<span class="nc" id="L2454">			int r = 10;</span>
+<span class="nc" id="L2455">			int len = input.length();</span>
+			// If input contains at least two code points and
+			// the first two code points are either &quot;0X&quot; or &quot;0x&quot;, then:
+<span class="nc bnc" id="L2458" title="All 2 branches missed.">			if (len &gt;= 2) {</span>
+<span class="nc" id="L2459">				int ch0 = input.codePointAt(0);</span>
+<span class="nc" id="L2460">				int ch1 = input.codePointAt(1);</span>
+<span class="nc bnc" id="L2461" title="All 6 branches missed.">				if (ch0 == '0' &amp;&amp; (ch1 == 'X' || ch1 == 'x')) {</span>
+					// Set validationError to true.
+<span class="nc" id="L2463">					validationError = true;</span>
+					// Remove the first two code points from input.
+<span class="nc" id="L2465">					input = input.substring(2);</span>
+					// Set R to 16.
+<span class="nc" id="L2467">					r = 16;</span>
+				}
+				// Otherwise, if input contains at least two code points and
+				// the first code point is U+0030 (0), then:
+<span class="nc bnc" id="L2471" title="All 2 branches missed.">				else if (ch0 == '0') {</span>
+					// Set validationError to true.
+<span class="nc" id="L2473">					validationError = true;</span>
+					// Remove the first code point from input.
+<span class="nc" id="L2475">					input = input.substring(1);</span>
+					// Set R to 8.
+<span class="nc" id="L2477">					r = 8;</span>
+				}
+			}
+			// If input is the empty string, then return (0, true).
+<span class="nc bnc" id="L2481" title="All 2 branches missed.">			if (input.isEmpty()) {</span>
+<span class="nc" id="L2482">				return new ParseIpv4NumberSuccess(0, true);</span>
+			}
+			// If input contains a code point that is not a radix-R digit, then return failure.
+<span class="nc bnc" id="L2485" title="All 2 branches missed.">			for (int i = 0; i &lt; input.length(); i++) {</span>
+<span class="nc" id="L2486">				int c = input.codePointAt(i);</span>
+<span class="nc" id="L2487">				int digit = Character.digit(c, r);</span>
+<span class="nc bnc" id="L2488" title="All 2 branches missed.">				if (digit == -1) {</span>
+<span class="nc" id="L2489">					return ParseIpv4NumberFailure.INSTANCE;</span>
+				}
+			}
+			try {
+				// Let output be the mathematical integer value that is represented by
+				// input in radix-R notation, using ASCII hex digits for digits with values 0 through 15.
+<span class="nc" id="L2495">				int output = Integer.parseInt(input, r);</span>
+				// Return (output, validationError).
+<span class="nc" id="L2497">				return new ParseIpv4NumberSuccess(output, validationError);</span>
+			}
+<span class="nc" id="L2499">			catch (NumberFormatException ex) {</span>
+<span class="nc" id="L2500">				return ParseIpv4NumberFailure.INSTANCE;</span>
+			}
+		}
+
+
+		@Override
+		public boolean equals(@Nullable Object o) {
+<span class="nc bnc" id="L2507" title="All 2 branches missed.">			if (o == this) {</span>
+<span class="nc" id="L2508">				return true;</span>
+			}
+<span class="nc bnc" id="L2510" title="All 2 branches missed.">			else if (o instanceof Ipv4Address other) {</span>
+<span class="nc bnc" id="L2511" title="All 2 branches missed.">				return this.address == other.address;</span>
+			}
+			else {
+<span class="nc" id="L2514">				return false;</span>
+			}
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L2520">			return this.address;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L2525">			return this.string;</span>
+		}
+	}
+
+
+	static final class Ipv6Address implements IpAddress {
+
+		private final int[] pieces;
+
+		private final String string;
+
+<span class="nc" id="L2536">		private Ipv6Address(int[] pieces) {</span>
+<span class="nc bnc" id="L2537" title="All 2 branches missed.">			Assert.state(pieces.length == 8, &quot;Invalid amount of IPv6 pieces&quot;);</span>
+<span class="nc" id="L2538">			this.pieces = pieces;</span>
+<span class="nc" id="L2539">			this.string = serialize(pieces);</span>
+<span class="nc" id="L2540">		}</span>
+
+		/**
+		 * The IPv6 parser takes a scalar value string input and then runs these steps.
+		 * They return failure or an IPv6 address.
+		 */
+		public static Ipv6Address parse(String input) {
+			// Let address be a new IPv6 address whose IPv6 pieces are all 0.
+<span class="nc" id="L2548">			int[] address = new int[8];</span>
+			// Let pieceIndex be 0.
+<span class="nc" id="L2550">			int pieceIndex = 0;</span>
+			// Let compress be null.
+<span class="nc" id="L2552">			Integer compress = null;</span>
+			// Let pointer be a pointer for input.
+<span class="nc" id="L2554">			int pointer = 0;</span>
+<span class="nc" id="L2555">			int inputLength = input.length();</span>
+<span class="nc bnc" id="L2556" title="All 2 branches missed.">			int c = (inputLength &gt; 0) ? input.codePointAt(0) : EOF;</span>
+			// If c is U+003A (:), then:
+<span class="nc bnc" id="L2558" title="All 2 branches missed.">			if (c == ':') {</span>
+				// If remaining does not start with U+003A (:),
+				// IPv6-invalid-compression validation error, return failure.
+<span class="nc bnc" id="L2561" title="All 4 branches missed.">				if (inputLength &gt; 1 &amp;&amp; input.codePointAt(1) != ':') {</span>
+<span class="nc" id="L2562">					throw new InvalidUrlException(&quot;IPv6 address begins with improper compression.&quot;);</span>
+				}
+				// Increase pointer by 2.
+<span class="nc" id="L2565">				pointer += 2;</span>
+				// Increase pieceIndex by 1 and then set compress to pieceIndex.
+<span class="nc" id="L2567">				pieceIndex++;</span>
+<span class="nc" id="L2568">				compress = pieceIndex;</span>
+			}
+<span class="nc bnc" id="L2570" title="All 2 branches missed.">			c = (pointer &lt; inputLength) ? input.codePointAt(pointer) : EOF;</span>
+			// While c is not the EOF code point:
+<span class="nc bnc" id="L2572" title="All 2 branches missed.">			while (c != EOF) {</span>
+				// If pieceIndex is 8, IPv6-too-many-pieces validation error, return failure.
+<span class="nc bnc" id="L2574" title="All 2 branches missed.">				if (pieceIndex == 8) {</span>
+<span class="nc" id="L2575">					throw new InvalidUrlException(&quot;IPv6 address contains more than 8 pieces.&quot;);</span>
+				}
+				// If c is U+003A (:), then:
+<span class="nc bnc" id="L2578" title="All 2 branches missed.">				if (c == ':') {</span>
+					// If compress is non-null, IPv6-multiple-compression validation error, return failure.
+<span class="nc bnc" id="L2580" title="All 2 branches missed.">					if (compress != null) {</span>
+<span class="nc" id="L2581">						throw new InvalidUrlException(&quot;IPv6 address is compressed in more than one spot.&quot;);</span>
+					}
+					// Increase pointer and pieceIndex by 1, set compress to pieceIndex, and then continue.
+<span class="nc" id="L2584">					pointer++;</span>
+<span class="nc" id="L2585">					pieceIndex++;</span>
+<span class="nc" id="L2586">					compress = pieceIndex;</span>
+<span class="nc bnc" id="L2587" title="All 2 branches missed.">					c = (pointer &lt; inputLength) ? input.codePointAt(pointer) : EOF;</span>
+<span class="nc" id="L2588">					continue;</span>
+				}
+				// Let value and length be 0.
+<span class="nc" id="L2591">				int value = 0;</span>
+<span class="nc" id="L2592">				int length = 0;</span>
+				// While length is less than 4 and c is an ASCII hex digit,
+				// set value to value × 0x10 + c interpreted as hexadecimal number,
+				// and increase pointer and length by 1.
+<span class="nc bnc" id="L2596" title="All 4 branches missed.">				while (length &lt; 4 &amp;&amp; isAsciiHexDigit(c)) {</span>
+<span class="nc" id="L2597">					int cHex = Character.digit(c, 16);</span>
+<span class="nc" id="L2598">					value = (value * 0x10) + cHex;</span>
+<span class="nc" id="L2599">					pointer++;</span>
+<span class="nc" id="L2600">					length++;</span>
+<span class="nc bnc" id="L2601" title="All 2 branches missed.">					c = (pointer &lt; inputLength) ? input.codePointAt(pointer) : EOF;</span>
+<span class="nc" id="L2602">				}</span>
+				// If c is U+002E (.), then:
+<span class="nc bnc" id="L2604" title="All 2 branches missed.">				if (c == '.') {</span>
+					// If length is 0, IPv4-in-IPv6-invalid-code-point validation error, return failure.
+<span class="nc bnc" id="L2606" title="All 2 branches missed.">					if (length == 0) {</span>
+<span class="nc" id="L2607">						throw new InvalidUrlException(</span>
+								&quot;IPv6 address with IPv4 address syntax: IPv4 part is empty.&quot;);
+					}
+					// Decrease pointer by length.
+<span class="nc" id="L2611">					pointer -= length;</span>
+					// If pieceIndex is greater than 6,
+					// IPv4-in-IPv6-too-many-pieces validation error, return failure.
+<span class="nc bnc" id="L2614" title="All 2 branches missed.">					if (pieceIndex &gt; 6) {</span>
+<span class="nc" id="L2615">						throw new InvalidUrlException(</span>
+								&quot;IPv6 address with IPv4 address syntax: IPv6 address has more than 6 pieces.&quot;);
+					}
+					// Let numbersSeen be 0.
+<span class="nc" id="L2619">					int numbersSeen = 0;</span>
+<span class="nc bnc" id="L2620" title="All 2 branches missed.">					c = (pointer &lt; inputLength) ? input.codePointAt(pointer) : EOF;</span>
+					// While c is not the EOF code point:
+<span class="nc bnc" id="L2622" title="All 2 branches missed.">					while (c != EOF) {</span>
+						// Let ipv4Piece be null.
+<span class="nc" id="L2624">						Integer ipv4Piece = null;</span>
+						// If numbersSeen is greater than 0, then:
+<span class="nc bnc" id="L2626" title="All 2 branches missed.">						if (numbersSeen &gt; 0) {</span>
+							// If c is a U+002E (.) and numbersSeen is less than 4, then increase pointer by 1.
+<span class="nc bnc" id="L2628" title="All 4 branches missed.">							if (c =='.' &amp;&amp; numbersSeen &lt; 4) {</span>
+<span class="nc" id="L2629">								pointer++;</span>
+<span class="nc bnc" id="L2630" title="All 2 branches missed.">								c = (pointer &lt; inputLength) ? input.codePointAt(pointer) : EOF;</span>
+							}
+							// Otherwise, IPv4-in-IPv6-invalid-code-point validation error, return failure.
+							else {
+<span class="nc" id="L2634">								throw new InvalidUrlException(</span>
+										&quot;IPv6 address with IPv4 address syntax: &quot; +
+												&quot;IPv4 part is empty or contains a non-ASCII digit.&quot;);
+							}
+						}
+						// If c is not an ASCII digit,
+						// IPv4-in-IPv6-invalid-code-point validation error, return failure.
+<span class="nc bnc" id="L2641" title="All 2 branches missed.">						if (!isAsciiDigit(c)) {</span>
+<span class="nc" id="L2642">							throw new InvalidUrlException(</span>
+									&quot;IPv6 address with IPv4 address syntax: IPv4 part contains a non-ASCII digit.&quot;);
+						}
+						// While c is an ASCII digit:
+<span class="nc bnc" id="L2646" title="All 2 branches missed.">						while (isAsciiDigit(c)) {</span>
+							// Let number be c interpreted as decimal number.
+<span class="nc" id="L2648">							int number = Character.digit(c, 10);</span>
+							// If ipv4Piece is null, then set ipv4Piece to number.
+<span class="nc bnc" id="L2650" title="All 2 branches missed.">							if (ipv4Piece == null) {</span>
+<span class="nc" id="L2651">								ipv4Piece = number;</span>
+							}
+							// Otherwise, if ipv4Piece is 0,
+							// IPv4-in-IPv6-invalid-code-point validation error, return failure.
+<span class="nc bnc" id="L2655" title="All 2 branches missed.">							else if (ipv4Piece == 0) {</span>
+<span class="nc" id="L2656">								throw new InvalidUrlException(</span>
+										&quot;IPv6 address with IPv4 address syntax: IPv4 part contains a non-ASCII digit.&quot;);
+							}
+							// Otherwise, set ipv4Piece to ipv4Piece × 10 + number.
+							else {
+<span class="nc" id="L2661">								ipv4Piece = ipv4Piece * 10 + number;</span>
+							}
+							// If ipv4Piece is greater than 255,
+							// IPv4-in-IPv6-out-of-range-part validation error, return failure.
+<span class="nc bnc" id="L2665" title="All 2 branches missed.">							if (ipv4Piece &gt; 255) {</span>
+<span class="nc" id="L2666">								throw new InvalidUrlException(</span>
+										&quot;IPv6 address with IPv4 address syntax: IPv4 part exceeds 255.&quot;);
+							}
+							// Increase pointer by 1.
+<span class="nc" id="L2670">							pointer++;</span>
+<span class="nc bnc" id="L2671" title="All 2 branches missed.">							c = (pointer &lt; inputLength) ? input.codePointAt(pointer) : EOF;</span>
+<span class="nc" id="L2672">						}</span>
+						// Set address[pieceIndex] to address[pieceIndex] × 0x100 + ipv4Piece.
+<span class="nc bnc" id="L2674" title="All 2 branches missed.">						address[pieceIndex] = address[pieceIndex] * 0x100 + (ipv4Piece != null ? ipv4Piece : 0);</span>
+						// Increase numbersSeen by 1.
+<span class="nc" id="L2676">						numbersSeen++;</span>
+						// If numbersSeen is 2 or 4, then increase pieceIndex by 1.
+<span class="nc bnc" id="L2678" title="All 4 branches missed.">						if (numbersSeen == 2 || numbersSeen == 4) {</span>
+<span class="nc" id="L2679">							pieceIndex++;</span>
+						}
+<span class="nc bnc" id="L2681" title="All 2 branches missed.">						c = (pointer &lt; inputLength) ? input.codePointAt(pointer) : EOF;</span>
+<span class="nc" id="L2682">					}</span>
+					// If numbersSeen is not 4,
+					// IPv4-in-IPv6-too-few-parts validation error, return failure.
+<span class="nc bnc" id="L2685" title="All 2 branches missed.">					if (numbersSeen != 4) {</span>
+<span class="nc" id="L2686">						throw new InvalidUrlException(</span>
+								&quot;IPv6 address with IPv4 address syntax: IPv4 address contains too few parts.&quot;);
+					}
+					// Break.
+					break;
+				}
+				// Otherwise, if c is U+003A (:):
+<span class="nc bnc" id="L2693" title="All 2 branches missed.">				else if (c == ':') {</span>
+					// Increase pointer by 1.
+<span class="nc" id="L2695">					pointer++;</span>
+<span class="nc bnc" id="L2696" title="All 2 branches missed.">					c = (pointer &lt; inputLength) ? input.codePointAt(pointer) : EOF;</span>
+					// If c is the EOF code point, IPv6-invalid-code-point validation error, return failure.
+<span class="nc bnc" id="L2698" title="All 2 branches missed.">					if (c == EOF) {</span>
+<span class="nc" id="L2699">						throw new InvalidUrlException(&quot;IPv6 address unexpectedly ends.&quot;);</span>
+					}
+				}
+				// Otherwise, if c is not the EOF code point,
+				// IPv6-invalid-code-point validation error, return failure.
+<span class="nc bnc" id="L2704" title="All 2 branches missed.">				else if (c != EOF) {</span>
+<span class="nc" id="L2705">					throw new InvalidUrlException(</span>
+<span class="nc" id="L2706">							&quot;IPv6 address contains \&quot;&quot; + Character.toString(c) + &quot;\&quot;, which is &quot; +</span>
+									&quot;neither an ASCII hex digit nor a ':'.&quot;);
+				}
+				// Set address[pieceIndex] to value.
+<span class="nc" id="L2710">				address[pieceIndex] = value;</span>
+				// Increase pieceIndex by 1.
+<span class="nc" id="L2712">				pieceIndex++;</span>
+<span class="nc" id="L2713">			}</span>
+			// If compress is non-null, then:
+<span class="nc bnc" id="L2715" title="All 2 branches missed.">			if (compress != null) {</span>
+				// Let swaps be pieceIndex − compress.
+<span class="nc" id="L2717">				int swaps = pieceIndex - compress;</span>
+				// Set pieceIndex to 7.
+<span class="nc" id="L2719">				pieceIndex = 7;</span>
+				// While pieceIndex is not 0 and swaps is greater than 0,
+				// swap address[pieceIndex] with address[compress + swaps − 1], and
+				// then decrease both pieceIndex and swaps by 1.
+<span class="nc bnc" id="L2723" title="All 4 branches missed.">				while (pieceIndex != 0 &amp;&amp; swaps &gt; 0) {</span>
+<span class="nc" id="L2724">					int tmp = address[pieceIndex];</span>
+<span class="nc" id="L2725">					address[pieceIndex] = address[compress + swaps - 1];</span>
+<span class="nc" id="L2726">					address[compress + swaps - 1] = tmp;</span>
+<span class="nc" id="L2727">					pieceIndex--;</span>
+<span class="nc" id="L2728">					swaps--;</span>
+<span class="nc" id="L2729">				}</span>
+<span class="nc" id="L2730">			}</span>
+			// Otherwise, if compress is null and pieceIndex is not 8,
+			// IPv6-too-few-pieces validation error, return failure.
+<span class="nc bnc" id="L2733" title="All 2 branches missed.">			else if (pieceIndex != 8) {</span>
+<span class="nc" id="L2734">				throw new InvalidUrlException(&quot;An uncompressed IPv6 address contains fewer than 8 pieces.&quot;);</span>
+			}
+			// Return address.
+<span class="nc" id="L2737">			return new Ipv6Address(address);</span>
+		}
+
+
+		/**
+		 * The IPv6 serializer takes an IPv6 address {@code address} and
+		 * then runs these steps. They return an ASCII string.
+		 */
+		private static String serialize(int[] address) {
+			// Let output be the empty string.
+<span class="nc" id="L2747">			StringBuilder output = new StringBuilder();</span>
+			// Let compress be an index to the first IPv6 piece in
+			// the first longest sequences of address’s IPv6 pieces that are 0.
+<span class="nc" id="L2750">			int compress = longestSequenceOf0Pieces(address);</span>
+			// Let ignore0 be false.
+<span class="nc" id="L2752">			boolean ignore0 = false;</span>
+			// For each pieceIndex in the range 0 to 7, inclusive:
+<span class="nc bnc" id="L2754" title="All 2 branches missed.">			for (int pieceIndex = 0; pieceIndex &lt;= 7; pieceIndex++) {</span>
+				// If ignore0 is true and address[pieceIndex] is 0, then continue.
+<span class="nc bnc" id="L2756" title="All 4 branches missed.">				if (ignore0 &amp;&amp; address[pieceIndex] == 0) {</span>
+<span class="nc" id="L2757">					continue;</span>
+				}
+				// Otherwise, if ignore0 is true, set ignore0 to false.
+<span class="nc bnc" id="L2760" title="All 2 branches missed.">				else if (ignore0) {</span>
+<span class="nc" id="L2761">					ignore0 = false;</span>
+				}
+				// If compress is pieceIndex, then:
+<span class="nc bnc" id="L2764" title="All 2 branches missed.">				if (compress == pieceIndex) {</span>
+					// Let separator be &quot;::&quot; if pieceIndex is 0, and U+003A (:) otherwise.
+<span class="nc bnc" id="L2766" title="All 2 branches missed.">					String separator = (pieceIndex == 0) ? &quot;::&quot; : &quot;:&quot;;</span>
+					// Append separator to output.
+<span class="nc" id="L2768">					output.append(separator);</span>
+					// Set ignore0 to true and continue.
+<span class="nc" id="L2770">					ignore0 = true;</span>
+<span class="nc" id="L2771">					continue;</span>
+				}
+				// Append address[pieceIndex], represented as
+				// the shortest possible lowercase hexadecimal number, to output.
+<span class="nc" id="L2775">				output.append(Integer.toHexString(address[pieceIndex]));</span>
+				// If pieceIndex is not 7, then append U+003A (:) to output.
+<span class="nc bnc" id="L2777" title="All 2 branches missed.">				if (pieceIndex != 7) {</span>
+<span class="nc" id="L2778">					output.append(':');</span>
+				}
+			}
+			// Return output.
+<span class="nc" id="L2782">			return output.toString();</span>
+		}
+
+		private static int longestSequenceOf0Pieces(int[] pieces) {
+<span class="nc" id="L2786">			int longestStart = -1;</span>
+<span class="nc" id="L2787">			int longestLength = -1;</span>
+<span class="nc" id="L2788">			int start = -1;</span>
+<span class="nc bnc" id="L2789" title="All 2 branches missed.">			for (int i = 0; i &lt; pieces.length + 1; i++) {</span>
+<span class="nc bnc" id="L2790" title="All 4 branches missed.">				if (i &lt; pieces.length &amp;&amp; pieces[i] == 0) {</span>
+<span class="nc bnc" id="L2791" title="All 2 branches missed.">					if (start &lt; 0) {</span>
+<span class="nc" id="L2792">						start = i;</span>
+					}
+				}
+<span class="nc bnc" id="L2795" title="All 2 branches missed.">				else if (start &gt;= 0) {</span>
+<span class="nc" id="L2796">					int length = i - start;</span>
+<span class="nc bnc" id="L2797" title="All 2 branches missed.">					if (length &gt; longestLength) {</span>
+<span class="nc" id="L2798">						longestStart = start;</span>
+<span class="nc" id="L2799">						longestLength = length;</span>
+					}
+<span class="nc" id="L2801">					start = -1;</span>
+				}
+			}
+			// If there is no sequence of address’s IPv6 pieces
+			// that are 0 that is longer than 1, then set compress to null.
+<span class="nc bnc" id="L2806" title="All 2 branches missed.">			if (longestLength &gt; 1) {</span>
+<span class="nc" id="L2807">				return longestStart;</span>
+			}
+			else {
+<span class="nc" id="L2810">				return -1;</span>
+			}
+		}
+
+		@Override
+		public boolean equals(@Nullable Object obj) {
+<span class="nc bnc" id="L2816" title="All 2 branches missed.">			if (obj == this) {</span>
+<span class="nc" id="L2817">				return true;</span>
+			}
+<span class="nc bnc" id="L2819" title="All 2 branches missed.">			else if (obj instanceof Ipv6Address other) {</span>
+<span class="nc" id="L2820">				return Arrays.equals(this.pieces, other.pieces);</span>
+			}
+			else {
+<span class="nc" id="L2823">				return false;</span>
+			}
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L2829">			return Arrays.hashCode(this.pieces);</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L2834">			return this.string;</span>
+		}
+	}
+
+
+	sealed interface Port permits StringPort, IntPort {
+	}
+
+
+	static final class StringPort implements Port {
+
+		private final String port;
+
+<span class="nc" id="L2847">		public StringPort(String port) {</span>
+<span class="nc" id="L2848">			this.port = port;</span>
+<span class="nc" id="L2849">		}</span>
+
+		public String value() {
+<span class="nc" id="L2852">			return this.port;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L2857">			return this.port;</span>
+		}
+	}
+
+
+	static final class IntPort implements Port {
+
+		private final int port;
+
+<span class="nc" id="L2866">		public IntPort(int port) {</span>
+<span class="nc" id="L2867">			this.port = port;</span>
+<span class="nc" id="L2868">		}</span>
+
+		public int value() {
+<span class="nc" id="L2871">			return this.port;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L2876">			return Integer.toString(this.port);</span>
+		}
+
+	}
+
+
+	sealed interface Path permits PathSegment, PathSegments {
+
+		void append(int codePoint);
+
+		void append(String s);
+
+		boolean isEmpty();
+
+		void shorten(String scheme);
+
+		boolean isOpaque();
+
+		Path clone();
+
+		String name();
+	}
+
+
+	static final class PathSegment implements Path {
+
+<span class="nc" id="L2902">		private @Nullable StringBuilder builder = null;</span>
+
+		@Nullable String segment;
+
+<span class="nc" id="L2906">		PathSegment(String segment) {</span>
+<span class="nc" id="L2907">			this.segment = segment;</span>
+<span class="nc" id="L2908">		}</span>
+
+<span class="nc" id="L2910">		PathSegment(int codePoint) {</span>
+<span class="nc" id="L2911">			append(codePoint);</span>
+<span class="nc" id="L2912">		}</span>
+
+		public String segment() {
+<span class="nc" id="L2915">			String result = this.segment;</span>
+<span class="nc bnc" id="L2916" title="All 2 branches missed.">			if (result == null) {</span>
+<span class="nc bnc" id="L2917" title="All 2 branches missed.">				Assert.state(this.builder != null, &quot;String nor StringBuilder available&quot;);</span>
+<span class="nc" id="L2918">				result = this.builder.toString();</span>
+<span class="nc" id="L2919">				this.segment = result;</span>
+			}
+<span class="nc" id="L2921">			return result;</span>
+		}
+
+		@Override
+		public void append(int codePoint) {
+<span class="nc" id="L2926">			this.segment = null;</span>
+<span class="nc bnc" id="L2927" title="All 2 branches missed.">			if (this.builder == null) {</span>
+<span class="nc" id="L2928">				this.builder = new StringBuilder(2);</span>
+			}
+<span class="nc" id="L2930">			this.builder.appendCodePoint(codePoint);</span>
+<span class="nc" id="L2931">		}</span>
+
+		@Override
+		public void append(String s) {
+<span class="nc" id="L2935">			this.segment = null;</span>
+<span class="nc bnc" id="L2936" title="All 2 branches missed.">			if (this.builder == null) {</span>
+<span class="nc" id="L2937">				this.builder = new StringBuilder(s);</span>
+			}
+			else {
+<span class="nc" id="L2940">				this.builder.append(s);</span>
+			}
+<span class="nc" id="L2942">		}</span>
+
+		@Override
+		public String name() {
+<span class="nc" id="L2946">			String name = segment();</span>
+<span class="nc bnc" id="L2947" title="All 2 branches missed.">			if (name.startsWith(&quot;/&quot;)) {</span>
+<span class="nc" id="L2948">				name = name.substring(1);</span>
+			}
+<span class="nc" id="L2950">			return name;</span>
+		}
+
+		@Override
+		public boolean isEmpty() {
+<span class="nc bnc" id="L2955" title="All 2 branches missed.">			if (this.segment != null) {</span>
+<span class="nc" id="L2956">				return this.segment.isEmpty();</span>
+			}
+			else {
+<span class="nc bnc" id="L2959" title="All 2 branches missed.">				Assert.state(this.builder != null, &quot;String nor StringBuilder available&quot;);</span>
+<span class="nc" id="L2960">				return this.builder.isEmpty();</span>
+			}
+		}
+
+		@Override
+		public void shorten(String scheme) {
+<span class="nc" id="L2966">			throw new IllegalStateException(&quot;Opaque path not expected&quot;);</span>
+		}
+
+		@Override
+		public boolean isOpaque() {
+<span class="nc" id="L2971">			return true;</span>
+		}
+
+		@SuppressWarnings(&quot;MethodDoesntCallSuperMethod&quot;)
+		@Override
+		public Path clone() {
+<span class="nc" id="L2977">			return new PathSegment(segment());</span>
+		}
+
+		@Override
+		public boolean equals(@Nullable Object o) {
+<span class="nc bnc" id="L2982" title="All 2 branches missed.">			if (o == this) {</span>
+<span class="nc" id="L2983">				return true;</span>
+			}
+<span class="nc bnc" id="L2985" title="All 2 branches missed.">			else if (o instanceof PathSegment other) {</span>
+<span class="nc" id="L2986">				return segment().equals(other.segment());</span>
+			}
+			else {
+<span class="nc" id="L2989">				return false;</span>
+			}
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L2995">			return segment().hashCode();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L3000">			return segment();</span>
+		}
+	}
+
+
+	static final class PathSegments implements Path {
+
+		private final List&lt;PathSegment&gt; segments;
+
+<span class="nc" id="L3009">		public PathSegments() {</span>
+<span class="nc" id="L3010">			this.segments = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L3011">		}</span>
+
+<span class="nc" id="L3013">		public PathSegments(List&lt;PathSegment&gt; segments) {</span>
+<span class="nc" id="L3014">			this.segments = new ArrayList&lt;&gt;(segments);</span>
+<span class="nc" id="L3015">		}</span>
+
+
+		@Override
+		public void append(int codePoint) {
+<span class="nc" id="L3020">			this.segments.add(new PathSegment(codePoint));</span>
+<span class="nc" id="L3021">		}</span>
+
+		@Override
+		public void append(String segment) {
+<span class="nc" id="L3025">			this.segments.add(new PathSegment(segment));</span>
+<span class="nc" id="L3026">		}</span>
+
+		public int size() {
+<span class="nc" id="L3029">			return this.segments.size();</span>
+		}
+
+		public String get(int i) {
+<span class="nc" id="L3033">			return this.segments.get(i).segment();</span>
+		}
+
+		@Override
+		public boolean isEmpty() {
+<span class="nc" id="L3038">			return this.segments.isEmpty();</span>
+		}
+
+		@Override
+		public void shorten(String scheme) {
+<span class="nc" id="L3043">			int size = size();</span>
+<span class="nc bnc" id="L3044" title="All 4 branches missed.">			if (&quot;file&quot;.equals(scheme) &amp;&amp;</span>
+					size == 1 &amp;&amp;
+<span class="nc bnc" id="L3046" title="All 2 branches missed.">					isWindowsDriveLetter(get(0), true)) {</span>
+<span class="nc" id="L3047">				return;</span>
+			}
+<span class="nc bnc" id="L3049" title="All 2 branches missed.">			if (!isEmpty()) {</span>
+<span class="nc" id="L3050">				this.segments.remove(size - 1);</span>
+			}
+<span class="nc" id="L3052">		}</span>
+
+		@Override
+		public boolean isOpaque() {
+<span class="nc" id="L3056">			return false;</span>
+		}
+
+		@SuppressWarnings(&quot;MethodDoesntCallSuperMethod&quot;)
+		@Override
+		public Path clone() {
+<span class="nc" id="L3062">			return new PathSegments(this.segments);</span>
+		}
+
+		@Override
+		public String name() {
+<span class="nc" id="L3067">			StringBuilder output = new StringBuilder();</span>
+<span class="nc bnc" id="L3068" title="All 2 branches missed.">			for (PathSegment segment : this.segments) {</span>
+<span class="nc" id="L3069">				output.append('/');</span>
+<span class="nc" id="L3070">				output.append(segment.name());</span>
+<span class="nc" id="L3071">			}</span>
+<span class="nc" id="L3072">			return output.toString();</span>
+		}
+
+		@Override
+		public boolean equals(@Nullable Object o) {
+<span class="nc bnc" id="L3077" title="All 2 branches missed.">			if (o == this) {</span>
+<span class="nc" id="L3078">				return true;</span>
+			}
+<span class="nc bnc" id="L3080" title="All 2 branches missed.">			else if (o instanceof PathSegments other) {</span>
+<span class="nc" id="L3081">				return this.segments.equals(other.segments);</span>
+			}
+			else {
+<span class="nc" id="L3084">				return false;</span>
+			}
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L3090">			return this.segments.hashCode();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L3095">			StringBuilder output = new StringBuilder();</span>
+<span class="nc bnc" id="L3096" title="All 2 branches missed.">			for (PathSegment segment : this.segments) {</span>
+<span class="nc" id="L3097">				output.append(segment);</span>
+<span class="nc" id="L3098">			}</span>
+<span class="nc" id="L3099">			return output.toString();</span>
+		}
+
+	}
+
+
+	private sealed interface ParseIpv4NumberResult permits ParseIpv4NumberFailure, ParseIpv4NumberSuccess {
+	}
+
+
+<span class="nc" id="L3109">	private record ParseIpv4NumberSuccess(int number, boolean validationError) implements ParseIpv4NumberResult {</span>
+	}
+
+
+	private static final class ParseIpv4NumberFailure implements ParseIpv4NumberResult {
+
+<span class="nc" id="L3115">		public static final ParseIpv4NumberFailure INSTANCE = new ParseIpv4NumberFailure();</span>
+
+		private ParseIpv4NumberFailure() {
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

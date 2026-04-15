@@ -1,0 +1,249 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>AbstractRoutingConnectionFactory.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-r2dbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.r2dbc.connection.lookup</a> &gt; <span class="el_source">AbstractRoutingConnectionFactory.java</span></div><h1>AbstractRoutingConnectionFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.r2dbc.connection.lookup;
+
+import java.util.Map;
+
+import io.r2dbc.spi.Connection;
+import io.r2dbc.spi.ConnectionFactory;
+import io.r2dbc.spi.ConnectionFactoryMetadata;
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Mono;
+
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+
+/**
+ * Abstract {@link ConnectionFactory} implementation that routes
+ * {@link #create()} calls to one of various target
+ * {@linkplain ConnectionFactory factories} based on a lookup key.
+ * The latter is typically (but not necessarily) determined from some
+ * subscriber context.
+ *
+ * &lt;p&gt;Allows to configure a default target {@link #setDefaultTargetConnectionFactory(Object)
+ * ConnectionFactory} as a fallback.
+ *
+ * &lt;p&gt;Calls to {@link #getMetadata()} are routed to the
+ * {@link #setDefaultTargetConnectionFactory(Object) default ConnectionFactory}
+ * if configured.
+ *
+ * @author Mark Paluch
+ * @author Jens Schauder
+ * @since 5.3
+ * @see #setTargetConnectionFactories
+ * @see #setDefaultTargetConnectionFactory
+ * @see #determineCurrentLookupKey()
+ */
+<span class="fc" id="L52">public abstract class AbstractRoutingConnectionFactory implements ConnectionFactory, InitializingBean {</span>
+
+<span class="fc" id="L54">	private static final Object FALLBACK_MARKER = new Object();</span>
+
+
+	private @Nullable Map&lt;?, ?&gt; targetConnectionFactories;
+
+	private @Nullable Object defaultTargetConnectionFactory;
+
+<span class="fc" id="L61">	private boolean lenientFallback = true;</span>
+
+<span class="fc" id="L63">	private ConnectionFactoryLookup connectionFactoryLookup = new MapConnectionFactoryLookup();</span>
+
+	private @Nullable Map&lt;Object, ConnectionFactory&gt; resolvedConnectionFactories;
+
+	private @Nullable ConnectionFactory resolvedDefaultConnectionFactory;
+
+
+	/**
+	 * Specify the map of target {@link ConnectionFactory ConnectionFactories},
+	 * with the lookup key as key. The mapped value can either be a corresponding
+	 * {@link ConnectionFactory} instance or a connection factory name String (to be
+	 * resolved via a {@link #setConnectionFactoryLookup ConnectionFactoryLookup}).
+	 * &lt;p&gt;The key can be of arbitrary type; this class implements the generic lookup
+	 * process only. The concrete key representation will be handled by
+	 * {@link #resolveSpecifiedLookupKey(Object)} and {@link #determineCurrentLookupKey()}.
+	 */
+	public void setTargetConnectionFactories(Map&lt;?, ?&gt; targetConnectionFactories) {
+<span class="fc" id="L80">		this.targetConnectionFactories = targetConnectionFactories;</span>
+<span class="fc" id="L81">	}</span>
+
+	/**
+	 * Specify the default target {@link ConnectionFactory}, if any.
+	 * &lt;p&gt;The mapped value can either be a corresponding {@link ConnectionFactory}
+	 * instance or a connection factory name {@link String} (to be resolved via a
+	 * {@link #setConnectionFactoryLookup ConnectionFactoryLookup}).
+	 * &lt;p&gt;This {@link ConnectionFactory} will be used as target if none of the keyed
+	 * {@link #setTargetConnectionFactories targetConnectionFactories} match the
+	 * {@link #determineCurrentLookupKey() current lookup key}.
+	 */
+	public void setDefaultTargetConnectionFactory(Object defaultTargetConnectionFactory) {
+<span class="fc" id="L93">		this.defaultTargetConnectionFactory = defaultTargetConnectionFactory;</span>
+<span class="fc" id="L94">	}</span>
+
+	/**
+	 * Specify whether to apply a lenient fallback to the default {@link ConnectionFactory}
+	 * if no specific {@link ConnectionFactory} could be found for the current lookup key.
+	 * &lt;p&gt;Default is {@code true}, accepting lookup keys without a corresponding entry
+	 * in the target {@link ConnectionFactory} map - simply falling back to the default
+	 * {@link ConnectionFactory} in that case.
+	 * &lt;p&gt;Switch this flag to {@code false} if you would prefer the fallback to only
+	 * apply when no lookup key was emitted. Lookup keys without a {@link ConnectionFactory}
+	 * entry will then lead to an {@link IllegalStateException}.
+	 * @see #setTargetConnectionFactories
+	 * @see #setDefaultTargetConnectionFactory
+	 * @see #determineCurrentLookupKey()
+	 */
+	public void setLenientFallback(boolean lenientFallback) {
+<span class="fc" id="L110">		this.lenientFallback = lenientFallback;</span>
+<span class="fc" id="L111">	}</span>
+
+	/**
+	 * Set the {@link ConnectionFactoryLookup} implementation to use for resolving
+	 * connection factory name Strings in the {@link #setTargetConnectionFactories
+	 * targetConnectionFactories} map.
+	 */
+	public void setConnectionFactoryLookup(ConnectionFactoryLookup connectionFactoryLookup) {
+<span class="fc" id="L119">		Assert.notNull(connectionFactoryLookup, &quot;ConnectionFactoryLookup must not be null&quot;);</span>
+<span class="fc" id="L120">		this.connectionFactoryLookup = connectionFactoryLookup;</span>
+<span class="fc" id="L121">	}</span>
+
+
+	/**
+	 * Delegates to {@link #initialize()}.
+	 */
+	@Override
+	public void afterPropertiesSet() {
+<span class="fc" id="L129">		initialize();</span>
+<span class="fc" id="L130">	}</span>
+
+	/**
+	 * Initialize the internal state of this {@code AbstractRoutingConnectionFactory}
+	 * by resolving the configured target ConnectionFactories.
+	 * @throws IllegalArgumentException if the target ConnectionFactories have not
+	 * been configured
+	 * @since 6.1
+	 * @see #setTargetConnectionFactories(Map)
+	 * @see #setDefaultTargetConnectionFactory(Object)
+	 */
+	public void initialize() {
+<span class="fc" id="L142">		Assert.notNull(this.targetConnectionFactories, &quot;Property 'targetConnectionFactories' must not be null&quot;);</span>
+
+<span class="fc" id="L144">		this.resolvedConnectionFactories = CollectionUtils.newHashMap(this.targetConnectionFactories.size());</span>
+<span class="fc" id="L145">		this.targetConnectionFactories.forEach((key, value) -&gt; {</span>
+<span class="fc" id="L146">			Object lookupKey = resolveSpecifiedLookupKey(key);</span>
+<span class="fc" id="L147">			ConnectionFactory connectionFactory = resolveSpecifiedConnectionFactory(value);</span>
+<span class="fc" id="L148">			this.resolvedConnectionFactories.put(lookupKey, connectionFactory);</span>
+<span class="fc" id="L149">		});</span>
+
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">		if (this.defaultTargetConnectionFactory != null) {</span>
+<span class="fc" id="L152">			this.resolvedDefaultConnectionFactory = resolveSpecifiedConnectionFactory(this.defaultTargetConnectionFactory);</span>
+		}
+<span class="fc" id="L154">	}</span>
+
+	/**
+	 * Resolve the given lookup key object, as specified in the
+	 * {@link #setTargetConnectionFactories targetConnectionFactories} map,
+	 * into the actual lookup key to be used for matching with the
+	 * {@link #determineCurrentLookupKey() current lookup key}.
+	 * &lt;p&gt;The default implementation simply returns the given key as-is.
+	 * @param lookupKey the lookup key object as specified by the user
+	 * @return the lookup key as needed for matching.
+	 */
+	protected Object resolveSpecifiedLookupKey(Object lookupKey) {
+<span class="fc" id="L166">		return lookupKey;</span>
+	}
+
+	/**
+	 * Resolve the specified connection factory object into a
+	 * {@link ConnectionFactory} instance.
+	 * &lt;p&gt;The default implementation handles {@link ConnectionFactory} instances
+	 * and connection factory names (to be resolved via a
+	 * {@link #setConnectionFactoryLookup ConnectionFactoryLookup}).
+	 * @param connectionFactory the connection factory value object as specified in the
+	 * {@link #setTargetConnectionFactories targetConnectionFactories} map
+	 * @return the resolved {@link ConnectionFactory} (never {@code null})
+	 * @throws IllegalArgumentException in case of an unsupported value type
+	 */
+	protected ConnectionFactory resolveSpecifiedConnectionFactory(Object connectionFactory)
+			throws IllegalArgumentException {
+
+<span class="fc bfc" id="L183" title="All 2 branches covered.">		if (connectionFactory instanceof ConnectionFactory factory) {</span>
+<span class="fc" id="L184">			return factory;</span>
+		}
+<span class="fc bfc" id="L186" title="All 2 branches covered.">		else if (connectionFactory instanceof String factoryName) {</span>
+<span class="fc" id="L187">			return this.connectionFactoryLookup.getConnectionFactory(factoryName);</span>
+		}
+		else {
+<span class="fc" id="L190">			throw new IllegalArgumentException(&quot;Illegal connection factory value - &quot; +</span>
+					&quot;only 'io.r2dbc.spi.ConnectionFactory' and 'String' supported: &quot; + connectionFactory);
+		}
+	}
+
+	@Override
+	public Mono&lt;Connection&gt; create() {
+<span class="nc" id="L197">		return determineTargetConnectionFactory().map(ConnectionFactory::create).flatMap(Mono::from);</span>
+	}
+
+	@Override
+	public ConnectionFactoryMetadata getMetadata() {
+<span class="nc bnc" id="L202" title="All 2 branches missed.">		if (this.resolvedDefaultConnectionFactory != null) {</span>
+<span class="nc" id="L203">			return this.resolvedDefaultConnectionFactory.getMetadata();</span>
+		}
+<span class="nc" id="L205">		throw new UnsupportedOperationException(</span>
+				&quot;No default ConnectionFactory configured to retrieve ConnectionFactoryMetadata&quot;);
+	}
+
+	/**
+	 * Retrieve the current target {@link ConnectionFactory}. Determines the
+	 * {@link #determineCurrentLookupKey() current lookup key}, performs a lookup
+	 * in the {@link #setTargetConnectionFactories targetConnectionFactories} map,
+	 * falls back to the specified {@link #setDefaultTargetConnectionFactory default
+	 * target ConnectionFactory} if necessary.
+	 * @return {@link Mono} that emits the current {@link ConnectionFactory} as
+	 * per {@link #determineCurrentLookupKey()}
+	 * @see #determineCurrentLookupKey()
+	 */
+	@SuppressWarnings(&quot;NullAway&quot;) // Lambda
+	protected Mono&lt;ConnectionFactory&gt; determineTargetConnectionFactory() {
+<span class="pc bpc" id="L221" title="1 of 2 branches missed.">		Assert.state(this.resolvedConnectionFactories != null, &quot;ConnectionFactory router not initialized&quot;);</span>
+
+<span class="fc" id="L223">		Mono&lt;Object&gt; lookupKey = determineCurrentLookupKey().defaultIfEmpty(FALLBACK_MARKER);</span>
+
+<span class="fc" id="L225">		return lookupKey.handle((key, sink) -&gt; {</span>
+<span class="fc" id="L226">			ConnectionFactory connectionFactory = this.resolvedConnectionFactories.get(key);</span>
+<span class="fc bfc" id="L227" title="All 6 branches covered.">			if (connectionFactory == null &amp;&amp; (key == FALLBACK_MARKER || this.lenientFallback)) {</span>
+<span class="fc" id="L228">				connectionFactory = this.resolvedDefaultConnectionFactory;</span>
+			}
+<span class="fc bfc" id="L230" title="All 2 branches covered.">			if (connectionFactory == null) {</span>
+<span class="fc" id="L231">				sink.error(new IllegalStateException(String.format(</span>
+<span class="pc bpc" id="L232" title="1 of 2 branches missed.">						&quot;Cannot determine target ConnectionFactory for lookup key '%s'&quot;, key == FALLBACK_MARKER ? null : key)));</span>
+<span class="fc" id="L233">				return;</span>
+			}
+<span class="fc" id="L235">			sink.next(connectionFactory);</span>
+<span class="fc" id="L236">		});</span>
+	}
+
+	/**
+	 * Determine the current lookup key. This will typically be implemented to check a
+	 * subscriber context. Allows for arbitrary keys. The returned key needs to match the
+	 * stored lookup key type, as resolved by the {@link #resolveSpecifiedLookupKey} method.
+	 * @return {@link Mono} emitting the lookup key. May complete without emitting a value
+	 * if no lookup key available
+	 */
+	protected abstract Mono&lt;Object&gt; determineCurrentLookupKey();
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

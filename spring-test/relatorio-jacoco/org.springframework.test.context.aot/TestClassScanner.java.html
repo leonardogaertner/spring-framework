@@ -1,0 +1,276 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TestClassScanner.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context.aot</a> &gt; <span class="el_source">TestClassScanner.java</span></div><h1>TestClassScanner.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context.aot;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Modifier;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.Optional;
+import java.util.Set;
+import java.util.stream.Stream;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.junit.platform.engine.support.descriptor.ClassSource;
+import org.junit.platform.launcher.Launcher;
+import org.junit.platform.launcher.LauncherDiscoveryRequest;
+import org.junit.platform.launcher.TestIdentifier;
+import org.junit.platform.launcher.TestPlan;
+import org.junit.platform.launcher.core.LauncherDiscoveryRequestBuilder;
+import org.junit.platform.launcher.core.LauncherFactory;
+
+import org.springframework.core.annotation.MergedAnnotation;
+import org.springframework.core.annotation.MergedAnnotations;
+import org.springframework.test.context.BootstrapWith;
+import org.springframework.test.context.ContextConfiguration;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+
+import static org.junit.platform.engine.discovery.DiscoverySelectors.selectClasspathRoots;
+import static org.junit.platform.engine.discovery.PackageNameFilter.includePackageNames;
+import static org.springframework.core.annotation.MergedAnnotation.VALUE;
+import static org.springframework.core.annotation.MergedAnnotations.SearchStrategy.INHERITED_ANNOTATIONS;
+import static org.springframework.core.annotation.MergedAnnotations.SearchStrategy.TYPE_HIERARCHY;
+
+/**
+ * {@code TestClassScanner} scans provided classpath roots for Spring integration
+ * test classes using the JUnit Platform {@link Launcher} API which allows all
+ * registered {@link org.junit.platform.engine.TestEngine TestEngines} to discover
+ * tests according to their own rules.
+ *
+ * &lt;p&gt;The scanner currently detects the following categories of Spring integration
+ * test classes.
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;JUnit Jupiter: classes that register the {@code SpringExtension} via
+ * {@code @ExtendWith}.&lt;/li&gt;
+ * &lt;li&gt;JUnit 4: classes that register the {@code SpringJUnit4ClassRunner} or
+ * {@code SpringRunner} via {@code @RunWith}.&lt;/li&gt;
+ * &lt;li&gt;Generic: classes that are annotated with {@code @ContextConfiguration} or
+ * {@code @BootstrapWith}.&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;The scanner has been tested with the following
+ * {@link org.junit.platform.engine.TestEngine TestEngines}.
+ *
+ * &lt;ul&gt;
+ * &lt;li&gt;JUnit Jupiter&lt;/li&gt;
+ * &lt;li&gt;JUnit Vintage&lt;/li&gt;
+ * &lt;li&gt;JUnit Platform Suite Engine&lt;/li&gt;
+ * &lt;li&gt;TestNG Engine for the JUnit Platform&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Sam Brannen
+ * @since 6.0
+ */
+class TestClassScanner {
+
+	// JUnit Jupiter
+	private static final String SPRING_EXTENSION_NAME = &quot;org.springframework.test.context.junit.jupiter.SpringExtension&quot;;
+	private static final String EXTEND_WITH_ANNOTATION_NAME = &quot;org.junit.jupiter.api.extension.ExtendWith&quot;;
+	private static final String CLASS_TEMPLATE_ANNOTATION_NAME = &quot;org.junit.jupiter.api.ClassTemplate&quot;;
+	private static final String NESTED_ANNOTATION_NAME = &quot;org.junit.jupiter.api.Nested&quot;;
+
+	// JUnit 4
+	private static final String RUN_WITH_ANNOTATION_NAME = &quot;org.junit.runner.RunWith&quot;;
+	private static final String SPRING_JUNIT4_CLASS_RUNNER_NAME = &quot;org.springframework.test.context.junit4.SpringJUnit4ClassRunner&quot;;
+	private static final String SPRING_RUNNER_NAME = &quot;org.springframework.test.context.junit4.SpringRunner&quot;;
+
+
+<span class="fc" id="L98">	private final Log logger = LogFactory.getLog(TestClassScanner.class);</span>
+
+	private final Set&lt;Path&gt; classpathRoots;
+
+
+	/**
+	 * Create a {@code TestClassScanner} for the given classpath roots.
+	 * &lt;p&gt;For example, in a Gradle project that only supports Java-based tests,
+	 * the supplied set would contain a single {@link Path} representing the
+	 * absolute path to the project's {@code build/classes/java/test} folder.
+	 * @param classpathRoots the classpath roots to scan
+	 */
+<span class="fc" id="L110">	TestClassScanner(Set&lt;Path&gt; classpathRoots) {</span>
+<span class="fc" id="L111">		this.classpathRoots = assertPreconditions(classpathRoots);</span>
+<span class="fc" id="L112">	}</span>
+
+
+	/**
+	 * Scan the configured classpath roots for Spring integration test classes.
+	 */
+	Stream&lt;Class&lt;?&gt;&gt; scan() {
+<span class="fc" id="L119">		return scan(new String[0]);</span>
+	}
+
+	/**
+	 * Scan the configured classpath roots for Spring integration test classes
+	 * in the given packages.
+	 * &lt;p&gt;This method is currently only intended to be used within our own test
+	 * suite to validate the behavior of this scanner with a limited scope. In
+	 * production scenarios one should invoke {@link #scan()} to scan all packages
+	 * in the configured classpath roots.
+	 */
+	Stream&lt;Class&lt;?&gt;&gt; scan(String... packageNames) {
+<span class="fc" id="L131">		Assert.noNullElements(packageNames, &quot;'packageNames' must not contain null elements&quot;);</span>
+
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">		if (logger.isInfoEnabled()) {</span>
+<span class="fc bfc" id="L134" title="All 2 branches covered.">			if (packageNames.length &gt; 0) {</span>
+<span class="fc" id="L135">				logger.info(&quot;Scanning for Spring test classes in packages %s in classpath roots %s&quot;</span>
+<span class="fc" id="L136">						.formatted(Arrays.toString(packageNames), this.classpathRoots));</span>
+			}
+			else {
+<span class="fc" id="L139">				logger.info(&quot;Scanning for Spring test classes in all packages in classpath roots %s&quot;</span>
+<span class="fc" id="L140">						.formatted(this.classpathRoots));</span>
+			}
+		}
+
+<span class="fc" id="L144">		LauncherDiscoveryRequestBuilder builder = LauncherDiscoveryRequestBuilder.request();</span>
+<span class="fc" id="L145">		builder.selectors(selectClasspathRoots(this.classpathRoots));</span>
+<span class="fc bfc" id="L146" title="All 2 branches covered.">		if (packageNames.length &gt; 0) {</span>
+<span class="fc" id="L147">			builder.filters(includePackageNames(packageNames));</span>
+		}
+<span class="fc" id="L149">		LauncherDiscoveryRequest request = builder</span>
+				// In case junit.platform.discovery.issue.severity.critical=INFO has been configured,
+				// we do not want scanning to fail due to the deprecation of the Vintage test engine.
+				// So, we disable reporting of the deprecation discovery issue.
+<span class="fc" id="L153">				.configurationParameter(&quot;junit.vintage.discovery.issue.reporting.enabled&quot;, &quot;false&quot;)</span>
+<span class="fc" id="L154">				.build();</span>
+<span class="fc" id="L155">		Launcher launcher = LauncherFactory.create();</span>
+<span class="fc" id="L156">		TestPlan testPlan = launcher.discover(request);</span>
+
+<span class="fc" id="L158">		return testPlan.getRoots().stream()</span>
+<span class="fc" id="L159">				.map(testPlan::getDescendants)</span>
+<span class="fc" id="L160">				.flatMap(Set::stream)</span>
+<span class="fc" id="L161">				.map(TestIdentifier::getSource)</span>
+<span class="fc" id="L162">				.flatMap(Optional::stream)</span>
+<span class="fc" id="L163">				.filter(ClassSource.class::isInstance)</span>
+<span class="fc" id="L164">				.map(ClassSource.class::cast)</span>
+<span class="fc" id="L165">				.map(this::getJavaClass)</span>
+<span class="fc" id="L166">				.flatMap(Optional::stream)</span>
+<span class="fc" id="L167">				.filter(this::isSpringTestClass)</span>
+<span class="fc" id="L168">				.flatMap(this::expandJupiterClassTemplateIfNecessary)</span>
+<span class="fc" id="L169">				.distinct()</span>
+<span class="fc" id="L170">				.sorted(Comparator.comparing(Class::getName));</span>
+	}
+
+	private Optional&lt;Class&lt;?&gt;&gt; getJavaClass(ClassSource classSource) {
+		try {
+<span class="fc" id="L175">			return Optional.of(classSource.getJavaClass());</span>
+		}
+<span class="nc" id="L177">		catch (Exception ex) {</span>
+			// ignore exception
+<span class="nc" id="L179">			return Optional.empty();</span>
+		}
+	}
+
+	private boolean isSpringTestClass(Class&lt;?&gt; clazz) {
+<span class="fc bfc" id="L184" title="All 4 branches covered.">		boolean isSpringTestClass = (isJupiterSpringTestClass(clazz) || isJUnit4SpringTestClass(clazz) ||</span>
+<span class="fc bfc" id="L185" title="All 2 branches covered.">				isGenericSpringTestClass(clazz));</span>
+<span class="pc bpc" id="L186" title="1 of 4 branches missed.">		if (isSpringTestClass &amp;&amp; logger.isTraceEnabled()) {</span>
+<span class="nc" id="L187">			logger.trace(&quot;Found Spring test class: &quot; + clazz.getName());</span>
+		}
+<span class="fc" id="L189">		return isSpringTestClass;</span>
+	}
+
+	/**
+	 * Expand the supplied test class into a stream containing the supplied test
+	 * class. If the supplied class is a JUnit Jupiter {@code @ClassTemplate}
+	 * (such as a {@code @ParameterizedClass}), the returned stream will also
+	 * contain {@code @Nested} test classes associated with the supplied test
+	 * class.
+	 * @since 7.0
+	 */
+	private Stream&lt;Class&lt;?&gt;&gt; expandJupiterClassTemplateIfNecessary(Class&lt;?&gt; testClass) {
+<span class="fc bfc" id="L201" title="All 2 branches covered.">		if (isJupiterClassTemplate(testClass)) {</span>
+<span class="fc" id="L202">			Set&lt;Class&lt;?&gt;&gt; testClasses = new HashSet&lt;&gt;();</span>
+<span class="fc" id="L203">			collectNestedTestClasses(testClass, testClasses, new HashSet&lt;&gt;());</span>
+<span class="fc" id="L204">			testClasses.add(testClass);</span>
+<span class="fc" id="L205">			return testClasses.stream();</span>
+		}
+<span class="fc" id="L207">		return Stream.of(testClass);</span>
+	}
+
+	/**
+	 * Collect all {@code @Nested} test classes declared in the superclass hierarchy
+	 * of the supplied test class as well as {@code @Nested} test classes declared
+	 * in the supplied test class itself, recursively.
+	 * @since 7.0
+	 */
+	private static void collectNestedTestClasses(Class&lt;?&gt; testClass, Set&lt;Class&lt;?&gt;&gt; testClasses, Set&lt;Class&lt;?&gt;&gt; visited) {
+<span class="pc bpc" id="L217" title="1 of 2 branches missed.">		if (visited.add(testClass)) {</span>
+<span class="fc" id="L218">			Class&lt;?&gt; superclass = testClass.getSuperclass();</span>
+<span class="pc bpc" id="L219" title="1 of 4 branches missed.">			if (superclass != null &amp;&amp; superclass != Object.class) {</span>
+<span class="fc" id="L220">				collectNestedTestClasses(superclass, testClasses, visited);</span>
+			}
+<span class="fc bfc" id="L222" title="All 2 branches covered.">			for (Class&lt;?&gt; nestedClass : testClass.getDeclaredClasses()) {</span>
+<span class="fc bfc" id="L223" title="All 2 branches covered.">				if (isJupiterNestedClass(nestedClass)) {</span>
+<span class="fc" id="L224">					testClasses.add(nestedClass);</span>
+<span class="fc" id="L225">					collectNestedTestClasses(nestedClass, testClasses, visited);</span>
+				}
+			}
+		}
+<span class="fc" id="L229">	}</span>
+
+	private static boolean isJupiterSpringTestClass(Class&lt;?&gt; clazz) {
+<span class="fc" id="L232">		return MergedAnnotations.search(TYPE_HIERARCHY)</span>
+<span class="fc" id="L233">				.withEnclosingClasses(ClassUtils::isInnerClass)</span>
+<span class="fc" id="L234">				.from(clazz)</span>
+<span class="fc" id="L235">				.stream(EXTEND_WITH_ANNOTATION_NAME)</span>
+<span class="fc" id="L236">				.map(annotation -&gt; annotation.getClassArray(VALUE))</span>
+<span class="fc" id="L237">				.flatMap(Arrays::stream)</span>
+<span class="fc" id="L238">				.map(Class::getName)</span>
+<span class="fc" id="L239">				.anyMatch(SPRING_EXTENSION_NAME::equals);</span>
+	}
+
+	private static boolean isJupiterClassTemplate(Class&lt;?&gt; clazz) {
+<span class="fc" id="L243">		return MergedAnnotations.from(clazz, TYPE_HIERARCHY).isPresent(CLASS_TEMPLATE_ANNOTATION_NAME);</span>
+	}
+
+	private static boolean isJupiterNestedClass(Class&lt;?&gt; clazz) {
+<span class="fc bfc" id="L247" title="All 4 branches covered.">		return (!Modifier.isAbstract(clazz.getModifiers()) &amp;&amp; ClassUtils.isInnerClass(clazz) &amp;&amp;</span>
+<span class="fc bfc" id="L248" title="All 2 branches covered.">				MergedAnnotations.from(clazz, TYPE_HIERARCHY).isPresent(NESTED_ANNOTATION_NAME));</span>
+	}
+
+	private static boolean isJUnit4SpringTestClass(Class&lt;?&gt; clazz) {
+<span class="fc" id="L252">		MergedAnnotation&lt;Annotation&gt; mergedAnnotation =</span>
+<span class="fc" id="L253">				MergedAnnotations.from(clazz, INHERITED_ANNOTATIONS).get(RUN_WITH_ANNOTATION_NAME);</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">		if (mergedAnnotation.isPresent()) {</span>
+<span class="fc" id="L255">			String name = mergedAnnotation.getClass(VALUE).getName();</span>
+<span class="pc bpc" id="L256" title="1 of 4 branches missed.">			return (SPRING_JUNIT4_CLASS_RUNNER_NAME.equals(name) || SPRING_RUNNER_NAME.equals(name));</span>
+		}
+<span class="fc" id="L258">		return false;</span>
+	}
+
+	private static boolean isGenericSpringTestClass(Class&lt;?&gt; clazz) {
+<span class="fc" id="L262">		MergedAnnotations mergedAnnotations = MergedAnnotations.from(clazz, TYPE_HIERARCHY);</span>
+<span class="fc bfc" id="L263" title="All 2 branches covered.">		return (mergedAnnotations.isPresent(ContextConfiguration.class) ||</span>
+<span class="pc bpc" id="L264" title="1 of 2 branches missed.">				mergedAnnotations.isPresent(BootstrapWith.class));</span>
+	}
+
+	private static Set&lt;Path&gt; assertPreconditions(Set&lt;Path&gt; classpathRoots) {
+<span class="fc" id="L268">		Assert.notEmpty(classpathRoots, &quot;'classpathRoots' must not be null or empty&quot;);</span>
+<span class="fc" id="L269">		Assert.noNullElements(classpathRoots, &quot;'classpathRoots' must not contain null elements&quot;);</span>
+<span class="fc" id="L270">		classpathRoots.forEach(classpathRoot -&gt; Assert.isTrue(Files.exists(classpathRoot),</span>
+<span class="nc" id="L271">				() -&gt; &quot;Classpath root [%s] does not exist&quot;.formatted(classpathRoot)));</span>
+<span class="fc" id="L272">		return classpathRoots;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

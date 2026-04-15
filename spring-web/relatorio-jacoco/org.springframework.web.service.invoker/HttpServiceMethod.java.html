@@ -1,0 +1,598 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HttpServiceMethod.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.service.invoker</a> &gt; <span class="el_source">HttpServiceMethod.java</span></div><h1>HttpServiceMethod.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.service.invoker;
+
+import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.Method;
+import java.lang.reflect.Type;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.GenericTypeResolver;
+import org.springframework.core.KotlinDetector;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.annotation.MergedAnnotation;
+import org.springframework.core.annotation.MergedAnnotationPredicates;
+import org.springframework.core.annotation.MergedAnnotations;
+import org.springframework.core.annotation.MergedAnnotations.SearchStrategy;
+import org.springframework.core.annotation.RepeatableContainers;
+import org.springframework.core.annotation.SynthesizingMethodParameter;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.util.StringValueResolver;
+import org.springframework.web.service.annotation.HttpExchange;
+
+/**
+ * Implements the invocation of an {@link HttpExchange @HttpExchange}-annotated,
+ * {@link HttpServiceProxyFactory#createClient(Class) HTTP service proxy} method
+ * by delegating to an {@link HttpExchangeAdapter} to perform actual requests.
+ *
+ * @author Rossen Stoyanchev
+ * @author Sebastien Deleuze
+ * @author Olga Maciaszek-Sharma
+ * @author Sam Brannen
+ * @since 6.0
+ */
+final class HttpServiceMethod {
+
+<span class="nc" id="L71">	private static final boolean REACTOR_PRESENT =</span>
+<span class="nc" id="L72">			ClassUtils.isPresent(&quot;reactor.core.publisher.Mono&quot;, HttpServiceMethod.class.getClassLoader());</span>
+
+
+	private final Method method;
+
+	private final MethodParameter[] parameters;
+
+	private final List&lt;HttpServiceArgumentResolver&gt; argumentResolvers;
+
+	private final HttpRequestValues.Processor requestValuesProcessor;
+
+	private final HttpRequestValuesInitializer requestValuesInitializer;
+
+	private final ResponseFunction responseFunction;
+
+
+	HttpServiceMethod(
+			Method method, Class&lt;?&gt; serviceType, List&lt;HttpServiceArgumentResolver&gt; argumentResolvers,
+			HttpRequestValues.Processor valuesProcessor, HttpExchangeAdapter adapter,
+<span class="nc" id="L91">			@Nullable StringValueResolver embeddedValueResolver) {</span>
+
+<span class="nc" id="L93">		this.method = method;</span>
+<span class="nc" id="L94">		this.parameters = initMethodParameters(method);</span>
+<span class="nc" id="L95">		this.argumentResolvers = argumentResolvers;</span>
+<span class="nc" id="L96">		this.requestValuesProcessor = valuesProcessor;</span>
+
+<span class="nc bnc" id="L98" title="All 4 branches missed.">		boolean isReactorAdapter = (REACTOR_PRESENT &amp;&amp; adapter instanceof ReactorHttpExchangeAdapter);</span>
+
+<span class="nc" id="L100">		this.requestValuesInitializer =</span>
+<span class="nc" id="L101">				HttpRequestValuesInitializer.create(</span>
+						method, serviceType, embeddedValueResolver,
+<span class="nc bnc" id="L103" title="All 2 branches missed.">						(isReactorAdapter ? ReactiveHttpRequestValues::builder : HttpRequestValues::builder));</span>
+
+<span class="nc bnc" id="L105" title="All 2 branches missed.">		this.responseFunction = (isReactorAdapter ?</span>
+<span class="nc" id="L106">				ReactorExchangeResponseFunction.create((ReactorHttpExchangeAdapter) adapter, method, serviceType) :</span>
+<span class="nc" id="L107">				ExchangeResponseFunction.create(adapter, method, serviceType));</span>
+<span class="nc" id="L108">	}</span>
+
+	private static MethodParameter[] initMethodParameters(Method method) {
+<span class="nc" id="L111">		int count = method.getParameterCount();</span>
+<span class="nc bnc" id="L112" title="All 2 branches missed.">		if (count == 0) {</span>
+<span class="nc" id="L113">			return new MethodParameter[0];</span>
+		}
+<span class="nc bnc" id="L115" title="All 2 branches missed.">		if (KotlinDetector.isSuspendingFunction(method)) {</span>
+<span class="nc" id="L116">			count -= 1;</span>
+		}
+
+<span class="nc" id="L119">		MethodParameter[] parameters = new MethodParameter[count];</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">		for (int i = 0; i &lt; count; i++) {</span>
+<span class="nc" id="L121">			parameters[i] = new SynthesizingMethodParameter(method, i);</span>
+		}
+<span class="nc" id="L123">		return parameters;</span>
+	}
+
+
+	public Method getMethod() {
+<span class="nc" id="L128">		return this.method;</span>
+	}
+
+
+	public @Nullable Object invoke(@Nullable Object[] arguments) {
+<span class="nc" id="L133">		HttpRequestValues.Builder requestValues = this.requestValuesInitializer.initializeRequestValuesBuilder();</span>
+<span class="nc" id="L134">		applyArguments(requestValues, arguments);</span>
+<span class="nc" id="L135">		this.requestValuesProcessor.process(this.method, this.parameters, arguments, requestValues);</span>
+<span class="nc" id="L136">		return this.responseFunction.execute(requestValues.build());</span>
+	}
+
+	private void applyArguments(HttpRequestValues.Builder requestValues, @Nullable Object[] arguments) {
+<span class="nc bnc" id="L140" title="All 2 branches missed.">		Assert.isTrue(arguments.length == this.parameters.length, &quot;Method argument mismatch&quot;);</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">		for (int i = 0; i &lt; arguments.length; i++) {</span>
+<span class="nc" id="L142">			Object value = arguments[i];</span>
+<span class="nc" id="L143">			boolean resolved = false;</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">			for (HttpServiceArgumentResolver resolver : this.argumentResolvers) {</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">				if (resolver.resolve(value, this.parameters[i], requestValues)) {</span>
+<span class="nc" id="L146">					resolved = true;</span>
+<span class="nc" id="L147">					break;</span>
+				}
+<span class="nc" id="L149">			}</span>
+<span class="nc" id="L150">			int index = i;</span>
+<span class="nc" id="L151">			Assert.state(resolved, () -&gt;</span>
+<span class="nc" id="L152">					&quot;Could not resolve parameter [&quot; + this.parameters[index].getParameterIndex() + &quot;] in &quot; +</span>
+<span class="nc" id="L153">							this.parameters[index].getExecutable().toGenericString() + &quot;: No suitable resolver&quot;);</span>
+		}
+<span class="nc" id="L155">	}</span>
+
+
+	/**
+	 * Factory for {@link HttpRequestValues} with values extracted from the type
+	 * and method-level {@link HttpExchange @HttpExchange} annotations.
+	 */
+<span class="nc" id="L162">	private record HttpRequestValuesInitializer(</span>
+			@Nullable HttpMethod httpMethod, @Nullable String url,
+			@Nullable MediaType contentType, @Nullable List&lt;MediaType&gt; acceptMediaTypes,
+			MultiValueMap&lt;String, String&gt; headers, @Nullable String version,
+			Supplier&lt;HttpRequestValues.Builder&gt; requestValuesSupplier) {
+
+		public HttpRequestValues.Builder initializeRequestValuesBuilder() {
+<span class="nc" id="L169">			HttpRequestValues.Builder requestValues = this.requestValuesSupplier.get();</span>
+<span class="nc bnc" id="L170" title="All 2 branches missed.">			if (this.httpMethod != null) {</span>
+<span class="nc" id="L171">				requestValues.setHttpMethod(this.httpMethod);</span>
+			}
+<span class="nc bnc" id="L173" title="All 2 branches missed.">			if (this.url != null) {</span>
+<span class="nc" id="L174">				requestValues.setUriTemplate(this.url);</span>
+			}
+<span class="nc bnc" id="L176" title="All 2 branches missed.">			if (this.contentType != null) {</span>
+<span class="nc" id="L177">				requestValues.setContentType(this.contentType);</span>
+			}
+<span class="nc bnc" id="L179" title="All 2 branches missed.">			if (this.acceptMediaTypes != null) {</span>
+<span class="nc" id="L180">				requestValues.setAccept(this.acceptMediaTypes);</span>
+			}
+<span class="nc" id="L182">			this.headers.forEach((name, values) -&gt;</span>
+<span class="nc" id="L183">					values.forEach(value -&gt; requestValues.addHeader(name, value)));</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">			if (this.version != null) {</span>
+<span class="nc" id="L185">				requestValues.setApiVersion(this.version);</span>
+			}
+<span class="nc" id="L187">			return requestValues;</span>
+		}
+
+
+		/**
+		 * Introspect the method and create the request factory for it.
+		 */
+		public static HttpRequestValuesInitializer create(
+				Method method, Class&lt;?&gt; containingClass, @Nullable StringValueResolver embeddedValueResolver,
+				Supplier&lt;HttpRequestValues.Builder&gt; requestValuesSupplier) {
+
+<span class="nc" id="L198">			List&lt;AnnotationDescriptor&gt; methodHttpExchanges = getAnnotationDescriptors(method);</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">			Assert.state(!methodHttpExchanges.isEmpty(),</span>
+<span class="nc" id="L200">					() -&gt; &quot;Expected @HttpExchange annotation on method &quot; + method);</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">			Assert.state(methodHttpExchanges.size() == 1,</span>
+<span class="nc" id="L202">					() -&gt; &quot;Multiple @HttpExchange annotations found on method %s, but only one is allowed: %s&quot;</span>
+<span class="nc" id="L203">							.formatted(method, methodHttpExchanges));</span>
+
+<span class="nc" id="L205">			List&lt;AnnotationDescriptor&gt; typeHttpExchanges = getAnnotationDescriptors(containingClass);</span>
+<span class="nc bnc" id="L206" title="All 2 branches missed.">			Assert.state(typeHttpExchanges.size() &lt;= 1,</span>
+<span class="nc" id="L207">					() -&gt; &quot;Multiple @HttpExchange annotations found on %s, but only one is allowed: %s&quot;</span>
+<span class="nc" id="L208">							.formatted(containingClass, typeHttpExchanges));</span>
+
+<span class="nc" id="L210">			HttpExchange methodAnnotation = methodHttpExchanges.get(0).httpExchange;</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">			HttpExchange typeAnnotation = (!typeHttpExchanges.isEmpty() ? typeHttpExchanges.get(0).httpExchange : null);</span>
+
+<span class="nc" id="L213">			HttpMethod httpMethod = initHttpMethod(typeAnnotation, methodAnnotation);</span>
+<span class="nc" id="L214">			String url = initUrl(typeAnnotation, methodAnnotation, embeddedValueResolver);</span>
+<span class="nc" id="L215">			MediaType contentType = initContentType(typeAnnotation, methodAnnotation);</span>
+<span class="nc" id="L216">			List&lt;MediaType&gt; acceptableMediaTypes = initAccept(typeAnnotation, methodAnnotation);</span>
+<span class="nc" id="L217">			MultiValueMap&lt;String, String&gt; headers = initHeaders(typeAnnotation, methodAnnotation, embeddedValueResolver);</span>
+<span class="nc" id="L218">			String version = initVersion(typeAnnotation, methodAnnotation);</span>
+
+<span class="nc" id="L220">			return new HttpRequestValuesInitializer(</span>
+					httpMethod, url, contentType, acceptableMediaTypes, headers, version,
+					requestValuesSupplier);
+		}
+
+		private static @Nullable HttpMethod initHttpMethod(@Nullable HttpExchange typeAnnotation, HttpExchange methodAnnotation) {
+<span class="nc" id="L226">			String methodLevelMethod = methodAnnotation.method();</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">			if (StringUtils.hasText(methodLevelMethod)) {</span>
+<span class="nc" id="L228">				return HttpMethod.valueOf(methodLevelMethod);</span>
+			}
+
+<span class="nc bnc" id="L231" title="All 2 branches missed.">			String typeLevelMethod = (typeAnnotation != null ? typeAnnotation.method() : null);</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">			if (StringUtils.hasText(typeLevelMethod)) {</span>
+<span class="nc" id="L233">				return HttpMethod.valueOf(typeLevelMethod);</span>
+			}
+
+<span class="nc" id="L236">			return null;</span>
+		}
+
+		@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+		private static @Nullable String initUrl(
+				@Nullable HttpExchange typeAnnotation, HttpExchange methodAnnotation,
+				@Nullable StringValueResolver embeddedValueResolver) {
+
+<span class="nc bnc" id="L244" title="All 2 branches missed.">			String typeLevelUrl = (typeAnnotation != null ? typeAnnotation.url() : null);</span>
+<span class="nc" id="L245">			String methodLevelUrl = methodAnnotation.url();</span>
+
+<span class="nc bnc" id="L247" title="All 2 branches missed.">			if (embeddedValueResolver != null) {</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">				typeLevelUrl = (typeLevelUrl != null ? embeddedValueResolver.resolveStringValue(typeLevelUrl) : null);</span>
+<span class="nc" id="L249">				methodLevelUrl = embeddedValueResolver.resolveStringValue(methodLevelUrl);</span>
+			}
+
+<span class="nc" id="L252">			boolean hasTypeLevelUrl = StringUtils.hasText(typeLevelUrl);</span>
+<span class="nc" id="L253">			boolean hasMethodLevelUrl = StringUtils.hasText(methodLevelUrl);</span>
+
+<span class="nc bnc" id="L255" title="All 4 branches missed.">			if (hasTypeLevelUrl &amp;&amp; hasMethodLevelUrl) {</span>
+<span class="nc bnc" id="L256" title="All 4 branches missed.">				return (typeLevelUrl + (!typeLevelUrl.endsWith(&quot;/&quot;) &amp;&amp; !methodLevelUrl.startsWith(&quot;/&quot;) ? &quot;/&quot; : &quot;&quot;) + methodLevelUrl);</span>
+			}
+
+<span class="nc bnc" id="L259" title="All 4 branches missed.">			if (!hasTypeLevelUrl &amp;&amp; !hasMethodLevelUrl) {</span>
+<span class="nc" id="L260">				return null;</span>
+			}
+
+<span class="nc bnc" id="L263" title="All 2 branches missed.">			return (hasMethodLevelUrl ? methodLevelUrl : typeLevelUrl);</span>
+		}
+
+		private static @Nullable MediaType initContentType(
+				@Nullable HttpExchange typeAnnotation, HttpExchange methodAnnotation) {
+
+<span class="nc" id="L269">			String methodLevelContentType = methodAnnotation.contentType();</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">			if (StringUtils.hasText(methodLevelContentType)) {</span>
+<span class="nc" id="L271">				return MediaType.parseMediaType(methodLevelContentType);</span>
+			}
+
+<span class="nc bnc" id="L274" title="All 2 branches missed.">			String typeLevelContentType = (typeAnnotation != null ? typeAnnotation.contentType() : null);</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">			if (StringUtils.hasText(typeLevelContentType)) {</span>
+<span class="nc" id="L276">				return MediaType.parseMediaType(typeLevelContentType);</span>
+			}
+
+<span class="nc" id="L279">			return null;</span>
+		}
+
+		private static @Nullable List&lt;MediaType&gt; initAccept(
+				@Nullable HttpExchange typeAnnotation, HttpExchange methodAnnotation) {
+
+<span class="nc" id="L285">			String[] methodLevelAccept = methodAnnotation.accept();</span>
+<span class="nc bnc" id="L286" title="All 2 branches missed.">			if (!ObjectUtils.isEmpty(methodLevelAccept)) {</span>
+<span class="nc" id="L287">				return MediaType.parseMediaTypes(List.of(methodLevelAccept));</span>
+			}
+
+<span class="nc bnc" id="L290" title="All 2 branches missed.">			String[] typeLevelAccept = (typeAnnotation != null ? typeAnnotation.accept() : null);</span>
+<span class="nc bnc" id="L291" title="All 2 branches missed.">			if (!ObjectUtils.isEmpty(typeLevelAccept)) {</span>
+<span class="nc" id="L292">				return MediaType.parseMediaTypes(List.of(typeLevelAccept));</span>
+			}
+
+<span class="nc" id="L295">			return null;</span>
+		}
+
+		private static MultiValueMap&lt;String, String&gt; initHeaders(
+				@Nullable HttpExchange typeAnnotation, HttpExchange methodAnnotation,
+				@Nullable StringValueResolver embeddedValueResolver) {
+
+<span class="nc" id="L302">			MultiValueMap&lt;String, String&gt; headers = new LinkedMultiValueMap&lt;&gt;();</span>
+<span class="nc bnc" id="L303" title="All 2 branches missed.">			if (typeAnnotation != null) {</span>
+<span class="nc" id="L304">				addHeaders(typeAnnotation.headers(), embeddedValueResolver, headers);</span>
+			}
+<span class="nc" id="L306">			addHeaders(methodAnnotation.headers(), embeddedValueResolver, headers);</span>
+<span class="nc" id="L307">			return headers;</span>
+		}
+
+		private static @Nullable String initVersion(
+				@Nullable HttpExchange typeAnnotation, HttpExchange methodAnnotation) {
+
+<span class="nc bnc" id="L313" title="All 2 branches missed.">			if (StringUtils.hasText(methodAnnotation.version())) {</span>
+<span class="nc" id="L314">				return methodAnnotation.version();</span>
+			}
+<span class="nc bnc" id="L316" title="All 4 branches missed.">			if (typeAnnotation != null &amp;&amp; StringUtils.hasText(typeAnnotation.version())) {</span>
+<span class="nc" id="L317">				return typeAnnotation.version();</span>
+			}
+<span class="nc" id="L319">			return null;</span>
+		}
+
+		private static void addHeaders(
+				String[] rawValues, @Nullable StringValueResolver embeddedValueResolver,
+				MultiValueMap&lt;String, String&gt; outputHeaders) {
+
+<span class="nc bnc" id="L326" title="All 2 branches missed.">			for (String rawValue: rawValues) {</span>
+<span class="nc" id="L327">				String[] pair = StringUtils.split(rawValue, &quot;=&quot;);</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">				if (pair == null) {</span>
+<span class="nc" id="L329">					continue;</span>
+				}
+<span class="nc" id="L331">				String name = pair[0].trim();</span>
+<span class="nc" id="L332">				List&lt;String&gt; values = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">				for (String value : StringUtils.commaDelimitedListToSet(pair[1])) {</span>
+<span class="nc bnc" id="L334" title="All 2 branches missed.">					if (embeddedValueResolver != null) {</span>
+<span class="nc" id="L335">						value = embeddedValueResolver.resolveStringValue(value);</span>
+					}
+<span class="nc bnc" id="L337" title="All 2 branches missed.">					if (value != null) {</span>
+<span class="nc" id="L338">						value = value.trim();</span>
+<span class="nc" id="L339">						values.add(value);</span>
+					}
+<span class="nc" id="L341">				}</span>
+<span class="nc bnc" id="L342" title="All 2 branches missed.">				if (!values.isEmpty()) {</span>
+<span class="nc" id="L343">					outputHeaders.addAll(name, values);</span>
+				}
+			}
+<span class="nc" id="L346">		}</span>
+
+		private static List&lt;AnnotationDescriptor&gt; getAnnotationDescriptors(AnnotatedElement element) {
+<span class="nc" id="L349">			return MergedAnnotations.from(element, SearchStrategy.TYPE_HIERARCHY, RepeatableContainers.none())</span>
+<span class="nc" id="L350">					.stream(HttpExchange.class)</span>
+<span class="nc" id="L351">					.filter(MergedAnnotationPredicates.firstRunOf(MergedAnnotation::getAggregateIndex))</span>
+<span class="nc" id="L352">					.map(AnnotationDescriptor::new)</span>
+<span class="nc" id="L353">					.distinct()</span>
+<span class="nc" id="L354">					.toList();</span>
+		}
+
+
+		private static class AnnotationDescriptor {
+
+			private final HttpExchange httpExchange;
+			private final MergedAnnotation&lt;?&gt; root;
+
+<span class="nc" id="L363">			AnnotationDescriptor(MergedAnnotation&lt;HttpExchange&gt; mergedAnnotation) {</span>
+<span class="nc" id="L364">				this.httpExchange = mergedAnnotation.synthesize();</span>
+<span class="nc" id="L365">				this.root = mergedAnnotation.getRoot();</span>
+<span class="nc" id="L366">			}</span>
+
+			@Override
+			public boolean equals(@Nullable Object obj) {
+<span class="nc bnc" id="L370" title="All 4 branches missed.">				return (obj instanceof AnnotationDescriptor that &amp;&amp; this.httpExchange.equals(that.httpExchange));</span>
+			}
+
+			@Override
+			public int hashCode() {
+<span class="nc" id="L375">				return this.httpExchange.hashCode();</span>
+			}
+
+			@Override
+			public String toString() {
+<span class="nc" id="L380">				return this.root.synthesize().toString();</span>
+			}
+		}
+
+	}
+
+
+	/**
+	 * Execute a request, obtain a response, and adapt to the expected return type.
+	 */
+	private interface ResponseFunction {
+
+		@Nullable Object execute(HttpRequestValues requestValues);
+
+	}
+
+<span class="nc" id="L396">	private record ExchangeResponseFunction(</span>
+			Function&lt;HttpRequestValues, @Nullable Object&gt; responseFunction) implements ResponseFunction {
+
+		@Override
+		public @Nullable Object execute(HttpRequestValues requestValues) {
+<span class="nc" id="L401">			return this.responseFunction.apply(requestValues);</span>
+		}
+
+
+		/**
+		 * Create the {@code ResponseFunction} that matches the method return type.
+		 */
+		public static ResponseFunction create(
+				HttpExchangeAdapter client, Method method, Class&lt;?&gt; serviceType) {
+
+<span class="nc bnc" id="L411" title="All 2 branches missed.">			if (KotlinDetector.isSuspendingFunction(method)) {</span>
+<span class="nc" id="L412">				throw new IllegalStateException(</span>
+						&quot;Kotlin Coroutines are only supported with reactive implementations&quot;);
+			}
+
+<span class="nc" id="L416">			MethodParameter param = new MethodParameter(method, -1).withContainingClass(serviceType).nestedIfOptional();</span>
+<span class="nc" id="L417">			Class&lt;?&gt; paramType = param.getNestedParameterType();</span>
+
+			Function&lt;HttpRequestValues, @Nullable Object&gt; responseFunction;
+<span class="nc bnc" id="L420" title="All 2 branches missed.">			if (ClassUtils.isVoidType(paramType)) {</span>
+<span class="nc" id="L421">				responseFunction = requestValues -&gt; {</span>
+<span class="nc" id="L422">					client.exchange(requestValues);</span>
+<span class="nc" id="L423">					return null;</span>
+				};
+			}
+<span class="nc bnc" id="L426" title="All 2 branches missed.">			else if (paramType.equals(HttpHeaders.class)) {</span>
+<span class="nc" id="L427">				responseFunction = request -&gt; asOptionalIfNecessary(client.exchangeForHeaders(request), param);</span>
+			}
+<span class="nc bnc" id="L429" title="All 2 branches missed.">			else if (paramType.equals(ResponseEntity.class)) {</span>
+<span class="nc" id="L430">				MethodParameter bodyParam = param.nested();</span>
+<span class="nc bnc" id="L431" title="All 2 branches missed.">				if (bodyParam.getNestedParameterType().equals(Void.class)) {</span>
+<span class="nc" id="L432">					responseFunction = request -&gt;</span>
+<span class="nc" id="L433">							asOptionalIfNecessary(client.exchangeForBodilessEntity(request), param);</span>
+				}
+				else {
+<span class="nc" id="L436">					Type type = bodyParam.getNestedGenericParameterType();</span>
+<span class="nc" id="L437">					ParameterizedTypeReference&lt;?&gt; bodyTypeRef =</span>
+<span class="nc" id="L438">							ParameterizedTypeReference.forType(GenericTypeResolver.resolveType(type, serviceType));</span>
+<span class="nc" id="L439">					responseFunction = request -&gt;</span>
+<span class="nc" id="L440">							asOptionalIfNecessary(client.exchangeForEntity(request, bodyTypeRef), param);</span>
+				}
+<span class="nc" id="L442">			}</span>
+			else {
+<span class="nc" id="L444">				Type type = param.getNestedGenericParameterType();</span>
+<span class="nc" id="L445">				ParameterizedTypeReference&lt;?&gt; bodyTypeRef =</span>
+<span class="nc" id="L446">						ParameterizedTypeReference.forType(GenericTypeResolver.resolveType(type, serviceType));</span>
+<span class="nc" id="L447">				responseFunction = request -&gt;</span>
+<span class="nc" id="L448">						asOptionalIfNecessary(client.exchangeForBody(request, bodyTypeRef), param);</span>
+			}
+
+<span class="nc" id="L451">			return new ExchangeResponseFunction(responseFunction);</span>
+		}
+
+		private static @Nullable Object asOptionalIfNecessary(@Nullable Object response, MethodParameter param) {
+<span class="nc bnc" id="L455" title="All 2 branches missed.">			return param.getParameterType().equals(Optional.class) ? Optional.ofNullable(response) : response;</span>
+		}
+	}
+
+
+	/**
+	 * {@link ResponseFunction} for {@link ReactorHttpExchangeAdapter}.
+	 */
+<span class="nc" id="L463">	private record ReactorExchangeResponseFunction(</span>
+			Function&lt;HttpRequestValues, Publisher&lt;?&gt;&gt; responseFunction,
+			@Nullable ReactiveAdapter returnTypeAdapter,
+			boolean blockForOptional, @Nullable Duration blockTimeout) implements ResponseFunction {
+
+		private static final String COROUTINES_FLOW_CLASS_NAME = &quot;kotlinx.coroutines.flow.Flow&quot;;
+
+		@Override
+		public @Nullable Object execute(HttpRequestValues requestValues) {
+
+<span class="nc" id="L473">			Publisher&lt;?&gt; responsePublisher = this.responseFunction.apply(requestValues);</span>
+
+<span class="nc bnc" id="L475" title="All 2 branches missed.">			if (this.returnTypeAdapter != null) {</span>
+<span class="nc" id="L476">				return this.returnTypeAdapter.fromPublisher(responsePublisher);</span>
+			}
+
+<span class="nc bnc" id="L479" title="All 2 branches missed.">			if (this.blockForOptional) {</span>
+<span class="nc bnc" id="L480" title="All 2 branches missed.">				return (this.blockTimeout != null ?</span>
+<span class="nc" id="L481">						((Mono&lt;?&gt;) responsePublisher).blockOptional(this.blockTimeout) :</span>
+<span class="nc" id="L482">						((Mono&lt;?&gt;) responsePublisher).blockOptional());</span>
+			}
+			else {
+<span class="nc bnc" id="L485" title="All 2 branches missed.">				return (this.blockTimeout != null ?</span>
+<span class="nc" id="L486">						((Mono&lt;?&gt;) responsePublisher).block(this.blockTimeout) :</span>
+<span class="nc" id="L487">						((Mono&lt;?&gt;) responsePublisher).block());</span>
+			}
+		}
+
+
+		/**
+		 * Create the {@code ResponseFunction} that matches the method return type.
+		 */
+		public static ResponseFunction create(
+				ReactorHttpExchangeAdapter client, Method method, Class&lt;?&gt; serviceType) {
+
+<span class="nc" id="L498">			MethodParameter returnParam = new MethodParameter(method, -1).withContainingClass(serviceType);</span>
+<span class="nc" id="L499">			Class&lt;?&gt; returnType = returnParam.getParameterType();</span>
+<span class="nc" id="L500">			boolean isSuspending = KotlinDetector.isSuspendingFunction(method);</span>
+<span class="nc" id="L501">			boolean hasFlowReturnType = COROUTINES_FLOW_CLASS_NAME.equals(returnType.getName());</span>
+<span class="nc bnc" id="L502" title="All 4 branches missed.">			boolean isUnwrapped = isSuspending &amp;&amp; !hasFlowReturnType;</span>
+<span class="nc bnc" id="L503" title="All 2 branches missed.">			if (isSuspending) {</span>
+<span class="nc bnc" id="L504" title="All 2 branches missed.">				returnType = (hasFlowReturnType ? Flux.class : Mono.class);</span>
+			}
+
+<span class="nc" id="L507">			ReactiveAdapter reactiveAdapter = client.getReactiveAdapterRegistry().getAdapter(returnType);</span>
+
+<span class="nc bnc" id="L509" title="All 2 branches missed.">			MethodParameter actualParam = (reactiveAdapter != null ? returnParam.nested() : returnParam.nestedIfOptional());</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">			Class&lt;?&gt; actualType = isUnwrapped ? actualParam.getParameterType() : actualParam.getNestedParameterType();</span>
+
+			Function&lt;HttpRequestValues, Publisher&lt;?&gt;&gt; responseFunction;
+<span class="nc bnc" id="L513" title="All 2 branches missed.">			if (ClassUtils.isVoidType(actualType)) {</span>
+<span class="nc" id="L514">				responseFunction = client::exchangeForMono;</span>
+			}
+<span class="nc bnc" id="L516" title="All 4 branches missed.">			else if (reactiveAdapter != null &amp;&amp; reactiveAdapter.isNoValue()) {</span>
+<span class="nc" id="L517">				responseFunction = client::exchangeForMono;</span>
+			}
+<span class="nc bnc" id="L519" title="All 2 branches missed.">			else if (actualType.equals(HttpHeaders.class)) {</span>
+<span class="nc" id="L520">				responseFunction = client::exchangeForHeadersMono;</span>
+			}
+<span class="nc bnc" id="L522" title="All 2 branches missed.">			else if (actualType.equals(ResponseEntity.class)) {</span>
+<span class="nc bnc" id="L523" title="All 2 branches missed.">				MethodParameter bodyParam = (isUnwrapped ? actualParam : actualParam.nested());</span>
+<span class="nc" id="L524">				Class&lt;?&gt; bodyType = bodyParam.getNestedParameterType();</span>
+<span class="nc bnc" id="L525" title="All 2 branches missed.">				if (bodyType.equals(Void.class)) {</span>
+<span class="nc" id="L526">					responseFunction = client::exchangeForBodilessEntityMono;</span>
+				}
+				else {
+<span class="nc" id="L529">					ReactiveAdapter bodyAdapter = client.getReactiveAdapterRegistry().getAdapter(bodyType);</span>
+<span class="nc" id="L530">					responseFunction = initResponseEntityFunction(client, bodyParam, serviceType, bodyAdapter, isUnwrapped);</span>
+				}
+<span class="nc" id="L532">			}</span>
+			else {
+<span class="nc" id="L534">				responseFunction = initBodyFunction(</span>
+						client, actualParam, serviceType, reactiveAdapter, isUnwrapped);
+			}
+
+<span class="nc" id="L538">			return new ReactorExchangeResponseFunction(</span>
+<span class="nc" id="L539">					responseFunction, reactiveAdapter, returnType.equals(Optional.class), client.getBlockTimeout());</span>
+		}
+
+		@SuppressWarnings(&quot;ConstantConditions&quot;)
+		private static Function&lt;HttpRequestValues, Publisher&lt;?&gt;&gt; initResponseEntityFunction(
+				ReactorHttpExchangeAdapter client, MethodParameter methodParam, Class&lt;?&gt; serviceType,
+				@Nullable ReactiveAdapter reactiveAdapter, boolean isUnwrapped) {
+
+<span class="nc bnc" id="L547" title="All 2 branches missed.">			if (reactiveAdapter == null) {</span>
+<span class="nc" id="L548">				return request -&gt; {</span>
+<span class="nc" id="L549">					Type type = methodParam.getNestedGenericParameterType();</span>
+<span class="nc" id="L550">					Type resolvedType = GenericTypeResolver.resolveType(type, serviceType);</span>
+<span class="nc" id="L551">					return client.exchangeForEntityMono(request, ParameterizedTypeReference.forType(resolvedType));</span>
+				};
+			}
+
+<span class="nc" id="L555">			Assert.isTrue(reactiveAdapter.isMultiValue(),</span>
+					&quot;ResponseEntity body must be a concrete value or a multi-value Publisher&quot;);
+
+<span class="nc bnc" id="L558" title="All 2 branches missed.">			Type type = (isUnwrapped ?</span>
+<span class="nc" id="L559">					methodParam.nested().getGenericParameterType() :</span>
+<span class="nc" id="L560">					methodParam.nested().getNestedGenericParameterType());</span>
+
+<span class="nc" id="L562">			ParameterizedTypeReference&lt;?&gt; bodyType =</span>
+<span class="nc" id="L563">					ParameterizedTypeReference.forType(GenericTypeResolver.resolveType(type, serviceType));</span>
+
+			// Shortcut for Flux
+<span class="nc bnc" id="L566" title="All 2 branches missed.">			if (reactiveAdapter.getReactiveType().equals(Flux.class)) {</span>
+<span class="nc" id="L567">				return request -&gt; client.exchangeForEntityFlux(request, bodyType);</span>
+			}
+
+<span class="nc" id="L570">			return request -&gt; client.exchangeForEntityFlux(request, bodyType)</span>
+<span class="nc" id="L571">					.map(entity -&gt; {</span>
+<span class="nc" id="L572">						Flux&lt;?&gt; entityBody = entity.getBody();</span>
+<span class="nc bnc" id="L573" title="All 2 branches missed.">						Assert.state(entityBody != null, &quot;Entity body must not be null&quot;);</span>
+<span class="nc" id="L574">						Object body = reactiveAdapter.fromPublisher(entityBody);</span>
+<span class="nc" id="L575">						return new ResponseEntity&lt;&gt;(body, entity.getHeaders(), entity.getStatusCode());</span>
+					});
+		}
+
+		private static Function&lt;HttpRequestValues, Publisher&lt;?&gt;&gt; initBodyFunction(
+				ReactorHttpExchangeAdapter client,
+				MethodParameter methodParam, Class&lt;?&gt; serviceType,
+				@Nullable ReactiveAdapter reactiveAdapter, boolean isSuspending) {
+
+<span class="nc bnc" id="L584" title="All 2 branches missed.">			Type type = (isSuspending ?</span>
+<span class="nc" id="L585">					methodParam.getGenericParameterType() :</span>
+<span class="nc" id="L586">					methodParam.getNestedGenericParameterType());</span>
+
+<span class="nc" id="L588">			ParameterizedTypeReference&lt;?&gt; bodyType =</span>
+<span class="nc" id="L589">					ParameterizedTypeReference.forType(GenericTypeResolver.resolveType(type, serviceType));</span>
+
+<span class="nc bnc" id="L591" title="All 4 branches missed.">			return (reactiveAdapter != null &amp;&amp; reactiveAdapter.isMultiValue() ?</span>
+<span class="nc" id="L592">					request -&gt; client.exchangeForBodyFlux(request, bodyType) :</span>
+<span class="nc" id="L593">					request -&gt; client.exchangeForBodyMono(request, bodyType));</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

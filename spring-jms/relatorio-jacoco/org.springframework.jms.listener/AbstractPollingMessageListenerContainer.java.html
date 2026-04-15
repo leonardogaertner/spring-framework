@@ -1,0 +1,522 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractPollingMessageListenerContainer.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jms.listener</a> &gt; <span class="el_source">AbstractPollingMessageListenerContainer.java</span></div><h1>AbstractPollingMessageListenerContainer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jms.listener;
+
+import io.micrometer.observation.Observation;
+import jakarta.jms.Connection;
+import jakarta.jms.Destination;
+import jakarta.jms.JMSException;
+import jakarta.jms.Message;
+import jakarta.jms.MessageConsumer;
+import jakarta.jms.Session;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.jms.connection.ConnectionFactoryUtils;
+import org.springframework.jms.connection.JmsResourceHolder;
+import org.springframework.jms.connection.SingleConnectionFactory;
+import org.springframework.jms.support.JmsUtils;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionException;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
+import org.springframework.transaction.support.ResourceTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionSynchronizationUtils;
+import org.springframework.util.Assert;
+
+/**
+ * Base class for listener container implementations which are based on polling.
+ * Provides support for listener handling based on {@link jakarta.jms.MessageConsumer},
+ * optionally participating in externally managed transactions.
+ *
+ * &lt;p&gt;This listener container variant is built for repeated polling attempts,
+ * each invoking the {@link #receiveAndExecute} method. The MessageConsumer used
+ * may be reobtained for each attempt or cached in between attempts; this is up
+ * to the concrete implementation. The receive timeout for each attempt can be
+ * configured through the {@link #setReceiveTimeout &quot;receiveTimeout&quot;} property.
+ *
+ * &lt;p&gt;The underlying mechanism is based on standard JMS MessageConsumer handling,
+ * which is perfectly compatible with both native JMS and JMS in a Jakarta EE environment.
+ * Neither the JMS {@code MessageConsumer.setMessageListener} facility  nor the JMS
+ * ServerSessionPool facility is required. A further advantage of this approach is
+ * full control over the listening process, allowing for custom scaling and throttling
+ * and of concurrent message processing (which is up to concrete subclasses).
+ *
+ * &lt;p&gt;Message receipt and listener execution can automatically be wrapped
+ * in transactions through passing a Spring
+ * {@link org.springframework.transaction.PlatformTransactionManager} into the
+ * {@link #setTransactionManager &quot;transactionManager&quot;} property. This will usually
+ * be a {@link org.springframework.transaction.jta.JtaTransactionManager} in a
+ * Jakarta EE environment, in combination with a JTA-aware JMS ConnectionFactory
+ * obtained from JNDI (check your application server's documentation).
+ *
+ * &lt;p&gt;This base class does not assume any specific mechanism for asynchronous
+ * execution of polling invokers. Check out {@link DefaultMessageListenerContainer}
+ * for a concrete implementation which is based on Spring's
+ * {@link org.springframework.core.task.TaskExecutor} abstraction,
+ * including dynamic scaling of concurrent consumers and automatic self recovery.
+ *
+ * @author Juergen Hoeller
+ * @since 2.0.3
+ * @see #createListenerConsumer
+ * @see #receiveAndExecute
+ * @see #setTransactionManager
+ */
+<span class="fc" id="L79">public abstract class AbstractPollingMessageListenerContainer extends AbstractMessageListenerContainer {</span>
+
+	/**
+	 * The default receive timeout: 1000 ms = 1 second.
+	 */
+	public static final long DEFAULT_RECEIVE_TIMEOUT = 1000;
+
+
+<span class="fc" id="L87">	private final MessageListenerContainerResourceFactory transactionalResourceFactory =</span>
+			new MessageListenerContainerResourceFactory();
+
+<span class="fc" id="L90">	private boolean sessionTransactedCalled = false;</span>
+
+	private @Nullable PlatformTransactionManager transactionManager;
+
+<span class="fc" id="L94">	private final DefaultTransactionDefinition transactionDefinition = new DefaultTransactionDefinition();</span>
+
+<span class="fc" id="L96">	private long receiveTimeout = DEFAULT_RECEIVE_TIMEOUT;</span>
+
+
+	@Override
+	public void setSessionTransacted(boolean sessionTransacted) {
+<span class="fc" id="L101">		super.setSessionTransacted(sessionTransacted);</span>
+<span class="fc" id="L102">		this.sessionTransactedCalled = true;</span>
+<span class="fc" id="L103">	}</span>
+
+	/**
+	 * Specify the Spring {@link org.springframework.transaction.PlatformTransactionManager}
+	 * to use for transactional wrapping of message receipt plus listener execution.
+	 * &lt;p&gt;Default is none, not performing any transactional wrapping.
+	 * If specified, this will usually be a Spring
+	 * {@link org.springframework.transaction.jta.JtaTransactionManager} or one
+	 * of its subclasses, in combination with a JTA-aware ConnectionFactory that
+	 * this message listener container obtains its Connections from.
+	 * &lt;p&gt;&lt;b&gt;Note: Consider the use of local JMS transactions instead.&lt;/b&gt;
+	 * Simply switch the {@link #setSessionTransacted &quot;sessionTransacted&quot;} flag
+	 * to &quot;true&quot; in order to use a locally transacted JMS Session for the entire
+	 * receive processing, including any Session operations performed by a
+	 * {@link SessionAwareMessageListener} (for example, sending a response message). This
+	 * allows for fully synchronized Spring transactions based on local JMS
+	 * transactions, similar to what
+	 * {@link org.springframework.jms.connection.JmsTransactionManager} provides. Check
+	 * {@link AbstractMessageListenerContainer}'s javadoc for
+	 * a discussion of transaction choices and message redelivery scenarios.
+	 * @see #setSessionTransacted(boolean)
+	 * @see org.springframework.transaction.jta.JtaTransactionManager
+	 * @see org.springframework.jms.connection.JmsTransactionManager
+	 */
+	public void setTransactionManager(@Nullable PlatformTransactionManager transactionManager) {
+<span class="fc" id="L128">		this.transactionManager = transactionManager;</span>
+<span class="fc" id="L129">	}</span>
+
+	/**
+	 * Return the Spring PlatformTransactionManager to use for transactional
+	 * wrapping of message receipt plus listener execution.
+	 */
+	protected final @Nullable PlatformTransactionManager getTransactionManager() {
+<span class="fc" id="L136">		return this.transactionManager;</span>
+	}
+
+	/**
+	 * Specify the transaction name to use for transactional wrapping.
+	 * Default is the bean name of this listener container, if any.
+	 * @see org.springframework.transaction.TransactionDefinition#getName()
+	 */
+	public void setTransactionName(String transactionName) {
+<span class="nc" id="L145">		this.transactionDefinition.setName(transactionName);</span>
+<span class="nc" id="L146">	}</span>
+
+	/**
+	 * Specify the transaction timeout to use for transactional wrapping, in &lt;b&gt;seconds&lt;/b&gt;.
+	 * Default is none, using the transaction manager's default timeout.
+	 * @see org.springframework.transaction.TransactionDefinition#getTimeout()
+	 * @see #setReceiveTimeout
+	 */
+	public void setTransactionTimeout(int transactionTimeout) {
+<span class="nc" id="L155">		this.transactionDefinition.setTimeout(transactionTimeout);</span>
+<span class="nc" id="L156">	}</span>
+
+	/**
+	 * Set the timeout to use for receive calls, in &lt;b&gt;milliseconds&lt;/b&gt;.
+	 * The default is 1000 ms, that is, 1 second.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; This value needs to be smaller than the transaction
+	 * timeout used by the transaction manager (in the appropriate unit,
+	 * of course). 0 indicates no timeout at all; however, this is only
+	 * feasible if not running within a transaction manager and generally
+	 * discouraged since such a listener container cannot cleanly shut down.
+	 * A negative value such as -1 indicates a no-wait receive operation.
+	 * @see #receiveFromConsumer(MessageConsumer, long)
+	 * @see jakarta.jms.MessageConsumer#receive(long)
+	 * @see jakarta.jms.MessageConsumer#receiveNoWait()
+	 * @see jakarta.jms.MessageConsumer#receive()
+	 * @see #setTransactionTimeout
+	 */
+	public void setReceiveTimeout(long receiveTimeout) {
+<span class="fc" id="L174">		this.receiveTimeout = receiveTimeout;</span>
+<span class="fc" id="L175">	}</span>
+
+	/**
+	 * Return the receive timeout (ms) configured for this listener container.
+	 * @since 4.2
+	 */
+	protected long getReceiveTimeout() {
+<span class="fc" id="L182">		return this.receiveTimeout;</span>
+	}
+
+
+	@Override
+	public void initialize() {
+		// Set sessionTransacted=true in case of a non-JTA transaction manager.
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">		if (!this.sessionTransactedCalled &amp;&amp;</span>
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">				this.transactionManager instanceof ResourceTransactionManager rtm &amp;&amp;</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">				!TransactionSynchronizationUtils.sameResourceFactory(rtm, obtainConnectionFactory())) {</span>
+<span class="nc" id="L192">			super.setSessionTransacted(true);</span>
+		}
+
+		// Use bean name as default transaction name.
+<span class="pc bpc" id="L196" title="1 of 2 branches missed.">		if (this.transactionDefinition.getName() == null) {</span>
+<span class="fc" id="L197">			String beanName = getBeanName();</span>
+<span class="fc bfc" id="L198" title="All 2 branches covered.">			if (beanName != null) {</span>
+<span class="fc" id="L199">				this.transactionDefinition.setName(beanName);</span>
+			}
+		}
+
+		// Proceed with superclass initialization.
+<span class="fc" id="L204">		super.initialize();</span>
+<span class="fc" id="L205">	}</span>
+
+
+	/**
+	 * Create a MessageConsumer for the given JMS Session,
+	 * registering a MessageListener for the specified listener.
+	 * @param session the JMS Session to work on
+	 * @return the MessageConsumer
+	 * @throws jakarta.jms.JMSException if thrown by JMS methods
+	 * @see #receiveAndExecute
+	 */
+	protected MessageConsumer createListenerConsumer(Session session) throws JMSException {
+<span class="fc" id="L217">		Destination destination = getDestination();</span>
+<span class="fc bfc" id="L218" title="All 2 branches covered.">		if (destination == null) {</span>
+<span class="fc" id="L219">			String destinationName = getDestinationName();</span>
+<span class="pc bpc" id="L220" title="1 of 2 branches missed.">			Assert.state(destinationName != null, &quot;No destination set&quot;);</span>
+<span class="fc" id="L221">			destination = resolveDestinationName(session, destinationName);</span>
+		}
+<span class="fc" id="L223">		return createConsumer(session, destination);</span>
+	}
+
+	/**
+	 * Execute the listener for a message received from the given consumer,
+	 * wrapping the entire operation in an external transaction if demanded.
+	 * @param session the JMS Session to work on
+	 * @param consumer the MessageConsumer to work on
+	 * @return whether a message has been received
+	 * @throws JMSException if thrown by JMS methods
+	 * @see #doReceiveAndExecute
+	 */
+	protected boolean receiveAndExecute(
+			Object invoker, @Nullable Session session, @Nullable MessageConsumer consumer)
+			throws JMSException {
+
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">		if (this.transactionManager != null) {</span>
+			// Execute receive within transaction.
+<span class="nc" id="L241">			TransactionStatus status = this.transactionManager.getTransaction(this.transactionDefinition);</span>
+			boolean messageReceived;
+			try {
+<span class="nc" id="L244">				messageReceived = doReceiveAndExecute(invoker, session, consumer, status);</span>
+			}
+<span class="nc" id="L246">			catch (JMSException | RuntimeException | Error ex) {</span>
+<span class="nc" id="L247">				rollbackOnException(this.transactionManager, status, ex);</span>
+<span class="nc" id="L248">				throw ex;</span>
+<span class="nc" id="L249">			}</span>
+			try {
+<span class="nc" id="L251">				this.transactionManager.commit(status);</span>
+			}
+<span class="nc" id="L253">			catch (TransactionException ex) {</span>
+				// Propagate transaction system exceptions as infrastructure problems.
+<span class="nc" id="L255">				throw ex;</span>
+			}
+<span class="nc" id="L257">			catch (RuntimeException ex) {</span>
+				// Typically a late persistence exception from a listener-used resource
+				// -&gt; handle it as listener exception, not as an infrastructure problem.
+				// For example, a database locking failure should not lead to listener shutdown.
+<span class="nc" id="L261">				handleListenerException(ex);</span>
+<span class="nc" id="L262">			}</span>
+<span class="nc" id="L263">			return messageReceived;</span>
+		}
+
+		else {
+			// Execute receive outside of transaction.
+<span class="fc" id="L268">			return doReceiveAndExecute(invoker, session, consumer, null);</span>
+		}
+	}
+
+	/**
+	 * Actually execute the listener for a message received from the given consumer,
+	 * fetching all requires resources and invoking the listener.
+	 * @param session the JMS Session to work on
+	 * @param consumer the MessageConsumer to work on
+	 * @param status the TransactionStatus (may be {@code null})
+	 * @return whether a message has been received
+	 * @throws JMSException if thrown by JMS methods
+	 * @see #doExecuteListener(jakarta.jms.Session, jakarta.jms.Message)
+	 */
+	protected boolean doReceiveAndExecute(Object invoker, @Nullable Session session,
+			@Nullable MessageConsumer consumer, @Nullable TransactionStatus status) throws JMSException {
+
+<span class="fc" id="L285">		Connection conToClose = null;</span>
+<span class="fc" id="L286">		Session sessionToClose = null;</span>
+<span class="fc" id="L287">		MessageConsumer consumerToClose = null;</span>
+		try {
+<span class="fc" id="L289">			Session sessionToUse = session;</span>
+<span class="fc" id="L290">			boolean transactional = false;</span>
+<span class="fc bfc" id="L291" title="All 2 branches covered.">			if (sessionToUse == null) {</span>
+<span class="fc" id="L292">				sessionToUse = ConnectionFactoryUtils.doGetTransactionalSession(</span>
+<span class="fc" id="L293">						obtainConnectionFactory(), this.transactionalResourceFactory, true);</span>
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">				transactional = (sessionToUse != null);</span>
+			}
+<span class="fc bfc" id="L296" title="All 2 branches covered.">			if (sessionToUse == null) {</span>
+				Connection conToUse;
+<span class="pc bpc" id="L298" title="1 of 2 branches missed.">				if (sharedConnectionEnabled()) {</span>
+<span class="fc" id="L299">					conToUse = getSharedConnection();</span>
+				}
+				else {
+<span class="nc" id="L302">					conToUse = createConnection();</span>
+<span class="nc" id="L303">					conToClose = conToUse;</span>
+<span class="nc" id="L304">					conToUse.start();</span>
+				}
+<span class="fc" id="L306">				sessionToUse = createSession(conToUse);</span>
+<span class="fc" id="L307">				sessionToClose = sessionToUse;</span>
+			}
+<span class="fc" id="L309">			MessageConsumer consumerToUse = consumer;</span>
+<span class="fc bfc" id="L310" title="All 2 branches covered.">			if (consumerToUse == null) {</span>
+<span class="nc" id="L311">				consumerToUse = createListenerConsumer(sessionToUse);</span>
+<span class="nc" id="L312">				consumerToClose = consumerToUse;</span>
+			}
+<span class="fc" id="L314">			Message message = receiveMessage(consumerToUse);</span>
+<span class="fc bfc" id="L315" title="All 2 branches covered.">			if (message != null) {</span>
+<span class="pc bpc" id="L316" title="2 of 4 branches missed.">				boolean exposeResource = (!transactional &amp;&amp; isExposeListenerSession() &amp;&amp;</span>
+<span class="pc bpc" id="L317" title="1 of 2 branches missed.">						!TransactionSynchronizationManager.hasResource(obtainConnectionFactory()));</span>
+<span class="fc" id="L318">				Observation observation = createObservation(message).start();</span>
+<span class="fc" id="L319">				Observation.Scope scope = observation.openScope();</span>
+<span class="pc bpc" id="L320" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L321">					logger.debug(&quot;Received message of type [&quot; + message.getClass().getName() + &quot;] from consumer [&quot; +</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">							consumerToUse + &quot;] of &quot; + (transactional ? &quot;transactional &quot; : &quot;&quot;) + &quot;session [&quot; +</span>
+							sessionToUse + &quot;]&quot;);
+				}
+				try {
+<span class="fc" id="L326">					messageReceived(invoker, sessionToUse);</span>
+<span class="pc bpc" id="L327" title="1 of 2 branches missed.">					if (exposeResource) {</span>
+<span class="fc" id="L328">						TransactionSynchronizationManager.bindResource(</span>
+<span class="fc" id="L329">								obtainConnectionFactory(), new LocallyExposedJmsResourceHolder(sessionToUse));</span>
+					}
+<span class="fc" id="L331">					doExecuteListener(sessionToUse, message);</span>
+				}
+<span class="fc" id="L333">				catch (Throwable ex) {</span>
+<span class="pc bpc" id="L334" title="1 of 2 branches missed.">					if (status != null) {</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">						if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L336">							logger.debug(&quot;Rolling back transaction because of listener exception thrown: &quot; + ex);</span>
+						}
+<span class="nc" id="L338">						status.setRollbackOnly();</span>
+					}
+					try {
+<span class="fc" id="L341">						handleListenerException(ex);</span>
+					}
+<span class="nc" id="L343">					catch (Throwable throwable) {</span>
+<span class="nc" id="L344">						observation.error(throwable);</span>
+<span class="nc" id="L345">						throw throwable;</span>
+<span class="fc" id="L346">					}</span>
+					// Rethrow JMSException to indicate an infrastructure problem
+					// that may have to trigger recovery...
+<span class="pc bpc" id="L349" title="1 of 2 branches missed.">					if (ex instanceof JMSException jmsException) {</span>
+<span class="nc" id="L350">						throw jmsException;</span>
+					}
+				}
+				finally {
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">					if (exposeResource) {</span>
+<span class="fc" id="L355">						TransactionSynchronizationManager.unbindResource(obtainConnectionFactory());</span>
+					}
+<span class="fc" id="L357">					observation.stop();</span>
+<span class="fc" id="L358">					scope.close();</span>
+				}
+				// Indicate that a message has been received.
+<span class="fc" id="L361">				return true;</span>
+			}
+			else {
+<span class="pc bpc" id="L364" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">					logger.trace(&quot;Consumer [&quot; + consumerToUse + &quot;] of &quot; + (transactional ? &quot;transactional &quot; : &quot;&quot;) +</span>
+							&quot;session [&quot; + sessionToUse + &quot;] did not receive a message&quot;);
+				}
+<span class="fc" id="L368">				noMessageReceived(invoker, sessionToUse);</span>
+				// Nevertheless call commit, in order to reset the transaction timeout (if any).
+<span class="pc bpc" id="L370" title="1 of 2 branches missed.">				if (shouldCommitAfterNoMessageReceived(sessionToUse)) {</span>
+<span class="fc" id="L371">					commitIfNecessary(sessionToUse, null);</span>
+				}
+				// Indicate that no message has been received.
+<span class="fc" id="L374">				return false;</span>
+			}
+		}
+		finally {
+<span class="fc" id="L378">			JmsUtils.closeMessageConsumer(consumerToClose);</span>
+<span class="fc" id="L379">			JmsUtils.closeSession(sessionToClose);</span>
+<span class="fc" id="L380">			ConnectionFactoryUtils.releaseConnection(conToClose, getConnectionFactory(), true);</span>
+		}
+	}
+
+	/**
+	 * This implementation checks whether the Session is externally synchronized.
+	 * In this case, the Session is not locally transacted, despite the listener
+	 * container's &quot;sessionTransacted&quot; flag being set to &quot;true&quot;.
+	 * @see org.springframework.jms.connection.JmsResourceHolder
+	 */
+	@Override
+	protected boolean isSessionLocallyTransacted(Session session) {
+<span class="nc bnc" id="L392" title="All 2 branches missed.">		if (!super.isSessionLocallyTransacted(session)) {</span>
+<span class="nc" id="L393">			return false;</span>
+		}
+<span class="nc" id="L395">		JmsResourceHolder resourceHolder =</span>
+<span class="nc" id="L396">				(JmsResourceHolder) TransactionSynchronizationManager.getResource(obtainConnectionFactory());</span>
+<span class="nc bnc" id="L397" title="All 4 branches missed.">		return (resourceHolder == null || resourceHolder instanceof LocallyExposedJmsResourceHolder ||</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">				!resourceHolder.containsSession(session));</span>
+	}
+
+	/**
+	 * Determine whether to trigger a commit after no message has been received.
+	 * This is a good idea on any modern-day JMS provider.
+	 * @param session the current JMS Session which received no message
+	 * @return whether to call {@link #commitIfNecessary} on the given Session
+	 */
+	protected boolean shouldCommitAfterNoMessageReceived(Session session) {
+<span class="fc" id="L408">		return true;</span>
+	}
+
+	/**
+	 * Perform a rollback, handling rollback exceptions properly.
+	 * @param status object representing the transaction
+	 * @param ex the thrown listener exception or error
+	 */
+	private void rollbackOnException(PlatformTransactionManager manager, TransactionStatus status, Throwable ex) {
+<span class="nc" id="L417">		logger.debug(&quot;Initiating transaction rollback on listener exception&quot;, ex);</span>
+		try {
+<span class="nc" id="L419">			manager.rollback(status);</span>
+		}
+<span class="nc" id="L421">		catch (RuntimeException ex2) {</span>
+<span class="nc" id="L422">			logger.error(&quot;Listener exception overridden by rollback exception&quot;, ex);</span>
+<span class="nc" id="L423">			throw ex2;</span>
+		}
+<span class="nc" id="L425">		catch (Error err) {</span>
+<span class="nc" id="L426">			logger.error(&quot;Listener exception overridden by rollback error&quot;, ex);</span>
+<span class="nc" id="L427">			throw err;</span>
+<span class="nc" id="L428">		}</span>
+<span class="nc" id="L429">	}</span>
+
+	/**
+	 * Receive a message from the given consumer.
+	 * @param consumer the MessageConsumer to use
+	 * @return the Message, or {@code null} if none
+	 * @throws JMSException if thrown by JMS methods
+	 */
+	protected @Nullable Message receiveMessage(MessageConsumer consumer) throws JMSException {
+<span class="fc" id="L438">		return receiveFromConsumer(consumer, getReceiveTimeout());</span>
+	}
+
+	/**
+	 * Template method that gets called right when a new message has been received,
+	 * before attempting to process it. Allows subclasses to react to the event
+	 * of an actual incoming message, for example adapting their consumer count.
+	 * @param invoker the invoker object (passed through)
+	 * @param session the receiving JMS Session
+	 */
+	protected void messageReceived(Object invoker, Session session) {
+<span class="nc" id="L449">	}</span>
+
+	/**
+	 * Template method that gets called when &lt;i&gt;no&lt;/i&gt; message has been received,
+	 * before returning to the receive loop again. Allows subclasses to react to
+	 * the event of no incoming message, for example marking the invoker as idle.
+	 * @param invoker the invoker object (passed through)
+	 * @param session the receiving JMS Session
+	 */
+	protected void noMessageReceived(Object invoker, Session session) {
+<span class="nc" id="L459">	}</span>
+
+	/**
+	 * Fetch an appropriate Connection from the given JmsResourceHolder.
+	 * &lt;p&gt;This implementation accepts any JMS 1.1 Connection.
+	 * @param holder the JmsResourceHolder
+	 * @return an appropriate Connection fetched from the holder,
+	 * or {@code null} if none found
+	 */
+	protected @Nullable Connection getConnection(JmsResourceHolder holder) {
+<span class="nc" id="L469">		return holder.getConnection();</span>
+	}
+
+	/**
+	 * Fetch an appropriate Session from the given JmsResourceHolder.
+	 * &lt;p&gt;This implementation accepts any JMS 1.1 Session.
+	 * @param holder the JmsResourceHolder
+	 * @return an appropriate Session fetched from the holder,
+	 * or {@code null} if none found
+	 */
+	protected @Nullable Session getSession(JmsResourceHolder holder) {
+<span class="nc" id="L480">		return holder.getSession();</span>
+	}
+
+
+	/**
+	 * ResourceFactory implementation that delegates to this listener container's protected callback methods.
+	 */
+<span class="fc" id="L487">	private class MessageListenerContainerResourceFactory implements ConnectionFactoryUtils.ResourceFactory {</span>
+
+		@Override
+		public @Nullable Connection getConnection(JmsResourceHolder holder) {
+<span class="nc" id="L491">			return AbstractPollingMessageListenerContainer.this.getConnection(holder);</span>
+		}
+
+		@Override
+		public @Nullable Session getSession(JmsResourceHolder holder) {
+<span class="nc" id="L496">			return AbstractPollingMessageListenerContainer.this.getSession(holder);</span>
+		}
+
+		@Override
+		public Connection createConnection() throws JMSException {
+<span class="nc bnc" id="L501" title="All 2 branches missed.">			if (AbstractPollingMessageListenerContainer.this.sharedConnectionEnabled()) {</span>
+<span class="nc" id="L502">				Connection sharedCon = AbstractPollingMessageListenerContainer.this.getSharedConnection();</span>
+<span class="nc" id="L503">				return new SingleConnectionFactory(sharedCon).createConnection();</span>
+			}
+			else {
+<span class="nc" id="L506">				return AbstractPollingMessageListenerContainer.this.createConnection();</span>
+			}
+		}
+
+		@Override
+		public Session createSession(Connection con) throws JMSException {
+<span class="nc" id="L512">			return AbstractPollingMessageListenerContainer.this.createSession(con);</span>
+		}
+
+		@Override
+		public boolean isSynchedLocalTransactionAllowed() {
+<span class="nc" id="L517">			return AbstractPollingMessageListenerContainer.this.isSessionTransacted();</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

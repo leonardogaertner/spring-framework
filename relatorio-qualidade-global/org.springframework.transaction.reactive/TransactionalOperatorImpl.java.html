@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TransactionalOperatorImpl.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.transaction.reactive</a> &gt; <span class="el_source">TransactionalOperatorImpl.java</span></div><h1>TransactionalOperatorImpl.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.transaction.reactive;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.transaction.ReactiveTransaction;
+import org.springframework.transaction.ReactiveTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionException;
+import org.springframework.transaction.TransactionSystemException;
+import org.springframework.util.Assert;
+
+/**
+ * Operator class that simplifies programmatic transaction demarcation and
+ * transaction exception handling.
+ *
+ * @author Mark Paluch
+ * @author Juergen Hoeller
+ * @author Enric Sala
+ * @since 5.2
+ * @see #execute
+ * @see ReactiveTransactionManager
+ */
+final class TransactionalOperatorImpl implements TransactionalOperator {
+
+<span class="fc" id="L45">	private static final Log logger = LogFactory.getLog(TransactionalOperatorImpl.class);</span>
+
+	private final ReactiveTransactionManager transactionManager;
+
+	private final TransactionDefinition transactionDefinition;
+
+
+	/**
+	 * Construct a new TransactionTemplate using the given transaction manager,
+	 * taking its default settings from the given transaction definition.
+	 * @param transactionManager the transaction management strategy to be used
+	 * @param transactionDefinition the transaction definition to copy the
+	 * default settings from. Local properties can still be set to change values.
+	 */
+<span class="fc" id="L59">	TransactionalOperatorImpl(ReactiveTransactionManager transactionManager, TransactionDefinition transactionDefinition) {</span>
+<span class="fc" id="L60">		Assert.notNull(transactionManager, &quot;ReactiveTransactionManager must not be null&quot;);</span>
+<span class="fc" id="L61">		Assert.notNull(transactionDefinition, &quot;TransactionDefinition must not be null&quot;);</span>
+<span class="fc" id="L62">		this.transactionManager = transactionManager;</span>
+<span class="fc" id="L63">		this.transactionDefinition = transactionDefinition;</span>
+<span class="fc" id="L64">	}</span>
+
+
+	/**
+	 * Return the transaction management strategy to be used.
+	 */
+	public ReactiveTransactionManager getTransactionManager() {
+<span class="nc" id="L71">		return this.transactionManager;</span>
+	}
+
+	@Override
+	public &lt;T&gt; Flux&lt;T&gt; execute(TransactionCallback&lt;T&gt; action) throws TransactionException {
+<span class="fc" id="L76">		return TransactionContextManager.currentContext().flatMapMany(context -&gt;</span>
+<span class="fc" id="L77">			Flux.usingWhen(</span>
+<span class="fc" id="L78">				this.transactionManager.getReactiveTransaction(this.transactionDefinition),</span>
+<span class="fc" id="L79">				action::doInTransaction,</span>
+<span class="fc" id="L80">				this.transactionManager::commit,</span>
+				this::rollbackOnException,
+<span class="fc" id="L82">				this.transactionManager::rollback)</span>
+<span class="fc" id="L83">			.onErrorMap(this::unwrapIfResourceCleanupFailure))</span>
+<span class="fc" id="L84">		.contextWrite(TransactionContextManager.getOrCreateContext())</span>
+<span class="fc" id="L85">		.contextWrite(TransactionContextManager.getOrCreateContextHolder());</span>
+	}
+
+	/**
+	 * Perform a rollback, handling rollback exceptions properly.
+	 * @param status object representing the transaction
+	 * @param ex the thrown application exception or error
+	 * @throws TransactionException in case of a rollback error
+	 */
+	private Mono&lt;Void&gt; rollbackOnException(ReactiveTransaction status, Throwable ex) throws TransactionException {
+<span class="fc" id="L95">		logger.debug(&quot;Initiating transaction rollback on application exception&quot;, ex);</span>
+<span class="fc" id="L96">		return this.transactionManager.rollback(status).onErrorMap(ex2 -&gt; {</span>
+<span class="fc" id="L97">					logger.error(&quot;Application exception overridden by rollback exception&quot;, ex);</span>
+<span class="pc bpc" id="L98" title="1 of 2 branches missed.">					if (ex2 instanceof TransactionSystemException tse) {</span>
+<span class="nc" id="L99">						tse.initApplicationException(ex);</span>
+					}
+					else {
+<span class="fc" id="L102">						ex2.addSuppressed(ex);</span>
+					}
+<span class="fc" id="L104">					return ex2;</span>
+				}
+		);
+	}
+
+	/**
+	 * Unwrap the cause of a throwable, if produced by a failure
+	 * during the async resource cleanup in {@link Flux#usingWhen}.
+	 * @param ex the throwable to try to unwrap
+	 */
+	private Throwable unwrapIfResourceCleanupFailure(Throwable ex) {
+<span class="pc bpc" id="L115" title="1 of 4 branches missed.">		if (ex instanceof RuntimeException &amp;&amp; ex.getCause() != null) {</span>
+<span class="fc" id="L116">			String msg = ex.getMessage();</span>
+<span class="pc bpc" id="L117" title="1 of 4 branches missed.">			if (msg != null &amp;&amp; msg.startsWith(&quot;Async resource cleanup failed&quot;)) {</span>
+<span class="fc" id="L118">				return ex.getCause();</span>
+			}
+		}
+<span class="fc" id="L121">		return ex;</span>
+	}
+
+
+	@Override
+	public boolean equals(@Nullable Object other) {
+<span class="nc bnc" id="L127" title="All 6 branches missed.">		return (this == other || (super.equals(other) &amp;&amp; (!(other instanceof TransactionalOperatorImpl toi) ||</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">				getTransactionManager() == toi.getTransactionManager())));</span>
+	}
+
+	@Override
+	public int hashCode() {
+<span class="nc" id="L133">		return getTransactionManager().hashCode();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

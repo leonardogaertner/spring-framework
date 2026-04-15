@@ -1,0 +1,1857 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ResolvableType.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core</a> &gt; <span class="el_source">ResolvableType.java</span></div><h1>ResolvableType.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core;
+
+import java.io.Serializable;
+import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.GenericArrayType;
+import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
+import java.lang.reflect.ParameterizedType;
+import java.lang.reflect.Type;
+import java.lang.reflect.TypeVariable;
+import java.lang.reflect.WildcardType;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.IdentityHashMap;
+import java.util.Map;
+import java.util.Set;
+import java.util.StringJoiner;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.SerializableTypeWrapper.FieldTypeProvider;
+import org.springframework.core.SerializableTypeWrapper.MethodParameterTypeProvider;
+import org.springframework.core.SerializableTypeWrapper.TypeProvider;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ConcurrentReferenceHashMap;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Encapsulates a Java {@link java.lang.reflect.Type}, providing access to
+ * {@link #getSuperType() supertypes}, {@link #getInterfaces() interfaces}, and
+ * {@link #getGeneric(int...) generic parameters} along with the ability to ultimately
+ * {@link #resolve() resolve} to a {@link java.lang.Class}.
+ *
+ * &lt;p&gt;A {@code ResolvableType} may be obtained from a {@linkplain #forField(Field) field},
+ * a {@linkplain #forMethodParameter(Method, int) method parameter},
+ * a {@linkplain #forMethodReturnType(Method) method return type}, or a
+ * {@linkplain #forClass(Class) class}. Most methods on this class will themselves return
+ * a {@code ResolvableType}, allowing for easy navigation. For example:
+ * &lt;pre class=&quot;code&quot;&gt;
+ * private HashMap&amp;lt;Integer, List&amp;lt;String&amp;gt;&amp;gt; myMap;
+ *
+ * public void example() {
+ *     ResolvableType t = ResolvableType.forField(getClass().getDeclaredField(&quot;myMap&quot;));
+ *     t.getSuperType(); // AbstractMap&amp;lt;Integer, List&amp;lt;String&amp;gt;&amp;gt;
+ *     t.asMap(); // Map&amp;lt;Integer, List&amp;lt;String&amp;gt;&amp;gt;
+ *     t.getGeneric(0).resolve(); // Integer
+ *     t.getGeneric(1).resolve(); // List
+ *     t.getGeneric(1); // List&amp;lt;String&amp;gt;
+ *     t.resolveGeneric(1, 0); // String
+ * }
+ * &lt;/pre&gt;
+ *
+ * @author Phillip Webb
+ * @author Juergen Hoeller
+ * @author Stephane Nicoll
+ * @author Yanming Zhou
+ * @since 4.0
+ * @see #forField(Field)
+ * @see #forMethodParameter(Method, int)
+ * @see #forMethodReturnType(Method)
+ * @see #forConstructorParameter(Constructor, int)
+ * @see #forClass(Class)
+ * @see #forType(Type)
+ * @see #forInstance(Object)
+ * @see ResolvableTypeProvider
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class ResolvableType implements Serializable {
+
+	/**
+	 * {@code ResolvableType} returned when no value is available. {@code NONE} is used
+	 * in preference to {@code null} so that multiple method calls can be safely chained.
+	 */
+<span class="fc" id="L95">	public static final ResolvableType NONE = new ResolvableType(EmptyType.INSTANCE, null, null, 0);</span>
+
+<span class="fc" id="L97">	private static final ResolvableType[] EMPTY_TYPES_ARRAY = new ResolvableType[0];</span>
+
+<span class="fc" id="L99">	private static final ConcurrentReferenceHashMap&lt;ResolvableType, ResolvableType&gt; cache =</span>
+			new ConcurrentReferenceHashMap&lt;&gt;(256);
+
+
+	/**
+	 * The underlying Java type being managed.
+	 */
+	private final Type type;
+
+	/**
+	 * The component type for an array or {@code null} if the type should be deduced.
+	 */
+	private final @Nullable ResolvableType componentType;
+
+	/**
+	 * Optional provider for the type.
+	 */
+	private final @Nullable TypeProvider typeProvider;
+
+	/**
+	 * The {@code VariableResolver} to use or {@code null} if no resolver is available.
+	 */
+	private final @Nullable VariableResolver variableResolver;
+
+	private final @Nullable Integer hash;
+
+	private @Nullable Class&lt;?&gt; resolved;
+
+	private transient volatile @Nullable ResolvableType superType;
+
+	private transient volatile ResolvableType @Nullable [] interfaces;
+
+	private transient volatile ResolvableType @Nullable [] generics;
+
+	private transient volatile @Nullable Boolean unresolvableGenerics;
+
+
+	/**
+	 * Private constructor used to create a new {@code ResolvableType} for cache key purposes,
+	 * with no upfront resolution.
+	 */
+	private ResolvableType(
+<span class="fc" id="L141">			Type type, @Nullable TypeProvider typeProvider, @Nullable VariableResolver variableResolver) {</span>
+
+<span class="fc" id="L143">		this.type = type;</span>
+<span class="fc" id="L144">		this.componentType = null;</span>
+<span class="fc" id="L145">		this.typeProvider = typeProvider;</span>
+<span class="fc" id="L146">		this.variableResolver = variableResolver;</span>
+<span class="fc" id="L147">		this.hash = calculateHashCode();</span>
+<span class="fc" id="L148">		this.resolved = null;</span>
+<span class="fc" id="L149">	}</span>
+
+	/**
+	 * Private constructor used to create a new {@code ResolvableType} for cache value purposes,
+	 * with upfront resolution and a pre-calculated hash.
+	 * @since 4.2
+	 */
+	private ResolvableType(Type type, @Nullable TypeProvider typeProvider,
+<span class="fc" id="L157">			@Nullable VariableResolver variableResolver, @Nullable Integer hash) {</span>
+
+<span class="fc" id="L159">		this.type = type;</span>
+<span class="fc" id="L160">		this.componentType = null;</span>
+<span class="fc" id="L161">		this.typeProvider = typeProvider;</span>
+<span class="fc" id="L162">		this.variableResolver = variableResolver;</span>
+<span class="fc" id="L163">		this.hash = hash;</span>
+<span class="fc" id="L164">		this.resolved = resolveClass();</span>
+<span class="fc" id="L165">	}</span>
+
+	/**
+	 * Private constructor used to create a new {@code ResolvableType} for uncached purposes,
+	 * with upfront resolution but lazily calculated hash.
+	 */
+	private ResolvableType(Type type, @Nullable ResolvableType componentType,
+<span class="fc" id="L172">			@Nullable TypeProvider typeProvider, @Nullable VariableResolver variableResolver) {</span>
+
+<span class="fc" id="L174">		this.type = type;</span>
+<span class="fc" id="L175">		this.componentType = componentType;</span>
+<span class="fc" id="L176">		this.typeProvider = typeProvider;</span>
+<span class="fc" id="L177">		this.variableResolver = variableResolver;</span>
+<span class="fc" id="L178">		this.hash = null;</span>
+<span class="fc" id="L179">		this.resolved = resolveClass();</span>
+<span class="fc" id="L180">	}</span>
+
+	/**
+	 * Private constructor used to create a new {@code ResolvableType} on a {@link Class} basis.
+	 * &lt;p&gt;Avoids all {@code instanceof} checks in order to create a straight {@link Class} wrapper.
+	 * @since 4.2
+	 */
+<span class="fc" id="L187">	private ResolvableType(@Nullable Class&lt;?&gt; clazz) {</span>
+<span class="fc bfc" id="L188" title="All 2 branches covered.">		this.resolved = (clazz != null ? clazz : Object.class);</span>
+<span class="fc" id="L189">		this.type = this.resolved;</span>
+<span class="fc" id="L190">		this.componentType = null;</span>
+<span class="fc" id="L191">		this.typeProvider = null;</span>
+<span class="fc" id="L192">		this.variableResolver = null;</span>
+<span class="fc" id="L193">		this.hash = null;</span>
+<span class="fc" id="L194">	}</span>
+
+
+	/**
+	 * Return the underling Java {@link Type} being managed.
+	 */
+	public Type getType() {
+<span class="fc" id="L201">		return SerializableTypeWrapper.unwrap(this.type);</span>
+	}
+
+	/**
+	 * Return the underlying Java {@link Class} being managed, if available;
+	 * otherwise {@code null}.
+	 */
+	public @Nullable Class&lt;?&gt; getRawClass() {
+<span class="fc bfc" id="L209" title="All 2 branches covered.">		if (this.type == this.resolved) {</span>
+<span class="fc" id="L210">			return this.resolved;</span>
+		}
+<span class="fc" id="L212">		Type rawType = this.type;</span>
+<span class="fc bfc" id="L213" title="All 2 branches covered.">		if (rawType instanceof ParameterizedType parameterizedType) {</span>
+<span class="fc" id="L214">			rawType = parameterizedType.getRawType();</span>
+		}
+<span class="fc bfc" id="L216" title="All 2 branches covered.">		return (rawType instanceof Class&lt;?&gt; rawClass ? rawClass : null);</span>
+	}
+
+	/**
+	 * Return the underlying source of the resolvable type. Will return a {@link Field},
+	 * {@link MethodParameter} or {@link Type} depending on how the {@code ResolvableType}
+	 * was constructed. This method is primarily to provide access to additional type
+	 * information or meta-data that alternative JVM languages may provide.
+	 */
+	public Object getSource() {
+<span class="fc bfc" id="L226" title="All 2 branches covered.">		Object source = (this.typeProvider != null ? this.typeProvider.getSource() : null);</span>
+<span class="fc bfc" id="L227" title="All 2 branches covered.">		return (source != null ? source : this.type);</span>
+	}
+
+	/**
+	 * Return this type as a resolved {@code Class}, falling back to
+	 * {@link java.lang.Object} if no specific class can be resolved.
+	 * @return the resolved {@link Class} or the {@code Object} fallback
+	 * @since 5.1
+	 * @see #getRawClass()
+	 * @see #resolve(Class)
+	 */
+	public Class&lt;?&gt; toClass() {
+<span class="fc" id="L239">		return resolve(Object.class);</span>
+	}
+
+	/**
+	 * Determine whether the given object is an instance of this {@code ResolvableType}.
+	 * @param obj the object to check
+	 * @since 4.2
+	 * @see #isAssignableFrom(Class)
+	 */
+	public boolean isInstance(@Nullable Object obj) {
+<span class="pc bpc" id="L249" title="1 of 4 branches missed.">		return (obj != null &amp;&amp; isAssignableFrom(obj.getClass()));</span>
+	}
+
+	/**
+	 * Determine whether this {@code ResolvableType} is assignable from the
+	 * specified other type.
+	 * @param other the type to be checked against (as a {@code Class})
+	 * @since 4.2
+	 * @see #isAssignableFrom(ResolvableType)
+	 */
+	public boolean isAssignableFrom(Class&lt;?&gt; other) {
+		// As of 6.1: shortcut assignability check for top-level Class references
+<span class="fc bfc" id="L261" title="All 2 branches covered.">		return (this.type instanceof Class&lt;?&gt; clazz ? ClassUtils.isAssignable(clazz, other) :</span>
+<span class="fc" id="L262">				isAssignableFrom(forClass(other), false, null, false));</span>
+	}
+
+	/**
+	 * Determine whether this {@code ResolvableType} is assignable from the
+	 * specified other type.
+	 * &lt;p&gt;Attempts to follow the same rules as the Java compiler, considering
+	 * whether both the {@link #resolve() resolved} {@code Class} is
+	 * {@link Class#isAssignableFrom(Class) assignable from} the given type
+	 * as well as whether all {@link #getGenerics() generics} are assignable.
+	 * @param other the type to be checked against (as a {@code ResolvableType})
+	 * @return {@code true} if the specified other type can be assigned to this
+	 * {@code ResolvableType}; {@code false} otherwise
+	 */
+	public boolean isAssignableFrom(ResolvableType other) {
+<span class="fc" id="L277">		return isAssignableFrom(other, false, null, false);</span>
+	}
+
+	/**
+	 * Determine whether this {@code ResolvableType} is assignable from the
+	 * specified other type, as far as the other type is actually resolvable.
+	 * @param other the type to be checked against (as a {@code ResolvableType})
+	 * @return {@code true} if the specified other type can be assigned to this
+	 * {@code ResolvableType} as far as it is resolvable; {@code false} otherwise
+	 * @since 6.2
+	 */
+	public boolean isAssignableFromResolvedPart(ResolvableType other) {
+<span class="fc" id="L289">		return isAssignableFrom(other, false, null, true);</span>
+	}
+
+	private boolean isAssignableFrom(ResolvableType other, boolean strict,
+			@Nullable Map&lt;Type, Type&gt; matchedBefore, boolean upUntilUnresolvable) {
+
+<span class="fc" id="L295">		Assert.notNull(other, &quot;ResolvableType must not be null&quot;);</span>
+
+		// If we cannot resolve types, we are not assignable
+<span class="pc bpc" id="L298" title="1 of 4 branches missed.">		if (this == NONE || other == NONE) {</span>
+<span class="fc" id="L299">			return false;</span>
+		}
+
+<span class="fc bfc" id="L302" title="All 2 branches covered.">		if (matchedBefore != null) {</span>
+<span class="fc bfc" id="L303" title="All 2 branches covered.">			if (matchedBefore.get(this.type) == other.type) {</span>
+<span class="fc" id="L304">				return true;</span>
+			}
+		}
+		else {
+			// As of 6.1: shortcut assignability check for top-level Class references
+<span class="fc bfc" id="L309" title="All 4 branches covered.">			if (this.type instanceof Class&lt;?&gt; clazz &amp;&amp; other.type instanceof Class&lt;?&gt; otherClazz) {</span>
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">				return (strict ? clazz.isAssignableFrom(otherClazz) : ClassUtils.isAssignable(clazz, otherClazz));</span>
+			}
+		}
+
+<span class="fc bfc" id="L314" title="All 6 branches covered.">		if (upUntilUnresolvable &amp;&amp; (other.isUnresolvableTypeVariable() || other.isWildcardWithoutBounds())) {</span>
+<span class="fc" id="L315">			return true;</span>
+		}
+
+		// Deal with array by delegating to the component type
+<span class="fc bfc" id="L319" title="All 2 branches covered.">		if (isArray()) {</span>
+<span class="pc bpc" id="L320" title="1 of 4 branches missed.">			return (other.isArray() &amp;&amp; getComponentType().isAssignableFrom(</span>
+<span class="fc" id="L321">					other.getComponentType(), true, matchedBefore, upUntilUnresolvable));</span>
+		}
+
+		// Deal with wildcard bounds
+<span class="fc" id="L325">		WildcardBounds ourBounds = WildcardBounds.get(this);</span>
+<span class="fc" id="L326">		WildcardBounds otherBounds = WildcardBounds.get(other);</span>
+
+		// In the form X is assignable to &lt;? extends Number&gt;
+<span class="fc bfc" id="L329" title="All 2 branches covered.">		if (otherBounds != null) {</span>
+<span class="fc bfc" id="L330" title="All 2 branches covered.">			if (ourBounds != null) {</span>
+<span class="pc bpc" id="L331" title="1 of 2 branches missed.">				return (ourBounds.isSameKind(otherBounds) &amp;&amp;</span>
+<span class="fc bfc" id="L332" title="All 2 branches covered.">						ourBounds.isAssignableFrom(otherBounds.getBounds(), matchedBefore));</span>
+			}
+<span class="pc bpc" id="L334" title="1 of 2 branches missed.">			else if (upUntilUnresolvable) {</span>
+<span class="nc" id="L335">				return otherBounds.isAssignableFrom(this, matchedBefore);</span>
+			}
+<span class="fc bfc" id="L337" title="All 2 branches covered.">			else if (!strict) {</span>
+<span class="fc bfc" id="L338" title="All 2 branches covered.">				return (matchedBefore != null ? otherBounds.equalsType(this, matchedBefore) :</span>
+<span class="fc" id="L339">						otherBounds.isAssignableTo(this, matchedBefore));</span>
+			}
+			else {
+<span class="fc" id="L342">				return false;</span>
+			}
+		}
+
+		// In the form &lt;? extends Number&gt; is assignable to X...
+<span class="fc bfc" id="L347" title="All 2 branches covered.">		if (ourBounds != null) {</span>
+<span class="fc" id="L348">			return ourBounds.isAssignableFrom(other, matchedBefore);</span>
+		}
+
+		// Main assignability check about to follow
+<span class="fc bfc" id="L352" title="All 4 branches covered.">		boolean exactMatch = (strict &amp;&amp; matchedBefore != null);</span>
+<span class="fc" id="L353">		boolean checkGenerics = true;</span>
+<span class="fc" id="L354">		Class&lt;?&gt; ourResolved = null;</span>
+<span class="fc bfc" id="L355" title="All 2 branches covered.">		if (this.type instanceof TypeVariable&lt;?&gt; variable) {</span>
+			// Try default variable resolution
+<span class="pc bpc" id="L357" title="1 of 2 branches missed.">			if (this.variableResolver != null) {</span>
+<span class="fc" id="L358">				ResolvableType resolved = this.variableResolver.resolveVariable(variable);</span>
+<span class="pc bpc" id="L359" title="1 of 2 branches missed.">				if (resolved != null) {</span>
+<span class="fc" id="L360">					ourResolved = resolved.resolve();</span>
+				}
+			}
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">			if (ourResolved == null) {</span>
+				// Try variable resolution against target type
+<span class="nc bnc" id="L365" title="All 2 branches missed.">				if (other.variableResolver != null) {</span>
+<span class="nc" id="L366">					ResolvableType resolved = other.variableResolver.resolveVariable(variable);</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">					if (resolved != null) {</span>
+<span class="nc" id="L368">						ourResolved = resolved.resolve();</span>
+<span class="nc" id="L369">						checkGenerics = false;</span>
+					}
+				}
+			}
+<span class="pc bpc" id="L373" title="1 of 2 branches missed.">			if (ourResolved == null) {</span>
+				// Unresolved type variable, potentially nested -&gt; never insist on exact match
+<span class="nc" id="L375">				exactMatch = false;</span>
+			}
+		}
+<span class="fc bfc" id="L378" title="All 2 branches covered.">		if (ourResolved == null) {</span>
+<span class="fc" id="L379">			ourResolved = toClass();</span>
+		}
+<span class="fc" id="L381">		Class&lt;?&gt; otherResolved = other.toClass();</span>
+
+		// We need an exact type match for generics
+		// List&lt;CharSequence&gt; is not assignable from List&lt;String&gt;
+<span class="fc bfc" id="L385" title="All 6 branches covered.">		if (exactMatch ? !ourResolved.equals(otherResolved) :</span>
+<span class="pc bpc" id="L386" title="1 of 2 branches missed.">				(strict ? !ourResolved.isAssignableFrom(otherResolved) :</span>
+<span class="fc bfc" id="L387" title="All 2 branches covered.">						!ClassUtils.isAssignable(ourResolved, otherResolved))) {</span>
+<span class="fc" id="L388">			return false;</span>
+		}
+
+<span class="pc bpc" id="L391" title="1 of 2 branches missed.">		if (checkGenerics) {</span>
+			// Recursively check each generic
+<span class="fc" id="L393">			ResolvableType[] ourGenerics = getGenerics();</span>
+<span class="fc" id="L394">			ResolvableType[] otherGenerics = other.as(ourResolved).getGenerics();</span>
+<span class="pc bpc" id="L395" title="1 of 2 branches missed.">			if (ourGenerics.length != otherGenerics.length) {</span>
+<span class="nc" id="L396">				return false;</span>
+			}
+<span class="fc bfc" id="L398" title="All 2 branches covered.">			if (ourGenerics.length &gt; 0) {</span>
+<span class="fc bfc" id="L399" title="All 2 branches covered.">				if (matchedBefore == null) {</span>
+<span class="fc" id="L400">					matchedBefore = new IdentityHashMap&lt;&gt;(1);</span>
+				}
+<span class="fc" id="L402">				matchedBefore.put(this.type, other.type);</span>
+<span class="fc bfc" id="L403" title="All 2 branches covered.">				for (int i = 0; i &lt; ourGenerics.length; i++) {</span>
+<span class="fc" id="L404">					ResolvableType otherGeneric = otherGenerics[i];</span>
+<span class="fc bfc" id="L405" title="All 2 branches covered.">					if (!ourGenerics[i].isAssignableFrom(otherGeneric,</span>
+<span class="fc bfc" id="L406" title="All 2 branches covered.">							!otherGeneric.isUnresolvableTypeVariable(), matchedBefore, upUntilUnresolvable)) {</span>
+<span class="fc" id="L407">						return false;</span>
+					}
+				}
+			}
+		}
+
+<span class="fc" id="L413">		return true;</span>
+	}
+
+	/**
+	 * Return {@code true} if this type resolves to a Class that represents an array.
+	 * @see #getComponentType()
+	 */
+	public boolean isArray() {
+<span class="fc bfc" id="L421" title="All 2 branches covered.">		if (this == NONE) {</span>
+<span class="fc" id="L422">			return false;</span>
+		}
+<span class="fc bfc" id="L424" title="All 6 branches covered.">		return ((this.type instanceof Class&lt;?&gt; clazz &amp;&amp; clazz.isArray()) ||</span>
+<span class="pc bpc" id="L425" title="1 of 2 branches missed.">				this.type instanceof GenericArrayType || resolveType().isArray());</span>
+	}
+
+	/**
+	 * Return the ResolvableType representing the component type of the array or
+	 * {@link #NONE} if this type does not represent an array.
+	 * @see #isArray()
+	 */
+	public ResolvableType getComponentType() {
+<span class="pc bpc" id="L434" title="1 of 2 branches missed.">		if (this == NONE) {</span>
+<span class="nc" id="L435">			return NONE;</span>
+		}
+<span class="fc bfc" id="L437" title="All 2 branches covered.">		if (this.componentType != null) {</span>
+<span class="fc" id="L438">			return this.componentType;</span>
+		}
+<span class="fc bfc" id="L440" title="All 2 branches covered.">		if (this.type instanceof Class&lt;?&gt; clazz) {</span>
+<span class="fc" id="L441">			Class&lt;?&gt; componentType = clazz.componentType();</span>
+<span class="fc" id="L442">			return forType(componentType, this.variableResolver);</span>
+		}
+<span class="pc bpc" id="L444" title="1 of 2 branches missed.">		if (this.type instanceof GenericArrayType genericArrayType) {</span>
+<span class="fc" id="L445">			return forType(genericArrayType.getGenericComponentType(), this.variableResolver);</span>
+		}
+<span class="nc" id="L447">		return resolveType().getComponentType();</span>
+	}
+
+	/**
+	 * Convenience method to return this type as a resolvable {@link Collection} type.
+	 * &lt;p&gt;Returns {@link #NONE} if this type does not implement or extend
+	 * {@link Collection}.
+	 * @see #as(Class)
+	 * @see #asMap()
+	 */
+	public ResolvableType asCollection() {
+<span class="fc" id="L458">		return as(Collection.class);</span>
+	}
+
+	/**
+	 * Convenience method to return this type as a resolvable {@link Map} type.
+	 * &lt;p&gt;Returns {@link #NONE} if this type does not implement or extend
+	 * {@link Map}.
+	 * @see #as(Class)
+	 * @see #asCollection()
+	 */
+	public ResolvableType asMap() {
+<span class="fc" id="L469">		return as(Map.class);</span>
+	}
+
+	/**
+	 * Return this type as a {@code ResolvableType} of the specified class. Searches
+	 * {@link #getSuperType() supertype} and {@link #getInterfaces() interface}
+	 * hierarchies to find a match, returning {@link #NONE} if this type does not
+	 * implement or extend the specified class.
+	 * @param type the required type (typically narrowed)
+	 * @return a {@code ResolvableType} representing this object as the specified
+	 * type, or {@link #NONE} if not resolvable as that type
+	 * @see #asCollection()
+	 * @see #asMap()
+	 * @see #getSuperType()
+	 * @see #getInterfaces()
+	 */
+	public ResolvableType as(Class&lt;?&gt; type) {
+<span class="fc bfc" id="L486" title="All 2 branches covered.">		if (this == NONE) {</span>
+<span class="fc" id="L487">			return NONE;</span>
+		}
+<span class="fc" id="L489">		Class&lt;?&gt; resolved = resolve();</span>
+<span class="fc bfc" id="L490" title="All 4 branches covered.">		if (resolved == null || resolved == type) {</span>
+<span class="fc" id="L491">			return this;</span>
+		}
+<span class="fc bfc" id="L493" title="All 2 branches covered.">		for (ResolvableType interfaceType : getInterfaces()) {</span>
+<span class="fc" id="L494">			ResolvableType interfaceAsType = interfaceType.as(type);</span>
+<span class="fc bfc" id="L495" title="All 2 branches covered.">			if (interfaceAsType != NONE) {</span>
+<span class="fc" id="L496">				return interfaceAsType;</span>
+			}
+		}
+<span class="fc" id="L499">		return getSuperType().as(type);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} representing the direct supertype of this type.
+	 * &lt;p&gt;If no supertype is available this method returns {@link #NONE}.
+	 * &lt;p&gt;Note: The resulting {@code ResolvableType} instance may not be {@link Serializable}.
+	 * @see #getInterfaces()
+	 */
+	public ResolvableType getSuperType() {
+<span class="fc" id="L509">		Class&lt;?&gt; resolved = resolve();</span>
+<span class="fc bfc" id="L510" title="All 2 branches covered.">		if (resolved == null) {</span>
+<span class="fc" id="L511">			return NONE;</span>
+		}
+		try {
+<span class="fc" id="L514">			Type superclass = resolved.getGenericSuperclass();</span>
+<span class="fc bfc" id="L515" title="All 2 branches covered.">			if (superclass == null) {</span>
+<span class="fc" id="L516">				return NONE;</span>
+			}
+<span class="fc" id="L518">			ResolvableType superType = this.superType;</span>
+<span class="fc bfc" id="L519" title="All 2 branches covered.">			if (superType == null) {</span>
+<span class="fc" id="L520">				superType = forType(superclass, this);</span>
+<span class="fc" id="L521">				this.superType = superType;</span>
+			}
+<span class="fc" id="L523">			return superType;</span>
+		}
+<span class="nc" id="L525">		catch (TypeNotPresentException ex) {</span>
+			// Ignore non-present types in generic signature
+<span class="nc" id="L527">			return NONE;</span>
+		}
+	}
+
+	/**
+	 * Return a {@code ResolvableType} array representing the direct interfaces
+	 * implemented by this type. If this type does not implement any interfaces an
+	 * empty array is returned.
+	 * &lt;p&gt;Note: The resulting {@code ResolvableType} instances may not be {@link Serializable}.
+	 * @see #getSuperType()
+	 */
+	public ResolvableType[] getInterfaces() {
+<span class="fc" id="L539">		Class&lt;?&gt; resolved = resolve();</span>
+<span class="pc bpc" id="L540" title="1 of 2 branches missed.">		if (resolved == null) {</span>
+<span class="nc" id="L541">			return EMPTY_TYPES_ARRAY;</span>
+		}
+<span class="fc" id="L543">		ResolvableType[] interfaces = this.interfaces;</span>
+<span class="fc bfc" id="L544" title="All 2 branches covered.">		if (interfaces == null) {</span>
+<span class="fc" id="L545">			Type[] genericIfcs = resolved.getGenericInterfaces();</span>
+<span class="fc bfc" id="L546" title="All 2 branches covered.">			if (genericIfcs.length &gt; 0) {</span>
+<span class="fc" id="L547">				interfaces = new ResolvableType[genericIfcs.length];</span>
+<span class="fc bfc" id="L548" title="All 2 branches covered.">				for (int i = 0; i &lt; genericIfcs.length; i++) {</span>
+<span class="fc" id="L549">					interfaces[i] = forType(genericIfcs[i], this);</span>
+				}
+			}
+			else {
+<span class="fc" id="L553">				interfaces = EMPTY_TYPES_ARRAY;</span>
+			}
+<span class="fc" id="L555">			this.interfaces = interfaces;</span>
+		}
+<span class="fc" id="L557">		return interfaces;</span>
+	}
+
+	/**
+	 * Return {@code true} if this type contains generic parameters.
+	 * @see #getGeneric(int...)
+	 * @see #getGenerics()
+	 */
+	public boolean hasGenerics() {
+<span class="fc bfc" id="L566" title="All 2 branches covered.">		return (getGenerics().length &gt; 0);</span>
+	}
+
+	/**
+	 * Return {@code true} if this type contains at least a generic type
+	 * that is resolved. In other words, this returns {@code false} if
+	 * the type contains unresolvable generics only, that is, no substitute
+	 * for any of its declared type variables.
+	 * @since 6.2
+	 */
+	public boolean hasResolvableGenerics() {
+<span class="pc bpc" id="L577" title="1 of 2 branches missed.">		if (this == NONE) {</span>
+<span class="nc" id="L578">			return false;</span>
+		}
+<span class="fc" id="L580">		ResolvableType[] generics = getGenerics();</span>
+<span class="fc bfc" id="L581" title="All 2 branches covered.">		for (ResolvableType generic : generics) {</span>
+<span class="pc bpc" id="L582" title="1 of 4 branches missed.">			if (!generic.isUnresolvableTypeVariable() &amp;&amp; !generic.isWildcardWithoutBounds()) {</span>
+<span class="fc" id="L583">				return true;</span>
+			}
+		}
+<span class="fc" id="L586">		return false;</span>
+	}
+
+	/**
+	 * Determine whether the underlying type has any unresolvable generics:
+	 * either through an unresolvable type variable on the type itself
+	 * or through implementing a generic interface in a raw fashion,
+	 * i.e. without substituting that interface's type variables.
+	 * The result will be {@code true} only in those two scenarios.
+	 */
+	public boolean hasUnresolvableGenerics() {
+<span class="pc bpc" id="L597" title="1 of 2 branches missed.">		if (this == NONE) {</span>
+<span class="nc" id="L598">			return false;</span>
+		}
+<span class="fc" id="L600">		return hasUnresolvableGenerics(null);</span>
+	}
+
+	private boolean hasUnresolvableGenerics(@Nullable Set&lt;Type&gt; alreadySeen) {
+<span class="fc" id="L604">		Boolean unresolvableGenerics = this.unresolvableGenerics;</span>
+<span class="fc bfc" id="L605" title="All 2 branches covered.">		if (unresolvableGenerics == null) {</span>
+<span class="fc" id="L606">			unresolvableGenerics = determineUnresolvableGenerics(alreadySeen);</span>
+<span class="fc" id="L607">			this.unresolvableGenerics = unresolvableGenerics;</span>
+		}
+<span class="fc" id="L609">		return unresolvableGenerics;</span>
+	}
+
+	private boolean determineUnresolvableGenerics(@Nullable Set&lt;Type&gt; alreadySeen) {
+<span class="pc bpc" id="L613" title="1 of 4 branches missed.">		if (alreadySeen != null &amp;&amp; alreadySeen.contains(this.type)) {</span>
+			// Self-referencing generic -&gt; not unresolvable
+<span class="nc" id="L615">			return false;</span>
+		}
+
+<span class="fc" id="L618">		ResolvableType[] generics = getGenerics();</span>
+<span class="fc bfc" id="L619" title="All 2 branches covered.">		for (ResolvableType generic : generics) {</span>
+<span class="fc bfc" id="L620" title="All 4 branches covered.">			if (generic.isUnresolvableTypeVariable() || generic.isWildcardWithoutBounds() ||</span>
+<span class="fc bfc" id="L621" title="All 2 branches covered.">					generic.hasUnresolvableGenerics(currentTypeSeen(alreadySeen))) {</span>
+<span class="fc" id="L622">				return true;</span>
+			}
+		}
+<span class="fc" id="L625">		Class&lt;?&gt; resolved = resolve();</span>
+<span class="pc bpc" id="L626" title="1 of 2 branches missed.">		if (resolved != null) {</span>
+			try {
+<span class="fc bfc" id="L628" title="All 2 branches covered.">				for (Type genericInterface : resolved.getGenericInterfaces()) {</span>
+<span class="fc bfc" id="L629" title="All 2 branches covered.">					if (genericInterface instanceof Class&lt;?&gt; clazz) {</span>
+<span class="fc bfc" id="L630" title="All 2 branches covered.">						if (clazz.getTypeParameters().length &gt; 0) {</span>
+<span class="fc" id="L631">							return true;</span>
+						}
+					}
+				}
+			}
+<span class="nc" id="L636">			catch (TypeNotPresentException ex) {</span>
+				// Ignore non-present types in generic signature
+<span class="fc" id="L638">			}</span>
+<span class="fc" id="L639">			Class&lt;?&gt; superclass = resolved.getSuperclass();</span>
+<span class="fc bfc" id="L640" title="All 4 branches covered.">			if (superclass != null &amp;&amp; superclass != Object.class) {</span>
+<span class="fc" id="L641">				return getSuperType().hasUnresolvableGenerics(currentTypeSeen(alreadySeen));</span>
+			}
+		}
+<span class="fc" id="L644">		return false;</span>
+	}
+
+	private Set&lt;Type&gt; currentTypeSeen(@Nullable Set&lt;Type&gt; alreadySeen) {
+<span class="fc bfc" id="L648" title="All 2 branches covered.">		if (alreadySeen == null) {</span>
+<span class="fc" id="L649">			alreadySeen = new HashSet&lt;&gt;(4);</span>
+		}
+<span class="fc" id="L651">		alreadySeen.add(this.type);</span>
+<span class="fc" id="L652">		return alreadySeen;</span>
+	}
+
+	/**
+	 * Determine whether the underlying type is a type variable that
+	 * cannot be resolved through the associated variable resolver.
+	 */
+	private boolean isUnresolvableTypeVariable() {
+<span class="fc bfc" id="L660" title="All 2 branches covered.">		if (this.type instanceof TypeVariable&lt;?&gt; variable) {</span>
+<span class="fc bfc" id="L661" title="All 2 branches covered.">			if (this.variableResolver == null) {</span>
+<span class="fc" id="L662">				return true;</span>
+			}
+<span class="fc" id="L664">			ResolvableType resolved = this.variableResolver.resolveVariable(variable);</span>
+<span class="fc bfc" id="L665" title="All 6 branches covered.">			if (resolved == null || resolved.isUnresolvableTypeVariable() || resolved.isWildcardWithoutBounds()) {</span>
+<span class="fc" id="L666">				return true;</span>
+			}
+		}
+<span class="fc" id="L669">		return false;</span>
+	}
+
+	/**
+	 * Determine whether the underlying type represents a wildcard
+	 * without specific bounds (i.e., equal to {@code ? extends Object}).
+	 */
+	private boolean isWildcardWithoutBounds() {
+<span class="fc bfc" id="L677" title="All 2 branches covered.">		if (this.type instanceof WildcardType wildcardType) {</span>
+<span class="pc bpc" id="L678" title="1 of 2 branches missed.">			if (wildcardType.getLowerBounds().length == 0) {</span>
+<span class="fc" id="L679">				Type[] upperBounds = wildcardType.getUpperBounds();</span>
+<span class="pc bpc" id="L680" title="2 of 6 branches missed.">				if (upperBounds.length == 0 || (upperBounds.length == 1 &amp;&amp; Object.class == upperBounds[0])) {</span>
+<span class="fc" id="L681">					return true;</span>
+				}
+			}
+		}
+<span class="fc" id="L685">		return false;</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified nesting level.
+	 * &lt;p&gt;See {@link #getNested(int, Map)} for details.
+	 * @param nestingLevel the nesting level
+	 * @return the {@code ResolvableType} type, or {@code #NONE}
+	 */
+	public ResolvableType getNested(int nestingLevel) {
+<span class="fc" id="L695">		return getNested(nestingLevel, null);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified nesting level.
+	 * &lt;p&gt;The nesting level refers to the specific generic parameter that should be returned.
+	 * A nesting level of 1 indicates this type; 2 indicates the first nested generic;
+	 * 3 the second; and so on. For example, given {@code List&lt;Set&lt;Integer&gt;&gt;} level 1 refers
+	 * to the {@code List}, level 2 the {@code Set}, and level 3 the {@code Integer}.
+	 * &lt;p&gt;The {@code typeIndexesPerLevel} map can be used to reference a specific generic
+	 * for the given level. For example, an index of 0 would refer to a {@code Map} key;
+	 * whereas, 1 would refer to the value. If the map does not contain a value for a
+	 * specific level the last generic will be used (for example, a {@code Map} value).
+	 * &lt;p&gt;Nesting levels may also apply to array types; for example given
+	 * {@code String[]}, a nesting level of 2 refers to {@code String}.
+	 * &lt;p&gt;If a type does not {@link #hasGenerics() contain} generics the
+	 * {@link #getSuperType() supertype} hierarchy will be considered.
+	 * @param nestingLevel the required nesting level, indexed from 1 for the
+	 * current type, 2 for the first nested generic, 3 for the second and so on
+	 * @param typeIndexesPerLevel a map containing the generic index for a given
+	 * nesting level (can be {@code null})
+	 * @return a {@code ResolvableType} for the nested level, or {@link #NONE}
+	 */
+	public ResolvableType getNested(int nestingLevel, @Nullable Map&lt;Integer, Integer&gt; typeIndexesPerLevel) {
+<span class="fc" id="L719">		ResolvableType result = this;</span>
+<span class="fc bfc" id="L720" title="All 2 branches covered.">		for (int i = 2; i &lt;= nestingLevel; i++) {</span>
+<span class="fc bfc" id="L721" title="All 2 branches covered.">			if (result.isArray()) {</span>
+<span class="fc" id="L722">				result = result.getComponentType();</span>
+			}
+			else {
+				// Handle derived types
+<span class="fc bfc" id="L726" title="All 4 branches covered.">				while (result != ResolvableType.NONE &amp;&amp; !result.hasGenerics()) {</span>
+<span class="fc" id="L727">					result = result.getSuperType();</span>
+				}
+<span class="fc bfc" id="L729" title="All 2 branches covered.">				Integer index = (typeIndexesPerLevel != null ? typeIndexesPerLevel.get(i) : null);</span>
+<span class="pc bpc" id="L730" title="1 of 2 branches missed.">				index = (index == null ? result.getGenerics().length - 1 : index);</span>
+<span class="fc" id="L731">				result = result.getGeneric(index);</span>
+			}
+		}
+<span class="fc" id="L734">		return result;</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} representing the generic parameter for the
+	 * given indexes. Indexes are zero based; for example given the type
+	 * {@code Map&lt;Integer, List&lt;String&gt;&gt;}, {@code getGeneric(0)} will access the
+	 * {@code Integer}. Nested generics can be accessed by specifying multiple indexes;
+	 * for example {@code getGeneric(1, 0)} will access the {@code String} from the
+	 * nested {@code List}. For convenience, if no indexes are specified the first
+	 * generic is returned.
+	 * &lt;p&gt;If no generic is available at the specified indexes {@link #NONE} is returned.
+	 * @param indexes the indexes that refer to the generic parameter
+	 * (can be omitted to return the first generic)
+	 * @return a {@code ResolvableType} for the specified generic, or {@link #NONE}
+	 * @see #hasGenerics()
+	 * @see #getGenerics()
+	 * @see #resolveGeneric(int...)
+	 * @see #resolveGenerics()
+	 */
+	public ResolvableType getGeneric(int @Nullable ... indexes) {
+<span class="fc" id="L755">		ResolvableType[] generics = getGenerics();</span>
+<span class="pc bpc" id="L756" title="1 of 4 branches missed.">		if (indexes == null || indexes.length == 0) {</span>
+<span class="fc bfc" id="L757" title="All 2 branches covered.">			return (generics.length == 0 ? NONE : generics[0]);</span>
+		}
+<span class="fc" id="L759">		ResolvableType generic = this;</span>
+<span class="fc bfc" id="L760" title="All 2 branches covered.">		for (int index : indexes) {</span>
+<span class="fc" id="L761">			generics = generic.getGenerics();</span>
+<span class="fc bfc" id="L762" title="All 4 branches covered.">			if (index &lt; 0 || index &gt;= generics.length) {</span>
+<span class="fc" id="L763">				return NONE;</span>
+			}
+<span class="fc" id="L765">			generic = generics[index];</span>
+		}
+<span class="fc" id="L767">		return generic;</span>
+	}
+
+	/**
+	 * Return an array of {@code ResolvableType ResolvableTypes} representing the generic parameters of
+	 * this type. If no generics are available an empty array is returned. If you need to
+	 * access a specific generic consider using the {@link #getGeneric(int...)} method as
+	 * it allows access to nested generics and protects against
+	 * {@code IndexOutOfBoundsExceptions}.
+	 * @return an array of {@code ResolvableType ResolvableTypes} representing the generic parameters
+	 * (never {@code null})
+	 * @see #hasGenerics()
+	 * @see #getGeneric(int...)
+	 * @see #resolveGeneric(int...)
+	 * @see #resolveGenerics()
+	 */
+	public ResolvableType[] getGenerics() {
+<span class="fc bfc" id="L784" title="All 2 branches covered.">		if (this == NONE) {</span>
+<span class="fc" id="L785">			return EMPTY_TYPES_ARRAY;</span>
+		}
+<span class="fc" id="L787">		ResolvableType[] generics = this.generics;</span>
+<span class="fc bfc" id="L788" title="All 2 branches covered.">		if (generics == null) {</span>
+<span class="fc bfc" id="L789" title="All 2 branches covered.">			if (this.type instanceof Class&lt;?&gt; clazz) {</span>
+<span class="fc" id="L790">				Type[] typeParams = clazz.getTypeParameters();</span>
+<span class="fc bfc" id="L791" title="All 2 branches covered.">				if (typeParams.length &gt; 0) {</span>
+<span class="fc" id="L792">					generics = new ResolvableType[typeParams.length];</span>
+<span class="fc bfc" id="L793" title="All 2 branches covered.">					for (int i = 0; i &lt; generics.length; i++) {</span>
+<span class="fc" id="L794">						generics[i] = ResolvableType.forType(typeParams[i], this);</span>
+					}
+				}
+				else {
+<span class="fc" id="L798">					generics = EMPTY_TYPES_ARRAY;</span>
+				}
+<span class="fc" id="L800">			}</span>
+<span class="fc bfc" id="L801" title="All 2 branches covered.">			else if (this.type instanceof ParameterizedType parameterizedType) {</span>
+<span class="fc" id="L802">				Type[] actualTypeArguments = parameterizedType.getActualTypeArguments();</span>
+<span class="pc bpc" id="L803" title="1 of 2 branches missed.">				if (actualTypeArguments.length &gt; 0) {</span>
+<span class="fc" id="L804">					generics = new ResolvableType[actualTypeArguments.length];</span>
+<span class="fc bfc" id="L805" title="All 2 branches covered.">					for (int i = 0; i &lt; actualTypeArguments.length; i++) {</span>
+<span class="fc" id="L806">						generics[i] = forType(actualTypeArguments[i], this.variableResolver);</span>
+					}
+				}
+				else {
+<span class="nc" id="L810">					generics = EMPTY_TYPES_ARRAY;</span>
+				}
+<span class="fc" id="L812">			}</span>
+			else {
+<span class="fc" id="L814">				generics = resolveType().getGenerics();</span>
+			}
+<span class="fc" id="L816">			this.generics = generics;</span>
+		}
+<span class="fc" id="L818">		return generics;</span>
+	}
+
+	/**
+	 * Convenience method that will {@link #getGenerics() get} and
+	 * {@link #resolve() resolve} generic parameters.
+	 * @return an array of resolved generic parameters (the resulting array
+	 * will never be {@code null}, but it may contain {@code null} elements)
+	 * @see #getGenerics()
+	 * @see #resolve()
+	 */
+	public @Nullable Class&lt;?&gt;[] resolveGenerics() {
+<span class="nc" id="L830">		ResolvableType[] generics = getGenerics();</span>
+<span class="nc" id="L831">		@Nullable Class&lt;?&gt;[] resolvedGenerics = new Class&lt;?&gt;[generics.length];</span>
+<span class="nc bnc" id="L832" title="All 2 branches missed.">		for (int i = 0; i &lt; generics.length; i++) {</span>
+<span class="nc" id="L833">			resolvedGenerics[i] = generics[i].resolve();</span>
+		}
+<span class="nc" id="L835">		return resolvedGenerics;</span>
+	}
+
+	/**
+	 * Convenience method that will {@link #getGenerics() get} and {@link #resolve()
+	 * resolve} generic parameters, using the specified {@code fallback} if any type
+	 * cannot be resolved.
+	 * @param fallback the fallback class to use if resolution fails
+	 * @return an array of resolved generic parameters
+	 * @see #getGenerics()
+	 * @see #resolve()
+	 */
+	public Class&lt;?&gt;[] resolveGenerics(Class&lt;?&gt; fallback) {
+<span class="fc" id="L848">		ResolvableType[] generics = getGenerics();</span>
+<span class="fc" id="L849">		Class&lt;?&gt;[] resolvedGenerics = new Class&lt;?&gt;[generics.length];</span>
+<span class="fc bfc" id="L850" title="All 2 branches covered.">		for (int i = 0; i &lt; generics.length; i++) {</span>
+<span class="fc" id="L851">			resolvedGenerics[i] = generics[i].resolve(fallback);</span>
+		}
+<span class="fc" id="L853">		return resolvedGenerics;</span>
+	}
+
+	/**
+	 * Convenience method that will {@link #getGeneric(int...) get} and
+	 * {@link #resolve() resolve} a specific generic parameter.
+	 * @param indexes the indexes that refer to the generic parameter
+	 * (can be omitted to return the first generic)
+	 * @return a resolved {@link Class} or {@code null}
+	 * @see #getGeneric(int...)
+	 * @see #resolve()
+	 */
+	public @Nullable Class&lt;?&gt; resolveGeneric(int... indexes) {
+<span class="fc" id="L866">		return getGeneric(indexes).resolve();</span>
+	}
+
+	/**
+	 * Resolve this type to a {@link java.lang.Class}, returning {@code null}
+	 * if the type cannot be resolved. This method will consider bounds of
+	 * {@link TypeVariable TypeVariables} and {@link WildcardType WildcardTypes} if
+	 * direct resolution fails; however, bounds of {@code Object.class} will be ignored.
+	 * &lt;p&gt;If this method returns a non-null {@code Class} and {@link #hasGenerics()}
+	 * returns {@code false}, the given type effectively wraps a plain {@code Class},
+	 * allowing for plain {@code Class} processing if desirable.
+	 * @return the resolved {@link Class}, or {@code null} if not resolvable
+	 * @see #resolve(Class)
+	 * @see #resolveGeneric(int...)
+	 * @see #resolveGenerics()
+	 */
+	public @Nullable Class&lt;?&gt; resolve() {
+<span class="fc" id="L883">		return this.resolved;</span>
+	}
+
+	/**
+	 * Resolve this type to a {@link java.lang.Class}, returning the specified
+	 * {@code fallback} if the type cannot be resolved. This method will consider bounds
+	 * of {@link TypeVariable TypeVariables} and {@link WildcardType WildcardTypes} if
+	 * direct resolution fails; however, bounds of {@code Object.class} will be ignored.
+	 * @param fallback the fallback class to use if resolution fails
+	 * @return the resolved {@link Class} or the {@code fallback}
+	 * @see #resolve()
+	 * @see #resolveGeneric(int...)
+	 * @see #resolveGenerics()
+	 */
+	public Class&lt;?&gt; resolve(Class&lt;?&gt; fallback) {
+<span class="fc bfc" id="L898" title="All 2 branches covered.">		return (this.resolved != null ? this.resolved : fallback);</span>
+	}
+
+	private @Nullable Class&lt;?&gt; resolveClass() {
+<span class="fc bfc" id="L902" title="All 2 branches covered.">		if (this.type == EmptyType.INSTANCE) {</span>
+<span class="fc" id="L903">			return null;</span>
+		}
+<span class="fc bfc" id="L905" title="All 2 branches covered.">		if (this.type instanceof Class&lt;?&gt; clazz) {</span>
+<span class="fc" id="L906">			return clazz;</span>
+		}
+<span class="fc bfc" id="L908" title="All 2 branches covered.">		if (this.type instanceof GenericArrayType) {</span>
+<span class="fc" id="L909">			Class&lt;?&gt; resolvedComponent = getComponentType().resolve();</span>
+<span class="fc bfc" id="L910" title="All 2 branches covered.">			return (resolvedComponent != null ? Array.newInstance(resolvedComponent, 0).getClass() : null);</span>
+		}
+<span class="fc" id="L912">		return resolveType().resolve();</span>
+	}
+
+	/**
+	 * Resolve this type by a single level, returning the resolved value or {@link #NONE}.
+	 * &lt;p&gt;Note: The returned {@code ResolvableType} should only be used as an intermediary
+	 * as it cannot be serialized.
+	 */
+	ResolvableType resolveType() {
+<span class="fc bfc" id="L921" title="All 2 branches covered.">		if (this.type instanceof ParameterizedType parameterizedType) {</span>
+<span class="fc" id="L922">			return forType(parameterizedType.getRawType(), this.variableResolver);</span>
+		}
+<span class="fc bfc" id="L924" title="All 2 branches covered.">		if (this.type instanceof WildcardType wildcardType) {</span>
+<span class="fc" id="L925">			Type resolved = resolveBounds(wildcardType.getUpperBounds());</span>
+<span class="fc bfc" id="L926" title="All 2 branches covered.">			if (resolved == null) {</span>
+<span class="fc" id="L927">				resolved = resolveBounds(wildcardType.getLowerBounds());</span>
+			}
+<span class="fc" id="L929">			return forType(resolved, this.variableResolver);</span>
+		}
+<span class="fc bfc" id="L931" title="All 2 branches covered.">		if (this.type instanceof TypeVariable&lt;?&gt; variable) {</span>
+			// Try default variable resolution
+<span class="fc bfc" id="L933" title="All 2 branches covered.">			if (this.variableResolver != null) {</span>
+<span class="fc" id="L934">				ResolvableType resolved = this.variableResolver.resolveVariable(variable);</span>
+<span class="fc bfc" id="L935" title="All 2 branches covered.">				if (resolved != null) {</span>
+<span class="fc" id="L936">					return resolved;</span>
+				}
+			}
+			// Fallback to bounds
+<span class="fc" id="L940">			return forType(resolveBounds(variable.getBounds()), this.variableResolver);</span>
+		}
+<span class="fc" id="L942">		return NONE;</span>
+	}
+
+	private @Nullable ResolvableType resolveVariable(TypeVariable&lt;?&gt; variable) {
+<span class="fc bfc" id="L946" title="All 2 branches covered.">		if (this.type instanceof TypeVariable) {</span>
+<span class="fc" id="L947">			return resolveType().resolveVariable(variable);</span>
+		}
+<span class="fc bfc" id="L949" title="All 2 branches covered.">		if (this.type instanceof ParameterizedType parameterizedType) {</span>
+<span class="fc" id="L950">			Class&lt;?&gt; resolved = resolve();</span>
+<span class="pc bpc" id="L951" title="1 of 2 branches missed.">			if (resolved == null) {</span>
+<span class="nc" id="L952">				return null;</span>
+			}
+<span class="fc" id="L954">			TypeVariable&lt;?&gt;[] variables = resolved.getTypeParameters();</span>
+<span class="fc" id="L955">			Type[] typeArguments = parameterizedType.getActualTypeArguments();</span>
+<span class="fc bfc" id="L956" title="All 2 branches covered.">			for (int i = 0; i &lt; variables.length; i++) {</span>
+<span class="fc bfc" id="L957" title="All 2 branches covered.">				if (ObjectUtils.nullSafeEquals(variables[i].getName(), variable.getName())) {</span>
+<span class="fc" id="L958">					return forType(typeArguments[i], this.variableResolver);</span>
+				}
+			}
+<span class="fc" id="L961">			Type ownerType = parameterizedType.getOwnerType();</span>
+<span class="pc bpc" id="L962" title="1 of 2 branches missed.">			if (ownerType != null) {</span>
+<span class="nc" id="L963">				return forType(ownerType, this.variableResolver).resolveVariable(variable);</span>
+			}
+		}
+<span class="pc bpc" id="L966" title="1 of 2 branches missed.">		if (this.type instanceof WildcardType) {</span>
+<span class="nc" id="L967">			ResolvableType resolved = resolveType().resolveVariable(variable);</span>
+<span class="nc bnc" id="L968" title="All 2 branches missed.">			if (resolved != null) {</span>
+<span class="nc" id="L969">				return resolved;</span>
+			}
+		}
+<span class="fc bfc" id="L972" title="All 2 branches covered.">		if (this.variableResolver != null) {</span>
+<span class="fc" id="L973">			return this.variableResolver.resolveVariable(variable);</span>
+		}
+<span class="fc" id="L975">		return null;</span>
+	}
+
+
+	/**
+	 * Check for full equality of all type resolution artifacts:
+	 * type as well as {@code TypeProvider} and {@code VariableResolver}.
+	 * @see #equalsType(ResolvableType)
+	 */
+	@Override
+	public boolean equals(@Nullable Object other) {
+<span class="fc bfc" id="L986" title="All 2 branches covered.">		if (this == other) {</span>
+<span class="fc" id="L987">			return true;</span>
+		}
+<span class="pc bpc" id="L989" title="1 of 4 branches missed.">		if (other == null || other.getClass() != getClass()) {</span>
+<span class="fc" id="L990">			return false;</span>
+		}
+<span class="fc" id="L992">		ResolvableType otherType = (ResolvableType) other;</span>
+
+<span class="fc bfc" id="L994" title="All 2 branches covered.">		if (!equalsType(otherType)) {</span>
+<span class="fc" id="L995">			return false;</span>
+		}
+<span class="pc bpc" id="L997" title="1 of 6 branches missed.">		if (this.typeProvider != otherType.typeProvider &amp;&amp;</span>
+				(this.typeProvider == null || otherType.typeProvider == null ||
+<span class="pc bpc" id="L999" title="1 of 2 branches missed.">				!ObjectUtils.nullSafeEquals(this.typeProvider.getType(), otherType.typeProvider.getType()))) {</span>
+<span class="fc" id="L1000">			return false;</span>
+		}
+<span class="fc bfc" id="L1002" title="All 6 branches covered.">		if (this.variableResolver != otherType.variableResolver &amp;&amp;</span>
+				(this.variableResolver == null || otherType.variableResolver == null ||
+<span class="fc bfc" id="L1004" title="All 2 branches covered.">				!ObjectUtils.nullSafeEquals(this.variableResolver.getSource(), otherType.variableResolver.getSource()))) {</span>
+<span class="fc" id="L1005">			return false;</span>
+		}
+<span class="fc" id="L1007">		return true;</span>
+	}
+
+	/**
+	 * Check for type-level equality with another {@code ResolvableType}.
+	 * &lt;p&gt;In contrast to {@link #equals(Object)} or {@link #isAssignableFrom(ResolvableType)},
+	 * this works between different sources as well, for example, method parameters and return types.
+	 * @param otherType the {@code ResolvableType} to match against
+	 * @return whether the declared type and type variables match
+	 * @since 6.1
+	 */
+	public boolean equalsType(ResolvableType otherType) {
+<span class="fc bfc" id="L1019" title="All 2 branches covered.">		return (ObjectUtils.nullSafeEquals(this.type, otherType.type) &amp;&amp;</span>
+<span class="pc bpc" id="L1020" title="1 of 2 branches missed.">				ObjectUtils.nullSafeEquals(this.componentType, otherType.componentType));</span>
+	}
+
+	@Override
+	public int hashCode() {
+<span class="fc bfc" id="L1025" title="All 2 branches covered.">		return (this.hash != null ? this.hash : calculateHashCode());</span>
+	}
+
+	private int calculateHashCode() {
+<span class="fc" id="L1029">		int hashCode = ObjectUtils.nullSafeHashCode(this.type);</span>
+<span class="pc bpc" id="L1030" title="1 of 2 branches missed.">		if (this.componentType != null) {</span>
+<span class="nc" id="L1031">			hashCode = 31 * hashCode + ObjectUtils.nullSafeHashCode(this.componentType);</span>
+		}
+<span class="fc bfc" id="L1033" title="All 2 branches covered.">		if (this.typeProvider != null) {</span>
+<span class="fc" id="L1034">			hashCode = 31 * hashCode + ObjectUtils.nullSafeHashCode(this.typeProvider.getType());</span>
+		}
+<span class="fc bfc" id="L1036" title="All 2 branches covered.">		if (this.variableResolver != null) {</span>
+<span class="fc" id="L1037">			hashCode = 31 * hashCode + ObjectUtils.nullSafeHashCode(this.variableResolver.getSource());</span>
+		}
+<span class="fc" id="L1039">		return hashCode;</span>
+	}
+
+	/**
+	 * Adapts this {@code ResolvableType} to a {@link VariableResolver}.
+	 */
+	@Nullable VariableResolver asVariableResolver() {
+<span class="fc bfc" id="L1046" title="All 2 branches covered.">		if (this == NONE) {</span>
+<span class="fc" id="L1047">			return null;</span>
+		}
+<span class="fc" id="L1049">		return new DefaultVariableResolver(this);</span>
+	}
+
+	/**
+	 * Custom serialization support for {@link #NONE}.
+	 */
+	private Object readResolve() {
+<span class="nc bnc" id="L1056" title="All 2 branches missed.">		return (this.type == EmptyType.INSTANCE ? NONE : this);</span>
+	}
+
+	/**
+	 * Return a String representation of this type in its fully resolved form
+	 * (including any generic parameters).
+	 */
+	@Override
+	public String toString() {
+<span class="fc bfc" id="L1065" title="All 2 branches covered.">		if (isArray()) {</span>
+<span class="fc" id="L1066">			return getComponentType() + &quot;[]&quot;;</span>
+		}
+<span class="fc bfc" id="L1068" title="All 2 branches covered.">		if (this.resolved == null) {</span>
+<span class="fc" id="L1069">			return &quot;?&quot;;</span>
+		}
+<span class="fc bfc" id="L1071" title="All 2 branches covered.">		if (this.type instanceof TypeVariable&lt;?&gt; variable) {</span>
+<span class="pc bpc" id="L1072" title="2 of 4 branches missed.">			if (this.variableResolver == null || this.variableResolver.resolveVariable(variable) == null) {</span>
+				// Don't bother with variable boundaries for toString()...
+				// Can cause infinite recursions in case of self-references
+<span class="nc" id="L1075">				return &quot;?&quot;;</span>
+			}
+		}
+<span class="fc bfc" id="L1078" title="All 2 branches covered.">		if (hasGenerics()) {</span>
+<span class="fc" id="L1079">			return this.resolved.getName() + '&lt;' + StringUtils.arrayToDelimitedString(getGenerics(), &quot;, &quot;) + '&gt;';</span>
+		}
+<span class="fc" id="L1081">		return this.resolved.getName();</span>
+	}
+
+
+	// Factory methods
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Class},
+	 * using the full generic type information for assignability checks.
+	 * &lt;p&gt;For example: {@code ResolvableType.forClass(MyArrayList.class)}.
+	 * @param clazz the class to introspect ({@code null} is semantically
+	 * equivalent to {@code Object.class} for typical use cases here)
+	 * @return a {@code ResolvableType} for the specified class
+	 * @see #forClass(Class, Class)
+	 * @see #forClassWithGenerics(Class, Class...)
+	 */
+	public static ResolvableType forClass(@Nullable Class&lt;?&gt; clazz) {
+<span class="fc" id="L1098">		return new ResolvableType(clazz);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Class},
+	 * doing assignability checks against the raw class only (analogous to
+	 * {@link Class#isAssignableFrom}, which this serves as a wrapper for).
+	 * &lt;p&gt;For example: {@code ResolvableType.forRawClass(List.class)}.
+	 * @param clazz the class to introspect ({@code null} is semantically
+	 * equivalent to {@code Object.class} for typical use cases here)
+	 * @return a {@code ResolvableType} for the specified class
+	 * @since 4.2
+	 * @see #forClass(Class)
+	 * @see #getRawClass()
+	 */
+	public static ResolvableType forRawClass(@Nullable Class&lt;?&gt; clazz) {
+<span class="fc" id="L1114">		return new ResolvableType(clazz) {</span>
+			@Override
+			public ResolvableType[] getGenerics() {
+<span class="fc" id="L1117">				return EMPTY_TYPES_ARRAY;</span>
+			}
+			@Override
+			public boolean isAssignableFrom(Class&lt;?&gt; other) {
+<span class="fc bfc" id="L1121" title="All 4 branches covered.">				return (clazz == null || ClassUtils.isAssignable(clazz, other));</span>
+			}
+			@Override
+			public boolean isAssignableFrom(ResolvableType other) {
+<span class="fc" id="L1125">				Class&lt;?&gt; otherClass = other.resolve();</span>
+<span class="pc bpc" id="L1126" title="2 of 6 branches missed.">				return (otherClass != null &amp;&amp; (clazz == null || ClassUtils.isAssignable(clazz, otherClass)));</span>
+			}
+		};
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified base type
+	 * (interface or base class) with a given implementation class.
+	 * &lt;p&gt;For example: {@code ResolvableType.forClass(List.class, MyArrayList.class)}.
+	 * @param baseType the base type (must not be {@code null})
+	 * @param implementationClass the implementation class
+	 * @return a {@code ResolvableType} for the specified base type backed by the
+	 * given implementation class
+	 * @see #forClass(Class)
+	 * @see #forClassWithGenerics(Class, Class...)
+	 */
+	public static ResolvableType forClass(Class&lt;?&gt; baseType, Class&lt;?&gt; implementationClass) {
+<span class="nc" id="L1143">		Assert.notNull(baseType, &quot;Base type must not be null&quot;);</span>
+<span class="nc" id="L1144">		ResolvableType asType = forType(implementationClass).as(baseType);</span>
+<span class="nc bnc" id="L1145" title="All 2 branches missed.">		return (asType == NONE ? forType(baseType) : asType);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Class} with pre-declared generics.
+	 * @param clazz the class (or interface) to introspect
+	 * @param generics the generics of the class
+	 * @return a {@code ResolvableType} for the specific class and generics
+	 * @see #forClassWithGenerics(Class, ResolvableType...)
+	 */
+	public static ResolvableType forClassWithGenerics(Class&lt;?&gt; clazz, Class&lt;?&gt;... generics) {
+<span class="fc" id="L1156">		Assert.notNull(generics, &quot;Generics array must not be null&quot;);</span>
+<span class="fc" id="L1157">		ResolvableType[] resolvableGenerics = new ResolvableType[generics.length];</span>
+<span class="fc bfc" id="L1158" title="All 2 branches covered.">		for (int i = 0; i &lt; generics.length; i++) {</span>
+<span class="fc" id="L1159">			resolvableGenerics[i] = forClass(generics[i]);</span>
+		}
+<span class="fc" id="L1161">		return forClassWithGenerics(clazz, resolvableGenerics);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Class} with pre-declared generics.
+	 * @param clazz the class (or interface) to introspect
+	 * @param generics the generics of the class
+	 * @return a {@code ResolvableType} for the specific class and generics
+	 * @see #forClassWithGenerics(Class, Class...)
+	 */
+	public static ResolvableType forClassWithGenerics(Class&lt;?&gt; clazz, @Nullable ResolvableType @Nullable ... generics) {
+<span class="fc" id="L1172">		Assert.notNull(clazz, &quot;Class must not be null&quot;);</span>
+<span class="fc" id="L1173">		TypeVariable&lt;?&gt;[] variables = clazz.getTypeParameters();</span>
+<span class="pc bpc" id="L1174" title="1 of 2 branches missed.">		if (generics != null) {</span>
+<span class="pc bpc" id="L1175" title="1 of 2 branches missed.">			Assert.isTrue(variables.length == generics.length,</span>
+<span class="nc" id="L1176">					() -&gt; &quot;Mismatched number of generics specified for &quot; + clazz.toGenericString());</span>
+		}
+<span class="fc" id="L1178">		Type[] arguments = new Type[variables.length];</span>
+<span class="fc bfc" id="L1179" title="All 2 branches covered.">		for (int i = 0; i &lt; variables.length; i++) {</span>
+<span class="pc bpc" id="L1180" title="1 of 2 branches missed.">			ResolvableType generic = (generics != null ? generics[i] : null);</span>
+<span class="pc bpc" id="L1181" title="1 of 2 branches missed.">			Type argument = (generic != null ? generic.getType() : null);</span>
+<span class="pc bpc" id="L1182" title="2 of 4 branches missed.">			arguments[i] = (argument != null &amp;&amp; !(argument instanceof TypeVariable) ? argument : variables[i]);</span>
+		}
+<span class="fc" id="L1184">		return forType(new SyntheticParameterizedType(clazz, arguments),</span>
+<span class="pc bpc" id="L1185" title="1 of 2 branches missed.">				(generics != null ? new TypeVariablesVariableResolver(variables, generics) : null));</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified instance. The instance does not
+	 * convey generic information but if it implements {@link ResolvableTypeProvider} a
+	 * more precise {@code ResolvableType} can be used than the simple one based on
+	 * the {@link #forClass(Class) Class instance}.
+	 * @param instance the instance (possibly {@code null})
+	 * @return a {@code ResolvableType} for the specified instance,
+	 * or {@code NONE} for {@code null}
+	 * @since 4.2
+	 * @see ResolvableTypeProvider
+	 */
+	public static ResolvableType forInstance(@Nullable Object instance) {
+<span class="fc bfc" id="L1200" title="All 2 branches covered.">		if (instance instanceof ResolvableTypeProvider resolvableTypeProvider) {</span>
+<span class="fc" id="L1201">			ResolvableType type = resolvableTypeProvider.getResolvableType();</span>
+<span class="pc bpc" id="L1202" title="1 of 2 branches missed.">			if (type != null) {</span>
+<span class="fc" id="L1203">				return type;</span>
+			}
+		}
+<span class="fc bfc" id="L1206" title="All 2 branches covered.">		return (instance != null ? forClass(instance.getClass()) : NONE);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Field}.
+	 * @param field the source field
+	 * @return a {@code ResolvableType} for the specified field
+	 * @see #forField(Field, Class)
+	 */
+	public static ResolvableType forField(Field field) {
+<span class="fc" id="L1216">		Assert.notNull(field, &quot;Field must not be null&quot;);</span>
+<span class="fc" id="L1217">		return forType(null, new FieldTypeProvider(field), null);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Field} with a given
+	 * implementation.
+	 * &lt;p&gt;Use this variant when the class that declares the field includes generic
+	 * parameter variables that are satisfied by the implementation class.
+	 * @param field the source field
+	 * @param implementationClass the implementation class
+	 * @return a {@code ResolvableType} for the specified field
+	 * @see #forField(Field)
+	 */
+	public static ResolvableType forField(Field field, Class&lt;?&gt; implementationClass) {
+<span class="fc" id="L1231">		Assert.notNull(field, &quot;Field must not be null&quot;);</span>
+<span class="fc" id="L1232">		ResolvableType owner = forType(implementationClass).as(field.getDeclaringClass());</span>
+<span class="fc" id="L1233">		return forType(null, new FieldTypeProvider(field), owner.asVariableResolver());</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Field} with a given
+	 * implementation.
+	 * &lt;p&gt;Use this variant when the class that declares the field includes generic
+	 * parameter variables that are satisfied by the implementation type.
+	 * @param field the source field
+	 * @param implementationType the implementation type
+	 * @return a {@code ResolvableType} for the specified field
+	 * @see #forField(Field)
+	 */
+	public static ResolvableType forField(Field field, @Nullable ResolvableType implementationType) {
+<span class="nc" id="L1247">		Assert.notNull(field, &quot;Field must not be null&quot;);</span>
+<span class="nc bnc" id="L1248" title="All 2 branches missed.">		ResolvableType owner = (implementationType != null ? implementationType : NONE);</span>
+<span class="nc" id="L1249">		owner = owner.as(field.getDeclaringClass());</span>
+<span class="nc" id="L1250">		return forType(null, new FieldTypeProvider(field), owner.asVariableResolver());</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Field} with the
+	 * given nesting level.
+	 * @param field the source field
+	 * @param nestingLevel the nesting level (1 for the outer level; 2 for a nested
+	 * generic type; etc)
+	 * @see #forField(Field)
+	 */
+	public static ResolvableType forField(Field field, int nestingLevel) {
+<span class="nc" id="L1262">		Assert.notNull(field, &quot;Field must not be null&quot;);</span>
+<span class="nc" id="L1263">		return forType(null, new FieldTypeProvider(field), null).getNested(nestingLevel);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Field} with a given
+	 * implementation and the given nesting level.
+	 * &lt;p&gt;Use this variant when the class that declares the field includes generic
+	 * parameter variables that are satisfied by the implementation class.
+	 * @param field the source field
+	 * @param nestingLevel the nesting level (1 for the outer level; 2 for a nested
+	 * generic type; etc)
+	 * @param implementationClass the implementation class
+	 * @return a {@code ResolvableType} for the specified field
+	 * @see #forField(Field)
+	 */
+	public static ResolvableType forField(Field field, int nestingLevel, @Nullable Class&lt;?&gt; implementationClass) {
+<span class="fc" id="L1279">		Assert.notNull(field, &quot;Field must not be null&quot;);</span>
+<span class="fc" id="L1280">		ResolvableType owner = forType(implementationClass).as(field.getDeclaringClass());</span>
+<span class="fc" id="L1281">		return forType(null, new FieldTypeProvider(field), owner.asVariableResolver()).getNested(nestingLevel);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Parameter}.
+	 * &lt;p&gt;This is a convenience factory method for scenarios where a {@code Parameter}
+	 * descriptor is already available.
+	 * @param parameter the source parameter
+	 * @return a {@code ResolvableType} for the specified parameter
+	 * @since 7.1
+	 */
+	public static ResolvableType forParameter(Parameter parameter) {
+<span class="fc" id="L1293">		return forMethodParameter(MethodParameter.forParameter(parameter));</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Constructor} parameter.
+	 * @param constructor the source constructor (must not be {@code null})
+	 * @param parameterIndex the parameter index
+	 * @return a {@code ResolvableType} for the specified constructor parameter
+	 * @see #forConstructorParameter(Constructor, int, Class)
+	 */
+	public static ResolvableType forConstructorParameter(Constructor&lt;?&gt; constructor, int parameterIndex) {
+<span class="fc" id="L1304">		return forMethodParameter(new MethodParameter(constructor, parameterIndex));</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Constructor} parameter
+	 * with a given implementation. Use this variant when the class that declares the
+	 * constructor includes generic parameter variables that are satisfied by the
+	 * implementation class.
+	 * @param constructor the source constructor (must not be {@code null})
+	 * @param parameterIndex the parameter index
+	 * @param implementationClass the implementation class
+	 * @return a {@code ResolvableType} for the specified constructor parameter
+	 * @see #forConstructorParameter(Constructor, int)
+	 */
+	public static ResolvableType forConstructorParameter(Constructor&lt;?&gt; constructor, int parameterIndex,
+			Class&lt;?&gt; implementationClass) {
+
+<span class="nc" id="L1321">		MethodParameter methodParameter = new MethodParameter(constructor, parameterIndex, implementationClass);</span>
+<span class="nc" id="L1322">		return forMethodParameter(methodParameter);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Method} return type.
+	 * @param method the source for the method return type
+	 * @return a {@code ResolvableType} for the specified method return
+	 * @see #forMethodReturnType(Method, Class)
+	 */
+	public static ResolvableType forMethodReturnType(Method method) {
+<span class="fc" id="L1332">		return forMethodParameter(new MethodParameter(method, -1));</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Method} return type.
+	 * &lt;p&gt;Use this variant when the class that declares the method includes generic
+	 * parameter variables that are satisfied by the implementation class.
+	 * @param method the source for the method return type
+	 * @param implementationClass the implementation class
+	 * @return a {@code ResolvableType} for the specified method return
+	 * @see #forMethodReturnType(Method)
+	 */
+	public static ResolvableType forMethodReturnType(Method method, Class&lt;?&gt; implementationClass) {
+<span class="fc" id="L1345">		MethodParameter methodParameter = new MethodParameter(method, -1, implementationClass);</span>
+<span class="fc" id="L1346">		return forMethodParameter(methodParameter);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Method} parameter.
+	 * @param method the source method (must not be {@code null})
+	 * @param parameterIndex the parameter index
+	 * @return a {@code ResolvableType} for the specified method parameter
+	 * @see #forMethodParameter(Method, int, Class)
+	 * @see #forMethodParameter(MethodParameter)
+	 */
+	public static ResolvableType forMethodParameter(Method method, int parameterIndex) {
+<span class="fc" id="L1358">		return forMethodParameter(new MethodParameter(method, parameterIndex));</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Method} parameter with a
+	 * given implementation. Use this variant when the class that declares the method
+	 * includes generic parameter variables that are satisfied by the implementation class.
+	 * @param method the source method (must not be {@code null})
+	 * @param parameterIndex the parameter index
+	 * @param implementationClass the implementation class
+	 * @return a {@code ResolvableType} for the specified method parameter
+	 * @see #forMethodParameter(Method, int, Class)
+	 * @see #forMethodParameter(MethodParameter)
+	 */
+	public static ResolvableType forMethodParameter(Method method, int parameterIndex, Class&lt;?&gt; implementationClass) {
+<span class="fc" id="L1373">		MethodParameter methodParameter = new MethodParameter(method, parameterIndex, implementationClass);</span>
+<span class="fc" id="L1374">		return forMethodParameter(methodParameter);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link MethodParameter}.
+	 * @param methodParameter the source method parameter (must not be {@code null})
+	 * @return a {@code ResolvableType} for the specified method parameter
+	 * @see #forMethodParameter(Method, int)
+	 */
+	public static ResolvableType forMethodParameter(MethodParameter methodParameter) {
+<span class="fc" id="L1384">		return forMethodParameter(methodParameter, (Type) null);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link MethodParameter} with a
+	 * given implementation type. Use this variant when the class that declares the method
+	 * includes generic parameter variables that are satisfied by the implementation type.
+	 * @param methodParameter the source method parameter (must not be {@code null})
+	 * @param implementationType the implementation type
+	 * @return a {@code ResolvableType} for the specified method parameter
+	 * @see #forMethodParameter(MethodParameter)
+	 */
+	public static ResolvableType forMethodParameter(MethodParameter methodParameter,
+			@Nullable ResolvableType implementationType) {
+
+<span class="nc" id="L1399">		Assert.notNull(methodParameter, &quot;MethodParameter must not be null&quot;);</span>
+<span class="nc bnc" id="L1400" title="All 2 branches missed.">		implementationType = (implementationType != null ? implementationType :</span>
+<span class="nc" id="L1401">				forType(methodParameter.getContainingClass()));</span>
+<span class="nc" id="L1402">		ResolvableType owner = implementationType.as(methodParameter.getDeclaringClass());</span>
+<span class="nc" id="L1403">		return forType(null, new MethodParameterTypeProvider(methodParameter), owner.asVariableResolver()).</span>
+<span class="nc" id="L1404">				getNested(methodParameter.getNestingLevel(), methodParameter.typeIndexesPerLevel);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link MethodParameter},
+	 * overriding the target type to resolve with a specific given type.
+	 * @param methodParameter the source method parameter (must not be {@code null})
+	 * @param targetType the type to resolve (a part of the method parameter's type)
+	 * @return a {@code ResolvableType} for the specified method parameter
+	 * @see #forMethodParameter(Method, int)
+	 */
+	public static ResolvableType forMethodParameter(MethodParameter methodParameter, @Nullable Type targetType) {
+<span class="fc" id="L1416">		Assert.notNull(methodParameter, &quot;MethodParameter must not be null&quot;);</span>
+<span class="fc" id="L1417">		return forMethodParameter(methodParameter, targetType, methodParameter.getNestingLevel());</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link MethodParameter} at
+	 * a specific nesting level, overriding the target type to resolve with a specific
+	 * given type.
+	 * @param methodParameter the source method parameter (must not be {@code null})
+	 * @param targetType the type to resolve (a part of the method parameter's type)
+	 * @param nestingLevel the nesting level to use
+	 * @return a {@code ResolvableType} for the specified method parameter
+	 * @since 5.2
+	 * @see #forMethodParameter(Method, int)
+	 */
+	static ResolvableType forMethodParameter(
+			MethodParameter methodParameter, @Nullable Type targetType, int nestingLevel) {
+
+<span class="fc" id="L1434">		ResolvableType owner = forType(methodParameter.getContainingClass()).as(methodParameter.getDeclaringClass());</span>
+<span class="fc" id="L1435">		return forType(targetType, new MethodParameterTypeProvider(methodParameter), owner.asVariableResolver()).</span>
+<span class="fc" id="L1436">				getNested(nestingLevel, methodParameter.typeIndexesPerLevel);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} as an array of the specified {@code componentType}.
+	 * @param componentType the component type
+	 * @return a {@code ResolvableType} as an array of the specified component type
+	 */
+	public static ResolvableType forArrayComponent(ResolvableType componentType) {
+<span class="fc" id="L1445">		Assert.notNull(componentType, &quot;Component type must not be null&quot;);</span>
+<span class="fc" id="L1446">		Class&lt;?&gt; arrayType = componentType.toClass().arrayType();</span>
+<span class="fc" id="L1447">		return new ResolvableType(arrayType, componentType, null, null);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the bounds of the specified {@link TypeVariable}.
+	 * @param typeVariable the type variable
+	 * @return a {@code ResolvableType} for the specified bounds
+	 * @since 6.2.3
+	 */
+	static ResolvableType forVariableBounds(TypeVariable&lt;?&gt; typeVariable) {
+<span class="nc" id="L1457">		return forType(resolveBounds(typeVariable.getBounds()));</span>
+	}
+
+	private static @Nullable Type resolveBounds(Type[] bounds) {
+<span class="fc bfc" id="L1461" title="All 4 branches covered.">		if (bounds.length == 0 || bounds[0] == Object.class) {</span>
+<span class="fc" id="L1462">			return null;</span>
+		}
+<span class="fc" id="L1464">		return bounds[0];</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Type}.
+	 * &lt;p&gt;Note: The resulting {@code ResolvableType} instance may not be {@link Serializable}.
+	 * @param type the source type (potentially {@code null})
+	 * @return a {@code ResolvableType} for the specified {@link Type}
+	 * @see #forType(Type, ResolvableType)
+	 */
+	public static ResolvableType forType(@Nullable Type type) {
+<span class="fc" id="L1475">		return forType(type, null, null);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Type} backed by the given
+	 * owner type.
+	 * &lt;p&gt;Note: The resulting {@code ResolvableType} instance may not be {@link Serializable}.
+	 * @param type the source type or {@code null}
+	 * @param owner the owner type used to resolve variables
+	 * @return a {@code ResolvableType} for the specified {@link Type} and owner
+	 * @see #forType(Type)
+	 */
+	public static ResolvableType forType(@Nullable Type type, @Nullable ResolvableType owner) {
+<span class="fc" id="L1488">		VariableResolver variableResolver = null;</span>
+<span class="pc bpc" id="L1489" title="1 of 2 branches missed.">		if (owner != null) {</span>
+<span class="fc" id="L1490">			variableResolver = owner.asVariableResolver();</span>
+		}
+<span class="fc" id="L1492">		return forType(type, variableResolver);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link ParameterizedTypeReference}.
+	 * &lt;p&gt;Note: The resulting {@code ResolvableType} instance may not be {@link Serializable}.
+	 * @param typeReference the reference to obtain the source type from
+	 * @return a {@code ResolvableType} for the specified {@link ParameterizedTypeReference}
+	 * @since 4.3.12
+	 * @see #forType(Type)
+	 */
+	public static ResolvableType forType(ParameterizedTypeReference&lt;?&gt; typeReference) {
+<span class="fc" id="L1504">		return forType(typeReference.getType(), null, null);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Type} backed by a given
+	 * {@link VariableResolver}.
+	 * @param type the source type or {@code null}
+	 * @param variableResolver the variable resolver or {@code null}
+	 * @return a {@code ResolvableType} for the specified {@link Type} and {@link VariableResolver}
+	 */
+	static ResolvableType forType(@Nullable Type type, @Nullable VariableResolver variableResolver) {
+<span class="fc" id="L1515">		return forType(type, null, variableResolver);</span>
+	}
+
+	/**
+	 * Return a {@code ResolvableType} for the specified {@link Type} backed by a given
+	 * {@link VariableResolver}.
+	 * @param type the source type or {@code null}
+	 * @param typeProvider the type provider or {@code null}
+	 * @param variableResolver the variable resolver or {@code null}
+	 * @return a {@code ResolvableType} for the specified {@link Type} and {@link VariableResolver}
+	 */
+	static ResolvableType forType(
+			@Nullable Type type, @Nullable TypeProvider typeProvider, @Nullable VariableResolver variableResolver) {
+
+<span class="fc bfc" id="L1529" title="All 4 branches covered.">		if (type == null &amp;&amp; typeProvider != null) {</span>
+<span class="fc" id="L1530">			type = SerializableTypeWrapper.forTypeProvider(typeProvider);</span>
+		}
+<span class="fc bfc" id="L1532" title="All 2 branches covered.">		if (type == null) {</span>
+<span class="fc" id="L1533">			return NONE;</span>
+		}
+
+		// For simple Class references, build the wrapper right away -
+		// no expensive resolution necessary, so not worth caching...
+<span class="fc bfc" id="L1538" title="All 2 branches covered.">		if (type instanceof Class) {</span>
+<span class="fc" id="L1539">			return new ResolvableType(type, null, typeProvider, variableResolver);</span>
+		}
+
+		// Purge empty entries on access since we don't have a clean-up thread or the like.
+<span class="fc" id="L1543">		cache.purgeUnreferencedEntries();</span>
+
+		// Check the cache - we may have a ResolvableType which has been resolved before...
+<span class="fc" id="L1546">		ResolvableType resultType = new ResolvableType(type, typeProvider, variableResolver);</span>
+<span class="fc" id="L1547">		ResolvableType cachedType = cache.get(resultType);</span>
+<span class="fc bfc" id="L1548" title="All 2 branches covered.">		if (cachedType == null) {</span>
+<span class="fc" id="L1549">			cachedType = new ResolvableType(type, typeProvider, variableResolver, resultType.hash);</span>
+<span class="fc" id="L1550">			cache.put(cachedType, cachedType);</span>
+		}
+<span class="fc" id="L1552">		resultType.resolved = cachedType.resolved;</span>
+<span class="fc" id="L1553">		return resultType;</span>
+	}
+
+	/**
+	 * Clear the internal {@code ResolvableType}/{@code SerializableTypeWrapper} cache.
+	 * @since 4.2
+	 */
+	public static void clearCache() {
+<span class="fc" id="L1561">		cache.clear();</span>
+<span class="fc" id="L1562">		SerializableTypeWrapper.cache.clear();</span>
+<span class="fc" id="L1563">	}</span>
+
+
+	/**
+	 * Strategy interface used to resolve {@link TypeVariable TypeVariables}.
+	 */
+	interface VariableResolver extends Serializable {
+
+		/**
+		 * Return the source of the resolver (used for hashCode and equals).
+		 */
+		Object getSource();
+
+		/**
+		 * Resolve the specified variable.
+		 * @param variable the variable to resolve
+		 * @return the resolved variable, or {@code null} if not found
+		 */
+		@Nullable ResolvableType resolveVariable(TypeVariable&lt;?&gt; variable);
+	}
+
+
+	@SuppressWarnings(&quot;serial&quot;)
+	private static class DefaultVariableResolver implements VariableResolver {
+
+		private final ResolvableType source;
+
+<span class="fc" id="L1590">		DefaultVariableResolver(ResolvableType resolvableType) {</span>
+<span class="fc" id="L1591">			this.source = resolvableType;</span>
+<span class="fc" id="L1592">		}</span>
+
+		@Override
+		public @Nullable ResolvableType resolveVariable(TypeVariable&lt;?&gt; variable) {
+<span class="fc" id="L1596">			return this.source.resolveVariable(variable);</span>
+		}
+
+		@Override
+		public Object getSource() {
+<span class="fc" id="L1601">			return this.source;</span>
+		}
+	}
+
+
+	@SuppressWarnings(&quot;serial&quot;)
+	private static class TypeVariablesVariableResolver implements VariableResolver {
+
+		private final TypeVariable&lt;?&gt;[] variables;
+
+		private final @Nullable ResolvableType[] generics;
+
+<span class="fc" id="L1613">		public TypeVariablesVariableResolver(TypeVariable&lt;?&gt;[] variables, @Nullable ResolvableType[] generics) {</span>
+<span class="fc" id="L1614">			this.variables = variables;</span>
+<span class="fc" id="L1615">			this.generics = generics;</span>
+<span class="fc" id="L1616">		}</span>
+
+		@Override
+		public @Nullable ResolvableType resolveVariable(TypeVariable&lt;?&gt; variable) {
+<span class="fc" id="L1620">			TypeVariable&lt;?&gt; variableToCompare = SerializableTypeWrapper.unwrap(variable);</span>
+<span class="fc bfc" id="L1621" title="All 2 branches covered.">			for (int i = 0; i &lt; this.variables.length; i++) {</span>
+<span class="fc" id="L1622">				TypeVariable&lt;?&gt; resolvedVariable = SerializableTypeWrapper.unwrap(this.variables[i]);</span>
+<span class="pc bpc" id="L1623" title="1 of 2 branches missed.">				if (ObjectUtils.nullSafeEquals(resolvedVariable, variableToCompare)) {</span>
+<span class="nc" id="L1624">					return this.generics[i];</span>
+				}
+			}
+<span class="fc" id="L1627">			return null;</span>
+		}
+
+		@Override
+		public Object getSource() {
+<span class="fc" id="L1632">			return this.generics;</span>
+		}
+	}
+
+
+	private static final class SyntheticParameterizedType implements ParameterizedType, Serializable {
+
+		private final Type rawType;
+
+		private final Type[] typeArguments;
+
+<span class="fc" id="L1643">		public SyntheticParameterizedType(Type rawType, Type[] typeArguments) {</span>
+<span class="fc" id="L1644">			this.rawType = rawType;</span>
+<span class="fc" id="L1645">			this.typeArguments = typeArguments;</span>
+<span class="fc" id="L1646">		}</span>
+
+		@Override
+		public String getTypeName() {
+<span class="nc" id="L1650">			String typeName = this.rawType.getTypeName();</span>
+<span class="nc bnc" id="L1651" title="All 2 branches missed.">			if (this.typeArguments.length &gt; 0) {</span>
+<span class="nc" id="L1652">				StringJoiner stringJoiner = new StringJoiner(&quot;, &quot;, &quot;&lt;&quot;, &quot;&gt;&quot;);</span>
+<span class="nc bnc" id="L1653" title="All 2 branches missed.">				for (Type argument : this.typeArguments) {</span>
+<span class="nc" id="L1654">					stringJoiner.add(argument.getTypeName());</span>
+				}
+<span class="nc" id="L1656">				return typeName + stringJoiner;</span>
+			}
+<span class="nc" id="L1658">			return typeName;</span>
+		}
+
+		@Override
+		public @Nullable Type getOwnerType() {
+<span class="fc" id="L1663">			return null;</span>
+		}
+
+		@Override
+		public Type getRawType() {
+<span class="fc" id="L1668">			return this.rawType;</span>
+		}
+
+		@Override
+		public Type[] getActualTypeArguments() {
+<span class="fc" id="L1673">			return this.typeArguments;</span>
+		}
+
+		@Override
+		public boolean equals(@Nullable Object other) {
+<span class="pc bpc" id="L1678" title="1 of 4 branches missed.">			return (this == other || (other instanceof ParameterizedType that &amp;&amp;</span>
+<span class="pc bpc" id="L1679" title="2 of 4 branches missed.">					that.getOwnerType() == null &amp;&amp; this.rawType.equals(that.getRawType()) &amp;&amp;</span>
+<span class="pc bpc" id="L1680" title="1 of 2 branches missed.">					Arrays.equals(this.typeArguments, that.getActualTypeArguments())));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="fc" id="L1685">			return (this.rawType.hashCode() * 31 + Arrays.hashCode(this.typeArguments));</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L1690">			return getTypeName();</span>
+		}
+	}
+
+
+	/**
+	 * Internal helper to handle bounds from {@link WildcardType WildcardTypes}.
+	 */
+	private static class WildcardBounds {
+
+		private final Kind kind;
+
+		private final ResolvableType[] bounds;
+
+		/**
+		 * Internal constructor to create a new {@link WildcardBounds} instance.
+		 * @param kind the kind of bounds
+		 * @param bounds the bounds
+		 * @see #get(ResolvableType)
+		 */
+<span class="fc" id="L1710">		public WildcardBounds(Kind kind, ResolvableType[] bounds) {</span>
+<span class="fc" id="L1711">			this.kind = kind;</span>
+<span class="fc" id="L1712">			this.bounds = bounds;</span>
+<span class="fc" id="L1713">		}</span>
+
+		/**
+		 * Return {@code true} if these bounds are the same kind as the specified bounds.
+		 */
+		public boolean isSameKind(WildcardBounds bounds) {
+<span class="pc bpc" id="L1719" title="1 of 2 branches missed.">			return this.kind == bounds.kind;</span>
+		}
+
+		/**
+		 * Return {@code true} if these bounds are assignable from all the specified types.
+		 * @param types the types to test against
+		 * @return {@code true} if these bounds are assignable from all types
+		 */
+		public boolean isAssignableFrom(ResolvableType[] types, @Nullable Map&lt;Type, Type&gt; matchedBefore) {
+<span class="fc bfc" id="L1728" title="All 2 branches covered.">			for (ResolvableType bound : this.bounds) {</span>
+<span class="fc" id="L1729">				boolean matched = false;</span>
+<span class="fc bfc" id="L1730" title="All 2 branches covered.">				for (ResolvableType type : types) {</span>
+<span class="pc bpc" id="L1731" title="1 of 4 branches missed.">					if (this.kind == Kind.UPPER ? bound.isAssignableFrom(type, false, matchedBefore, false) :</span>
+<span class="nc bnc" id="L1732" title="All 2 branches missed.">							type.isAssignableFrom(bound, false, matchedBefore, false)) {</span>
+<span class="fc" id="L1733">						matched = true;</span>
+<span class="fc" id="L1734">						break;</span>
+					}
+				}
+<span class="fc bfc" id="L1737" title="All 2 branches covered.">				if (!matched) {</span>
+<span class="fc" id="L1738">					return false;</span>
+				}
+			}
+<span class="fc" id="L1741">			return true;</span>
+		}
+
+		/**
+		 * Return {@code true} if these bounds are assignable from the specified type.
+		 * @param type the type to test against
+		 * @return {@code true} if these bounds are assignable from the type
+		 * @since 6.2
+		 */
+		public boolean isAssignableFrom(ResolvableType type, @Nullable Map&lt;Type, Type&gt; matchedBefore) {
+<span class="fc bfc" id="L1751" title="All 2 branches covered.">			for (ResolvableType bound : this.bounds) {</span>
+<span class="pc bpc" id="L1752" title="1 of 4 branches missed.">				if (this.kind == Kind.UPPER ? !bound.isAssignableFrom(type, false, matchedBefore, false) :</span>
+<span class="nc bnc" id="L1753" title="All 2 branches missed.">						!type.isAssignableFrom(bound, false, matchedBefore, false)) {</span>
+<span class="fc" id="L1754">					return false;</span>
+				}
+			}
+<span class="fc" id="L1757">			return true;</span>
+		}
+
+		/**
+		 * Return {@code true} if these bounds are assignable to the specified type.
+		 * @param type the type to test against
+		 * @return {@code true} if these bounds are assignable to the type
+		 * @since 6.2
+		 */
+		public boolean isAssignableTo(ResolvableType type, @Nullable Map&lt;Type, Type&gt; matchedBefore) {
+<span class="pc bpc" id="L1767" title="1 of 2 branches missed.">			if (this.kind == Kind.UPPER) {</span>
+<span class="fc bfc" id="L1768" title="All 2 branches covered.">				for (ResolvableType bound : this.bounds) {</span>
+<span class="pc bpc" id="L1769" title="1 of 2 branches missed.">					if (type.isAssignableFrom(bound, false, matchedBefore, false)) {</span>
+<span class="nc" id="L1770">						return true;</span>
+					}
+				}
+<span class="fc" id="L1773">				return false;</span>
+			}
+			else {
+<span class="nc bnc" id="L1776" title="All 2 branches missed.">				return (type.resolve() == Object.class);</span>
+			}
+		}
+
+		/**
+		 * Return {@code true} if these bounds are equal to the specified type.
+		 * @param type the type to test against
+		 * @return {@code true} if these bounds are equal to the type
+		 * @since 6.2.4
+		 */
+		public boolean equalsType(ResolvableType type, @Nullable Map&lt;Type, Type&gt; matchedBefore) {
+<span class="fc bfc" id="L1787" title="All 2 branches covered.">			for (ResolvableType bound : this.bounds) {</span>
+<span class="pc bpc" id="L1788" title="1 of 4 branches missed.">				if (this.kind == Kind.UPPER &amp;&amp; bound.hasUnresolvableGenerics() ?</span>
+<span class="pc bpc" id="L1789" title="1 of 2 branches missed.">						!type.isAssignableFrom(bound, true, matchedBefore, false) :</span>
+<span class="pc bpc" id="L1790" title="1 of 2 branches missed.">						!type.equalsType(bound)) {</span>
+<span class="fc" id="L1791">					return false;</span>
+				}
+			}
+<span class="fc" id="L1794">			return true;</span>
+		}
+
+		/**
+		 * Return the underlying bounds.
+		 */
+		public ResolvableType[] getBounds() {
+<span class="fc" id="L1801">			return this.bounds;</span>
+		}
+
+		/**
+		 * Get a {@link WildcardBounds} instance for the specified type, returning
+		 * {@code null} if the specified type cannot be resolved to a {@link WildcardType}
+		 * or an equivalent unresolvable type variable.
+		 * @param type the source type
+		 * @return a {@link WildcardBounds} instance or {@code null}
+		 */
+		public static @Nullable WildcardBounds get(ResolvableType type) {
+<span class="fc" id="L1812">			ResolvableType candidate = type;</span>
+<span class="fc bfc" id="L1813" title="All 4 branches covered.">			while (!(candidate.getType() instanceof WildcardType || candidate.isUnresolvableTypeVariable())) {</span>
+<span class="fc bfc" id="L1814" title="All 2 branches covered.">				if (candidate == NONE) {</span>
+<span class="fc" id="L1815">					return null;</span>
+				}
+<span class="fc" id="L1817">				candidate = candidate.resolveType();</span>
+			}
+			Kind boundsType;
+			Type[] bounds;
+<span class="fc bfc" id="L1821" title="All 2 branches covered.">			if (candidate.getType() instanceof WildcardType wildcardType) {</span>
+<span class="pc bpc" id="L1822" title="1 of 2 branches missed.">				boundsType = (wildcardType.getLowerBounds().length &gt; 0 ? Kind.LOWER : Kind.UPPER);</span>
+<span class="pc bpc" id="L1823" title="1 of 2 branches missed.">				bounds = (boundsType == Kind.UPPER ? wildcardType.getUpperBounds() : wildcardType.getLowerBounds());</span>
+			}
+			else {
+<span class="fc" id="L1826">				boundsType = Kind.UPPER;</span>
+<span class="fc" id="L1827">				bounds = ((TypeVariable&lt;?&gt;) candidate.getType()).getBounds();</span>
+			}
+<span class="fc" id="L1829">			ResolvableType[] resolvableBounds = new ResolvableType[bounds.length];</span>
+<span class="fc bfc" id="L1830" title="All 2 branches covered.">			for (int i = 0; i &lt; bounds.length; i++) {</span>
+<span class="fc" id="L1831">				resolvableBounds[i] = ResolvableType.forType(bounds[i], type.variableResolver);</span>
+			}
+<span class="fc" id="L1833">			return new WildcardBounds(boundsType, resolvableBounds);</span>
+		}
+
+		/**
+		 * The various kinds of bounds.
+		 */
+<span class="fc" id="L1839">		enum Kind {UPPER, LOWER}</span>
+	}
+
+
+	/**
+	 * Internal {@link Type} used to represent an empty value.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L1847">	static class EmptyType implements Type, Serializable {</span>
+
+<span class="fc" id="L1849">		static final Type INSTANCE = new EmptyType();</span>
+
+		Object readResolve() {
+<span class="nc" id="L1852">			return INSTANCE;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

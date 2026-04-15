@@ -1,0 +1,574 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SpelExpression.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.standard</a> &gt; <span class="el_source">SpelExpression.java</span></div><h1>SpelExpression.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.standard;
+
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.EvaluationException;
+import org.springframework.expression.Expression;
+import org.springframework.expression.TypedValue;
+import org.springframework.expression.common.ExpressionUtils;
+import org.springframework.expression.spel.CompiledExpression;
+import org.springframework.expression.spel.ExpressionState;
+import org.springframework.expression.spel.SpelCompilerMode;
+import org.springframework.expression.spel.SpelEvaluationException;
+import org.springframework.expression.spel.SpelMessage;
+import org.springframework.expression.spel.SpelNode;
+import org.springframework.expression.spel.SpelParserConfiguration;
+import org.springframework.expression.spel.ast.SpelNodeImpl;
+import org.springframework.expression.spel.support.StandardEvaluationContext;
+import org.springframework.util.Assert;
+
+/**
+ * A {@code SpelExpression} represents a parsed (valid) expression that is ready to be
+ * evaluated in a specified context. An expression can be evaluated standalone or in a
+ * specified context. During expression evaluation the context may be asked to resolve
+ * references to types, beans, properties, and methods.
+ *
+ * @author Andy Clement
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 3.0
+ */
+public class SpelExpression implements Expression {
+
+	// Number of times to interpret an expression before compiling it
+	private static final int INTERPRETED_COUNT_THRESHOLD = 100;
+
+	// Number of times to try compiling an expression before giving up
+	private static final int FAILED_ATTEMPTS_THRESHOLD = 100;
+
+
+	private final String expression;
+
+	private final SpelNodeImpl ast;
+
+	private final SpelParserConfiguration configuration;
+
+	// The default context is used if no override is supplied by the user
+	private @Nullable EvaluationContext evaluationContext;
+
+	// Holds the compiled form of the expression (if it has been compiled)
+	private volatile @Nullable CompiledExpression compiledAst;
+
+	// Count of many times as the expression been interpreted - can trigger compilation
+	// when certain limit reached
+<span class="fc" id="L74">	private final AtomicInteger interpretedCount = new AtomicInteger();</span>
+
+	// The number of times compilation was attempted and failed - enables us to eventually
+	// give up trying to compile it when it just doesn't seem to be possible.
+<span class="fc" id="L78">	private final AtomicInteger failedAttempts = new AtomicInteger();</span>
+
+
+	/**
+	 * Construct an expression, only used by the parser.
+	 */
+<span class="fc" id="L84">	public SpelExpression(String expression, SpelNodeImpl ast, SpelParserConfiguration configuration) {</span>
+<span class="fc" id="L85">		this.expression = expression;</span>
+<span class="fc" id="L86">		this.ast = ast;</span>
+<span class="fc" id="L87">		this.configuration = configuration;</span>
+<span class="fc" id="L88">	}</span>
+
+
+	/**
+	 * Set the evaluation context that will be used if none is specified on an evaluation call.
+	 * @param evaluationContext the evaluation context to use
+	 */
+	public void setEvaluationContext(EvaluationContext evaluationContext) {
+<span class="fc" id="L96">		this.evaluationContext = evaluationContext;</span>
+<span class="fc" id="L97">	}</span>
+
+	/**
+	 * Return the default evaluation context that will be used if none is supplied on an evaluation call.
+	 * @return the default evaluation context
+	 */
+	public EvaluationContext getEvaluationContext() {
+<span class="fc bfc" id="L104" title="All 2 branches covered.">		if (this.evaluationContext == null) {</span>
+<span class="fc" id="L105">			this.evaluationContext = new StandardEvaluationContext();</span>
+		}
+<span class="fc" id="L107">		return this.evaluationContext;</span>
+	}
+
+
+	// implementing Expression
+
+	@Override
+	public String getExpressionString() {
+<span class="fc" id="L115">		return this.expression;</span>
+	}
+
+	@Override
+	public @Nullable Object getValue() throws EvaluationException {
+<span class="fc" id="L120">		CompiledExpression compiledAst = this.compiledAst;</span>
+<span class="fc bfc" id="L121" title="All 2 branches covered.">		if (compiledAst != null) {</span>
+			try {
+<span class="fc" id="L123">				EvaluationContext context = getEvaluationContext();</span>
+<span class="fc" id="L124">				return compiledAst.getValue(context.getRootObject().getValue(), context);</span>
+			}
+<span class="nc" id="L126">			catch (Throwable ex) {</span>
+				// If running in mixed mode, revert to interpreted
+<span class="nc bnc" id="L128" title="All 2 branches missed.">				if (this.configuration.getCompilerMode() == SpelCompilerMode.MIXED) {</span>
+<span class="nc" id="L129">					this.compiledAst = null;</span>
+<span class="nc" id="L130">					this.interpretedCount.set(0);</span>
+				}
+				else {
+					// Running in SpelCompilerMode.immediate mode - propagate exception to caller
+<span class="nc" id="L134">					throw new SpelEvaluationException(ex, SpelMessage.EXCEPTION_RUNNING_COMPILED_EXPRESSION);</span>
+				}
+			}
+		}
+
+<span class="fc" id="L139">		ExpressionState expressionState = new ExpressionState(getEvaluationContext(), this.configuration);</span>
+<span class="fc" id="L140">		Object result = this.ast.getValue(expressionState);</span>
+<span class="fc" id="L141">		checkCompile(expressionState);</span>
+<span class="fc" id="L142">		return result;</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Override
+	public &lt;T&gt; @Nullable T getValue(@Nullable Class&lt;T&gt; expectedResultType) throws EvaluationException {
+<span class="fc" id="L148">		CompiledExpression compiledAst = this.compiledAst;</span>
+<span class="fc bfc" id="L149" title="All 2 branches covered.">		if (compiledAst != null) {</span>
+			try {
+<span class="fc" id="L151">				EvaluationContext context = getEvaluationContext();</span>
+<span class="fc" id="L152">				Object result = compiledAst.getValue(context.getRootObject().getValue(), context);</span>
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">				if (expectedResultType == null) {</span>
+<span class="nc" id="L154">					return (T) result;</span>
+				}
+				else {
+<span class="fc" id="L157">					return ExpressionUtils.convertTypedValue(</span>
+<span class="fc" id="L158">							getEvaluationContext(), new TypedValue(result), expectedResultType);</span>
+				}
+			}
+<span class="nc" id="L161">			catch (Throwable ex) {</span>
+				// If running in mixed mode, revert to interpreted
+<span class="nc bnc" id="L163" title="All 2 branches missed.">				if (this.configuration.getCompilerMode() == SpelCompilerMode.MIXED) {</span>
+<span class="nc" id="L164">					this.compiledAst = null;</span>
+<span class="nc" id="L165">					this.interpretedCount.set(0);</span>
+				}
+				else {
+					// Running in SpelCompilerMode.immediate mode - propagate exception to caller
+<span class="nc" id="L169">					throw new SpelEvaluationException(ex, SpelMessage.EXCEPTION_RUNNING_COMPILED_EXPRESSION);</span>
+				}
+			}
+		}
+
+<span class="fc" id="L174">		ExpressionState expressionState = new ExpressionState(getEvaluationContext(), this.configuration);</span>
+<span class="fc" id="L175">		TypedValue typedResultValue = this.ast.getTypedValue(expressionState);</span>
+<span class="fc" id="L176">		checkCompile(expressionState);</span>
+<span class="fc" id="L177">		return ExpressionUtils.convertTypedValue(</span>
+<span class="fc" id="L178">				expressionState.getEvaluationContext(), typedResultValue, expectedResultType);</span>
+	}
+
+	@Override
+	public @Nullable Object getValue(@Nullable Object rootObject) throws EvaluationException {
+<span class="fc" id="L183">		CompiledExpression compiledAst = this.compiledAst;</span>
+<span class="fc bfc" id="L184" title="All 2 branches covered.">		if (compiledAst != null) {</span>
+			try {
+<span class="fc" id="L186">				return compiledAst.getValue(rootObject, getEvaluationContext());</span>
+			}
+<span class="fc" id="L188">			catch (Throwable ex) {</span>
+				// If running in mixed mode, revert to interpreted
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">				if (this.configuration.getCompilerMode() == SpelCompilerMode.MIXED) {</span>
+<span class="nc" id="L191">					this.compiledAst = null;</span>
+<span class="nc" id="L192">					this.interpretedCount.set(0);</span>
+				}
+				else {
+					// Running in SpelCompilerMode.immediate mode - propagate exception to caller
+<span class="fc" id="L196">					throw new SpelEvaluationException(ex, SpelMessage.EXCEPTION_RUNNING_COMPILED_EXPRESSION);</span>
+				}
+			}
+		}
+
+<span class="fc" id="L201">		ExpressionState expressionState =</span>
+<span class="fc" id="L202">				new ExpressionState(getEvaluationContext(), toTypedValue(rootObject), this.configuration);</span>
+<span class="fc" id="L203">		Object result = this.ast.getValue(expressionState);</span>
+<span class="fc" id="L204">		checkCompile(expressionState);</span>
+<span class="fc" id="L205">		return result;</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Override
+	public &lt;T&gt; @Nullable T getValue(@Nullable Object rootObject, @Nullable Class&lt;T&gt; expectedResultType) throws EvaluationException {
+<span class="fc" id="L211">		CompiledExpression compiledAst = this.compiledAst;</span>
+<span class="fc bfc" id="L212" title="All 2 branches covered.">		if (compiledAst != null) {</span>
+			try {
+<span class="fc" id="L214">				Object result = compiledAst.getValue(rootObject, getEvaluationContext());</span>
+<span class="pc bpc" id="L215" title="1 of 2 branches missed.">				if (expectedResultType == null) {</span>
+<span class="nc" id="L216">					return (T)result;</span>
+				}
+				else {
+<span class="fc" id="L219">					return ExpressionUtils.convertTypedValue(</span>
+<span class="fc" id="L220">							getEvaluationContext(), new TypedValue(result), expectedResultType);</span>
+				}
+			}
+<span class="nc" id="L223">			catch (Throwable ex) {</span>
+				// If running in mixed mode, revert to interpreted
+<span class="nc bnc" id="L225" title="All 2 branches missed.">				if (this.configuration.getCompilerMode() == SpelCompilerMode.MIXED) {</span>
+<span class="nc" id="L226">					this.compiledAst = null;</span>
+<span class="nc" id="L227">					this.interpretedCount.set(0);</span>
+				}
+				else {
+					// Running in SpelCompilerMode.immediate mode - propagate exception to caller
+<span class="nc" id="L231">					throw new SpelEvaluationException(ex, SpelMessage.EXCEPTION_RUNNING_COMPILED_EXPRESSION);</span>
+				}
+			}
+		}
+
+<span class="fc" id="L236">		ExpressionState expressionState =</span>
+<span class="fc" id="L237">				new ExpressionState(getEvaluationContext(), toTypedValue(rootObject), this.configuration);</span>
+<span class="fc" id="L238">		TypedValue typedResultValue = this.ast.getTypedValue(expressionState);</span>
+<span class="fc" id="L239">		checkCompile(expressionState);</span>
+<span class="fc" id="L240">		return ExpressionUtils.convertTypedValue(</span>
+<span class="fc" id="L241">				expressionState.getEvaluationContext(), typedResultValue, expectedResultType);</span>
+	}
+
+	@Override
+	public @Nullable Object getValue(EvaluationContext context) throws EvaluationException {
+<span class="fc" id="L246">		Assert.notNull(context, &quot;EvaluationContext must not be null&quot;);</span>
+
+<span class="fc" id="L248">		CompiledExpression compiledAst = this.compiledAst;</span>
+<span class="fc bfc" id="L249" title="All 2 branches covered.">		if (compiledAst != null) {</span>
+			try {
+<span class="fc" id="L251">				return compiledAst.getValue(context.getRootObject().getValue(), context);</span>
+			}
+<span class="fc" id="L253">			catch (Throwable ex) {</span>
+				// If running in mixed mode, revert to interpreted
+<span class="fc bfc" id="L255" title="All 2 branches covered.">				if (this.configuration.getCompilerMode() == SpelCompilerMode.MIXED) {</span>
+<span class="fc" id="L256">					this.compiledAst = null;</span>
+<span class="fc" id="L257">					this.interpretedCount.set(0);</span>
+				}
+				else {
+					// Running in SpelCompilerMode.immediate mode - propagate exception to caller
+<span class="fc" id="L261">					throw new SpelEvaluationException(ex, SpelMessage.EXCEPTION_RUNNING_COMPILED_EXPRESSION);</span>
+				}
+			}
+		}
+
+<span class="fc" id="L266">		ExpressionState expressionState = new ExpressionState(context, this.configuration);</span>
+<span class="fc" id="L267">		Object result = this.ast.getValue(expressionState);</span>
+<span class="fc" id="L268">		checkCompile(expressionState);</span>
+<span class="fc" id="L269">		return result;</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Override
+	public &lt;T&gt; @Nullable T getValue(EvaluationContext context, @Nullable Class&lt;T&gt; expectedResultType) throws EvaluationException {
+<span class="fc" id="L275">		Assert.notNull(context, &quot;EvaluationContext must not be null&quot;);</span>
+
+<span class="fc" id="L277">		CompiledExpression compiledAst = this.compiledAst;</span>
+<span class="fc bfc" id="L278" title="All 2 branches covered.">		if (compiledAst != null) {</span>
+			try {
+<span class="fc" id="L280">				Object result = compiledAst.getValue(context.getRootObject().getValue(), context);</span>
+<span class="pc bpc" id="L281" title="1 of 2 branches missed.">				if (expectedResultType != null) {</span>
+<span class="fc" id="L282">					return ExpressionUtils.convertTypedValue(context, new TypedValue(result), expectedResultType);</span>
+				}
+				else {
+<span class="nc" id="L285">					return (T) result;</span>
+				}
+			}
+<span class="nc" id="L288">			catch (Throwable ex) {</span>
+				// If running in mixed mode, revert to interpreted
+<span class="nc bnc" id="L290" title="All 2 branches missed.">				if (this.configuration.getCompilerMode() == SpelCompilerMode.MIXED) {</span>
+<span class="nc" id="L291">					this.compiledAst = null;</span>
+<span class="nc" id="L292">					this.interpretedCount.set(0);</span>
+				}
+				else {
+					// Running in SpelCompilerMode.immediate mode - propagate exception to caller
+<span class="nc" id="L296">					throw new SpelEvaluationException(ex, SpelMessage.EXCEPTION_RUNNING_COMPILED_EXPRESSION);</span>
+				}
+			}
+		}
+
+<span class="fc" id="L301">		ExpressionState expressionState = new ExpressionState(context, this.configuration);</span>
+<span class="fc" id="L302">		TypedValue typedResultValue = this.ast.getTypedValue(expressionState);</span>
+<span class="fc" id="L303">		checkCompile(expressionState);</span>
+<span class="fc" id="L304">		return ExpressionUtils.convertTypedValue(context, typedResultValue, expectedResultType);</span>
+	}
+
+	@Override
+	public @Nullable Object getValue(EvaluationContext context, @Nullable Object rootObject) throws EvaluationException {
+<span class="fc" id="L309">		Assert.notNull(context, &quot;EvaluationContext must not be null&quot;);</span>
+
+<span class="fc" id="L311">		CompiledExpression compiledAst = this.compiledAst;</span>
+<span class="fc bfc" id="L312" title="All 2 branches covered.">		if (compiledAst != null) {</span>
+			try {
+<span class="fc" id="L314">				return compiledAst.getValue(rootObject, context);</span>
+			}
+<span class="nc" id="L316">			catch (Throwable ex) {</span>
+				// If running in mixed mode, revert to interpreted
+<span class="nc bnc" id="L318" title="All 2 branches missed.">				if (this.configuration.getCompilerMode() == SpelCompilerMode.MIXED) {</span>
+<span class="nc" id="L319">					this.compiledAst = null;</span>
+<span class="nc" id="L320">					this.interpretedCount.set(0);</span>
+				}
+				else {
+					// Running in SpelCompilerMode.immediate mode - propagate exception to caller
+<span class="nc" id="L324">					throw new SpelEvaluationException(ex, SpelMessage.EXCEPTION_RUNNING_COMPILED_EXPRESSION);</span>
+				}
+			}
+		}
+
+<span class="fc" id="L329">		ExpressionState expressionState = new ExpressionState(context, toTypedValue(rootObject), this.configuration);</span>
+<span class="fc" id="L330">		Object result = this.ast.getValue(expressionState);</span>
+<span class="fc" id="L331">		checkCompile(expressionState);</span>
+<span class="fc" id="L332">		return result;</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	@Override
+	public &lt;T&gt; @Nullable T getValue(EvaluationContext context, @Nullable Object rootObject, @Nullable Class&lt;T&gt; expectedResultType)
+			throws EvaluationException {
+
+<span class="fc" id="L340">		Assert.notNull(context, &quot;EvaluationContext must not be null&quot;);</span>
+
+<span class="fc" id="L342">		CompiledExpression compiledAst = this.compiledAst;</span>
+<span class="fc bfc" id="L343" title="All 2 branches covered.">		if (compiledAst != null) {</span>
+			try {
+<span class="fc" id="L345">				Object result = compiledAst.getValue(rootObject, context);</span>
+<span class="pc bpc" id="L346" title="1 of 2 branches missed.">				if (expectedResultType != null) {</span>
+<span class="fc" id="L347">					return ExpressionUtils.convertTypedValue(context, new TypedValue(result), expectedResultType);</span>
+				}
+				else {
+<span class="nc" id="L350">					return (T) result;</span>
+				}
+			}
+<span class="nc" id="L353">			catch (Throwable ex) {</span>
+				// If running in mixed mode, revert to interpreted
+<span class="nc bnc" id="L355" title="All 2 branches missed.">				if (this.configuration.getCompilerMode() == SpelCompilerMode.MIXED) {</span>
+<span class="nc" id="L356">					this.compiledAst = null;</span>
+<span class="nc" id="L357">					this.interpretedCount.set(0);</span>
+				}
+				else {
+					// Running in SpelCompilerMode.immediate mode - propagate exception to caller
+<span class="nc" id="L361">					throw new SpelEvaluationException(ex, SpelMessage.EXCEPTION_RUNNING_COMPILED_EXPRESSION);</span>
+				}
+			}
+		}
+
+<span class="fc" id="L366">		ExpressionState expressionState = new ExpressionState(context, toTypedValue(rootObject), this.configuration);</span>
+<span class="fc" id="L367">		TypedValue typedResultValue = this.ast.getTypedValue(expressionState);</span>
+<span class="fc" id="L368">		checkCompile(expressionState);</span>
+<span class="fc" id="L369">		return ExpressionUtils.convertTypedValue(context, typedResultValue, expectedResultType);</span>
+	}
+
+	@Override
+	public @Nullable Class&lt;?&gt; getValueType() throws EvaluationException {
+<span class="fc" id="L374">		return getValueType(getEvaluationContext());</span>
+	}
+
+	@Override
+	public @Nullable Class&lt;?&gt; getValueType(@Nullable Object rootObject) throws EvaluationException {
+<span class="nc" id="L379">		return getValueType(getEvaluationContext(), rootObject);</span>
+	}
+
+	@Override
+	public @Nullable Class&lt;?&gt; getValueType(EvaluationContext context) throws EvaluationException {
+<span class="fc" id="L384">		Assert.notNull(context, &quot;EvaluationContext must not be null&quot;);</span>
+<span class="fc" id="L385">		ExpressionState expressionState = new ExpressionState(context, this.configuration);</span>
+<span class="fc" id="L386">		TypeDescriptor typeDescriptor = this.ast.getValueInternal(expressionState).getTypeDescriptor();</span>
+<span class="fc bfc" id="L387" title="All 2 branches covered.">		return (typeDescriptor != null ? typeDescriptor.getType() : null);</span>
+	}
+
+	@Override
+	public @Nullable Class&lt;?&gt; getValueType(EvaluationContext context, @Nullable Object rootObject) throws EvaluationException {
+<span class="nc" id="L392">		ExpressionState expressionState = new ExpressionState(context, toTypedValue(rootObject), this.configuration);</span>
+<span class="nc" id="L393">		TypeDescriptor typeDescriptor = this.ast.getValueInternal(expressionState).getTypeDescriptor();</span>
+<span class="nc bnc" id="L394" title="All 2 branches missed.">		return (typeDescriptor != null ? typeDescriptor.getType() : null);</span>
+	}
+
+	@Override
+	public @Nullable TypeDescriptor getValueTypeDescriptor() throws EvaluationException {
+<span class="nc" id="L399">		return getValueTypeDescriptor(getEvaluationContext());</span>
+	}
+
+	@Override
+	public @Nullable TypeDescriptor getValueTypeDescriptor(@Nullable Object rootObject) throws EvaluationException {
+<span class="fc" id="L404">		ExpressionState expressionState =</span>
+<span class="fc" id="L405">				new ExpressionState(getEvaluationContext(), toTypedValue(rootObject), this.configuration);</span>
+<span class="fc" id="L406">		return this.ast.getValueInternal(expressionState).getTypeDescriptor();</span>
+	}
+
+	@Override
+	public @Nullable TypeDescriptor getValueTypeDescriptor(EvaluationContext context) throws EvaluationException {
+<span class="fc" id="L411">		Assert.notNull(context, &quot;EvaluationContext must not be null&quot;);</span>
+<span class="fc" id="L412">		ExpressionState expressionState = new ExpressionState(context, this.configuration);</span>
+<span class="fc" id="L413">		return this.ast.getValueInternal(expressionState).getTypeDescriptor();</span>
+	}
+
+	@Override
+	public @Nullable TypeDescriptor getValueTypeDescriptor(EvaluationContext context, @Nullable Object rootObject)
+			throws EvaluationException {
+
+<span class="nc" id="L420">		Assert.notNull(context, &quot;EvaluationContext must not be null&quot;);</span>
+<span class="nc" id="L421">		ExpressionState expressionState = new ExpressionState(context, toTypedValue(rootObject), this.configuration);</span>
+<span class="nc" id="L422">		return this.ast.getValueInternal(expressionState).getTypeDescriptor();</span>
+	}
+
+	@Override
+	public boolean isWritable(@Nullable Object rootObject) throws EvaluationException {
+<span class="nc" id="L427">		return this.ast.isWritable(</span>
+<span class="nc" id="L428">				new ExpressionState(getEvaluationContext(), toTypedValue(rootObject), this.configuration));</span>
+	}
+
+	@Override
+	public boolean isWritable(EvaluationContext context) throws EvaluationException {
+<span class="fc" id="L433">		Assert.notNull(context, &quot;EvaluationContext must not be null&quot;);</span>
+<span class="fc" id="L434">		return this.ast.isWritable(new ExpressionState(context, this.configuration));</span>
+	}
+
+	@Override
+	public boolean isWritable(EvaluationContext context, @Nullable Object rootObject) throws EvaluationException {
+<span class="fc" id="L439">		Assert.notNull(context, &quot;EvaluationContext must not be null&quot;);</span>
+<span class="fc" id="L440">		return this.ast.isWritable(new ExpressionState(context, toTypedValue(rootObject), this.configuration));</span>
+	}
+
+	@Override
+	public void setValue(@Nullable Object rootObject, @Nullable Object value) throws EvaluationException {
+<span class="fc" id="L445">		this.ast.setValue(</span>
+<span class="fc" id="L446">				new ExpressionState(getEvaluationContext(), toTypedValue(rootObject), this.configuration), value);</span>
+<span class="fc" id="L447">	}</span>
+
+	@Override
+	public void setValue(EvaluationContext context, @Nullable Object value) throws EvaluationException {
+<span class="fc" id="L451">		Assert.notNull(context, &quot;EvaluationContext must not be null&quot;);</span>
+<span class="fc" id="L452">		this.ast.setValue(new ExpressionState(context, this.configuration), value);</span>
+<span class="fc" id="L453">	}</span>
+
+	@Override
+	public void setValue(EvaluationContext context, @Nullable Object rootObject, @Nullable Object value)
+			throws EvaluationException {
+
+<span class="fc" id="L459">		Assert.notNull(context, &quot;EvaluationContext must not be null&quot;);</span>
+<span class="fc" id="L460">		this.ast.setValue(new ExpressionState(context, toTypedValue(rootObject), this.configuration), value);</span>
+<span class="fc" id="L461">	}</span>
+
+
+	/**
+	 * Compile the expression if it has been evaluated more than the threshold number
+	 * of times to trigger compilation.
+	 * @param expressionState the expression state used to determine compilation mode
+	 */
+	private void checkCompile(ExpressionState expressionState) {
+<span class="fc" id="L470">		this.interpretedCount.incrementAndGet();</span>
+<span class="fc" id="L471">		SpelCompilerMode compilerMode = expressionState.getConfiguration().getCompilerMode();</span>
+<span class="fc bfc" id="L472" title="All 2 branches covered.">		if (compilerMode != SpelCompilerMode.OFF) {</span>
+<span class="fc bfc" id="L473" title="All 2 branches covered.">			if (compilerMode == SpelCompilerMode.IMMEDIATE) {</span>
+<span class="fc bfc" id="L474" title="All 2 branches covered.">				if (this.interpretedCount.get() &gt; 1) {</span>
+<span class="fc" id="L475">					compileExpression();</span>
+				}
+			}
+			else {
+				// compilerMode = SpelCompilerMode.MIXED
+<span class="fc bfc" id="L480" title="All 2 branches covered.">				if (this.interpretedCount.get() &gt; INTERPRETED_COUNT_THRESHOLD) {</span>
+<span class="fc" id="L481">					compileExpression();</span>
+				}
+			}
+		}
+<span class="fc" id="L485">	}</span>
+
+	/**
+	 * Perform expression compilation. This will only succeed once exit descriptors for
+	 * all nodes have been determined. If the compilation fails and has failed more than
+	 * 100 times the expression is no longer considered suitable for compilation.
+	 * @return whether this expression has been successfully compiled
+	 */
+	public boolean compileExpression() {
+<span class="fc" id="L494">		CompiledExpression compiledAst = this.compiledAst;</span>
+<span class="fc bfc" id="L495" title="All 2 branches covered.">		if (compiledAst != null) {</span>
+			// Previously compiled
+<span class="fc" id="L497">			return true;</span>
+		}
+<span class="fc bfc" id="L499" title="All 2 branches covered.">		if (this.failedAttempts.get() &gt; FAILED_ATTEMPTS_THRESHOLD) {</span>
+			// Don't try again
+<span class="fc" id="L501">			return false;</span>
+		}
+
+<span class="fc" id="L504">		synchronized (this) {</span>
+<span class="fc bfc" id="L505" title="All 2 branches covered.">			if (this.compiledAst != null) {</span>
+				// Compiled by another thread before this thread got into the sync block
+<span class="fc" id="L507">				return true;</span>
+			}
+			try {
+<span class="fc" id="L510">				SpelCompiler compiler = SpelCompiler.getCompiler(this.configuration.getCompilerClassLoader());</span>
+<span class="fc" id="L511">				compiledAst = compiler.compile(this.ast);</span>
+<span class="fc bfc" id="L512" title="All 2 branches covered.">				if (compiledAst != null) {</span>
+					// Successfully compiled
+<span class="fc" id="L514">					this.compiledAst = compiledAst;</span>
+<span class="fc" id="L515">					return true;</span>
+				}
+				else {
+					// Failed to compile
+<span class="fc" id="L519">					this.failedAttempts.incrementAndGet();</span>
+<span class="fc" id="L520">					return false;</span>
+				}
+			}
+<span class="fc" id="L523">			catch (Exception ex) {</span>
+				// Failed to compile
+<span class="fc" id="L525">				this.failedAttempts.incrementAndGet();</span>
+
+				// If running in mixed mode, revert to interpreted
+<span class="pc bpc" id="L528" title="1 of 2 branches missed.">				if (this.configuration.getCompilerMode() == SpelCompilerMode.MIXED) {</span>
+<span class="fc" id="L529">					this.compiledAst = null;</span>
+<span class="fc" id="L530">					this.interpretedCount.set(0);</span>
+<span class="fc" id="L531">					return false;</span>
+				}
+				else {
+					// Running in SpelCompilerMode.immediate mode - propagate exception to caller
+<span class="nc" id="L535">					throw new SpelEvaluationException(ex, SpelMessage.EXCEPTION_COMPILING_EXPRESSION);</span>
+				}
+			}
+		}
+	}
+
+	/**
+	 * Cause an expression to revert to being interpreted if it has been using a compiled
+	 * form. It also resets the compilation attempt failure count (an expression is normally no
+	 * longer considered compilable if it cannot be compiled after 100 attempts).
+	 */
+	public void revertToInterpreted() {
+<span class="fc" id="L547">		this.compiledAst = null;</span>
+<span class="fc" id="L548">		this.interpretedCount.set(0);</span>
+<span class="fc" id="L549">		this.failedAttempts.set(0);</span>
+<span class="fc" id="L550">	}</span>
+
+	/**
+	 * Return the Abstract Syntax Tree for the expression.
+	 */
+	public SpelNode getAST() {
+<span class="fc" id="L556">		return this.ast;</span>
+	}
+
+	/**
+	 * Produce a string representation of the Abstract Syntax Tree for the expression.
+	 * This should ideally look like the input expression, but properly formatted since any
+	 * unnecessary whitespace will have been discarded during the parse of the expression.
+	 * @return the string representation of the AST
+	 */
+	public String toStringAST() {
+<span class="fc" id="L566">		return this.ast.toStringAST();</span>
+	}
+
+	private TypedValue toTypedValue(@Nullable Object object) {
+<span class="fc bfc" id="L570" title="All 2 branches covered.">		return (object != null ? new TypedValue(object) : TypedValue.NULL);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

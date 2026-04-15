@@ -1,0 +1,523 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ResponseBodyEmitterReturnValueHandler.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-webmvc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.mvc.method.annotation</a> &gt; <span class="el_source">ResponseBodyEmitterReturnValueHandler.java</span></div><h1>ResponseBodyEmitterReturnValueHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.mvc.method.annotation;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+import java.util.function.Consumer;
+
+import jakarta.servlet.ServletOutputStream;
+import jakarta.servlet.WriteListener;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpServletResponseWrapper;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.task.SyncTaskExecutor;
+import org.springframework.core.task.TaskExecutor;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.converter.HttpMessageConverter;
+import org.springframework.http.converter.StringHttpMessageConverter;
+import org.springframework.http.server.DelegatingServerHttpResponse;
+import org.springframework.http.server.ServerHttpResponse;
+import org.springframework.http.server.ServletServerHttpResponse;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+import org.springframework.web.accept.ContentNegotiationManager;
+import org.springframework.web.context.request.NativeWebRequest;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
+import org.springframework.web.context.request.ServletWebRequest;
+import org.springframework.web.context.request.async.DeferredResult;
+import org.springframework.web.context.request.async.WebAsyncUtils;
+import org.springframework.web.filter.ShallowEtagHeaderFilter;
+import org.springframework.web.method.support.HandlerMethodReturnValueHandler;
+import org.springframework.web.method.support.ModelAndViewContainer;
+import org.springframework.web.servlet.LocaleResolver;
+import org.springframework.web.servlet.ModelAndView;
+import org.springframework.web.servlet.View;
+import org.springframework.web.servlet.ViewResolver;
+import org.springframework.web.servlet.i18n.AcceptHeaderLocaleResolver;
+import org.springframework.web.servlet.view.FragmentsRendering;
+
+/**
+ * Handler for return values of type:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@link ResponseBodyEmitter} including sub-class {@link SseEmitter} and others.
+ * &lt;li&gt;Reactive return types known to {@link ReactiveAdapterRegistry}.
+ * &lt;li&gt;Any of the above wrapped with {@link ResponseEntity}.
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;Single-value reactive types are adapted to {@link DeferredResult}.
+ * Multi-value reactive types are adapted to {@link ResponseBodyEmitter} or
+ * {@link SseEmitter} as follows:
+ * &lt;ul&gt;
+ * &lt;li&gt;SSE stream, if the element type is
+ * {@link org.springframework.http.codec.ServerSentEvent} or if negotiated by
+ * content type.
+ * &lt;li&gt;Text stream for a {@link org.reactivestreams.Publisher} of
+ * {@link CharSequence}.
+ * &lt;li&gt;A JSON stream if negotiated by content type to
+ * {@link MediaType#APPLICATION_NDJSON}.
+ * &lt;/ul&gt;
+ *
+ * @author Rossen Stoyanchev
+ * @since 4.2
+ */
+public class ResponseBodyEmitterReturnValueHandler implements HandlerMethodReturnValueHandler {
+
+	private final List&lt;HttpMessageConverter&lt;?&gt;&gt; sseMessageConverters;
+
+	private final ReactiveTypeHandler reactiveHandler;
+
+	private final List&lt;ViewResolver&gt; viewResolvers;
+
+	private final LocaleResolver localeResolver;
+
+
+	/**
+	 * Simple constructor with reactive type support based on a default instance of
+	 * {@link ReactiveAdapterRegistry},
+	 * {@link org.springframework.core.task.SyncTaskExecutor}, and
+	 * {@link ContentNegotiationManager} with an Accept header strategy.
+	 */
+	public ResponseBodyEmitterReturnValueHandler(List&lt;HttpMessageConverter&lt;?&gt;&gt; messageConverters) {
+<span class="fc" id="L112">		this(messageConverters,</span>
+<span class="fc" id="L113">				ReactiveAdapterRegistry.getSharedInstance(), new SyncTaskExecutor(),</span>
+				new ContentNegotiationManager());
+<span class="fc" id="L115">	}</span>
+
+	/**
+	 * Constructor that with added arguments to customize &quot;reactive&quot; type support.
+	 * @param messageConverters converters to write emitted objects with
+	 * @param registry for reactive return value type support
+	 * @param executor for blocking I/O writes of items emitted from reactive types
+	 * @param manager for detecting streaming media types
+	 * @since 5.0
+	 */
+	public ResponseBodyEmitterReturnValueHandler(List&lt;HttpMessageConverter&lt;?&gt;&gt; messageConverters,
+			ReactiveAdapterRegistry registry, TaskExecutor executor, ContentNegotiationManager manager) {
+
+<span class="fc" id="L128">		this(messageConverters, registry, executor, manager, Collections.emptyList(), null);</span>
+<span class="fc" id="L129">	}</span>
+
+	/**
+	 * Constructor that with added arguments for view rendering.
+	 * @param messageConverters converters to write emitted objects with
+	 * @param registry for reactive return value type support
+	 * @param executor for blocking I/O writes of items emitted from reactive types
+	 * @param manager for detecting streaming media types
+	 * @param viewResolvers resolvers for fragment stream rendering
+	 * @param localeResolver the {@link LocaleResolver} for fragment stream rendering
+	 * @since 6.2
+	 */
+	public ResponseBodyEmitterReturnValueHandler(
+			List&lt;HttpMessageConverter&lt;?&gt;&gt; messageConverters,
+			ReactiveAdapterRegistry registry, TaskExecutor executor, ContentNegotiationManager manager,
+<span class="fc" id="L144">			List&lt;ViewResolver&gt; viewResolvers, @Nullable LocaleResolver localeResolver) {</span>
+
+<span class="fc" id="L146">		Assert.notEmpty(messageConverters, &quot;HttpMessageConverter List must not be empty&quot;);</span>
+<span class="fc" id="L147">		this.sseMessageConverters = initSseConverters(messageConverters);</span>
+<span class="fc" id="L148">		this.reactiveHandler = new ReactiveTypeHandler(registry, executor, manager, null);</span>
+<span class="fc" id="L149">		this.viewResolvers = viewResolvers;</span>
+<span class="fc bfc" id="L150" title="All 2 branches covered.">		this.localeResolver = (localeResolver != null ? localeResolver : new AcceptHeaderLocaleResolver());</span>
+<span class="fc" id="L151">	}</span>
+
+	private static List&lt;HttpMessageConverter&lt;?&gt;&gt; initSseConverters(List&lt;HttpMessageConverter&lt;?&gt;&gt; converters) {
+<span class="fc bfc" id="L154" title="All 2 branches covered.">		for (HttpMessageConverter&lt;?&gt; converter : converters) {</span>
+<span class="fc bfc" id="L155" title="All 2 branches covered.">			if (converter.canWrite(String.class, MediaType.TEXT_PLAIN)) {</span>
+<span class="fc" id="L156">				return converters;</span>
+			}
+<span class="fc" id="L158">		}</span>
+<span class="fc" id="L159">		List&lt;HttpMessageConverter&lt;?&gt;&gt; result = new ArrayList&lt;&gt;(converters.size() + 1);</span>
+<span class="fc" id="L160">		result.add(new StringHttpMessageConverter(StandardCharsets.UTF_8));</span>
+<span class="fc" id="L161">		result.addAll(converters);</span>
+<span class="fc" id="L162">		return result;</span>
+	}
+
+
+	@Override
+	public boolean supportsReturnType(MethodParameter returnType) {
+<span class="fc bfc" id="L168" title="All 2 branches covered.">		Class&lt;?&gt; bodyType = ResponseEntity.class.isAssignableFrom(returnType.getParameterType()) ?</span>
+<span class="fc" id="L169">				ResolvableType.forMethodParameter(returnType).getGeneric().resolve() :</span>
+<span class="fc" id="L170">				returnType.getParameterType();</span>
+
+<span class="fc bfc" id="L172" title="All 4 branches covered.">		return (bodyType != null &amp;&amp; supportsBodyType(bodyType));</span>
+	}
+
+	boolean supportsBodyType(Class&lt;?&gt; bodyType) {
+<span class="fc bfc" id="L176" title="All 4 branches covered.">		return (ResponseBodyEmitter.class.isAssignableFrom(bodyType) || this.reactiveHandler.isReactiveType(bodyType));</span>
+	}
+
+	@Override
+	@SuppressWarnings(&quot;resource&quot;)
+	public void handleReturnValue(@Nullable Object returnValue, MethodParameter returnType,
+			ModelAndViewContainer mavContainer, NativeWebRequest webRequest) throws Exception {
+
+<span class="fc bfc" id="L184" title="All 2 branches covered.">		if (returnValue == null) {</span>
+<span class="fc" id="L185">			mavContainer.setRequestHandled(true);</span>
+<span class="fc" id="L186">			return;</span>
+		}
+
+<span class="fc" id="L189">		HttpServletResponse response = webRequest.getNativeResponse(HttpServletResponse.class);</span>
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">		Assert.state(response != null, &quot;No HttpServletResponse&quot;);</span>
+<span class="fc" id="L191">		ServerHttpResponse outputMessage = new ServletServerHttpResponse(response);</span>
+<span class="fc" id="L192">		MediaType contentType = null;</span>
+
+<span class="fc bfc" id="L194" title="All 2 branches covered.">		if (returnValue instanceof ResponseEntity&lt;?&gt; responseEntity) {</span>
+<span class="fc" id="L195">			response.setStatus(responseEntity.getStatusCode().value());</span>
+<span class="fc" id="L196">			outputMessage.getHeaders().putAll(responseEntity.getHeaders());</span>
+<span class="fc" id="L197">			contentType = responseEntity.getHeaders().getContentType();</span>
+<span class="fc" id="L198">			returnValue = responseEntity.getBody();</span>
+<span class="fc" id="L199">			returnType = returnType.nested();</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">			if (returnValue == null) {</span>
+<span class="fc" id="L201">				mavContainer.setRequestHandled(true);</span>
+<span class="fc" id="L202">				outputMessage.flush();</span>
+<span class="fc" id="L203">				return;</span>
+			}
+		}
+
+<span class="fc" id="L207">		HttpServletRequest request = webRequest.getNativeRequest(HttpServletRequest.class);</span>
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">		Assert.state(request != null, &quot;No ServletRequest&quot;);</span>
+
+		ResponseBodyEmitter emitter;
+<span class="fc bfc" id="L211" title="All 2 branches covered.">		if (returnValue instanceof ResponseBodyEmitter responseBodyEmitter) {</span>
+<span class="fc" id="L212">			emitter = responseBodyEmitter;</span>
+		}
+		else {
+<span class="fc" id="L215">			emitter = this.reactiveHandler.handleValue(returnValue, returnType, contentType, mavContainer, webRequest);</span>
+<span class="fc bfc" id="L216" title="All 2 branches covered.">			if (emitter == null) {</span>
+				// reactive but not streaming, e.g. Mono or aggregated Flux
+<span class="fc" id="L218">				return;</span>
+			}
+		}
+<span class="fc" id="L221">		emitter.extendResponse(outputMessage);</span>
+
+		// We are streaming
+<span class="fc" id="L224">		ShallowEtagHeaderFilter.disableContentCaching(request);</span>
+
+		// Suppress header updates from message converters
+<span class="fc" id="L227">		outputMessage = new StreamingServletServerHttpResponse(outputMessage);</span>
+
+		DefaultSseEmitterHandler emitterHandler;
+		try {
+<span class="fc" id="L231">			DeferredResult&lt;?&gt; result = new DeferredResult&lt;&gt;(emitter.getTimeout());</span>
+<span class="fc" id="L232">			WebAsyncUtils.getAsyncManager(webRequest).startDeferredResultProcessing(result, mavContainer);</span>
+<span class="fc" id="L233">			FragmentHandler handler = new FragmentHandler(request, response, this.viewResolvers, this.localeResolver);</span>
+<span class="fc" id="L234">			emitterHandler = new DefaultSseEmitterHandler(this.sseMessageConverters, handler, outputMessage, result);</span>
+		}
+<span class="nc" id="L236">		catch (Throwable ex) {</span>
+<span class="nc" id="L237">			emitter.initializeWithError(ex);</span>
+<span class="nc" id="L238">			throw ex;</span>
+<span class="fc" id="L239">		}</span>
+
+<span class="fc" id="L241">		emitter.initialize(emitterHandler);</span>
+<span class="fc" id="L242">	}</span>
+
+
+	/**
+	 * Wrap to silently ignore header changes HttpMessageConverter's that would
+	 * otherwise cause HttpHeaders to raise exceptions.
+	 */
+	private static class StreamingServletServerHttpResponse extends DelegatingServerHttpResponse {
+
+<span class="fc" id="L251">		private final HttpHeaders mutableHeaders = new HttpHeaders();</span>
+
+		public StreamingServletServerHttpResponse(ServerHttpResponse delegate) {
+<span class="fc" id="L254">			super(delegate);</span>
+<span class="fc" id="L255">			this.mutableHeaders.putAll(delegate.getHeaders());</span>
+<span class="fc" id="L256">		}</span>
+
+		@Override
+		public HttpHeaders getHeaders() {
+<span class="fc" id="L260">			return this.mutableHeaders;</span>
+		}
+	}
+
+
+	/**
+	 * ResponseBodyEmitter.Handler that writes with HttpMessageConverter's.
+	 */
+	private static final class DefaultSseEmitterHandler implements ResponseBodyEmitter.Handler {
+
+		private final List&lt;HttpMessageConverter&lt;?&gt;&gt; messageConverters;
+
+		private final FragmentHandler fragmentHandler;
+
+		private final ServerHttpResponse outputMessage;
+
+		private final DeferredResult&lt;?&gt; deferredResult;
+
+		public DefaultSseEmitterHandler(
+				List&lt;HttpMessageConverter&lt;?&gt;&gt; messageConverters, FragmentHandler fragmentHandler,
+<span class="fc" id="L280">				ServerHttpResponse outputMessage, DeferredResult&lt;?&gt; result) {</span>
+
+<span class="fc" id="L282">			this.messageConverters = messageConverters;</span>
+<span class="fc" id="L283">			this.fragmentHandler = fragmentHandler;</span>
+<span class="fc" id="L284">			this.outputMessage = outputMessage;</span>
+<span class="fc" id="L285">			this.deferredResult = result;</span>
+<span class="fc" id="L286">		}</span>
+
+		@Override
+		public void send(Object data, @Nullable MediaType mediaType) throws IOException {
+<span class="fc" id="L290">			sendInternal(data, mediaType);</span>
+<span class="fc" id="L291">			this.outputMessage.flush();</span>
+<span class="fc" id="L292">		}</span>
+
+		@Override
+		public void send(Set&lt;ResponseBodyEmitter.DataWithMediaType&gt; items) throws IOException {
+<span class="fc bfc" id="L296" title="All 2 branches covered.">			for (ResponseBodyEmitter.DataWithMediaType item : items) {</span>
+<span class="fc" id="L297">				sendInternal(item.getData(), item.getMediaType());</span>
+<span class="fc" id="L298">			}</span>
+<span class="fc" id="L299">			this.outputMessage.flush();</span>
+<span class="fc" id="L300">		}</span>
+
+		@SuppressWarnings(&quot;unchecked&quot;)
+		private &lt;T&gt; void sendInternal(T data, @Nullable MediaType mediaType) throws IOException {
+<span class="fc bfc" id="L304" title="All 2 branches covered.">			if (data instanceof ModelAndView mav) {</span>
+<span class="fc" id="L305">				this.fragmentHandler.handle(mav);</span>
+<span class="fc" id="L306">				return;</span>
+			}
+<span class="pc bpc" id="L308" title="1 of 2 branches missed.">			for (HttpMessageConverter&lt;?&gt; converter : this.messageConverters) {</span>
+<span class="fc bfc" id="L309" title="All 2 branches covered.">				if (converter.canWrite(data.getClass(), mediaType)) {</span>
+<span class="fc" id="L310">					((HttpMessageConverter&lt;T&gt;) converter).write(data, mediaType, this.outputMessage);</span>
+<span class="fc" id="L311">					return;</span>
+				}
+<span class="fc" id="L313">			}</span>
+<span class="nc" id="L314">			throw new IllegalArgumentException(&quot;No suitable converter for &quot; + data.getClass());</span>
+		}
+
+		@Override
+		public void complete() {
+			try {
+<span class="fc" id="L320">				this.outputMessage.flush();</span>
+<span class="fc" id="L321">				this.deferredResult.setResult(null);</span>
+			}
+<span class="nc" id="L323">			catch (IOException ex) {</span>
+<span class="nc" id="L324">				this.deferredResult.setErrorResult(ex);</span>
+<span class="fc" id="L325">			}</span>
+<span class="fc" id="L326">		}</span>
+
+		@Override
+		public void completeWithError(Throwable failure) {
+<span class="fc" id="L330">			this.deferredResult.setErrorResult(failure);</span>
+<span class="fc" id="L331">		}</span>
+
+		@Override
+		public void onTimeout(Runnable callback) {
+<span class="fc" id="L335">			this.deferredResult.onTimeout(callback);</span>
+<span class="fc" id="L336">		}</span>
+
+		@Override
+		public void onError(Consumer&lt;Throwable&gt; callback) {
+<span class="fc" id="L340">			this.deferredResult.onError(callback);</span>
+<span class="fc" id="L341">		}</span>
+
+		@Override
+		public void onCompletion(Runnable callback) {
+<span class="fc" id="L345">			this.deferredResult.onCompletion(callback);</span>
+<span class="fc" id="L346">		}</span>
+	}
+
+
+	/**
+	 * Handler that renders ModelAndView fragments via FragmentsRendering.
+	 */
+	private static final class FragmentHandler {
+
+		private final HttpServletRequest request;
+
+		private final HttpServletResponse response;
+
+		private final List&lt;ViewResolver&gt; viewResolvers;
+
+		private final Locale locale;
+
+		private final Charset charset;
+
+		private final ServletRequestAttributes requestAttributes;
+
+		public FragmentHandler(
+				HttpServletRequest request, HttpServletResponse response,
+<span class="fc" id="L369">				List&lt;ViewResolver&gt; viewResolvers, LocaleResolver localeResolver) {</span>
+
+<span class="fc" id="L371">			this.request = request;</span>
+<span class="fc" id="L372">			this.response = response;</span>
+<span class="fc" id="L373">			this.viewResolvers = viewResolvers;</span>
+<span class="fc" id="L374">			this.charset = initCharset(response);</span>
+<span class="fc" id="L375">			this.locale = localeResolver.resolveLocale(request);</span>
+<span class="fc" id="L376">			this.requestAttributes = new ServletWebRequest(this.request);</span>
+<span class="fc" id="L377">		}</span>
+
+		private static Charset initCharset(HttpServletResponse response) {
+<span class="fc" id="L380">			String s = response.getHeader(&quot;Content-Type&quot;);</span>
+<span class="fc bfc" id="L381" title="All 2 branches covered.">			if (StringUtils.hasText(s)) {</span>
+<span class="fc" id="L382">				MediaType contentType = MediaType.valueOf(s);</span>
+<span class="pc bpc" id="L383" title="1 of 2 branches missed.">				if (contentType.getCharset() != null) {</span>
+<span class="nc" id="L384">					return contentType.getCharset();</span>
+				}
+			}
+<span class="fc" id="L387">			return StandardCharsets.UTF_8;</span>
+		}
+
+		public void handle(ModelAndView modelAndView) throws IOException {
+<span class="fc" id="L391">			RequestContextHolder.setRequestAttributes(this.requestAttributes);</span>
+			try {
+<span class="fc" id="L393">				FragmentHttpServletResponse fragmentResponse =</span>
+						new FragmentHttpServletResponse(this.response, this.charset);
+
+<span class="fc" id="L396">				FragmentsRendering render = FragmentsRendering.fragments(List.of(modelAndView)).build();</span>
+<span class="fc" id="L397">				render.resolveNestedViews(this::resolveViewName, this.locale);</span>
+<span class="fc" id="L398">				render.render(modelAndView.getModel(), this.request, fragmentResponse);</span>
+
+<span class="fc" id="L400">				byte[] content = fragmentResponse.getFragmentContent();</span>
+<span class="fc" id="L401">				this.response.getOutputStream().write(content);</span>
+			}
+<span class="nc" id="L403">			catch (IOException ex) {</span>
+<span class="nc" id="L404">				throw ex;</span>
+			}
+<span class="nc" id="L406">			catch (Exception ex) {</span>
+<span class="nc" id="L407">				throw new IllegalStateException(&quot;Failed to render &quot; + modelAndView, ex);</span>
+			}
+			finally {
+<span class="fc" id="L410">				RequestContextHolder.resetRequestAttributes();</span>
+			}
+<span class="fc" id="L412">		}</span>
+
+		public @Nullable View resolveViewName(String viewName, Locale locale) throws Exception {
+<span class="pc bpc" id="L415" title="1 of 2 branches missed.">			for (ViewResolver resolver : this.viewResolvers) {</span>
+<span class="fc" id="L416">				View view = resolver.resolveViewName(viewName, locale);</span>
+<span class="pc bpc" id="L417" title="1 of 2 branches missed.">				if (view != null) {</span>
+<span class="fc" id="L418">					return view;</span>
+				}
+<span class="nc" id="L420">			}</span>
+<span class="nc" id="L421">			return null;</span>
+		}
+	}
+
+
+	/**
+	 * HttpServletResponse wrapper for fragment rendering.
+	 * Ignores calls for setting content-type and content-length per fragment.
+	 * Caches written content and replaces new lines.
+	 */
+	private static final class FragmentHttpServletResponse extends HttpServletResponseWrapper {
+
+		private final FragmentServletOutputStream outputStream;
+
+		private final PrintWriter writer;
+
+		private final Charset charset;
+
+		public FragmentHttpServletResponse(HttpServletResponse delegate, Charset charset) {
+<span class="fc" id="L440">			super(delegate);</span>
+<span class="fc" id="L441">			this.outputStream = new FragmentServletOutputStream();</span>
+<span class="fc" id="L442">			this.writer = new PrintWriter(this.outputStream);</span>
+<span class="fc" id="L443">			this.charset = charset;</span>
+<span class="fc" id="L444">		}</span>
+
+		@Override
+		public void setContentType(String type) {
+			// ignore
+<span class="fc" id="L449">		}</span>
+
+		@Override
+		public void setCharacterEncoding(String charset) {
+			// ignore
+<span class="nc" id="L454">		}</span>
+
+		@Override
+		public void setCharacterEncoding(Charset encoding) {
+			// ignore
+<span class="fc" id="L459">		}</span>
+
+		@Override
+		public void setContentLength(int len) {
+			// ignore
+<span class="nc" id="L464">		}</span>
+
+		@Override
+		public ServletOutputStream getOutputStream() {
+<span class="nc" id="L468">			return this.outputStream;</span>
+		}
+
+		@Override
+		public PrintWriter getWriter() {
+<span class="fc" id="L473">			return this.writer;</span>
+		}
+
+		public byte[] getFragmentContent() {
+<span class="fc" id="L477">			this.writer.flush();</span>
+<span class="fc" id="L478">			String content = this.outputStream.toString(this.charset);</span>
+<span class="fc" id="L479">			content = content.replace(&quot;\n&quot;, &quot;\ndata:&quot;);</span>
+<span class="fc" id="L480">			return content.getBytes(this.charset);</span>
+		}
+	}
+
+
+	/**
+	 * ServletOutputStream that caches written fragment content.
+	 */
+<span class="fc" id="L488">	private static final class FragmentServletOutputStream extends ServletOutputStream {</span>
+
+<span class="fc" id="L490">		private final ByteArrayOutputStream outputStream = new ByteArrayOutputStream();</span>
+
+		@Override
+		public void write(int b) {
+<span class="nc" id="L494">			this.outputStream.write(b);</span>
+<span class="nc" id="L495">		}</span>
+
+		@Override
+		public void write(byte[] b) throws IOException {
+<span class="nc" id="L499">			this.outputStream.write(b);</span>
+<span class="nc" id="L500">		}</span>
+
+		@Override
+		public void write(byte[] b, int off, int len) {
+<span class="fc" id="L504">			this.outputStream.write(b, off, len);</span>
+<span class="fc" id="L505">		}</span>
+
+		@Override
+		public boolean isReady() {
+<span class="nc" id="L509">			return false;</span>
+		}
+
+		@Override
+		public void setWriteListener(WriteListener writeListener) {
+<span class="nc" id="L514">			throw new UnsupportedOperationException();</span>
+		}
+
+		public String toString(Charset charset) {
+<span class="fc" id="L518">			return this.outputStream.toString(charset);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

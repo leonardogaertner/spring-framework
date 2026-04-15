@@ -1,0 +1,611 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConcurrentLruCache.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.util</a> &gt; <span class="el_source">ConcurrentLruCache.java</span></div><h1>ConcurrentLruCache.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.util;
+
+import java.util.Queue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLongArray;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.atomic.AtomicReferenceArray;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Function;
+
+import org.jspecify.annotations.Nullable;
+
+/**
+ * Simple LRU (Least Recently Used) cache, bounded by a specified cache capacity.
+ *
+ * &lt;p&gt;This is a simplified, opinionated implementation of an LRU cache for internal
+ * use in Spring Framework. It is inspired from
+ * &lt;a href=&quot;https://github.com/ben-manes/concurrentlinkedhashmap&quot;&gt;ConcurrentLinkedHashMap&lt;/a&gt;.
+ *
+ * &lt;p&gt;Read and write operations are internally recorded in dedicated buffers,
+ * then drained at chosen times to avoid contention.
+ *
+ * @author Brian Clozel
+ * @author Ben Manes
+ * @since 5.3
+ * @param &lt;K&gt; the type of the key used for cache retrieval
+ * @param &lt;V&gt; the type of the cached values, does not allow null values
+ * @see #get(Object)
+ */
+@SuppressWarnings({&quot;unchecked&quot;, &quot;NullAway&quot;})
+public final class ConcurrentLruCache&lt;K, V&gt; {
+
+	private final int capacity;
+
+<span class="nc" id="L55">	private final AtomicInteger currentSize = new AtomicInteger();</span>
+
+	private final ConcurrentMap&lt;K, Node&lt;K, V&gt;&gt; cache;
+
+	private final Function&lt;K, V&gt; generator;
+
+	private final ReadOperations&lt;K, V&gt; readOperations;
+
+	private final WriteOperations writeOperations;
+
+<span class="nc" id="L65">	private final Lock evictionLock = new ReentrantLock();</span>
+
+	/*
+	 * Queue that contains all ACTIVE cache entries, ordered with least recently used entries first.
+	 * Read and write operations are buffered and periodically processed to reorder the queue.
+	 */
+<span class="nc" id="L71">	private final EvictionQueue&lt;K, V&gt; evictionQueue = new EvictionQueue&lt;&gt;();</span>
+
+<span class="nc" id="L73">	private final AtomicReference&lt;DrainStatus&gt; drainStatus = new AtomicReference&lt;&gt;(DrainStatus.IDLE);</span>
+
+
+	/**
+	 * Create a new cache instance with the given capacity and generator function.
+	 * @param capacity the maximum number of entries in the cache
+	 * (0 indicates no caching, always generating a new value)
+	 * @param generator a function to generate a new value for a given key
+	 */
+	public ConcurrentLruCache(int capacity, Function&lt;K, V&gt; generator) {
+<span class="nc" id="L83">		this(capacity, generator, 16);</span>
+<span class="nc" id="L84">	}</span>
+
+<span class="nc" id="L86">	private ConcurrentLruCache(int capacity, Function&lt;K, V&gt; generator, int concurrencyLevel) {</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">		Assert.isTrue(capacity &gt;= 0, &quot;Capacity must be &gt;= 0&quot;);</span>
+<span class="nc" id="L88">		this.capacity = capacity;</span>
+<span class="nc" id="L89">		this.cache = new ConcurrentHashMap&lt;&gt;(16, 0.75f, concurrencyLevel);</span>
+<span class="nc" id="L90">		this.generator = generator;</span>
+<span class="nc" id="L91">		this.readOperations = new ReadOperations&lt;&gt;(this.evictionQueue);</span>
+<span class="nc" id="L92">		this.writeOperations = new WriteOperations();</span>
+<span class="nc" id="L93">	}</span>
+
+
+	/**
+	 * Retrieve an entry from the cache, potentially triggering generation of the value.
+	 * @param key the key to retrieve the entry for
+	 * @return the cached or newly generated value
+	 */
+	public V get(K key) {
+<span class="nc bnc" id="L102" title="All 2 branches missed.">		if (this.capacity == 0) {</span>
+<span class="nc" id="L103">			return this.generator.apply(key);</span>
+		}
+<span class="nc" id="L105">		final Node&lt;K, V&gt; node = this.cache.get(key);</span>
+<span class="nc bnc" id="L106" title="All 2 branches missed.">		if (node == null) {</span>
+<span class="nc" id="L107">			V value = this.generator.apply(key);</span>
+<span class="nc" id="L108">			put(key, value);</span>
+<span class="nc" id="L109">			return value;</span>
+		}
+<span class="nc" id="L111">		processRead(node);</span>
+<span class="nc" id="L112">		return node.getValue();</span>
+	}
+
+	private void put(K key, V value) {
+<span class="nc" id="L116">		Assert.notNull(key, &quot;key must not be null&quot;);</span>
+<span class="nc" id="L117">		Assert.notNull(value, &quot;value must not be null&quot;);</span>
+<span class="nc" id="L118">		final CacheEntry&lt;V&gt; cacheEntry = new CacheEntry&lt;&gt;(value, CacheEntryState.ACTIVE);</span>
+<span class="nc" id="L119">		final Node&lt;K, V&gt; node = new Node&lt;&gt;(key, cacheEntry);</span>
+<span class="nc" id="L120">		final Node&lt;K, V&gt; prior = this.cache.putIfAbsent(node.key, node);</span>
+<span class="nc bnc" id="L121" title="All 2 branches missed.">		if (prior == null) {</span>
+<span class="nc" id="L122">			processWrite(new AddTask(node));</span>
+		}
+		else {
+<span class="nc" id="L125">			processRead(prior);</span>
+		}
+<span class="nc" id="L127">	}</span>
+
+	private void processRead(Node&lt;K, V&gt; node) {
+<span class="nc" id="L130">		boolean drainRequested = this.readOperations.recordRead(node);</span>
+<span class="nc" id="L131">		final DrainStatus status = this.drainStatus.get();</span>
+<span class="nc bnc" id="L132" title="All 2 branches missed.">		if (status.shouldDrainBuffers(drainRequested)) {</span>
+<span class="nc" id="L133">			drainOperations();</span>
+		}
+<span class="nc" id="L135">	}</span>
+
+	private void processWrite(Runnable task) {
+<span class="nc" id="L138">		this.writeOperations.add(task);</span>
+<span class="nc" id="L139">		this.drainStatus.lazySet(DrainStatus.REQUIRED);</span>
+<span class="nc" id="L140">		drainOperations();</span>
+<span class="nc" id="L141">	}</span>
+
+	private void drainOperations() {
+<span class="nc bnc" id="L144" title="All 2 branches missed.">		if (this.evictionLock.tryLock()) {</span>
+			try {
+<span class="nc" id="L146">				this.drainStatus.lazySet(DrainStatus.PROCESSING);</span>
+<span class="nc" id="L147">				this.readOperations.drain();</span>
+<span class="nc" id="L148">				this.writeOperations.drain();</span>
+			}
+			finally {
+<span class="nc" id="L151">				this.drainStatus.compareAndSet(DrainStatus.PROCESSING, DrainStatus.IDLE);</span>
+<span class="nc" id="L152">				this.evictionLock.unlock();</span>
+			}
+		}
+<span class="nc" id="L155">	}</span>
+
+	/**
+	 * Return the maximum number of entries in the cache.
+	 * @see #size()
+	 */
+	public int capacity() {
+<span class="nc" id="L162">		return this.capacity;</span>
+	}
+
+	/**
+	 * Return the maximum number of entries in the cache.
+	 * @deprecated in favor of {@link #capacity()} as of 6.0.
+	 */
+	@Deprecated(since = &quot;6.0&quot;)
+	public int sizeLimit() {
+<span class="nc" id="L171">		return this.capacity;</span>
+	}
+
+	/**
+	 * Return the current size of the cache.
+	 * @see #capacity()
+	 */
+	public int size() {
+<span class="nc" id="L179">		return this.cache.size();</span>
+	}
+
+	/**
+	 * Immediately remove all entries from this cache.
+	 */
+	public void clear() {
+<span class="nc" id="L186">		this.evictionLock.lock();</span>
+		try {
+			Node&lt;K, V&gt; node;
+<span class="nc bnc" id="L189" title="All 2 branches missed.">			while ((node = this.evictionQueue.poll()) != null) {</span>
+<span class="nc" id="L190">				this.cache.remove(node.key, node);</span>
+<span class="nc" id="L191">				markAsRemoved(node);</span>
+			}
+<span class="nc" id="L193">			this.readOperations.clear();</span>
+<span class="nc" id="L194">			this.writeOperations.drainAll();</span>
+		}
+		finally {
+<span class="nc" id="L197">			this.evictionLock.unlock();</span>
+		}
+<span class="nc" id="L199">	}</span>
+
+	/*
+	 * Transition the node to the {@code removed} state and decrement the current size of the cache.
+	 */
+	private void markAsRemoved(Node&lt;K, V&gt; node) {
+		for (; ; ) {
+<span class="nc" id="L206">			CacheEntry&lt;V&gt; current = node.get();</span>
+<span class="nc" id="L207">			CacheEntry&lt;V&gt; removed = new CacheEntry&lt;&gt;(current.value, CacheEntryState.REMOVED);</span>
+<span class="nc bnc" id="L208" title="All 2 branches missed.">			if (node.compareAndSet(current, removed)) {</span>
+<span class="nc" id="L209">				this.currentSize.lazySet(this.currentSize.get() - 1);</span>
+<span class="nc" id="L210">				return;</span>
+			}
+<span class="nc" id="L212">		}</span>
+	}
+
+	/**
+	 * Determine whether the given key is present in this cache.
+	 * @param key the key to check for
+	 * @return {@code true} if the key is present, {@code false} if there was no matching key
+	 */
+	public boolean contains(K key) {
+<span class="nc" id="L221">		return this.cache.containsKey(key);</span>
+	}
+
+	/**
+	 * Immediately remove the given key and any associated value.
+	 * @param key the key to evict the entry for
+	 * @return {@code true} if the key was present before,
+	 * {@code false} if there was no matching key
+	 */
+	public boolean remove(K key) {
+<span class="nc" id="L231">		final Node&lt;K, V&gt; node = this.cache.remove(key);</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">		if (node == null) {</span>
+<span class="nc" id="L233">			return false;</span>
+		}
+<span class="nc" id="L235">		markForRemoval(node);</span>
+<span class="nc" id="L236">		processWrite(new RemovalTask(node));</span>
+<span class="nc" id="L237">		return true;</span>
+	}
+
+	/*
+	 * Transition the node from the {@code active} state to the {@code pending removal} state,
+	 * if the transition is valid.
+	 */
+	private void markForRemoval(Node&lt;K, V&gt; node) {
+		for (; ; ) {
+<span class="nc" id="L246">			final CacheEntry&lt;V&gt; current = node.get();</span>
+<span class="nc bnc" id="L247" title="All 2 branches missed.">			if (!current.isActive()) {</span>
+<span class="nc" id="L248">				return;</span>
+			}
+<span class="nc" id="L250">			final CacheEntry&lt;V&gt; pendingRemoval = new CacheEntry&lt;&gt;(current.value, CacheEntryState.PENDING_REMOVAL);</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">			if (node.compareAndSet(current, pendingRemoval)) {</span>
+<span class="nc" id="L252">				return;</span>
+			}
+<span class="nc" id="L254">		}</span>
+	}
+
+	/**
+	 * Write operation recorded when a new entry is added to the cache.
+	 */
+	private final class AddTask implements Runnable {
+		final Node&lt;K, V&gt; node;
+
+<span class="nc" id="L263">		AddTask(Node&lt;K, V&gt; node) {</span>
+<span class="nc" id="L264">			this.node = node;</span>
+<span class="nc" id="L265">		}</span>
+
+		@Override
+		public void run() {
+<span class="nc" id="L269">			currentSize.lazySet(currentSize.get() + 1);</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">			if (this.node.get().isActive()) {</span>
+<span class="nc" id="L271">				evictionQueue.add(this.node);</span>
+<span class="nc" id="L272">				evictEntries();</span>
+			}
+<span class="nc" id="L274">		}</span>
+
+		private void evictEntries() {
+<span class="nc bnc" id="L277" title="All 2 branches missed.">			while (currentSize.get() &gt; capacity) {</span>
+<span class="nc" id="L278">				final Node&lt;K, V&gt; node = evictionQueue.poll();</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">				if (node == null) {</span>
+<span class="nc" id="L280">					return;</span>
+				}
+<span class="nc" id="L282">				cache.remove(node.key, node);</span>
+<span class="nc" id="L283">				markAsRemoved(node);</span>
+<span class="nc" id="L284">			}</span>
+<span class="nc" id="L285">		}</span>
+
+	}
+
+
+	/**
+	 * Write operation recorded when an entry is removed to the cache.
+	 */
+	private final class RemovalTask implements Runnable {
+		final Node&lt;K, V&gt; node;
+
+<span class="nc" id="L296">		RemovalTask(Node&lt;K, V&gt; node) {</span>
+<span class="nc" id="L297">			this.node = node;</span>
+<span class="nc" id="L298">		}</span>
+
+		@Override
+		public void run() {
+<span class="nc" id="L302">			evictionQueue.remove(this.node);</span>
+<span class="nc" id="L303">			markAsRemoved(this.node);</span>
+<span class="nc" id="L304">		}</span>
+	}
+
+
+	/*
+	 * Draining status for the read/write buffers.
+	 */
+<span class="nc" id="L311">	private enum DrainStatus {</span>
+
+		/*
+		 * No drain operation currently running.
+		 */
+<span class="nc" id="L316">		IDLE {</span>
+			@Override
+			boolean shouldDrainBuffers(boolean delayable) {
+<span class="nc bnc" id="L319" title="All 2 branches missed.">				return !delayable;</span>
+			}
+		},
+
+		/*
+		 * A drain operation is required due to a pending write modification.
+		 */
+<span class="nc" id="L326">		REQUIRED {</span>
+			@Override
+			boolean shouldDrainBuffers(boolean delayable) {
+<span class="nc" id="L329">				return true;</span>
+			}
+		},
+
+		/*
+		 * A drain operation is in progress.
+		 */
+<span class="nc" id="L336">		PROCESSING {</span>
+			@Override
+			boolean shouldDrainBuffers(boolean delayable) {
+<span class="nc" id="L339">				return false;</span>
+			}
+		};
+
+		/**
+		 * Determine whether the buffers should be drained.
+		 * @param delayable if a drain should be delayed until required
+		 * @return if a drain should be attempted
+		 */
+		abstract boolean shouldDrainBuffers(boolean delayable);
+	}
+
+
+<span class="nc" id="L352">	private enum CacheEntryState {</span>
+
+<span class="nc" id="L354">		ACTIVE, PENDING_REMOVAL, REMOVED</span>
+	}
+
+
+<span class="nc" id="L358">	private record CacheEntry&lt;V&gt;(V value, CacheEntryState state) {</span>
+
+		boolean isActive() {
+<span class="nc bnc" id="L361" title="All 2 branches missed.">			return this.state == CacheEntryState.ACTIVE;</span>
+		}
+	}
+
+
+	private static final class ReadOperations&lt;K, V&gt; {
+
+<span class="nc" id="L368">		private static final int BUFFER_COUNT = detectNumberOfBuffers();</span>
+
+		private static int detectNumberOfBuffers() {
+<span class="nc" id="L371">			int availableProcessors = Runtime.getRuntime().availableProcessors();</span>
+<span class="nc" id="L372">			int nextPowerOfTwo = 1 &lt;&lt; (Integer.SIZE - Integer.numberOfLeadingZeros(availableProcessors - 1));</span>
+<span class="nc" id="L373">			return Math.min(4, nextPowerOfTwo);</span>
+		}
+
+<span class="nc" id="L376">		private static final int BUFFERS_MASK = BUFFER_COUNT - 1;</span>
+
+		private static final int MAX_PENDING_OPERATIONS = 32;
+
+		private static final int MAX_DRAIN_COUNT = 2 * MAX_PENDING_OPERATIONS;
+
+		private static final int BUFFER_SIZE = 2 * MAX_DRAIN_COUNT;
+
+		private static final int BUFFER_INDEX_MASK = BUFFER_SIZE - 1;
+
+		/*
+		 * Number of operations recorded, for each buffer
+		 */
+<span class="nc" id="L389">		private final AtomicLongArray recordedCount = new AtomicLongArray(BUFFER_COUNT);</span>
+
+		/*
+		 * Number of operations read, for each buffer
+		 */
+<span class="nc" id="L394">		private final long[] readCount = new long[BUFFER_COUNT];</span>
+
+		/*
+		 * Number of operations processed, for each buffer
+		 */
+<span class="nc" id="L399">		private final AtomicLongArray processedCount = new AtomicLongArray(BUFFER_COUNT);</span>
+
+<span class="nc" id="L401">		@SuppressWarnings(&quot;rawtypes&quot;)</span>
+		private final AtomicReferenceArray&lt;Node&lt;K, V&gt;&gt;[] buffers = new AtomicReferenceArray[BUFFER_COUNT];
+
+		private final EvictionQueue&lt;K, V&gt; evictionQueue;
+
+<span class="nc" id="L406">		ReadOperations(EvictionQueue&lt;K, V&gt; evictionQueue) {</span>
+<span class="nc" id="L407">			this.evictionQueue = evictionQueue;</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">			for (int i = 0; i &lt; BUFFER_COUNT; i++) {</span>
+<span class="nc" id="L409">				this.buffers[i] = new AtomicReferenceArray&lt;&gt;(BUFFER_SIZE);</span>
+			}
+<span class="nc" id="L411">		}</span>
+
+		@SuppressWarnings(&quot;deprecation&quot;)  // for Thread.getId() on JDK 19
+		private static int getBufferIndex() {
+<span class="nc" id="L415">			return ((int) Thread.currentThread().getId()) &amp; BUFFERS_MASK;</span>
+		}
+
+		boolean recordRead(Node&lt;K, V&gt; node) {
+<span class="nc" id="L419">			int bufferIndex = getBufferIndex();</span>
+<span class="nc" id="L420">			final long writeCount = this.recordedCount.get(bufferIndex);</span>
+<span class="nc" id="L421">			this.recordedCount.lazySet(bufferIndex, writeCount + 1);</span>
+<span class="nc" id="L422">			final int index = (int) (writeCount &amp; BUFFER_INDEX_MASK);</span>
+<span class="nc" id="L423">			this.buffers[bufferIndex].lazySet(index, node);</span>
+<span class="nc" id="L424">			final long pending = (writeCount - this.processedCount.get(bufferIndex));</span>
+<span class="nc bnc" id="L425" title="All 2 branches missed.">			return (pending &lt; MAX_PENDING_OPERATIONS);</span>
+		}
+
+		@SuppressWarnings(&quot;deprecation&quot;)  // for Thread.getId() on JDK 19
+		void drain() {
+<span class="nc" id="L430">			final int start = (int) Thread.currentThread().getId();</span>
+<span class="nc" id="L431">			final int end = start + BUFFER_COUNT;</span>
+<span class="nc bnc" id="L432" title="All 2 branches missed.">			for (int i = start; i &lt; end; i++) {</span>
+<span class="nc" id="L433">				drainReadBuffer(i &amp; BUFFERS_MASK);</span>
+			}
+<span class="nc" id="L435">		}</span>
+
+		void clear() {
+<span class="nc bnc" id="L438" title="All 2 branches missed.">			for (int i = 0; i &lt; BUFFER_COUNT; i++) {</span>
+<span class="nc" id="L439">				AtomicReferenceArray&lt;Node&lt;K, V&gt;&gt; buffer = this.buffers[i];</span>
+<span class="nc bnc" id="L440" title="All 2 branches missed.">				for (int j = 0; j &lt; BUFFER_SIZE; j++) {</span>
+<span class="nc" id="L441">					buffer.lazySet(j, null);</span>
+				}
+			}
+<span class="nc" id="L444">		}</span>
+
+		private void drainReadBuffer(int bufferIndex) {
+<span class="nc" id="L447">			final long writeCount = this.recordedCount.get(bufferIndex);</span>
+<span class="nc bnc" id="L448" title="All 2 branches missed.">			for (int i = 0; i &lt; MAX_DRAIN_COUNT; i++) {</span>
+<span class="nc" id="L449">				final int index = (int) (this.readCount[bufferIndex] &amp; BUFFER_INDEX_MASK);</span>
+<span class="nc" id="L450">				final AtomicReferenceArray&lt;Node&lt;K, V&gt;&gt; buffer = this.buffers[bufferIndex];</span>
+<span class="nc" id="L451">				final Node&lt;K, V&gt; node = buffer.get(index);</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">				if (node == null) {</span>
+<span class="nc" id="L453">					break;</span>
+				}
+<span class="nc" id="L455">				buffer.lazySet(index, null);</span>
+<span class="nc" id="L456">				this.evictionQueue.moveToBack(node);</span>
+<span class="nc" id="L457">				this.readCount[bufferIndex]++;</span>
+			}
+<span class="nc" id="L459">			this.processedCount.lazySet(bufferIndex, writeCount);</span>
+<span class="nc" id="L460">		}</span>
+	}
+
+
+<span class="nc" id="L464">	private static final class WriteOperations {</span>
+
+		private static final int DRAIN_THRESHOLD = 16;
+
+<span class="nc" id="L468">		private final Queue&lt;Runnable&gt; operations = new ConcurrentLinkedQueue&lt;&gt;();</span>
+
+		public void add(Runnable task) {
+<span class="nc" id="L471">			this.operations.add(task);</span>
+<span class="nc" id="L472">		}</span>
+
+		public void drain() {
+<span class="nc bnc" id="L475" title="All 2 branches missed.">			for (int i = 0; i &lt; DRAIN_THRESHOLD; i++) {</span>
+<span class="nc" id="L476">				final Runnable task = this.operations.poll();</span>
+<span class="nc bnc" id="L477" title="All 2 branches missed.">				if (task == null) {</span>
+<span class="nc" id="L478">					break;</span>
+				}
+<span class="nc" id="L480">				task.run();</span>
+			}
+<span class="nc" id="L482">		}</span>
+
+		public void drainAll() {
+			Runnable task;
+<span class="nc bnc" id="L486" title="All 2 branches missed.">			while ((task = this.operations.poll()) != null) {</span>
+<span class="nc" id="L487">				task.run();</span>
+			}
+<span class="nc" id="L489">		}</span>
+	}
+
+
+	@SuppressWarnings(&quot;serial&quot;)
+	private static final class Node&lt;K, V&gt; extends AtomicReference&lt;CacheEntry&lt;V&gt;&gt; {
+
+		final K key;
+
+		@Nullable Node&lt;K, V&gt; prev;
+
+		@Nullable Node&lt;K, V&gt; next;
+
+		Node(K key, CacheEntry&lt;V&gt; cacheEntry) {
+<span class="nc" id="L503">			super(cacheEntry);</span>
+<span class="nc" id="L504">			this.key = key;</span>
+<span class="nc" id="L505">		}</span>
+
+		public @Nullable Node&lt;K, V&gt; getPrevious() {
+<span class="nc" id="L508">			return this.prev;</span>
+		}
+
+		public void setPrevious(@Nullable Node&lt;K, V&gt; prev) {
+<span class="nc" id="L512">			this.prev = prev;</span>
+<span class="nc" id="L513">		}</span>
+
+		public @Nullable Node&lt;K, V&gt; getNext() {
+<span class="nc" id="L516">			return this.next;</span>
+		}
+
+		public void setNext(@Nullable Node&lt;K, V&gt; next) {
+<span class="nc" id="L520">			this.next = next;</span>
+<span class="nc" id="L521">		}</span>
+
+		V getValue() {
+<span class="nc" id="L524">			return get().value;</span>
+		}
+	}
+
+
+	private static final class EvictionQueue&lt;K, V&gt; {
+
+		@Nullable Node&lt;K, V&gt; first;
+
+		@Nullable Node&lt;K, V&gt; last;
+
+		@Nullable Node&lt;K, V&gt; poll() {
+<span class="nc bnc" id="L536" title="All 2 branches missed.">			if (this.first == null) {</span>
+<span class="nc" id="L537">				return null;</span>
+			}
+<span class="nc" id="L539">			final Node&lt;K, V&gt; f = this.first;</span>
+<span class="nc" id="L540">			final Node&lt;K, V&gt; next = f.getNext();</span>
+<span class="nc" id="L541">			f.setNext(null);</span>
+
+<span class="nc" id="L543">			this.first = next;</span>
+<span class="nc bnc" id="L544" title="All 2 branches missed.">			if (next == null) {</span>
+<span class="nc" id="L545">				this.last = null;</span>
+			}
+			else {
+<span class="nc" id="L548">				next.setPrevious(null);</span>
+			}
+<span class="nc" id="L550">			return f;</span>
+		}
+
+		void add(Node&lt;K, V&gt; e) {
+<span class="nc bnc" id="L554" title="All 2 branches missed.">			if (contains(e)) {</span>
+<span class="nc" id="L555">				return;</span>
+			}
+<span class="nc" id="L557">			linkLast(e);</span>
+<span class="nc" id="L558">		}</span>
+
+		private boolean contains(Node&lt;K, V&gt; e) {
+<span class="nc bnc" id="L561" title="All 6 branches missed.">			return (e.getPrevious() != null) || (e.getNext() != null) || (e == this.first);</span>
+		}
+
+		private void linkLast(final Node&lt;K, V&gt; e) {
+<span class="nc" id="L565">			final Node&lt;K, V&gt; l = this.last;</span>
+<span class="nc" id="L566">			this.last = e;</span>
+
+<span class="nc bnc" id="L568" title="All 2 branches missed.">			if (l == null) {</span>
+<span class="nc" id="L569">				this.first = e;</span>
+			}
+			else {
+<span class="nc" id="L572">				l.setNext(e);</span>
+<span class="nc" id="L573">				e.setPrevious(l);</span>
+			}
+<span class="nc" id="L575">		}</span>
+
+		private void unlink(Node&lt;K, V&gt; e) {
+<span class="nc" id="L578">			final Node&lt;K, V&gt; prev = e.getPrevious();</span>
+<span class="nc" id="L579">			final Node&lt;K, V&gt; next = e.getNext();</span>
+<span class="nc bnc" id="L580" title="All 2 branches missed.">			if (prev == null) {</span>
+<span class="nc" id="L581">				this.first = next;</span>
+			}
+			else {
+<span class="nc" id="L584">				prev.setNext(next);</span>
+<span class="nc" id="L585">				e.setPrevious(null);</span>
+			}
+<span class="nc bnc" id="L587" title="All 2 branches missed.">			if (next == null) {</span>
+<span class="nc" id="L588">				this.last = prev;</span>
+			}
+			else {
+<span class="nc" id="L591">				next.setPrevious(prev);</span>
+<span class="nc" id="L592">				e.setNext(null);</span>
+			}
+<span class="nc" id="L594">		}</span>
+
+		void moveToBack(Node&lt;K, V&gt; e) {
+<span class="nc bnc" id="L597" title="All 4 branches missed.">			if (contains(e) &amp;&amp; e != this.last) {</span>
+<span class="nc" id="L598">				unlink(e);</span>
+<span class="nc" id="L599">				linkLast(e);</span>
+			}
+<span class="nc" id="L601">		}</span>
+
+		void remove(Node&lt;K, V&gt; e) {
+<span class="nc bnc" id="L604" title="All 2 branches missed.">			if (contains(e)) {</span>
+<span class="nc" id="L605">				unlink(e);</span>
+			}
+<span class="nc" id="L607">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

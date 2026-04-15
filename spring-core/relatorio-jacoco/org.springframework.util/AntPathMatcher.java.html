@@ -1,0 +1,974 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AntPathMatcher.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.util</a> &gt; <span class="el_source">AntPathMatcher.java</span></div><h1>AntPathMatcher.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.util;
+
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import org.jspecify.annotations.Nullable;
+
+/**
+ * {@link PathMatcher} implementation for Ant-style path patterns.
+ *
+ * &lt;p&gt;Part of this mapping code has been kindly borrowed from &lt;a href=&quot;https://ant.apache.org&quot;&gt;Apache Ant&lt;/a&gt;.
+ *
+ * &lt;p&gt;The mapping matches URLs using the following rules:&lt;br&gt;
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code ?} matches one character&lt;/li&gt;
+ * &lt;li&gt;{@code *} matches zero or more characters&lt;/li&gt;
+ * &lt;li&gt;{@code **} matches zero or more &lt;em&gt;directories&lt;/em&gt; in a path&lt;/li&gt;
+ * &lt;li&gt;{@code {spring:[a-z]+}} matches the regexp {@code [a-z]+} as a path variable named &quot;spring&quot;&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * &lt;h3&gt;Examples&lt;/h3&gt;
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code com/t?st.jsp} &amp;mdash; matches {@code com/test.jsp} but also
+ * {@code com/tast.jsp} or {@code com/txst.jsp}&lt;/li&gt;
+ * &lt;li&gt;{@code com/*.jsp} &amp;mdash; matches all {@code .jsp} files in the
+ * {@code com} directory&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;com/&amp;#42;&amp;#42;/test.jsp&lt;/code&gt; &amp;mdash; matches all {@code test.jsp}
+ * files underneath the {@code com} path&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;org/springframework/&amp;#42;&amp;#42;/*.jsp&lt;/code&gt; &amp;mdash; matches all
+ * {@code .jsp} files underneath the {@code org/springframework} path&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;org/&amp;#42;&amp;#42;/servlet/bla.jsp&lt;/code&gt; &amp;mdash; matches
+ * {@code org/springframework/servlet/bla.jsp} but also
+ * {@code org/springframework/testing/servlet/bla.jsp} and {@code org/servlet/bla.jsp}&lt;/li&gt;
+ * &lt;li&gt;{@code com/{filename:\\w+}.jsp} will match {@code com/test.jsp} and assign the value {@code test}
+ * to the {@code filename} variable&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; a pattern and a path must both be absolute or must
+ * both be relative in order for the two to match. Therefore, it is recommended
+ * that users of this implementation to sanitize patterns in order to prefix
+ * them with &quot;/&quot; as it makes sense in the context in which they're used.
+ *
+ * @author Alef Arendsen
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @author Arjen Poutsma
+ * @author Rossen Stoyanchev
+ * @author Sam Brannen
+ * @author Vladislav Kisel
+ * @since 16.07.2003
+ */
+public class AntPathMatcher implements PathMatcher {
+
+	/** Default path separator: &quot;/&quot;. */
+	public static final String DEFAULT_PATH_SEPARATOR = &quot;/&quot;;
+
+	private static final int CACHE_TURNOFF_THRESHOLD = 65536;
+
+<span class="nc" id="L81">	private static final Pattern VARIABLE_PATTERN = Pattern.compile(&quot;\\{[^/]+?\\}&quot;);</span>
+
+<span class="nc" id="L83">	private static final char[] WILDCARD_CHARS = {'*', '?', '{'};</span>
+
+
+	private String pathSeparator;
+
+	private PathSeparatorPatternCache pathSeparatorPatternCache;
+
+<span class="nc" id="L90">	private boolean caseSensitive = true;</span>
+
+<span class="nc" id="L92">	private boolean trimTokens = false;</span>
+
+	private volatile @Nullable Boolean cachePatterns;
+
+<span class="nc" id="L96">	private final Map&lt;String, String[]&gt; tokenizedPatternCache = new ConcurrentHashMap&lt;&gt;(256);</span>
+
+<span class="nc" id="L98">	final Map&lt;String, AntPathStringMatcher&gt; stringMatcherCache = new ConcurrentHashMap&lt;&gt;(256);</span>
+
+
+	/**
+	 * Create a new instance with the {@link #DEFAULT_PATH_SEPARATOR}.
+	 */
+<span class="nc" id="L104">	public AntPathMatcher() {</span>
+<span class="nc" id="L105">		this.pathSeparator = DEFAULT_PATH_SEPARATOR;</span>
+<span class="nc" id="L106">		this.pathSeparatorPatternCache = new PathSeparatorPatternCache(DEFAULT_PATH_SEPARATOR);</span>
+<span class="nc" id="L107">	}</span>
+
+	/**
+	 * A convenient, alternative constructor to use with a custom path separator.
+	 * @param pathSeparator the path separator to use, must not be {@code null}.
+	 * @since 4.1
+	 */
+<span class="nc" id="L114">	public AntPathMatcher(String pathSeparator) {</span>
+<span class="nc" id="L115">		Assert.notNull(pathSeparator, &quot;'pathSeparator' must not be null&quot;);</span>
+<span class="nc" id="L116">		this.pathSeparator = pathSeparator;</span>
+<span class="nc" id="L117">		this.pathSeparatorPatternCache = new PathSeparatorPatternCache(pathSeparator);</span>
+<span class="nc" id="L118">	}</span>
+
+
+	/**
+	 * Set the path separator to use for pattern parsing.
+	 * &lt;p&gt;Default is &quot;/&quot;, as in Ant.
+	 */
+	public void setPathSeparator(@Nullable String pathSeparator) {
+<span class="nc bnc" id="L126" title="All 2 branches missed.">		this.pathSeparator = (pathSeparator != null ? pathSeparator : DEFAULT_PATH_SEPARATOR);</span>
+<span class="nc" id="L127">		this.pathSeparatorPatternCache = new PathSeparatorPatternCache(this.pathSeparator);</span>
+<span class="nc" id="L128">	}</span>
+
+	/**
+	 * Specify whether to perform pattern matching in a case-sensitive fashion.
+	 * &lt;p&gt;Default is {@code true}. Switch this to {@code false} for case-insensitive matching.
+	 * @since 4.2
+	 */
+	public void setCaseSensitive(boolean caseSensitive) {
+<span class="nc" id="L136">		this.caseSensitive = caseSensitive;</span>
+<span class="nc" id="L137">	}</span>
+
+	/**
+	 * Specify whether to trim tokenized paths and patterns.
+	 * &lt;p&gt;Default is {@code false}.
+	 */
+	public void setTrimTokens(boolean trimTokens) {
+<span class="nc" id="L144">		this.trimTokens = trimTokens;</span>
+<span class="nc" id="L145">	}</span>
+
+	/**
+	 * Specify whether to cache parsed pattern metadata for patterns passed
+	 * into this matcher's {@link #match} method. A value of {@code true}
+	 * activates an unlimited pattern cache; a value of {@code false} turns
+	 * the pattern cache off completely.
+	 * &lt;p&gt;Default is for the cache to be on, but with the variant to automatically
+	 * turn it off when encountering too many patterns to cache at runtime
+	 * (the threshold is 65536), assuming that arbitrary permutations of patterns
+	 * are coming in, with little chance for encountering a recurring pattern.
+	 * @since 4.0.1
+	 * @see #getStringMatcher(String)
+	 */
+	public void setCachePatterns(boolean cachePatterns) {
+<span class="nc" id="L160">		this.cachePatterns = cachePatterns;</span>
+<span class="nc" id="L161">	}</span>
+
+	private void deactivatePatternCache() {
+<span class="nc" id="L164">		this.cachePatterns = false;</span>
+<span class="nc" id="L165">		this.tokenizedPatternCache.clear();</span>
+<span class="nc" id="L166">		this.stringMatcherCache.clear();</span>
+<span class="nc" id="L167">	}</span>
+
+
+	@Override
+	public boolean isPattern(@Nullable String path) {
+<span class="nc bnc" id="L172" title="All 2 branches missed.">		if (path == null) {</span>
+<span class="nc" id="L173">			return false;</span>
+		}
+<span class="nc" id="L175">		boolean uriVar = false;</span>
+<span class="nc bnc" id="L176" title="All 2 branches missed.">		for (int i = 0; i &lt; path.length(); i++) {</span>
+<span class="nc" id="L177">			char c = path.charAt(i);</span>
+<span class="nc bnc" id="L178" title="All 4 branches missed.">			if (c == '*' || c == '?') {</span>
+<span class="nc" id="L179">				return true;</span>
+			}
+<span class="nc bnc" id="L181" title="All 2 branches missed.">			if (c == '{') {</span>
+<span class="nc" id="L182">				uriVar = true;</span>
+<span class="nc" id="L183">				continue;</span>
+			}
+<span class="nc bnc" id="L185" title="All 4 branches missed.">			if (c == '}' &amp;&amp; uriVar) {</span>
+<span class="nc" id="L186">				return true;</span>
+			}
+		}
+<span class="nc" id="L189">		return false;</span>
+	}
+
+	@Override
+	public boolean match(String pattern, String path) {
+<span class="nc" id="L194">		return doMatch(pattern, path, true, null);</span>
+	}
+
+	@Override
+	public boolean matchStart(String pattern, String path) {
+<span class="nc" id="L199">		return doMatch(pattern, path, false, null);</span>
+	}
+
+	/**
+	 * Actually match the given {@code path} against the given {@code pattern}.
+	 * @param pattern the pattern to match against
+	 * @param path the path to test
+	 * @param fullMatch whether a full pattern match is required (else a pattern match
+	 * as far as the given base path goes is sufficient)
+	 * @return {@code true} if the supplied {@code path} matched, {@code false} if it didn't
+	 */
+	protected boolean doMatch(String pattern, @Nullable String path, boolean fullMatch,
+			@Nullable Map&lt;String, String&gt; uriTemplateVariables) {
+
+<span class="nc bnc" id="L213" title="All 4 branches missed.">		if (path == null || path.startsWith(this.pathSeparator) != pattern.startsWith(this.pathSeparator)) {</span>
+<span class="nc" id="L214">			return false;</span>
+		}
+
+<span class="nc" id="L217">		String[] pattDirs = tokenizePattern(pattern);</span>
+<span class="nc bnc" id="L218" title="All 6 branches missed.">		if (fullMatch &amp;&amp; this.caseSensitive &amp;&amp; !isPotentialMatch(path, pattDirs)) {</span>
+<span class="nc" id="L219">			return false;</span>
+		}
+
+<span class="nc" id="L222">		String[] pathDirs = tokenizePath(path);</span>
+<span class="nc" id="L223">		int pattIdxStart = 0;</span>
+<span class="nc" id="L224">		int pattIdxEnd = pattDirs.length - 1;</span>
+<span class="nc" id="L225">		int pathIdxStart = 0;</span>
+<span class="nc" id="L226">		int pathIdxEnd = pathDirs.length - 1;</span>
+
+		// Match all elements up to the first **
+<span class="nc bnc" id="L229" title="All 4 branches missed.">		while (pattIdxStart &lt;= pattIdxEnd &amp;&amp; pathIdxStart &lt;= pathIdxEnd) {</span>
+<span class="nc" id="L230">			String pattDir = pattDirs[pattIdxStart];</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">			if (&quot;**&quot;.equals(pattDir)) {</span>
+<span class="nc" id="L232">				break;</span>
+			}
+<span class="nc bnc" id="L234" title="All 2 branches missed.">			if (!matchStrings(pattDir, pathDirs[pathIdxStart], uriTemplateVariables)) {</span>
+<span class="nc" id="L235">				return false;</span>
+			}
+<span class="nc" id="L237">			pattIdxStart++;</span>
+<span class="nc" id="L238">			pathIdxStart++;</span>
+<span class="nc" id="L239">		}</span>
+
+<span class="nc bnc" id="L241" title="All 2 branches missed.">		if (pathIdxStart &gt; pathIdxEnd) {</span>
+			// Path is exhausted, only match if rest of pattern is * or **'s
+<span class="nc bnc" id="L243" title="All 2 branches missed.">			if (pattIdxStart &gt; pattIdxEnd) {</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">				return (pattern.endsWith(this.pathSeparator) == path.endsWith(this.pathSeparator));</span>
+			}
+<span class="nc bnc" id="L246" title="All 2 branches missed.">			if (!fullMatch) {</span>
+<span class="nc" id="L247">				return true;</span>
+			}
+<span class="nc bnc" id="L249" title="All 6 branches missed.">			if (pattIdxStart == pattIdxEnd &amp;&amp; pattDirs[pattIdxStart].equals(&quot;*&quot;) &amp;&amp; path.endsWith(this.pathSeparator)) {</span>
+<span class="nc" id="L250">				return true;</span>
+			}
+<span class="nc bnc" id="L252" title="All 2 branches missed.">			for (int i = pattIdxStart; i &lt;= pattIdxEnd; i++) {</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">				if (!pattDirs[i].equals(&quot;**&quot;)) {</span>
+<span class="nc" id="L254">					return false;</span>
+				}
+			}
+<span class="nc" id="L257">			return true;</span>
+		}
+<span class="nc bnc" id="L259" title="All 2 branches missed.">		else if (pattIdxStart &gt; pattIdxEnd) {</span>
+			// String not exhausted, but pattern is. Failure.
+<span class="nc" id="L261">			return false;</span>
+		}
+<span class="nc bnc" id="L263" title="All 4 branches missed.">		else if (!fullMatch &amp;&amp; &quot;**&quot;.equals(pattDirs[pattIdxStart])) {</span>
+			// Path start definitely matches due to &quot;**&quot; part in pattern.
+<span class="nc" id="L265">			return true;</span>
+		}
+
+		// up to last '**'
+<span class="nc bnc" id="L269" title="All 4 branches missed.">		while (pattIdxStart &lt;= pattIdxEnd &amp;&amp; pathIdxStart &lt;= pathIdxEnd) {</span>
+<span class="nc" id="L270">			String pattDir = pattDirs[pattIdxEnd];</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">			if (pattDir.equals(&quot;**&quot;)) {</span>
+<span class="nc" id="L272">				break;</span>
+			}
+<span class="nc bnc" id="L274" title="All 2 branches missed.">			if (!matchStrings(pattDir, pathDirs[pathIdxEnd], uriTemplateVariables)) {</span>
+<span class="nc" id="L275">				return false;</span>
+			}
+<span class="nc bnc" id="L277" title="All 2 branches missed.">			if (pattIdxEnd == (pattDirs.length - 1) &amp;&amp;</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">					pattern.endsWith(this.pathSeparator) != path.endsWith(this.pathSeparator)) {</span>
+<span class="nc" id="L279">				return false;</span>
+			}
+<span class="nc" id="L281">			pattIdxEnd--;</span>
+<span class="nc" id="L282">			pathIdxEnd--;</span>
+<span class="nc" id="L283">		}</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">		if (pathIdxStart &gt; pathIdxEnd) {</span>
+			// String is exhausted
+<span class="nc bnc" id="L286" title="All 2 branches missed.">			for (int i = pattIdxStart; i &lt;= pattIdxEnd; i++) {</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">				if (!pattDirs[i].equals(&quot;**&quot;)) {</span>
+<span class="nc" id="L288">					return false;</span>
+				}
+			}
+<span class="nc" id="L291">			return true;</span>
+		}
+
+<span class="nc bnc" id="L294" title="All 4 branches missed.">		while (pattIdxStart != pattIdxEnd &amp;&amp; pathIdxStart &lt;= pathIdxEnd) {</span>
+<span class="nc" id="L295">			int patIdxTmp = -1;</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">			for (int i = pattIdxStart + 1; i &lt;= pattIdxEnd; i++) {</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">				if (pattDirs[i].equals(&quot;**&quot;)) {</span>
+<span class="nc" id="L298">					patIdxTmp = i;</span>
+<span class="nc" id="L299">					break;</span>
+				}
+			}
+<span class="nc bnc" id="L302" title="All 2 branches missed.">			if (patIdxTmp == pattIdxStart + 1) {</span>
+				// '**/**' situation, so skip one
+<span class="nc" id="L304">				pattIdxStart++;</span>
+<span class="nc" id="L305">				continue;</span>
+			}
+			// Find the pattern between padIdxStart &amp; padIdxTmp in str between
+			// strIdxStart &amp; strIdxEnd
+<span class="nc" id="L309">			int patLength = (patIdxTmp - pattIdxStart - 1);</span>
+<span class="nc" id="L310">			int strLength = (pathIdxEnd - pathIdxStart + 1);</span>
+<span class="nc" id="L311">			int foundIdx = -1;</span>
+
+			strLoop:
+<span class="nc bnc" id="L314" title="All 2 branches missed.">			for (int i = 0; i &lt;= strLength - patLength; i++) {</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">				for (int j = 0; j &lt; patLength; j++) {</span>
+<span class="nc" id="L316">					String subPat = pattDirs[pattIdxStart + j + 1];</span>
+<span class="nc" id="L317">					String subStr = pathDirs[pathIdxStart + i + j];</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">					if (!matchStrings(subPat, subStr, uriTemplateVariables)) {</span>
+<span class="nc" id="L319">						continue strLoop;</span>
+					}
+				}
+<span class="nc" id="L322">				foundIdx = pathIdxStart + i;</span>
+<span class="nc" id="L323">				break;</span>
+			}
+
+<span class="nc bnc" id="L326" title="All 2 branches missed.">			if (foundIdx == -1) {</span>
+<span class="nc" id="L327">				return false;</span>
+			}
+
+<span class="nc" id="L330">			pattIdxStart = patIdxTmp;</span>
+<span class="nc" id="L331">			pathIdxStart = foundIdx + patLength;</span>
+<span class="nc" id="L332">		}</span>
+
+<span class="nc bnc" id="L334" title="All 2 branches missed.">		for (int i = pattIdxStart; i &lt;= pattIdxEnd; i++) {</span>
+<span class="nc bnc" id="L335" title="All 2 branches missed.">			if (!pattDirs[i].equals(&quot;**&quot;)) {</span>
+<span class="nc" id="L336">				return false;</span>
+			}
+		}
+
+<span class="nc" id="L340">		return true;</span>
+	}
+
+	private boolean isPotentialMatch(String path, String[] pattDirs) {
+<span class="nc bnc" id="L344" title="All 2 branches missed.">		if (!this.trimTokens) {</span>
+<span class="nc" id="L345">			int pos = 0;</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">			for (String pattDir : pattDirs) {</span>
+<span class="nc" id="L347">				int skipped = skipSeparator(path, pos, this.pathSeparator);</span>
+<span class="nc" id="L348">				pos += skipped;</span>
+<span class="nc" id="L349">				skipped = skipSegment(path, pos, pattDir);</span>
+<span class="nc bnc" id="L350" title="All 2 branches missed.">				if (skipped &lt; pattDir.length()) {</span>
+<span class="nc bnc" id="L351" title="All 6 branches missed.">					return (skipped &gt; 0 || (pattDir.length() &gt; 0 &amp;&amp; isWildcardChar(pattDir.charAt(0))));</span>
+				}
+<span class="nc" id="L353">				pos += skipped;</span>
+			}
+		}
+<span class="nc" id="L356">		return true;</span>
+	}
+
+	private int skipSegment(String path, int pos, String prefix) {
+<span class="nc" id="L360">		int skipped = 0;</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">		for (int i = 0; i &lt; prefix.length(); i++) {</span>
+<span class="nc" id="L362">			char c = prefix.charAt(i);</span>
+<span class="nc bnc" id="L363" title="All 2 branches missed.">			if (isWildcardChar(c)) {</span>
+<span class="nc" id="L364">				return skipped;</span>
+			}
+<span class="nc" id="L366">			int currPos = pos + skipped;</span>
+<span class="nc bnc" id="L367" title="All 2 branches missed.">			if (currPos &gt;= path.length()) {</span>
+<span class="nc" id="L368">				return 0;</span>
+			}
+<span class="nc bnc" id="L370" title="All 2 branches missed.">			if (c == path.charAt(currPos)) {</span>
+<span class="nc" id="L371">				skipped++;</span>
+			}
+		}
+<span class="nc" id="L374">		return skipped;</span>
+	}
+
+	private int skipSeparator(String path, int pos, String separator) {
+<span class="nc" id="L378">		int skipped = 0;</span>
+<span class="nc bnc" id="L379" title="All 2 branches missed.">		while (path.startsWith(separator, pos + skipped)) {</span>
+<span class="nc" id="L380">			skipped += separator.length();</span>
+		}
+<span class="nc" id="L382">		return skipped;</span>
+	}
+
+	private boolean isWildcardChar(char c) {
+<span class="nc bnc" id="L386" title="All 2 branches missed.">		for (char candidate : WILDCARD_CHARS) {</span>
+<span class="nc bnc" id="L387" title="All 2 branches missed.">			if (c == candidate) {</span>
+<span class="nc" id="L388">				return true;</span>
+			}
+		}
+<span class="nc" id="L391">		return false;</span>
+	}
+
+	/**
+	 * Tokenize the given path pattern into parts, based on this matcher's settings.
+	 * &lt;p&gt;Performs caching based on {@link #setCachePatterns}, delegating to
+	 * {@link #tokenizePath(String)} for the actual tokenization algorithm.
+	 * @param pattern the pattern to tokenize
+	 * @return the tokenized pattern parts
+	 */
+	protected String[] tokenizePattern(String pattern) {
+<span class="nc" id="L402">		String[] tokenized = null;</span>
+<span class="nc" id="L403">		Boolean cachePatterns = this.cachePatterns;</span>
+<span class="nc bnc" id="L404" title="All 4 branches missed.">		if (cachePatterns == null || cachePatterns) {</span>
+<span class="nc" id="L405">			tokenized = this.tokenizedPatternCache.get(pattern);</span>
+		}
+<span class="nc bnc" id="L407" title="All 2 branches missed.">		if (tokenized == null) {</span>
+<span class="nc" id="L408">			tokenized = tokenizePath(pattern);</span>
+<span class="nc bnc" id="L409" title="All 4 branches missed.">			if (cachePatterns == null &amp;&amp; this.tokenizedPatternCache.size() &gt;= CACHE_TURNOFF_THRESHOLD) {</span>
+				// Try to adapt to the runtime situation that we're encountering:
+				// There are obviously too many different patterns coming in here...
+				// So let's turn off the cache since the patterns are unlikely to be reoccurring.
+<span class="nc" id="L413">				deactivatePatternCache();</span>
+<span class="nc" id="L414">				return tokenized;</span>
+			}
+<span class="nc bnc" id="L416" title="All 4 branches missed.">			if (cachePatterns == null || cachePatterns) {</span>
+<span class="nc" id="L417">				this.tokenizedPatternCache.put(pattern, tokenized);</span>
+			}
+		}
+<span class="nc" id="L420">		return tokenized;</span>
+	}
+
+	/**
+	 * Tokenize the given path into parts, based on this matcher's settings.
+	 * @param path the path to tokenize
+	 * @return the tokenized path parts
+	 */
+	protected String[] tokenizePath(String path) {
+<span class="nc" id="L429">		return StringUtils.tokenizeToStringArray(path, this.pathSeparator, this.trimTokens, true);</span>
+	}
+
+	/**
+	 * Test whether a string matches against a pattern.
+	 * @param pattern the pattern to match against (never {@code null})
+	 * @param str the String which must be matched against the pattern (never {@code null})
+	 * @return {@code true} if the string matches against the pattern, or {@code false} otherwise
+	 */
+	private boolean matchStrings(String pattern, String str,
+			@Nullable Map&lt;String, String&gt; uriTemplateVariables) {
+
+<span class="nc" id="L441">		return getStringMatcher(pattern).matchStrings(str, uriTemplateVariables);</span>
+	}
+
+	/**
+	 * Build or retrieve an {@link AntPathStringMatcher} for the given pattern.
+	 * &lt;p&gt;The default implementation checks this AntPathMatcher's internal cache
+	 * (see {@link #setCachePatterns}), creating a new AntPathStringMatcher instance
+	 * if no cached copy is found.
+	 * &lt;p&gt;When encountering too many patterns to cache at runtime (the threshold is 65536),
+	 * it turns the default cache off, assuming that arbitrary permutations of patterns
+	 * are coming in, with little chance for encountering a recurring pattern.
+	 * &lt;p&gt;This method may be overridden to implement a custom cache strategy.
+	 * @param pattern the pattern to match against (never {@code null})
+	 * @return a corresponding AntPathStringMatcher (never {@code null})
+	 * @see #setCachePatterns
+	 */
+	protected AntPathStringMatcher getStringMatcher(String pattern) {
+<span class="nc" id="L458">		AntPathStringMatcher matcher = null;</span>
+<span class="nc" id="L459">		Boolean cachePatterns = this.cachePatterns;</span>
+<span class="nc bnc" id="L460" title="All 4 branches missed.">		if (cachePatterns == null || cachePatterns) {</span>
+<span class="nc" id="L461">			matcher = this.stringMatcherCache.get(pattern);</span>
+		}
+<span class="nc bnc" id="L463" title="All 2 branches missed.">		if (matcher == null) {</span>
+<span class="nc" id="L464">			matcher = new AntPathStringMatcher(pattern, this.pathSeparator, this.caseSensitive);</span>
+<span class="nc bnc" id="L465" title="All 4 branches missed.">			if (cachePatterns == null &amp;&amp; this.stringMatcherCache.size() &gt;= CACHE_TURNOFF_THRESHOLD) {</span>
+				// Try to adapt to the runtime situation that we're encountering:
+				// There are obviously too many different patterns coming in here...
+				// So let's turn off the cache since the patterns are unlikely to be reoccurring.
+<span class="nc" id="L469">				deactivatePatternCache();</span>
+<span class="nc" id="L470">				return matcher;</span>
+			}
+<span class="nc bnc" id="L472" title="All 4 branches missed.">			if (cachePatterns == null || cachePatterns) {</span>
+<span class="nc" id="L473">				this.stringMatcherCache.put(pattern, matcher);</span>
+			}
+		}
+<span class="nc" id="L476">		return matcher;</span>
+	}
+
+	/**
+	 * Given a pattern and a full path, determine the pattern-mapped part. &lt;p&gt;For example: &lt;ul&gt;
+	 * &lt;li&gt;'{@code /docs/cvs/commit.html}' and '{@code /docs/cvs/commit.html} &amp;rarr; ''&lt;/li&gt;
+	 * &lt;li&gt;'{@code /docs/*}' and '{@code /docs/cvs/commit} &amp;rarr; '{@code cvs/commit}'&lt;/li&gt;
+	 * &lt;li&gt;'{@code /docs/cvs/*.html}' and '{@code /docs/cvs/commit.html} &amp;rarr; '{@code commit.html}'&lt;/li&gt;
+	 * &lt;li&gt;'{@code /docs/**}' and '{@code /docs/cvs/commit} &amp;rarr; '{@code cvs/commit}'&lt;/li&gt;
+	 * &lt;li&gt;'{@code /docs/**\/*.html}' and '{@code /docs/cvs/commit.html} &amp;rarr; '{@code cvs/commit.html}'&lt;/li&gt;
+	 * &lt;li&gt;'{@code /*.html}' and '{@code /docs/cvs/commit.html} &amp;rarr; '{@code docs/cvs/commit.html}'&lt;/li&gt;
+	 * &lt;li&gt;'{@code *.html}' and '{@code /docs/cvs/commit.html} &amp;rarr; '{@code /docs/cvs/commit.html}'&lt;/li&gt;
+	 * &lt;li&gt;'{@code *}' and '{@code /docs/cvs/commit.html} &amp;rarr; '{@code /docs/cvs/commit.html}'&lt;/li&gt; &lt;/ul&gt;
+	 * &lt;p&gt;Assumes that {@link #match} returns {@code true} for '{@code pattern}' and '{@code path}', but
+	 * does &lt;strong&gt;not&lt;/strong&gt; enforce this.
+	 */
+	@Override
+	public String extractPathWithinPattern(String pattern, String path) {
+<span class="nc" id="L494">		String[] patternParts = StringUtils.tokenizeToStringArray(pattern, this.pathSeparator, this.trimTokens, true);</span>
+<span class="nc" id="L495">		String[] pathParts = StringUtils.tokenizeToStringArray(path, this.pathSeparator, this.trimTokens, true);</span>
+<span class="nc" id="L496">		StringBuilder builder = new StringBuilder();</span>
+<span class="nc" id="L497">		boolean pathStarted = false;</span>
+
+<span class="nc bnc" id="L499" title="All 2 branches missed.">		for (int segment = 0; segment &lt; patternParts.length; segment++) {</span>
+<span class="nc" id="L500">			String patternPart = patternParts[segment];</span>
+<span class="nc bnc" id="L501" title="All 4 branches missed.">			if (patternPart.indexOf('*') &gt; -1 || patternPart.indexOf('?') &gt; -1) {</span>
+<span class="nc bnc" id="L502" title="All 2 branches missed.">				for (; segment &lt; pathParts.length; segment++) {</span>
+<span class="nc bnc" id="L503" title="All 6 branches missed.">					if (pathStarted || (segment == 0 &amp;&amp; !pattern.startsWith(this.pathSeparator))) {</span>
+<span class="nc" id="L504">						builder.append(this.pathSeparator);</span>
+					}
+<span class="nc" id="L506">					builder.append(pathParts[segment]);</span>
+<span class="nc" id="L507">					pathStarted = true;</span>
+				}
+			}
+		}
+
+<span class="nc" id="L512">		return builder.toString();</span>
+	}
+
+	@Override
+	public Map&lt;String, String&gt; extractUriTemplateVariables(String pattern, String path) {
+<span class="nc" id="L517">		Map&lt;String, String&gt; variables = new LinkedHashMap&lt;&gt;();</span>
+<span class="nc" id="L518">		boolean result = doMatch(pattern, path, true, variables);</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">		if (!result) {</span>
+<span class="nc" id="L520">			throw new IllegalStateException(&quot;Pattern \&quot;&quot; + pattern + &quot;\&quot; is not a match for \&quot;&quot; + path + &quot;\&quot;&quot;);</span>
+		}
+<span class="nc" id="L522">		return variables;</span>
+	}
+
+	/**
+	 * Combine two patterns into a new pattern.
+	 * &lt;p&gt;This implementation simply concatenates the two patterns, unless
+	 * the first pattern contains a file extension match (for example, {@code *.html}).
+	 * In that case, the second pattern will be merged into the first. Otherwise,
+	 * an {@code IllegalArgumentException} will be thrown.
+	 * &lt;h4&gt;Examples&lt;/h4&gt;
+	 * &lt;table border=&quot;1&quot;&gt;
+	 * &lt;tr&gt;&lt;th&gt;Pattern 1&lt;/th&gt;&lt;th&gt;Pattern 2&lt;/th&gt;&lt;th&gt;Result&lt;/th&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;{@code null}&lt;/td&gt;&lt;td&gt;{@code null}&lt;/td&gt;&lt;td&gt;&amp;nbsp;&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;/hotels&lt;/td&gt;&lt;td&gt;{@code null}&lt;/td&gt;&lt;td&gt;/hotels&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;{@code null}&lt;/td&gt;&lt;td&gt;/hotels&lt;/td&gt;&lt;td&gt;/hotels&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;/hotels&lt;/td&gt;&lt;td&gt;/bookings&lt;/td&gt;&lt;td&gt;/hotels/bookings&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;/hotels&lt;/td&gt;&lt;td&gt;bookings&lt;/td&gt;&lt;td&gt;/hotels/bookings&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;/hotels/*&lt;/td&gt;&lt;td&gt;/bookings&lt;/td&gt;&lt;td&gt;/hotels/bookings&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;/hotels/&amp;#42;&amp;#42;&lt;/td&gt;&lt;td&gt;/bookings&lt;/td&gt;&lt;td&gt;/hotels/&amp;#42;&amp;#42;/bookings&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;/hotels&lt;/td&gt;&lt;td&gt;{hotel}&lt;/td&gt;&lt;td&gt;/hotels/{hotel}&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;/hotels/*&lt;/td&gt;&lt;td&gt;{hotel}&lt;/td&gt;&lt;td&gt;/hotels/{hotel}&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;/hotels/&amp;#42;&amp;#42;&lt;/td&gt;&lt;td&gt;{hotel}&lt;/td&gt;&lt;td&gt;/hotels/&amp;#42;&amp;#42;/{hotel}&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;/*.html&lt;/td&gt;&lt;td&gt;/hotels.html&lt;/td&gt;&lt;td&gt;/hotels.html&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;/*.html&lt;/td&gt;&lt;td&gt;/hotels&lt;/td&gt;&lt;td&gt;/hotels.html&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;tr&gt;&lt;td&gt;/*.html&lt;/td&gt;&lt;td&gt;/*.txt&lt;/td&gt;&lt;td&gt;{@code IllegalArgumentException}&lt;/td&gt;&lt;/tr&gt;
+	 * &lt;/table&gt;
+	 * @param pattern1 the first pattern
+	 * @param pattern2 the second pattern
+	 * @return the combination of the two patterns
+	 * @throws IllegalArgumentException if the two patterns cannot be combined
+	 */
+	@Override
+	public String combine(String pattern1, String pattern2) {
+<span class="nc bnc" id="L555" title="All 4 branches missed.">		if (!StringUtils.hasText(pattern1) &amp;&amp; !StringUtils.hasText(pattern2)) {</span>
+<span class="nc" id="L556">			return &quot;&quot;;</span>
+		}
+<span class="nc bnc" id="L558" title="All 2 branches missed.">		if (!StringUtils.hasText(pattern1)) {</span>
+<span class="nc" id="L559">			return pattern2;</span>
+		}
+<span class="nc bnc" id="L561" title="All 2 branches missed.">		if (!StringUtils.hasText(pattern2)) {</span>
+<span class="nc" id="L562">			return pattern1;</span>
+		}
+
+<span class="nc bnc" id="L565" title="All 2 branches missed.">		boolean pattern1ContainsUriVar = (pattern1.indexOf('{') != -1);</span>
+<span class="nc bnc" id="L566" title="All 6 branches missed.">		if (!pattern1.equals(pattern2) &amp;&amp; !pattern1ContainsUriVar &amp;&amp; match(pattern1, pattern2)) {</span>
+			// /* + /hotel -&gt; /hotel ; &quot;/*.*&quot; + &quot;/*.html&quot; -&gt; /*.html
+			// However /user + /user -&gt; /usr/user ; /{foo} + /bar -&gt; /{foo}/bar
+<span class="nc" id="L569">			return pattern2;</span>
+		}
+
+		// /hotels/* + /booking -&gt; /hotels/booking
+		// /hotels/* + booking -&gt; /hotels/booking
+<span class="nc bnc" id="L574" title="All 2 branches missed.">		if (pattern1.endsWith(this.pathSeparatorPatternCache.getEndsOnWildCard())) {</span>
+<span class="nc" id="L575">			return concat(pattern1.substring(0, pattern1.length() - 2), pattern2);</span>
+		}
+
+		// /hotels/** + /booking -&gt; /hotels/**/booking
+		// /hotels/** + booking -&gt; /hotels/**/booking
+<span class="nc bnc" id="L580" title="All 2 branches missed.">		if (pattern1.endsWith(this.pathSeparatorPatternCache.getEndsOnDoubleWildCard())) {</span>
+<span class="nc" id="L581">			return concat(pattern1, pattern2);</span>
+		}
+
+<span class="nc" id="L584">		int starDotPos1 = pattern1.indexOf(&quot;*.&quot;);</span>
+<span class="nc bnc" id="L585" title="All 6 branches missed.">		if (pattern1ContainsUriVar || starDotPos1 == -1 || this.pathSeparator.equals(&quot;.&quot;)) {</span>
+			// simply concatenate the two patterns
+<span class="nc" id="L587">			return concat(pattern1, pattern2);</span>
+		}
+
+<span class="nc" id="L590">		String ext1 = pattern1.substring(starDotPos1 + 1);</span>
+<span class="nc" id="L591">		int dotPos2 = pattern2.indexOf('.');</span>
+<span class="nc bnc" id="L592" title="All 2 branches missed.">		String file2 = (dotPos2 == -1 ? pattern2 : pattern2.substring(0, dotPos2));</span>
+<span class="nc bnc" id="L593" title="All 2 branches missed.">		String ext2 = (dotPos2 == -1 ? &quot;&quot; : pattern2.substring(dotPos2));</span>
+<span class="nc bnc" id="L594" title="All 4 branches missed.">		boolean ext1All = (ext1.equals(&quot;.*&quot;) || ext1.isEmpty());</span>
+<span class="nc bnc" id="L595" title="All 4 branches missed.">		boolean ext2All = (ext2.equals(&quot;.*&quot;) || ext2.isEmpty());</span>
+<span class="nc bnc" id="L596" title="All 4 branches missed.">		if (!ext1All &amp;&amp; !ext2All) {</span>
+<span class="nc" id="L597">			throw new IllegalArgumentException(&quot;Cannot combine patterns: &quot; + pattern1 + &quot; vs &quot; + pattern2);</span>
+		}
+<span class="nc bnc" id="L599" title="All 2 branches missed.">		String ext = (ext1All ? ext2 : ext1);</span>
+<span class="nc" id="L600">		return file2 + ext;</span>
+	}
+
+	private String concat(String path1, String path2) {
+<span class="nc" id="L604">		boolean path1EndsWithSeparator = path1.endsWith(this.pathSeparator);</span>
+<span class="nc" id="L605">		boolean path2StartsWithSeparator = path2.startsWith(this.pathSeparator);</span>
+
+<span class="nc bnc" id="L607" title="All 4 branches missed.">		if (path1EndsWithSeparator &amp;&amp; path2StartsWithSeparator) {</span>
+<span class="nc" id="L608">			return path1 + path2.substring(1);</span>
+		}
+<span class="nc bnc" id="L610" title="All 4 branches missed.">		else if (path1EndsWithSeparator || path2StartsWithSeparator) {</span>
+<span class="nc" id="L611">			return path1 + path2;</span>
+		}
+		else {
+<span class="nc" id="L614">			return path1 + this.pathSeparator + path2;</span>
+		}
+	}
+
+	/**
+	 * Given a full path, returns a {@link Comparator} suitable for sorting patterns in order of
+	 * explicitness.
+	 * &lt;p&gt;This {@code Comparator} will {@linkplain java.util.List#sort(Comparator) sort}
+	 * a list so that more specific patterns (without URI templates or wild cards) come before
+	 * generic patterns. So given a list with the following patterns, the returned comparator
+	 * will sort this list so that the order will be as indicated.
+	 * &lt;ol&gt;
+	 * &lt;li&gt;{@code /hotels/new}&lt;/li&gt;
+	 * &lt;li&gt;{@code /hotels/{hotel}}&lt;/li&gt;
+	 * &lt;li&gt;{@code /hotels/*}&lt;/li&gt;
+	 * &lt;/ol&gt;
+	 * &lt;p&gt;The full path given as parameter is used to test for exact matches. So when the given path
+	 * is {@code /hotels/2}, the pattern {@code /hotels/2} will be sorted before {@code /hotels/1}.
+	 * @param path the full path to use for comparison
+	 * @return a comparator capable of sorting patterns in order of explicitness
+	 */
+	@Override
+	public Comparator&lt;String&gt; getPatternComparator(String path) {
+<span class="nc" id="L637">		return new AntPatternComparator(path, this.pathSeparator);</span>
+	}
+
+
+	/**
+	 * Tests whether a string matches against a pattern via a {@link Pattern}.
+	 * &lt;p&gt;The pattern may contain special characters: '*' means zero or more characters; '?' means one and
+	 * only one character; '{' and '}' indicate a URI template pattern. For example {@code /users/{user}}.
+	 */
+	protected static class AntPathStringMatcher {
+
+		private static final String DEFAULT_VARIABLE_PATTERN = &quot;((?s).*)&quot;;
+
+		private final String rawPattern;
+
+		private final boolean caseSensitive;
+
+		private final boolean exactMatch;
+
+		private final @Nullable Pattern pattern;
+
+<span class="nc" id="L658">		private final List&lt;String&gt; variableNames = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L660">		protected AntPathStringMatcher(String pattern, String pathSeparator, boolean caseSensitive) {</span>
+<span class="nc" id="L661">			this.rawPattern = pattern;</span>
+<span class="nc" id="L662">			this.caseSensitive = caseSensitive;</span>
+<span class="nc" id="L663">			StringBuilder patternBuilder = new StringBuilder();</span>
+<span class="nc" id="L664">			Matcher matcher = getGlobPattern(pathSeparator).matcher(pattern);</span>
+<span class="nc" id="L665">			int end = 0;</span>
+<span class="nc bnc" id="L666" title="All 2 branches missed.">			while (matcher.find()) {</span>
+<span class="nc" id="L667">				patternBuilder.append(quote(pattern, end, matcher.start()));</span>
+<span class="nc" id="L668">				String match = matcher.group();</span>
+<span class="nc bnc" id="L669" title="All 2 branches missed.">				if (&quot;?&quot;.equals(match)) {</span>
+<span class="nc" id="L670">					patternBuilder.append('.');</span>
+				}
+<span class="nc bnc" id="L672" title="All 2 branches missed.">				else if (&quot;*&quot;.equals(match)) {</span>
+<span class="nc" id="L673">					patternBuilder.append(&quot;.*&quot;);</span>
+				}
+<span class="nc bnc" id="L675" title="All 4 branches missed.">				else if (match.startsWith(&quot;{&quot;) &amp;&amp; match.endsWith(&quot;}&quot;)) {</span>
+<span class="nc" id="L676">					int colonIdx = match.indexOf(':');</span>
+<span class="nc bnc" id="L677" title="All 2 branches missed.">					if (colonIdx == -1) {</span>
+<span class="nc" id="L678">						patternBuilder.append(DEFAULT_VARIABLE_PATTERN);</span>
+<span class="nc" id="L679">						this.variableNames.add(matcher.group(1));</span>
+					}
+					else {
+<span class="nc" id="L682">						String variablePattern = match.substring(colonIdx + 1, match.length() - 1);</span>
+<span class="nc" id="L683">						patternBuilder.append('(');</span>
+<span class="nc" id="L684">						patternBuilder.append(variablePattern);</span>
+<span class="nc" id="L685">						patternBuilder.append(')');</span>
+<span class="nc" id="L686">						String variableName = match.substring(1, colonIdx);</span>
+<span class="nc" id="L687">						this.variableNames.add(variableName);</span>
+					}
+				}
+<span class="nc" id="L690">				end = matcher.end();</span>
+<span class="nc" id="L691">			}</span>
+			// No glob pattern was found, this is an exact String match
+<span class="nc bnc" id="L693" title="All 2 branches missed.">			if (end == 0) {</span>
+<span class="nc" id="L694">				this.exactMatch = true;</span>
+<span class="nc" id="L695">				this.pattern = null;</span>
+			}
+			else {
+<span class="nc" id="L698">				this.exactMatch = false;</span>
+<span class="nc" id="L699">				patternBuilder.append(quote(pattern, end, pattern.length()));</span>
+<span class="nc" id="L700">				this.pattern = Pattern.compile(patternBuilder.toString(),</span>
+<span class="nc bnc" id="L701" title="All 2 branches missed.">						Pattern.DOTALL | (this.caseSensitive ? 0 : Pattern.CASE_INSENSITIVE));</span>
+			}
+<span class="nc" id="L703">		}</span>
+
+		private static Pattern getGlobPattern(String pathSeparator) {
+<span class="nc" id="L706">			String pattern = &quot;\\?|\\*|\\{((?:\\{[^&quot; + pathSeparator + &quot;]+?\\}|[^&quot; + pathSeparator + &quot;{}]|\\\\[{}])+?)\\}&quot;;</span>
+<span class="nc" id="L707">			return Pattern.compile(pattern);</span>
+		}
+
+		private String quote(String s, int start, int end) {
+<span class="nc bnc" id="L711" title="All 2 branches missed.">			if (start == end) {</span>
+<span class="nc" id="L712">				return &quot;&quot;;</span>
+			}
+<span class="nc" id="L714">			return Pattern.quote(s.substring(start, end));</span>
+		}
+
+		/**
+		 * Main entry point.
+		 * @return {@code true} if the string matches against the pattern, or {@code false} otherwise.
+		 */
+		public boolean matchStrings(String str, @Nullable Map&lt;String, String&gt; uriTemplateVariables) {
+<span class="nc bnc" id="L722" title="All 2 branches missed.">			if (this.exactMatch) {</span>
+<span class="nc bnc" id="L723" title="All 2 branches missed.">				return this.caseSensitive ? this.rawPattern.equals(str) : this.rawPattern.equalsIgnoreCase(str);</span>
+			}
+<span class="nc bnc" id="L725" title="All 2 branches missed.">			else if (this.pattern != null) {</span>
+<span class="nc" id="L726">				Matcher matcher = this.pattern.matcher(str);</span>
+<span class="nc bnc" id="L727" title="All 2 branches missed.">				if (matcher.matches()) {</span>
+<span class="nc bnc" id="L728" title="All 2 branches missed.">					if (uriTemplateVariables != null) {</span>
+<span class="nc bnc" id="L729" title="All 2 branches missed.">						if (this.variableNames.size() != matcher.groupCount()) {</span>
+<span class="nc" id="L730">							throw new IllegalArgumentException(&quot;The number of capturing groups in the pattern segment &quot; +</span>
+									this.pattern + &quot; does not match the number of URI template variables it defines, &quot; +
+									&quot;which can occur if capturing groups are used in a URI template regex. &quot; +
+									&quot;Use non-capturing groups instead.&quot;);
+						}
+<span class="nc bnc" id="L735" title="All 2 branches missed.">						for (int i = 1; i &lt;= matcher.groupCount(); i++) {</span>
+<span class="nc" id="L736">							String name = this.variableNames.get(i - 1);</span>
+<span class="nc bnc" id="L737" title="All 2 branches missed.">							if (name.startsWith(&quot;*&quot;)) {</span>
+<span class="nc" id="L738">								throw new IllegalArgumentException(&quot;Capturing patterns (&quot; + name + &quot;) are not &quot; +</span>
+										&quot;supported by the AntPathMatcher. Use the PathPatternParser instead.&quot;);
+							}
+<span class="nc" id="L741">							String value = matcher.group(i);</span>
+<span class="nc" id="L742">							uriTemplateVariables.put(name, value);</span>
+						}
+					}
+<span class="nc" id="L745">					return true;</span>
+				}
+			}
+<span class="nc" id="L748">			return false;</span>
+		}
+
+	}
+
+
+	/**
+	 * The default {@link Comparator} implementation returned by
+	 * {@link #getPatternComparator(String)}.
+	 * &lt;p&gt;In order, the most &quot;generic&quot; pattern is determined by the following:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;if it's null or a capture all pattern (i.e. it is equal to &quot;/**&quot;)&lt;/li&gt;
+	 * &lt;li&gt;if the other pattern is an actual match&lt;/li&gt;
+	 * &lt;li&gt;if it's a catch-all pattern (i.e. it ends with &quot;**&quot;&lt;/li&gt;
+	 * &lt;li&gt;if it's got more &quot;*&quot; than the other pattern&lt;/li&gt;
+	 * &lt;li&gt;if it's got more &quot;{foo}&quot; than the other pattern&lt;/li&gt;
+	 * &lt;li&gt;if it's shorter than the other pattern&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 */
+	protected static class AntPatternComparator implements Comparator&lt;String&gt; {
+
+		private final String path;
+
+		private final String pathSeparator;
+
+		public AntPatternComparator(String path) {
+<span class="nc" id="L774">			this(path, DEFAULT_PATH_SEPARATOR);</span>
+<span class="nc" id="L775">		}</span>
+
+<span class="nc" id="L777">		public AntPatternComparator(String path, String pathSeparator) {</span>
+<span class="nc" id="L778">			this.path = path;</span>
+<span class="nc" id="L779">			this.pathSeparator = pathSeparator;</span>
+<span class="nc" id="L780">		}</span>
+
+		/**
+		 * Compare two patterns to determine which should match first, i.e. which
+		 * is the most specific regarding the current path.
+		 * @return a negative integer, zero, or a positive integer as pattern1 is
+		 * more specific, equally specific, or less specific than pattern2.
+		 */
+		@Override
+		public int compare(String pattern1, String pattern2) {
+<span class="nc" id="L790">			PatternInfo info1 = new PatternInfo(pattern1, this.pathSeparator);</span>
+<span class="nc" id="L791">			PatternInfo info2 = new PatternInfo(pattern2, this.pathSeparator);</span>
+
+<span class="nc bnc" id="L793" title="All 4 branches missed.">			if (info1.isLeastSpecific() &amp;&amp; info2.isLeastSpecific()) {</span>
+<span class="nc" id="L794">				return 0;</span>
+			}
+<span class="nc bnc" id="L796" title="All 2 branches missed.">			else if (info1.isLeastSpecific()) {</span>
+<span class="nc" id="L797">				return 1;</span>
+			}
+<span class="nc bnc" id="L799" title="All 2 branches missed.">			else if (info2.isLeastSpecific()) {</span>
+<span class="nc" id="L800">				return -1;</span>
+			}
+
+<span class="nc" id="L803">			boolean pattern1EqualsPath = pattern1.equals(this.path);</span>
+<span class="nc" id="L804">			boolean pattern2EqualsPath = pattern2.equals(this.path);</span>
+<span class="nc bnc" id="L805" title="All 4 branches missed.">			if (pattern1EqualsPath &amp;&amp; pattern2EqualsPath) {</span>
+<span class="nc" id="L806">				return 0;</span>
+			}
+<span class="nc bnc" id="L808" title="All 2 branches missed.">			else if (pattern1EqualsPath) {</span>
+<span class="nc" id="L809">				return -1;</span>
+			}
+<span class="nc bnc" id="L811" title="All 2 branches missed.">			else if (pattern2EqualsPath) {</span>
+<span class="nc" id="L812">				return 1;</span>
+			}
+
+<span class="nc bnc" id="L815" title="All 4 branches missed.">			if (info1.isPrefixPattern() &amp;&amp; info2.isPrefixPattern()) {</span>
+<span class="nc" id="L816">				return info2.getLength() - info1.getLength();</span>
+			}
+<span class="nc bnc" id="L818" title="All 4 branches missed.">			else if (info1.isPrefixPattern() &amp;&amp; info2.getDoubleWildcards() == 0) {</span>
+<span class="nc" id="L819">				return 1;</span>
+			}
+<span class="nc bnc" id="L821" title="All 4 branches missed.">			else if (info2.isPrefixPattern() &amp;&amp; info1.getDoubleWildcards() == 0) {</span>
+<span class="nc" id="L822">				return -1;</span>
+			}
+
+<span class="nc bnc" id="L825" title="All 2 branches missed.">			if (info1.getTotalCount() != info2.getTotalCount()) {</span>
+<span class="nc" id="L826">				return info1.getTotalCount() - info2.getTotalCount();</span>
+			}
+
+<span class="nc bnc" id="L829" title="All 2 branches missed.">			if (info1.getLength() != info2.getLength()) {</span>
+<span class="nc" id="L830">				return info2.getLength() - info1.getLength();</span>
+			}
+
+<span class="nc bnc" id="L833" title="All 2 branches missed.">			if (info1.getSingleWildcards() &lt; info2.getSingleWildcards()) {</span>
+<span class="nc" id="L834">				return -1;</span>
+			}
+<span class="nc bnc" id="L836" title="All 2 branches missed.">			else if (info2.getSingleWildcards() &lt; info1.getSingleWildcards()) {</span>
+<span class="nc" id="L837">				return 1;</span>
+			}
+
+<span class="nc bnc" id="L840" title="All 2 branches missed.">			if (info1.getUriVars() &lt; info2.getUriVars()) {</span>
+<span class="nc" id="L841">				return -1;</span>
+			}
+<span class="nc bnc" id="L843" title="All 2 branches missed.">			else if (info2.getUriVars() &lt; info1.getUriVars()) {</span>
+<span class="nc" id="L844">				return 1;</span>
+			}
+
+<span class="nc" id="L847">			return 0;</span>
+		}
+
+
+		/**
+		 * Value class that holds information about the pattern, for example, number of
+		 * occurrences of &quot;*&quot;, &quot;**&quot;, and &quot;{&quot; pattern elements.
+		 */
+		private static class PatternInfo {
+
+
+			private final @Nullable String pattern;
+
+			private int uriVars;
+
+			private int singleWildcards;
+
+			private int doubleWildcards;
+
+			private boolean catchAllPattern;
+
+			private boolean prefixPattern;
+
+			private @Nullable Integer length;
+
+<span class="nc" id="L872">			PatternInfo(@Nullable String pattern, String pathSeparator) {</span>
+<span class="nc" id="L873">				this.pattern = pattern;</span>
+<span class="nc bnc" id="L874" title="All 2 branches missed.">				if (this.pattern != null) {</span>
+<span class="nc" id="L875">					initCounters();</span>
+<span class="nc" id="L876">					this.catchAllPattern = this.pattern.equals(pathSeparator + &quot;**&quot;);</span>
+<span class="nc bnc" id="L877" title="All 4 branches missed.">					this.prefixPattern = !this.catchAllPattern &amp;&amp; this.pattern.endsWith(pathSeparator + &quot;**&quot;);</span>
+				}
+<span class="nc bnc" id="L879" title="All 2 branches missed.">				if (this.uriVars == 0) {</span>
+<span class="nc bnc" id="L880" title="All 2 branches missed.">					this.length = (this.pattern != null ? this.pattern.length() : 0);</span>
+				}
+<span class="nc" id="L882">			}</span>
+
+			protected void initCounters() {
+<span class="nc" id="L885">				int pos = 0;</span>
+<span class="nc bnc" id="L886" title="All 2 branches missed.">				if (this.pattern != null) {</span>
+<span class="nc bnc" id="L887" title="All 2 branches missed.">					while (pos &lt; this.pattern.length()) {</span>
+<span class="nc bnc" id="L888" title="All 2 branches missed.">						if (this.pattern.charAt(pos) == '{') {</span>
+<span class="nc" id="L889">							this.uriVars++;</span>
+<span class="nc" id="L890">							pos++;</span>
+						}
+<span class="nc bnc" id="L892" title="All 2 branches missed.">						else if (this.pattern.charAt(pos) == '*') {</span>
+<span class="nc bnc" id="L893" title="All 4 branches missed.">							if (pos + 1 &lt; this.pattern.length() &amp;&amp; this.pattern.charAt(pos + 1) == '*') {</span>
+<span class="nc" id="L894">								this.doubleWildcards++;</span>
+<span class="nc" id="L895">								pos += 2;</span>
+							}
+<span class="nc bnc" id="L897" title="All 4 branches missed.">							else if (pos &gt; 0 &amp;&amp; !this.pattern.substring(pos - 1).equals(&quot;.*&quot;)) {</span>
+<span class="nc" id="L898">								this.singleWildcards++;</span>
+<span class="nc" id="L899">								pos++;</span>
+							}
+							else {
+<span class="nc" id="L902">								pos++;</span>
+							}
+						}
+						else {
+<span class="nc" id="L906">							pos++;</span>
+						}
+					}
+				}
+<span class="nc" id="L910">			}</span>
+
+			public int getUriVars() {
+<span class="nc" id="L913">				return this.uriVars;</span>
+			}
+
+			public int getSingleWildcards() {
+<span class="nc" id="L917">				return this.singleWildcards;</span>
+			}
+
+			public int getDoubleWildcards() {
+<span class="nc" id="L921">				return this.doubleWildcards;</span>
+			}
+
+			public boolean isLeastSpecific() {
+<span class="nc bnc" id="L925" title="All 4 branches missed.">				return (this.pattern == null || this.catchAllPattern);</span>
+			}
+
+			public boolean isPrefixPattern() {
+<span class="nc" id="L929">				return this.prefixPattern;</span>
+			}
+
+			public int getTotalCount() {
+<span class="nc" id="L933">				return this.uriVars + this.singleWildcards + (2 * this.doubleWildcards);</span>
+			}
+
+			/**
+			 * Returns the length of the given pattern, where template variables are considered to be 1 long.
+			 */
+			public int getLength() {
+<span class="nc bnc" id="L940" title="All 2 branches missed.">				if (this.length == null) {</span>
+<span class="nc bnc" id="L941" title="All 2 branches missed.">					this.length = (this.pattern != null ?</span>
+<span class="nc" id="L942">							VARIABLE_PATTERN.matcher(this.pattern).replaceAll(&quot;#&quot;).length() : 0);</span>
+				}
+<span class="nc" id="L944">				return this.length;</span>
+			}
+		}
+	}
+
+
+	/**
+	 * A simple cache for patterns that depend on the configured path separator.
+	 */
+	private static class PathSeparatorPatternCache {
+
+		private final String endsOnWildCard;
+
+		private final String endsOnDoubleWildCard;
+
+<span class="nc" id="L959">		public PathSeparatorPatternCache(String pathSeparator) {</span>
+<span class="nc" id="L960">			this.endsOnWildCard = pathSeparator + &quot;*&quot;;</span>
+<span class="nc" id="L961">			this.endsOnDoubleWildCard = pathSeparator + &quot;**&quot;;</span>
+<span class="nc" id="L962">		}</span>
+
+		public String getEndsOnWildCard() {
+<span class="nc" id="L965">			return this.endsOnWildCard;</span>
+		}
+
+		public String getEndsOnDoubleWildCard() {
+<span class="nc" id="L969">			return this.endsOnDoubleWildCard;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

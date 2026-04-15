@@ -1,0 +1,415 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ServletHttpHandlerAdapter.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.server.reactive</a> &gt; <span class="el_source">ServletHttpHandlerAdapter.java</span></div><h1>ServletHttpHandlerAdapter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.server.reactive;
+
+import java.io.IOException;
+import java.net.URISyntaxException;
+import java.util.Collection;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import jakarta.servlet.AsyncContext;
+import jakarta.servlet.AsyncEvent;
+import jakarta.servlet.AsyncListener;
+import jakarta.servlet.DispatcherType;
+import jakarta.servlet.Servlet;
+import jakarta.servlet.ServletConfig;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRegistration;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.http.HttpServlet;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.apache.commons.logging.Log;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.http.HttpLogging;
+import org.springframework.http.HttpMethod;
+import org.springframework.util.Assert;
+
+/**
+ * Adapt {@link HttpHandler} to an {@link HttpServlet} using Servlet Async support
+ * and Servlet non-blocking I/O.
+ *
+ * @author Arjen Poutsma
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ * @see org.springframework.web.server.adapter.AbstractReactiveWebInitializer
+ */
+public class ServletHttpHandlerAdapter implements Servlet {
+
+<span class="fc" id="L59">	private static final Log logger = HttpLogging.forLogName(ServletHttpHandlerAdapter.class);</span>
+
+	private static final int DEFAULT_BUFFER_SIZE = 8192;
+
+<span class="fc" id="L63">	private static final String WRITE_ERROR_ATTRIBUTE_NAME = ServletHttpHandlerAdapter.class.getName() + &quot;.ERROR&quot;;</span>
+
+
+	private final HttpHandler httpHandler;
+
+<span class="fc" id="L68">	private int bufferSize = DEFAULT_BUFFER_SIZE;</span>
+
+	private @Nullable String servletPath;
+
+<span class="fc" id="L72">	private DataBufferFactory dataBufferFactory = DefaultDataBufferFactory.sharedInstance;</span>
+
+
+<span class="fc" id="L75">	public ServletHttpHandlerAdapter(HttpHandler httpHandler) {</span>
+<span class="fc" id="L76">		Assert.notNull(httpHandler, &quot;HttpHandler must not be null&quot;);</span>
+<span class="fc" id="L77">		this.httpHandler = httpHandler;</span>
+<span class="fc" id="L78">	}</span>
+
+
+	/**
+	 * Set the size of the input buffer used for reading in bytes.
+	 * &lt;p&gt;By default this is set to 8192.
+	 */
+	public void setBufferSize(int bufferSize) {
+<span class="nc bnc" id="L86" title="All 2 branches missed.">		Assert.isTrue(bufferSize &gt; 0, &quot;Buffer size must be larger than zero&quot;);</span>
+<span class="nc" id="L87">		this.bufferSize = bufferSize;</span>
+<span class="nc" id="L88">	}</span>
+
+	/**
+	 * Return the configured input buffer size.
+	 */
+	public int getBufferSize() {
+<span class="fc" id="L94">		return this.bufferSize;</span>
+	}
+
+	/**
+	 * Return the Servlet path under which the Servlet is deployed by checking
+	 * the Servlet registration from {@link #init(ServletConfig)}.
+	 * @return the path, or an empty string if the Servlet is deployed without
+	 * a prefix (i.e. &quot;/&quot; or &quot;/*&quot;), or {@code null} if this method is invoked
+	 * before the {@link #init(ServletConfig)} Servlet container callback.
+	 */
+	public @Nullable String getServletPath() {
+<span class="fc" id="L105">		return this.servletPath;</span>
+	}
+
+	public void setDataBufferFactory(DataBufferFactory dataBufferFactory) {
+<span class="nc" id="L109">		Assert.notNull(dataBufferFactory, &quot;DataBufferFactory must not be null&quot;);</span>
+<span class="nc" id="L110">		this.dataBufferFactory = dataBufferFactory;</span>
+<span class="nc" id="L111">	}</span>
+
+	public DataBufferFactory getDataBufferFactory() {
+<span class="fc" id="L114">		return this.dataBufferFactory;</span>
+	}
+
+
+	// Servlet methods...
+
+	@Override
+	public void init(ServletConfig config) {
+<span class="fc" id="L122">		this.servletPath = getServletPath(config);</span>
+<span class="fc" id="L123">	}</span>
+
+	private String getServletPath(ServletConfig config) {
+<span class="fc" id="L126">		String name = config.getServletName();</span>
+<span class="fc" id="L127">		ServletRegistration registration = config.getServletContext().getServletRegistration(name);</span>
+<span class="pc bpc" id="L128" title="1 of 2 branches missed.">		if (registration == null) {</span>
+<span class="nc" id="L129">			throw new IllegalStateException(&quot;ServletRegistration not found for Servlet '&quot; + name + &quot;'&quot;);</span>
+		}
+
+<span class="fc" id="L132">		Collection&lt;String&gt; mappings = registration.getMappings();</span>
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">		if (mappings.size() == 1) {</span>
+<span class="fc" id="L134">			String mapping = mappings.iterator().next();</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">			if (mapping.equals(&quot;/&quot;)) {</span>
+<span class="fc" id="L136">				return &quot;&quot;;</span>
+			}
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">			if (mapping.endsWith(&quot;/*&quot;)) {</span>
+<span class="fc" id="L139">				String path = mapping.substring(0, mapping.length() - 2);</span>
+<span class="pc bpc" id="L140" title="2 of 4 branches missed.">				if (!path.isEmpty() &amp;&amp; logger.isDebugEnabled()) {</span>
+<span class="fc" id="L141">					logger.debug(&quot;Found servlet mapping prefix '&quot; + path + &quot;' for '&quot; + name + &quot;'&quot;);</span>
+				}
+<span class="fc" id="L143">				return path;</span>
+			}
+		}
+
+<span class="nc" id="L147">		throw new IllegalArgumentException(&quot;Expected a single Servlet mapping: &quot; +</span>
+				&quot;either the default Servlet mapping (i.e. '/'), &quot; +
+				&quot;or a path based mapping (for example, '/*', '/foo/*'). &quot; +
+				&quot;Actual mappings: &quot; + mappings + &quot; for Servlet '&quot; + name + &quot;'&quot;);
+	}
+
+
+	@Override
+	public void service(ServletRequest request, ServletResponse response) throws ServletException, IOException {
+		// Check for existing error attribute first
+<span class="fc bfc" id="L157" title="All 2 branches covered.">		if (DispatcherType.ASYNC == request.getDispatcherType()) {</span>
+<span class="fc" id="L158">			Throwable ex = (Throwable) request.getAttribute(WRITE_ERROR_ATTRIBUTE_NAME);</span>
+<span class="fc" id="L159">			throw new ServletException(&quot;Failed to create response content&quot;, ex);</span>
+		}
+
+		// Start async before Read/WriteListener registration
+<span class="fc" id="L163">		AsyncContext asyncContext = request.startAsync();</span>
+<span class="fc" id="L164">		asyncContext.setTimeout(-1);</span>
+
+		ServletServerHttpRequest httpRequest;
+		AsyncListener requestListener;
+		String logPrefix;
+		try {
+<span class="fc" id="L170">			httpRequest = createRequest((HttpServletRequest) request, asyncContext);</span>
+<span class="fc" id="L171">			requestListener = httpRequest.getAsyncListener();</span>
+<span class="fc" id="L172">			logPrefix = httpRequest.getLogPrefix();</span>
+		}
+<span class="nc" id="L174">		catch (URISyntaxException ex) {</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L176">				logger.debug(&quot;Failed to get request  URL: &quot; + ex.getMessage());</span>
+			}
+<span class="nc" id="L178">			((HttpServletResponse) response).setStatus(400);</span>
+<span class="nc" id="L179">			asyncContext.complete();</span>
+<span class="nc" id="L180">			return;</span>
+<span class="fc" id="L181">		}</span>
+
+<span class="fc" id="L183">		ServletServerHttpResponse wrappedResponse =</span>
+<span class="fc" id="L184">				createResponse((HttpServletResponse) response, asyncContext, httpRequest);</span>
+<span class="fc" id="L185">		ServerHttpResponse httpResponse = wrappedResponse;</span>
+<span class="fc" id="L186">		AsyncListener responseListener = wrappedResponse.getAsyncListener();</span>
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">		if (httpRequest.getMethod() == HttpMethod.HEAD) {</span>
+<span class="nc" id="L188">			httpResponse = new HttpHeadResponseDecorator(httpResponse);</span>
+		}
+
+<span class="fc" id="L191">		AtomicBoolean completionFlag = new AtomicBoolean();</span>
+<span class="fc" id="L192">		HandlerResultSubscriber subscriber = new HandlerResultSubscriber(asyncContext, completionFlag, logPrefix);</span>
+
+<span class="fc" id="L194">		asyncContext.addListener(new HttpHandlerAsyncListener(</span>
+				requestListener, responseListener, subscriber, completionFlag, logPrefix));
+
+<span class="fc" id="L197">		this.httpHandler.handle(httpRequest, httpResponse).subscribe(subscriber);</span>
+<span class="fc" id="L198">	}</span>
+
+	protected ServletServerHttpRequest createRequest(HttpServletRequest request, AsyncContext context)
+			throws IOException, URISyntaxException {
+
+<span class="pc bpc" id="L203" title="1 of 2 branches missed.">		Assert.state(this.servletPath != null, &quot;Servlet path is not initialized&quot;);</span>
+<span class="fc" id="L204">		return new ServletServerHttpRequest(</span>
+<span class="fc" id="L205">				request, context, this.servletPath, getDataBufferFactory(), getBufferSize());</span>
+	}
+
+	protected ServletServerHttpResponse createResponse(HttpServletResponse response,
+			AsyncContext context, ServletServerHttpRequest request) throws IOException {
+
+<span class="fc" id="L211">		return new ServletServerHttpResponse(response, context, getDataBufferFactory(), request);</span>
+	}
+
+	@Override
+	public String getServletInfo() {
+<span class="nc" id="L216">		return &quot;&quot;;</span>
+	}
+
+	@Override
+	public @Nullable ServletConfig getServletConfig() {
+<span class="nc" id="L221">		return null;</span>
+	}
+
+	@Override
+	public void destroy() {
+<span class="fc" id="L226">	}</span>
+
+
+	private static void runIfAsyncNotComplete(AsyncContext asyncContext, AtomicBoolean isCompleted, Runnable task) {
+		try {
+<span class="pc bpc" id="L231" title="1 of 4 branches missed.">			if (asyncContext.getRequest().isAsyncStarted() &amp;&amp; isCompleted.compareAndSet(false, true)) {</span>
+<span class="fc" id="L232">				task.run();</span>
+			}
+		}
+<span class="fc" id="L235">		catch (IllegalStateException ex) {</span>
+			// Ignore: AsyncContext recycled and should not be used
+			// for example, TIMEOUT_LISTENER (above) may have completed the AsyncContext
+<span class="fc" id="L238">		}</span>
+<span class="fc" id="L239">	}</span>
+
+
+	/**
+	 * AsyncListener to complete the {@link AsyncContext} in case of error or
+	 * timeout notifications from the container
+	 * &lt;p&gt;Additional {@link AsyncListener}s are registered in
+	 * {@link ServletServerHttpRequest} to signal onError/onComplete to the
+	 * request body Subscriber, and in {@link ServletServerHttpResponse} to
+	 * cancel the write Publisher and signal onError/onComplete downstream to
+	 * the writing result Subscriber.
+	 */
+	private static class HttpHandlerAsyncListener implements AsyncListener {
+
+		private final AsyncListener requestAsyncListener;
+
+		private final AsyncListener responseAsyncListener;
+
+		// We cannot have AsyncListener and HandlerResultSubscriber until WildFly 12+:
+		// https://issues.jboss.org/browse/WFLY-8515
+		private final Runnable handlerDisposeTask;
+
+		private final AtomicBoolean completionFlag;
+
+		private final String logPrefix;
+
+		public HttpHandlerAsyncListener(AsyncListener requestAsyncListener, AsyncListener responseAsyncListener,
+<span class="fc" id="L266">				Runnable handlerDisposeTask, AtomicBoolean completionFlag, String logPrefix) {</span>
+
+<span class="fc" id="L268">			this.requestAsyncListener = requestAsyncListener;</span>
+<span class="fc" id="L269">			this.responseAsyncListener = responseAsyncListener;</span>
+<span class="fc" id="L270">			this.handlerDisposeTask = handlerDisposeTask;</span>
+<span class="fc" id="L271">			this.completionFlag = completionFlag;</span>
+<span class="fc" id="L272">			this.logPrefix = logPrefix;</span>
+<span class="fc" id="L273">		}</span>
+
+		@Override
+		public void onStartAsync(AsyncEvent event) {
+			// no-op
+<span class="nc" id="L278">		}</span>
+
+		@Override
+		public void onTimeout(AsyncEvent event) {
+			// Should never happen since we call asyncContext.setTimeout(-1)
+<span class="pc bpc" id="L283" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L284">				logger.debug(this.logPrefix + &quot;AsyncEvent onTimeout&quot;);</span>
+			}
+<span class="fc" id="L286">			delegateTimeout(this.requestAsyncListener, event);</span>
+<span class="fc" id="L287">			delegateTimeout(this.responseAsyncListener, event);</span>
+<span class="fc" id="L288">			handleTimeoutOrError(event);</span>
+<span class="fc" id="L289">		}</span>
+
+		@Override
+		public void onError(AsyncEvent event) {
+<span class="fc" id="L293">			Throwable ex = event.getThrowable();</span>
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">				logger.debug(this.logPrefix + &quot;AsyncEvent onError: &quot; + (ex != null ? ex : &quot;&lt;no Throwable&gt;&quot;));</span>
+			}
+<span class="fc" id="L297">			delegateError(this.requestAsyncListener, event);</span>
+<span class="fc" id="L298">			delegateError(this.responseAsyncListener, event);</span>
+<span class="fc" id="L299">			handleTimeoutOrError(event);</span>
+<span class="fc" id="L300">		}</span>
+
+		@Override
+		public void onComplete(AsyncEvent event) {
+<span class="fc" id="L304">			delegateComplete(this.requestAsyncListener, event);</span>
+<span class="fc" id="L305">			delegateComplete(this.responseAsyncListener, event);</span>
+<span class="fc" id="L306">		}</span>
+
+		private static void delegateTimeout(AsyncListener listener, AsyncEvent event) {
+			try {
+<span class="fc" id="L310">				listener.onTimeout(event);</span>
+			}
+<span class="fc" id="L312">			catch (Exception ignored) {</span>
+<span class="fc" id="L313">			}</span>
+<span class="fc" id="L314">		}</span>
+
+		private static void delegateError(AsyncListener listener, AsyncEvent event) {
+			try {
+<span class="fc" id="L318">				listener.onError(event);</span>
+			}
+<span class="nc" id="L320">			catch (Exception ignored) {</span>
+<span class="fc" id="L321">			}</span>
+<span class="fc" id="L322">		}</span>
+
+		private static void delegateComplete(AsyncListener listener, AsyncEvent event) {
+			try {
+<span class="fc" id="L326">				listener.onComplete(event);</span>
+			}
+<span class="nc" id="L328">			catch (Exception ignored) {</span>
+<span class="fc" id="L329">			}</span>
+<span class="fc" id="L330">		}</span>
+
+		private void handleTimeoutOrError(AsyncEvent event) {
+<span class="fc" id="L333">			AsyncContext context = event.getAsyncContext();</span>
+<span class="fc" id="L334">			runIfAsyncNotComplete(context, this.completionFlag, () -&gt; {</span>
+				try {
+<span class="fc" id="L336">					this.handlerDisposeTask.run();</span>
+				}
+				finally {
+<span class="fc" id="L339">					context.complete();</span>
+				}
+<span class="fc" id="L341">			});</span>
+<span class="fc" id="L342">		}</span>
+	}
+
+
+	private static class HandlerResultSubscriber implements Subscriber&lt;Void&gt;, Runnable {
+
+		private final AsyncContext asyncContext;
+
+		private final AtomicBoolean completionFlag;
+
+		private final String logPrefix;
+
+		private volatile @Nullable Subscription subscription;
+
+<span class="fc" id="L356">		public HandlerResultSubscriber(AsyncContext asyncContext, AtomicBoolean completionFlag, String logPrefix) {</span>
+<span class="fc" id="L357">			this.asyncContext = asyncContext;</span>
+<span class="fc" id="L358">			this.completionFlag = completionFlag;</span>
+<span class="fc" id="L359">			this.logPrefix = logPrefix;</span>
+<span class="fc" id="L360">		}</span>
+
+		@Override
+		public void onSubscribe(Subscription subscription) {
+<span class="fc" id="L364">			this.subscription = subscription;</span>
+<span class="fc" id="L365">			subscription.request(Long.MAX_VALUE);</span>
+<span class="fc" id="L366">		}</span>
+
+		@Override
+		public void onNext(Void aVoid) {
+			// no-op
+<span class="nc" id="L371">		}</span>
+
+		@Override
+		public void onError(Throwable ex) {
+<span class="pc bpc" id="L375" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L376">				logger.trace(this.logPrefix + &quot;onError: &quot; + ex);</span>
+			}
+<span class="fc" id="L378">			runIfAsyncNotComplete(this.asyncContext, this.completionFlag, () -&gt; {</span>
+<span class="pc bpc" id="L379" title="1 of 2 branches missed.">				if (this.asyncContext.getResponse().isCommitted()) {</span>
+<span class="fc" id="L380">					logger.trace(this.logPrefix + &quot;Dispatch to container, to raise the error on servlet thread&quot;);</span>
+<span class="fc" id="L381">					this.asyncContext.getRequest().setAttribute(WRITE_ERROR_ATTRIBUTE_NAME, ex);</span>
+<span class="fc" id="L382">					this.asyncContext.dispatch();</span>
+				}
+				else {
+					try {
+<span class="nc" id="L386">						logger.trace(this.logPrefix + &quot;Setting ServletResponse status to 500 Server Error&quot;);</span>
+<span class="nc" id="L387">						this.asyncContext.getResponse().resetBuffer();</span>
+<span class="nc" id="L388">						((HttpServletResponse) this.asyncContext.getResponse()).setStatus(500);</span>
+					}
+					finally {
+<span class="nc" id="L391">						this.asyncContext.complete();</span>
+					}
+				}
+<span class="fc" id="L394">			});</span>
+<span class="fc" id="L395">		}</span>
+
+		@Override
+		public void onComplete() {
+<span class="pc bpc" id="L399" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L400">				logger.trace(this.logPrefix + &quot;onComplete&quot;);</span>
+			}
+<span class="fc" id="L402">			runIfAsyncNotComplete(this.asyncContext, this.completionFlag, this.asyncContext::complete);</span>
+<span class="fc" id="L403">		}</span>
+
+		@Override
+		public void run() {
+<span class="fc" id="L407">			Subscription s = this.subscription;</span>
+<span class="pc bpc" id="L408" title="1 of 2 branches missed.">			if (s != null) {</span>
+<span class="fc" id="L409">				s.cancel();</span>
+			}
+<span class="fc" id="L411">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

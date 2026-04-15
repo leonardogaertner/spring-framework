@@ -1,0 +1,453 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>TestContextAotGenerator.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-test</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context.aot</a> &gt; <span class="el_source">TestContextAotGenerator.java</span></div><h1>TestContextAotGenerator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context.aot;
+
+import java.util.Arrays;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
+import java.util.stream.Stream;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.aot.AotDetector;
+import org.springframework.aot.generate.ClassNameGenerator;
+import org.springframework.aot.generate.DefaultGenerationContext;
+import org.springframework.aot.generate.GeneratedClasses;
+import org.springframework.aot.generate.GeneratedFiles;
+import org.springframework.aot.generate.GenerationContext;
+import org.springframework.aot.hint.RuntimeHints;
+import org.springframework.aot.hint.RuntimeHintsRegistrar;
+import org.springframework.aot.hint.TypeReference;
+import org.springframework.aot.hint.annotation.ReflectiveRuntimeHintsRegistrar;
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.aot.AotServices;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextInitializer;
+import org.springframework.context.annotation.ImportRuntimeHints;
+import org.springframework.context.aot.ApplicationContextAotGenerator;
+import org.springframework.context.support.GenericApplicationContext;
+import org.springframework.core.SpringProperties;
+import org.springframework.core.annotation.MergedAnnotation;
+import org.springframework.core.annotation.MergedAnnotations;
+import org.springframework.core.annotation.MergedAnnotations.SearchStrategy;
+import org.springframework.javapoet.ClassName;
+import org.springframework.test.context.BootstrapUtils;
+import org.springframework.test.context.ContextLoadException;
+import org.springframework.test.context.ContextLoader;
+import org.springframework.test.context.MergedContextConfiguration;
+import org.springframework.test.context.SmartContextLoader;
+import org.springframework.test.context.TestContextAnnotationUtils;
+import org.springframework.test.context.TestContextBootstrapper;
+import org.springframework.util.Assert;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.StringUtils;
+
+import static org.springframework.aot.hint.MemberCategory.INVOKE_DECLARED_CONSTRUCTORS;
+import static org.springframework.aot.hint.MemberCategory.INVOKE_PUBLIC_METHODS;
+
+/**
+ * {@code TestContextAotGenerator} generates AOT artifacts for integration tests
+ * that depend on support from the &lt;em&gt;Spring TestContext Framework&lt;/em&gt;.
+ *
+ * @author Sam Brannen
+ * @since 6.0
+ * @see ApplicationContextAotGenerator
+ */
+public class TestContextAotGenerator {
+
+	/**
+	 * JVM system property used to set the {@code failOnError} flag: {@value}.
+	 * &lt;p&gt;The {@code failOnError} flag controls whether errors encountered during
+	 * AOT processing in the &lt;em&gt;Spring TestContext Framework&lt;/em&gt; should result
+	 * in an exception that fails the overall process.
+	 * &lt;p&gt;Defaults to {@code true}.
+	 * &lt;p&gt;Supported values include {@code true} or {@code false}, ignoring case.
+	 * For example, the default may be changed to {@code false} by supplying
+	 * the following JVM system property via the command line.
+	 * &lt;pre style=&quot;code&quot;&gt;-Dspring.test.aot.processing.failOnError=false&lt;/pre&gt;
+	 * &lt;p&gt;May alternatively be configured via the
+	 * {@link org.springframework.core.SpringProperties SpringProperties}
+	 * mechanism.
+	 * @since 6.1
+	 */
+	public static final String FAIL_ON_ERROR_PROPERTY_NAME = &quot;spring.test.aot.processing.failOnError&quot;;
+
+<span class="fc" id="L95">	private static final Log logger = LogFactory.getLog(TestContextAotGenerator.class);</span>
+
+<span class="fc" id="L97">	private static final Predicate&lt;? super Class&lt;?&gt;&gt; isDisabledInAotMode =</span>
+<span class="fc" id="L98">			testClass -&gt; TestContextAnnotationUtils.hasAnnotation(testClass, DisabledInAotMode.class);</span>
+
+
+<span class="fc" id="L101">	private final ApplicationContextAotGenerator aotGenerator = new ApplicationContextAotGenerator();</span>
+
+	private final AotServices&lt;TestRuntimeHintsRegistrar&gt; testRuntimeHintsRegistrars;
+
+<span class="fc" id="L105">	private final MergedContextConfigurationRuntimeHints mergedConfigRuntimeHints =</span>
+			new MergedContextConfigurationRuntimeHints();
+
+<span class="fc" id="L108">	private final AtomicInteger sequence = new AtomicInteger();</span>
+
+	private final GeneratedFiles generatedFiles;
+
+	private final RuntimeHints runtimeHints;
+
+	final boolean failOnError;
+
+
+	/**
+	 * Create a new {@link TestContextAotGenerator} that uses the supplied
+	 * {@link GeneratedFiles}.
+	 * @param generatedFiles the {@code GeneratedFiles} to use
+	 * @see #TestContextAotGenerator(GeneratedFiles, RuntimeHints)
+	 */
+	public TestContextAotGenerator(GeneratedFiles generatedFiles) {
+<span class="fc" id="L124">		this(generatedFiles, new RuntimeHints());</span>
+<span class="fc" id="L125">	}</span>
+
+	/**
+	 * Create a new {@link TestContextAotGenerator} that uses the supplied
+	 * {@link GeneratedFiles} and {@link RuntimeHints}.
+	 * &lt;p&gt;This constructor looks up the value of the {@code failOnError} flag via
+	 * the {@value #FAIL_ON_ERROR_PROPERTY_NAME} property, defaulting to
+	 * {@code true} if the property is not set.
+	 * @param generatedFiles the {@code GeneratedFiles} to use
+	 * @param runtimeHints the {@code RuntimeHints} to use
+	 * @see #TestContextAotGenerator(GeneratedFiles, RuntimeHints, boolean)
+	 */
+	public TestContextAotGenerator(GeneratedFiles generatedFiles, RuntimeHints runtimeHints) {
+<span class="fc" id="L138">		this(generatedFiles, runtimeHints, getFailOnErrorFlag());</span>
+<span class="fc" id="L139">	}</span>
+
+	/**
+	 * Create a new {@link TestContextAotGenerator} that uses the supplied
+	 * {@link GeneratedFiles}, {@link RuntimeHints}, and {@code failOnError} flag.
+	 * @param generatedFiles the {@code GeneratedFiles} to use
+	 * @param runtimeHints the {@code RuntimeHints} to use
+	 * @param failOnError {@code true} if errors encountered during AOT processing
+	 * should result in an exception that fails the overall process
+	 * @since 6.1
+	 */
+<span class="fc" id="L150">	public TestContextAotGenerator(GeneratedFiles generatedFiles, RuntimeHints runtimeHints, boolean failOnError) {</span>
+<span class="fc" id="L151">		this.testRuntimeHintsRegistrars = AotServices.factories().load(TestRuntimeHintsRegistrar.class);</span>
+<span class="fc" id="L152">		this.generatedFiles = generatedFiles;</span>
+<span class="fc" id="L153">		this.runtimeHints = runtimeHints;</span>
+<span class="fc" id="L154">		this.failOnError = failOnError;</span>
+<span class="fc" id="L155">	}</span>
+
+
+	/**
+	 * Get the {@link RuntimeHints} gathered during {@linkplain #processAheadOfTime(Stream)
+	 * AOT processing}.
+	 */
+	public final RuntimeHints getRuntimeHints() {
+<span class="fc" id="L163">		return this.runtimeHints;</span>
+	}
+
+	/**
+	 * Process each of the supplied Spring integration test classes and generate
+	 * AOT artifacts.
+	 * @throws TestContextAotException if an error occurs during AOT processing
+	 */
+	public void processAheadOfTime(Stream&lt;Class&lt;?&gt;&gt; testClasses) throws TestContextAotException {
+<span class="pc bpc" id="L172" title="1 of 2 branches missed.">		Assert.state(!AotDetector.useGeneratedArtifacts(), &quot;Cannot perform AOT processing during AOT run-time execution&quot;);</span>
+		try {
+<span class="fc" id="L174">			resetAotFactories();</span>
+
+<span class="fc" id="L176">			Set&lt;Class&lt;? extends RuntimeHintsRegistrar&gt;&gt; coreRuntimeHintsRegistrarClasses = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc" id="L177">			ReflectiveRuntimeHintsRegistrar reflectiveRuntimeHintsRegistrar = new ReflectiveRuntimeHintsRegistrar();</span>
+
+<span class="fc" id="L179">			MultiValueMap&lt;MergedContextConfiguration, Class&lt;?&gt;&gt; mergedConfigMappings = new LinkedMultiValueMap&lt;&gt;();</span>
+<span class="fc" id="L180">			ClassLoader classLoader = getClass().getClassLoader();</span>
+<span class="fc" id="L181">			testClasses.forEach(testClass -&gt; {</span>
+<span class="fc" id="L182">				MergedContextConfiguration mergedConfig = buildMergedContextConfiguration(testClass);</span>
+<span class="fc" id="L183">				mergedConfigMappings.add(mergedConfig, testClass);</span>
+<span class="fc" id="L184">				collectRuntimeHintsRegistrarClasses(testClass, coreRuntimeHintsRegistrarClasses);</span>
+<span class="fc" id="L185">				reflectiveRuntimeHintsRegistrar.registerRuntimeHints(this.runtimeHints, testClass);</span>
+<span class="fc" id="L186">				this.testRuntimeHintsRegistrars.forEach(registrar -&gt; {</span>
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L188">						logger.trace(&quot;Processing RuntimeHints contribution from class [%s]&quot;</span>
+<span class="nc" id="L189">								.formatted(registrar.getClass().getCanonicalName()));</span>
+					}
+<span class="fc" id="L191">					registrar.registerHints(this.runtimeHints, testClass, classLoader);</span>
+<span class="fc" id="L192">				});</span>
+<span class="fc" id="L193">			});</span>
+
+<span class="fc" id="L195">			coreRuntimeHintsRegistrarClasses.stream()</span>
+<span class="fc" id="L196">					.map(BeanUtils::instantiateClass)</span>
+<span class="fc" id="L197">					.forEach(registrar -&gt; {</span>
+<span class="pc bpc" id="L198" title="1 of 2 branches missed.">						if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L199">							logger.trace(&quot;Processing RuntimeHints contribution from class [%s]&quot;</span>
+<span class="nc" id="L200">									.formatted(registrar.getClass().getCanonicalName()));</span>
+						}
+<span class="fc" id="L202">						registrar.registerHints(this.runtimeHints, classLoader);</span>
+<span class="fc" id="L203">					});</span>
+
+<span class="fc" id="L205">			MultiValueMap&lt;ClassName, Class&lt;?&gt;&gt; initializerClassMappings = processAheadOfTime(mergedConfigMappings);</span>
+<span class="fc" id="L206">			generateAotTestContextInitializerMappings(initializerClassMappings);</span>
+<span class="fc" id="L207">			generateAotTestAttributeMappings();</span>
+<span class="fc" id="L208">			registerSkippedExceptionTypes();</span>
+		}
+		finally {
+<span class="fc" id="L211">			resetAotFactories();</span>
+		}
+<span class="fc" id="L213">	}</span>
+
+	/**
+	 * Collect all {@link RuntimeHintsRegistrar} classes declared via
+	 * {@link ImportRuntimeHints @ImportRuntimeHints} on the supplied test class
+	 * and add them to the supplied {@link Set}.
+	 * @param testClass the test class on which to search for {@code @ImportRuntimeHints}
+	 * @param coreRuntimeHintsRegistrarClasses the set of registrar classes
+	 */
+	private void collectRuntimeHintsRegistrarClasses(
+			Class&lt;?&gt; testClass, Set&lt;Class&lt;? extends RuntimeHintsRegistrar&gt;&gt; coreRuntimeHintsRegistrarClasses) {
+
+<span class="fc" id="L225">		MergedAnnotations.from(testClass, SearchStrategy.TYPE_HIERARCHY)</span>
+<span class="fc" id="L226">				.stream(ImportRuntimeHints.class)</span>
+<span class="fc" id="L227">				.filter(MergedAnnotation::isPresent)</span>
+<span class="fc" id="L228">				.map(MergedAnnotation::synthesize)</span>
+<span class="fc" id="L229">				.map(ImportRuntimeHints::value)</span>
+<span class="fc" id="L230">				.flatMap(Arrays::stream)</span>
+<span class="fc" id="L231">				.forEach(coreRuntimeHintsRegistrarClasses::add);</span>
+<span class="fc" id="L232">	}</span>
+
+	private void resetAotFactories() {
+<span class="fc" id="L235">		AotTestAttributesFactory.reset();</span>
+<span class="fc" id="L236">		AotTestContextInitializersFactory.reset();</span>
+<span class="fc" id="L237">	}</span>
+
+	private MultiValueMap&lt;ClassName, Class&lt;?&gt;&gt; processAheadOfTime(
+			MultiValueMap&lt;MergedContextConfiguration, Class&lt;?&gt;&gt; mergedConfigMappings) {
+
+<span class="fc" id="L242">		ClassLoader classLoader = getClass().getClassLoader();</span>
+<span class="fc" id="L243">		MultiValueMap&lt;ClassName, Class&lt;?&gt;&gt; initializerClassMappings = new LinkedMultiValueMap&lt;&gt;();</span>
+<span class="fc" id="L244">		mergedConfigMappings.forEach((mergedConfig, testClasses) -&gt; {</span>
+<span class="fc" id="L245">			long numDisabled = testClasses.stream().filter(isDisabledInAotMode).count();</span>
+			// At least one test class is disabled?
+<span class="fc bfc" id="L247" title="All 2 branches covered.">			if (numDisabled &gt; 0) {</span>
+				// Then all related test classes should be disabled.
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">				if (numDisabled != testClasses.size()) {</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">					if (this.failOnError) {</span>
+<span class="nc" id="L251">						throw new TestContextAotException(&quot;&quot;&quot;</span>
+								All test classes that share an ApplicationContext must be annotated \
+								with @DisabledInAotMode if one of them is: \
+<span class="nc" id="L254">								&quot;&quot;&quot; + classNames(testClasses));</span>
+					}
+<span class="nc bnc" id="L256" title="All 2 branches missed.">					else if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L257">						logger.warn(&quot;&quot;&quot;</span>
+								All test classes that share an ApplicationContext must be annotated \
+								with @DisabledInAotMode if one of them is: \
+<span class="nc" id="L260">								&quot;&quot;&quot; + classNames(testClasses));</span>
+					}
+				}
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">				if (logger.isInfoEnabled()) {</span>
+<span class="fc" id="L264">					logger.info(&quot;Skipping AOT processing due to the presence of @DisabledInAotMode for test classes &quot; +</span>
+<span class="fc" id="L265">							classNames(testClasses));</span>
+				}
+			}
+			else {
+<span class="pc bpc" id="L269" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L270">					logger.debug(&quot;Generating AOT artifacts for test classes &quot; + classNames(testClasses));</span>
+				}
+<span class="fc" id="L272">				this.mergedConfigRuntimeHints.registerHints(this.runtimeHints, mergedConfig, classLoader);</span>
+				try {
+					// Use first test class discovered for a given unique MergedContextConfiguration.
+<span class="fc" id="L275">					Class&lt;?&gt; testClass = testClasses.get(0);</span>
+<span class="fc" id="L276">					DefaultGenerationContext generationContext = createGenerationContext(testClass);</span>
+<span class="fc" id="L277">					ClassName initializer = processAheadOfTime(mergedConfig, generationContext);</span>
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">					Assert.state(!initializerClassMappings.containsKey(initializer),</span>
+<span class="nc" id="L279">							() -&gt; &quot;ClassName [%s] already encountered&quot;.formatted(initializer.reflectionName()));</span>
+<span class="fc" id="L280">					initializerClassMappings.addAll(initializer, testClasses);</span>
+<span class="fc" id="L281">					generationContext.writeGeneratedContent();</span>
+				}
+<span class="nc" id="L283">				catch (Exception ex) {</span>
+<span class="nc bnc" id="L284" title="All 2 branches missed.">					if (this.failOnError) {</span>
+<span class="nc" id="L285">						throw new TestContextAotException(&quot;Failed to generate AOT artifacts for test classes &quot; +</span>
+<span class="nc" id="L286">								classNames(testClasses), ex);</span>
+					}
+<span class="nc bnc" id="L288" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L289">						logger.debug(&quot;Failed to generate AOT artifacts for test classes &quot; + classNames(testClasses), ex);</span>
+					}
+<span class="nc bnc" id="L291" title="All 2 branches missed.">					else if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L292">						logger.warn(&quot;&quot;&quot;</span>
+							Failed to generate AOT artifacts for test classes %s. \
+							Enable DEBUG logging to view the stack trace. %s&quot;&quot;&quot;
+<span class="nc" id="L295">								.formatted(classNames(testClasses), ex));</span>
+					}
+<span class="fc" id="L297">				}</span>
+			}
+<span class="fc" id="L299">		});</span>
+<span class="fc" id="L300">		return initializerClassMappings;</span>
+	}
+
+	/**
+	 * Process the specified {@link MergedContextConfiguration} ahead-of-time
+	 * using the specified {@link GenerationContext}.
+	 * &lt;p&gt;Return the {@link ClassName} of the {@link ApplicationContextInitializer}
+	 * to use to restore an optimized state of the test application context for
+	 * the given {@code MergedContextConfiguration}.
+	 * @param mergedConfig the {@code MergedContextConfiguration} to process
+	 * @param generationContext the generation context to use
+	 * @return the {@link ClassName} for the generated {@code ApplicationContextInitializer}
+	 * @throws TestContextAotException if an error occurs during AOT processing
+	 */
+	ClassName processAheadOfTime(MergedContextConfiguration mergedConfig,
+			GenerationContext generationContext) throws TestContextAotException {
+
+<span class="fc" id="L317">		try (GenericApplicationContext gac = loadContextForAotProcessing(mergedConfig)) {</span>
+<span class="fc" id="L318">			return this.aotGenerator.processAheadOfTime(gac, generationContext);</span>
+		}
+<span class="nc" id="L320">		catch (Throwable ex) {</span>
+<span class="nc" id="L321">			throw new TestContextAotException(&quot;Failed to process test class [%s] for AOT&quot;</span>
+<span class="nc" id="L322">					.formatted(mergedConfig.getTestClass().getName()), ex);</span>
+		}
+	}
+
+	/**
+	 * Load the {@code GenericApplicationContext} for the supplied merged context
+	 * configuration for AOT processing.
+	 * &lt;p&gt;Only supports {@link SmartContextLoader SmartContextLoaders} that
+	 * create {@link GenericApplicationContext GenericApplicationContexts}.
+	 * @throws TestContextAotException if an error occurs while loading the application
+	 * context or if one of the prerequisites is not met
+	 * @see AotContextLoader#loadContextForAotProcessing(MergedContextConfiguration, RuntimeHints)
+	 */
+	GenericApplicationContext loadContextForAotProcessing(
+			MergedContextConfiguration mergedConfig) throws TestContextAotException {
+
+<span class="fc" id="L338">		Class&lt;?&gt; testClass = mergedConfig.getTestClass();</span>
+<span class="fc" id="L339">		ContextLoader contextLoader = mergedConfig.getContextLoader();</span>
+<span class="pc" id="L340">		Assert.notNull(contextLoader, () -&gt; &quot;&quot;&quot;</span>
+				Cannot load an ApplicationContext with a NULL 'contextLoader'. \
+				Consider annotating test class [%s] with @ContextConfiguration or \
+<span class="nc" id="L343">				@ContextHierarchy.&quot;&quot;&quot;.formatted(testClass.getName()));</span>
+
+<span class="pc bpc" id="L345" title="1 of 2 branches missed.">		if (contextLoader instanceof AotContextLoader aotContextLoader) {</span>
+			try {
+<span class="fc" id="L347">				ApplicationContext context = aotContextLoader.loadContextForAotProcessing(mergedConfig, this.runtimeHints);</span>
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">				if (context instanceof GenericApplicationContext gac) {</span>
+<span class="fc" id="L349">					return gac;</span>
+				}
+			}
+<span class="nc" id="L352">			catch (Exception ex) {</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">				Throwable cause = (ex instanceof ContextLoadException cle ? cle.getCause() : ex);</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">				Assert.state(cause != null, &quot;Cause must not be null&quot;);</span>
+<span class="nc" id="L355">				throw new TestContextAotException(</span>
+						&quot;Failed to load ApplicationContext for AOT processing for test class [%s]&quot;
+<span class="nc" id="L357">							.formatted(testClass.getName()), cause);</span>
+<span class="nc" id="L358">			}</span>
+		}
+<span class="nc" id="L360">		throw new TestContextAotException(&quot;&quot;&quot;</span>
+				Cannot generate AOT artifacts for test class [%s]. The configured \
+				ContextLoader [%s] must be an AotContextLoader and must create a \
+<span class="nc" id="L363">				GenericApplicationContext.&quot;&quot;&quot;.formatted(testClass.getName(),</span>
+<span class="nc" id="L364">					contextLoader.getClass().getName()));</span>
+	}
+
+	private MergedContextConfiguration buildMergedContextConfiguration(Class&lt;?&gt; testClass) {
+<span class="fc" id="L368">		TestContextBootstrapper testContextBootstrapper =</span>
+<span class="fc" id="L369">				BootstrapUtils.resolveTestContextBootstrapper(testClass);</span>
+<span class="fc" id="L370">		registerDeclaredConstructors(testContextBootstrapper.getClass()); // @BootstrapWith</span>
+<span class="fc" id="L371">		testContextBootstrapper.getTestExecutionListeners().forEach(listener -&gt; {</span>
+<span class="fc" id="L372">			registerDeclaredConstructors(listener.getClass()); // @TestExecutionListeners</span>
+<span class="fc bfc" id="L373" title="All 4 branches covered.">			if (!isDisabledInAotMode.test(testClass) &amp;&amp; listener instanceof AotTestExecutionListener aotListener) {</span>
+<span class="fc" id="L374">				aotListener.processAheadOfTime(this.runtimeHints, testClass, getClass().getClassLoader());</span>
+			}
+<span class="fc" id="L376">		});</span>
+<span class="fc" id="L377">		return testContextBootstrapper.buildMergedContextConfiguration();</span>
+	}
+
+	DefaultGenerationContext createGenerationContext(Class&lt;?&gt; testClass) {
+<span class="fc" id="L381">		ClassNameGenerator classNameGenerator = new ClassNameGenerator(ClassName.get(testClass));</span>
+<span class="fc" id="L382">		TestContextGenerationContext generationContext =</span>
+				new TestContextGenerationContext(classNameGenerator, this.generatedFiles, this.runtimeHints);
+<span class="fc" id="L384">		return generationContext.withName(nextTestContextId());</span>
+	}
+
+	private String nextTestContextId() {
+<span class="fc" id="L388">		return &quot;TestContext%03d_&quot;.formatted(this.sequence.incrementAndGet());</span>
+	}
+
+	private void generateAotTestContextInitializerMappings(MultiValueMap&lt;ClassName, Class&lt;?&gt;&gt; initializerClassMappings) {
+<span class="fc" id="L392">		ClassNameGenerator classNameGenerator = new ClassNameGenerator(ClassName.get(AotTestContextInitializers.class));</span>
+<span class="fc" id="L393">		DefaultGenerationContext generationContext =</span>
+				new DefaultGenerationContext(classNameGenerator, this.generatedFiles, this.runtimeHints);
+<span class="fc" id="L395">		GeneratedClasses generatedClasses = generationContext.getGeneratedClasses();</span>
+
+<span class="fc" id="L397">		AotTestContextInitializersCodeGenerator codeGenerator =</span>
+				new AotTestContextInitializersCodeGenerator(initializerClassMappings, generatedClasses);
+<span class="fc" id="L399">		generationContext.writeGeneratedContent();</span>
+<span class="fc" id="L400">		String className = codeGenerator.getGeneratedClass().getName().reflectionName();</span>
+<span class="fc" id="L401">		registerPublicMethods(className);</span>
+<span class="fc" id="L402">	}</span>
+
+	private void generateAotTestAttributeMappings() {
+<span class="fc" id="L405">		ClassNameGenerator classNameGenerator = new ClassNameGenerator(ClassName.get(AotTestAttributes.class));</span>
+<span class="fc" id="L406">		DefaultGenerationContext generationContext =</span>
+				new DefaultGenerationContext(classNameGenerator, this.generatedFiles, this.runtimeHints);
+<span class="fc" id="L408">		GeneratedClasses generatedClasses = generationContext.getGeneratedClasses();</span>
+
+<span class="fc" id="L410">		Map&lt;String, String&gt; attributes = AotTestAttributesFactory.getAttributes();</span>
+<span class="fc" id="L411">		AotTestAttributesCodeGenerator codeGenerator =</span>
+				new AotTestAttributesCodeGenerator(attributes, generatedClasses);
+<span class="fc" id="L413">		generationContext.writeGeneratedContent();</span>
+<span class="fc" id="L414">		String className = codeGenerator.getGeneratedClass().getName().reflectionName();</span>
+<span class="fc" id="L415">		registerPublicMethods(className);</span>
+<span class="fc" id="L416">	}</span>
+
+	private void registerPublicMethods(String className) {
+<span class="fc" id="L419">		this.runtimeHints.reflection().registerType(TypeReference.of(className), INVOKE_PUBLIC_METHODS);</span>
+<span class="fc" id="L420">	}</span>
+
+	private void registerDeclaredConstructors(Class&lt;?&gt; type) {
+<span class="fc" id="L423">		this.runtimeHints.reflection().registerType(type, INVOKE_DECLARED_CONSTRUCTORS);</span>
+<span class="fc" id="L424">	}</span>
+
+	/**
+	 * Register hints for skipped exception types loaded via reflection in
+	 * {@link org.springframework.test.context.TestContextManager}.
+	 * @since 6.1.2
+	 */
+	private void registerSkippedExceptionTypes() {
+<span class="fc" id="L432">		Stream.of(</span>
+				&quot;org.opentest4j.TestAbortedException&quot;,
+				&quot;org.junit.AssumptionViolatedException&quot;,
+				&quot;org.testng.SkipException&quot;)
+<span class="fc" id="L436">			.map(TypeReference::of)</span>
+<span class="fc" id="L437">			.forEach(this.runtimeHints.reflection()::registerType);</span>
+<span class="fc" id="L438">	}</span>
+
+	private static boolean getFailOnErrorFlag() {
+<span class="fc" id="L441">		String failOnError = SpringProperties.getProperty(FAIL_ON_ERROR_PROPERTY_NAME);</span>
+<span class="fc bfc" id="L442" title="All 2 branches covered.">		if (StringUtils.hasText(failOnError)) {</span>
+<span class="fc" id="L443">			return Boolean.parseBoolean(failOnError.trim());</span>
+		}
+<span class="fc" id="L445">		return true;</span>
+	}
+
+	private static List&lt;String&gt; classNames(List&lt;Class&lt;?&gt;&gt; classes) {
+<span class="fc" id="L449">		return classes.stream().map(Class::getName).toList();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

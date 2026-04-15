@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>MethodInterceptorGenerator.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.cglib.proxy</a> &gt; <span class="el_source">MethodInterceptorGenerator.java</span></div><h1>MethodInterceptorGenerator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2003,2004 The Apache Software Foundation
+ *
+ *  Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.cglib.proxy;
+
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+import org.springframework.asm.Label;
+import org.springframework.asm.Type;
+import org.springframework.cglib.core.ClassEmitter;
+import org.springframework.cglib.core.ClassInfo;
+import org.springframework.cglib.core.CodeEmitter;
+import org.springframework.cglib.core.CollectionUtils;
+import org.springframework.cglib.core.Constants;
+import org.springframework.cglib.core.EmitUtils;
+import org.springframework.cglib.core.Local;
+import org.springframework.cglib.core.MethodInfo;
+import org.springframework.cglib.core.ObjectSwitchCallback;
+import org.springframework.cglib.core.Signature;
+import org.springframework.cglib.core.Transformer;
+import org.springframework.cglib.core.TypeUtils;
+
+@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;, &quot;deprecation&quot;})
+<span class="fc" id="L40">class MethodInterceptorGenerator</span>
+implements CallbackGenerator
+{
+<span class="fc" id="L43">    public static final MethodInterceptorGenerator INSTANCE = new MethodInterceptorGenerator();</span>
+
+    static final String EMPTY_ARGS_NAME = &quot;CGLIB$emptyArgs&quot;;
+    static final String FIND_PROXY_NAME = &quot;CGLIB$findMethodProxy&quot;;
+<span class="fc" id="L47">    static final Class[] FIND_PROXY_TYPES = { Signature.class };</span>
+
+<span class="fc" id="L49">    private static final Type ABSTRACT_METHOD_ERROR =</span>
+<span class="fc" id="L50">      TypeUtils.parseType(&quot;AbstractMethodError&quot;);</span>
+<span class="fc" id="L51">    private static final Type METHOD =</span>
+<span class="fc" id="L52">      TypeUtils.parseType(&quot;java.lang.reflect.Method&quot;);</span>
+<span class="fc" id="L53">    private static final Type REFLECT_UTILS =</span>
+<span class="fc" id="L54">      TypeUtils.parseType(&quot;org.springframework.cglib.core.ReflectUtils&quot;);</span>
+<span class="fc" id="L55">    private static final Type METHOD_PROXY =</span>
+<span class="fc" id="L56">      TypeUtils.parseType(&quot;org.springframework.cglib.proxy.MethodProxy&quot;);</span>
+<span class="fc" id="L57">    private static final Type METHOD_INTERCEPTOR =</span>
+<span class="fc" id="L58">      TypeUtils.parseType(&quot;org.springframework.cglib.proxy.MethodInterceptor&quot;);</span>
+<span class="fc" id="L59">    private static final Signature GET_DECLARED_METHODS =</span>
+<span class="fc" id="L60">      TypeUtils.parseSignature(&quot;java.lang.reflect.Method[] getDeclaredMethods()&quot;);</span>
+<span class="fc" id="L61">    private static final Signature FIND_METHODS =</span>
+<span class="fc" id="L62">      TypeUtils.parseSignature(&quot;java.lang.reflect.Method[] findMethods(String[], java.lang.reflect.Method[])&quot;);</span>
+<span class="fc" id="L63">    private static final Signature MAKE_PROXY =</span>
+      new Signature(&quot;create&quot;, METHOD_PROXY, new Type[]{
+          Constants.TYPE_CLASS,
+          Constants.TYPE_CLASS,
+          Constants.TYPE_STRING,
+          Constants.TYPE_STRING,
+          Constants.TYPE_STRING
+      });
+<span class="fc" id="L71">    private static final Signature INTERCEPT =</span>
+      new Signature(&quot;intercept&quot;, Constants.TYPE_OBJECT, new Type[]{
+          Constants.TYPE_OBJECT,
+          METHOD,
+          Constants.TYPE_OBJECT_ARRAY,
+          METHOD_PROXY
+      });
+<span class="fc" id="L78">    private static final Signature FIND_PROXY =</span>
+      new Signature(FIND_PROXY_NAME, METHOD_PROXY, new Type[]{ Constants.TYPE_SIGNATURE });
+<span class="fc" id="L80">    private static final Signature TO_STRING =</span>
+<span class="fc" id="L81">      TypeUtils.parseSignature(&quot;String toString()&quot;);</span>
+<span class="fc" id="L82">    private static final Transformer METHOD_TO_CLASS = value -&gt; ((MethodInfo)value).getClassInfo();</span>
+
+    private String getMethodField(Signature impl) {
+<span class="fc" id="L85">        return impl.getName() + &quot;$Method&quot;;</span>
+    }
+    private String getMethodProxyField(Signature impl) {
+<span class="fc" id="L88">        return impl.getName() + &quot;$Proxy&quot;;</span>
+    }
+
+    @Override
+    public void generate(ClassEmitter ce, Context context, List methods) {
+<span class="fc" id="L93">        Map sigMap = new HashMap();</span>
+<span class="fc bfc" id="L94" title="All 2 branches covered.">        for (Iterator it = methods.iterator(); it.hasNext();) {</span>
+<span class="fc" id="L95">            MethodInfo method = (MethodInfo)it.next();</span>
+<span class="fc" id="L96">            Signature sig = method.getSignature();</span>
+<span class="fc" id="L97">            Signature impl = context.getImplSignature(method);</span>
+
+<span class="fc" id="L99">            String methodField = getMethodField(impl);</span>
+<span class="fc" id="L100">            String methodProxyField = getMethodProxyField(impl);</span>
+
+<span class="fc" id="L102">            sigMap.put(sig.toString(), methodProxyField);</span>
+<span class="fc" id="L103">            ce.declare_field(Constants.PRIVATE_FINAL_STATIC, methodField, METHOD, null);</span>
+<span class="fc" id="L104">            ce.declare_field(Constants.PRIVATE_FINAL_STATIC, methodProxyField, METHOD_PROXY, null);</span>
+<span class="fc" id="L105">            ce.declare_field(Constants.PRIVATE_FINAL_STATIC, EMPTY_ARGS_NAME, Constants.TYPE_OBJECT_ARRAY, null);</span>
+            CodeEmitter e;
+
+            // access method
+<span class="fc" id="L109">            e = ce.begin_method(Constants.ACC_FINAL,</span>
+                                impl,
+<span class="fc" id="L111">                                method.getExceptionTypes());</span>
+<span class="fc" id="L112">            superHelper(e, method, context);</span>
+<span class="fc" id="L113">            e.return_value();</span>
+<span class="fc" id="L114">            e.end_method();</span>
+
+            // around method
+<span class="fc" id="L117">            e = context.beginMethod(ce, method);</span>
+<span class="fc" id="L118">            Label nullInterceptor = e.make_label();</span>
+<span class="fc" id="L119">            context.emitCallback(e, context.getIndex(method));</span>
+<span class="fc" id="L120">            e.dup();</span>
+<span class="fc" id="L121">            e.ifnull(nullInterceptor);</span>
+
+<span class="fc" id="L123">            e.load_this();</span>
+<span class="fc" id="L124">            e.getfield(methodField);</span>
+
+<span class="fc bfc" id="L126" title="All 2 branches covered.">            if (sig.getArgumentTypes().length == 0) {</span>
+<span class="fc" id="L127">                e.getfield(EMPTY_ARGS_NAME);</span>
+            } else {
+<span class="fc" id="L129">                e.create_arg_array();</span>
+            }
+
+<span class="fc" id="L132">            e.getfield(methodProxyField);</span>
+<span class="fc" id="L133">            e.invoke_interface(METHOD_INTERCEPTOR, INTERCEPT);</span>
+<span class="fc" id="L134">            e.unbox_or_zero(sig.getReturnType());</span>
+<span class="fc" id="L135">            e.return_value();</span>
+
+<span class="fc" id="L137">            e.mark(nullInterceptor);</span>
+<span class="fc" id="L138">            superHelper(e, method, context);</span>
+<span class="fc" id="L139">            e.return_value();</span>
+<span class="fc" id="L140">            e.end_method();</span>
+<span class="fc" id="L141">        }</span>
+<span class="fc" id="L142">        generateFindProxy(ce, sigMap);</span>
+<span class="fc" id="L143">    }</span>
+
+    private static void superHelper(CodeEmitter e, MethodInfo method, Context context)
+    {
+<span class="pc bpc" id="L147" title="1 of 2 branches missed.">        if (TypeUtils.isAbstract(method.getModifiers())) {</span>
+<span class="nc" id="L148">            e.throw_exception(ABSTRACT_METHOD_ERROR, method.toString() + &quot; is abstract&quot; );</span>
+        } else {
+<span class="fc" id="L150">            e.load_this();</span>
+<span class="fc" id="L151">            context.emitLoadArgsAndInvoke(e, method);</span>
+        }
+<span class="fc" id="L153">    }</span>
+
+    @Override
+    public void generateStatic(CodeEmitter e, Context context, List methods) throws Exception {
+        /* generates:
+           static {
+             Class thisClass = Class.forName(&quot;NameOfThisClass&quot;);
+             Class cls = Class.forName(&quot;java.lang.Object&quot;);
+             String[] sigs = new String[]{ &quot;toString&quot;, &quot;()Ljava/lang/String;&quot;, ... };
+             Method[] methods = cls.getDeclaredMethods();
+             methods = ReflectUtils.findMethods(sigs, methods);
+             METHOD_0 = methods[0];
+             CGLIB$ACCESS_0 = MethodProxy.create(cls, thisClass, &quot;()Ljava/lang/String;&quot;, &quot;toString&quot;, &quot;CGLIB$ACCESS_0&quot;);
+             ...
+           }
+        */
+
+<span class="fc" id="L170">        e.push(0);</span>
+<span class="fc" id="L171">        e.newarray();</span>
+<span class="fc" id="L172">        e.putfield(EMPTY_ARGS_NAME);</span>
+
+<span class="fc" id="L174">        Local thisclass = e.make_local();</span>
+<span class="fc" id="L175">        Local declaringclass = e.make_local();</span>
+<span class="fc" id="L176">        EmitUtils.load_class_this(e);</span>
+<span class="fc" id="L177">        e.store_local(thisclass);</span>
+
+<span class="fc" id="L179">        Map methodsByClass = CollectionUtils.bucket(methods, METHOD_TO_CLASS);</span>
+<span class="fc bfc" id="L180" title="All 2 branches covered.">        for (Iterator i = methodsByClass.keySet().iterator(); i.hasNext();) {</span>
+<span class="fc" id="L181">            ClassInfo classInfo = (ClassInfo)i.next();</span>
+
+<span class="fc" id="L183">            List classMethods = (List)methodsByClass.get(classInfo);</span>
+<span class="fc" id="L184">            e.push(2 * classMethods.size());</span>
+<span class="fc" id="L185">            e.newarray(Constants.TYPE_STRING);</span>
+<span class="fc bfc" id="L186" title="All 2 branches covered.">            for (int index = 0; index &lt; classMethods.size(); index++) {</span>
+<span class="fc" id="L187">                MethodInfo method = (MethodInfo)classMethods.get(index);</span>
+<span class="fc" id="L188">                Signature sig = method.getSignature();</span>
+<span class="fc" id="L189">                e.dup();</span>
+<span class="fc" id="L190">                e.push(2 * index);</span>
+<span class="fc" id="L191">                e.push(sig.getName());</span>
+<span class="fc" id="L192">                e.aastore();</span>
+<span class="fc" id="L193">                e.dup();</span>
+<span class="fc" id="L194">                e.push(2 * index + 1);</span>
+<span class="fc" id="L195">                e.push(sig.getDescriptor());</span>
+<span class="fc" id="L196">                e.aastore();</span>
+            }
+
+<span class="fc" id="L199">            EmitUtils.load_class(e, classInfo.getType());</span>
+<span class="fc" id="L200">            e.dup();</span>
+<span class="fc" id="L201">            e.store_local(declaringclass);</span>
+<span class="fc" id="L202">            e.invoke_virtual(Constants.TYPE_CLASS, GET_DECLARED_METHODS);</span>
+<span class="fc" id="L203">            e.invoke_static(REFLECT_UTILS, FIND_METHODS);</span>
+
+<span class="fc bfc" id="L205" title="All 2 branches covered.">            for (int index = 0; index &lt; classMethods.size(); index++) {</span>
+<span class="fc" id="L206">                MethodInfo method = (MethodInfo)classMethods.get(index);</span>
+<span class="fc" id="L207">                Signature sig = method.getSignature();</span>
+<span class="fc" id="L208">                Signature impl = context.getImplSignature(method);</span>
+<span class="fc" id="L209">                e.dup();</span>
+<span class="fc" id="L210">                e.push(index);</span>
+<span class="fc" id="L211">                e.array_load(METHOD);</span>
+<span class="fc" id="L212">                e.putfield(getMethodField(impl));</span>
+
+<span class="fc" id="L214">                e.load_local(declaringclass);</span>
+<span class="fc" id="L215">                e.load_local(thisclass);</span>
+<span class="fc" id="L216">                e.push(sig.getDescriptor());</span>
+<span class="fc" id="L217">                e.push(sig.getName());</span>
+<span class="fc" id="L218">                e.push(impl.getName());</span>
+<span class="fc" id="L219">                e.invoke_static(METHOD_PROXY, MAKE_PROXY);</span>
+<span class="fc" id="L220">                e.putfield(getMethodProxyField(impl));</span>
+            }
+<span class="fc" id="L222">            e.pop();</span>
+<span class="fc" id="L223">        }</span>
+<span class="fc" id="L224">    }</span>
+
+    public void generateFindProxy(ClassEmitter ce, final Map sigMap) {
+<span class="fc" id="L227">        final CodeEmitter e = ce.begin_method(Constants.ACC_PUBLIC | Constants.ACC_STATIC,</span>
+                                              FIND_PROXY,
+                                              null);
+<span class="fc" id="L230">        e.load_arg(0);</span>
+<span class="fc" id="L231">        e.invoke_virtual(Constants.TYPE_OBJECT, TO_STRING);</span>
+<span class="fc" id="L232">        ObjectSwitchCallback callback = new ObjectSwitchCallback() {</span>
+            @Override
+            public void processCase(Object key, Label end) {
+<span class="fc" id="L235">                e.getfield((String)sigMap.get(key));</span>
+<span class="fc" id="L236">                e.return_value();</span>
+<span class="fc" id="L237">            }</span>
+            @Override
+            public void processDefault() {
+<span class="fc" id="L240">                e.aconst_null();</span>
+<span class="fc" id="L241">                e.return_value();</span>
+<span class="fc" id="L242">            }</span>
+        };
+<span class="fc" id="L244">        EmitUtils.string_switch(e,</span>
+<span class="fc" id="L245">                                (String[])sigMap.keySet().toArray(new String[0]),</span>
+                                Constants.SWITCH_STYLE_HASH,
+                                callback);
+<span class="fc" id="L248">        e.end_method();</span>
+<span class="fc" id="L249">    }</span>
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

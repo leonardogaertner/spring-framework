@@ -1,0 +1,395 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>PartGenerator.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.converter.multipart</a> &gt; <span class="el_source">PartGenerator.java</span></div><h1>PartGenerator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2026-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.converter.multipart;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.UncheckedIOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayDeque;
+import java.util.List;
+import java.util.Queue;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.DefaultDataBuffer;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
+import org.springframework.http.converter.HttpMessageConversionException;
+import org.springframework.util.FastByteArrayOutputStream;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+
+/**
+ * {@link MultipartParser.PartListener Listen} to a stream of part tokens
+ * and return a {@code MultiValueMap&lt;String, Part&gt;} as a result.
+ *
+ * @author Brian Clozel
+ * @author Arjen Poutsma
+ */
+final class PartGenerator implements MultipartParser.PartListener {
+
+<span class="fc" id="L53">	private static final Log logger = LogFactory.getLog(PartGenerator.class);</span>
+
+<span class="fc" id="L55">	private final MultiValueMap&lt;String, Part&gt; parts = new LinkedMultiValueMap&lt;&gt;();</span>
+
+	private final int maxInMemorySize;
+
+	private final long maxDiskUsagePerPart;
+
+	private final int maxParts;
+
+	private final Path fileStorageDirectory;
+
+	private int partCount;
+
+	private State state;
+
+
+<span class="fc" id="L70">	PartGenerator(int maxInMemorySize, long maxDiskUsagePerPart, int maxParts, Path fileStorageDirectory) {</span>
+<span class="fc" id="L71">		this.maxInMemorySize = maxInMemorySize;</span>
+<span class="fc" id="L72">		this.maxDiskUsagePerPart = maxDiskUsagePerPart;</span>
+<span class="fc" id="L73">		this.maxParts = maxParts;</span>
+<span class="fc" id="L74">		this.fileStorageDirectory = fileStorageDirectory;</span>
+<span class="fc" id="L75">		this.state = new InitialState();</span>
+<span class="fc" id="L76">	}</span>
+
+	/**
+	 * Return the collected parts.
+	 */
+	public MultiValueMap&lt;String, Part&gt; getParts() {
+<span class="fc" id="L82">		return this.parts;</span>
+	}
+
+	@Override
+	public void onHeaders(HttpHeaders headers) {
+<span class="fc bfc" id="L87" title="All 2 branches covered.">		if (isFormField(headers)) {</span>
+<span class="fc" id="L88">			this.state = new FormFieldState(headers);</span>
+		}
+		else {
+<span class="fc" id="L91">			this.state = new InMemoryState(headers);</span>
+		}
+<span class="fc" id="L93">	}</span>
+
+	private static boolean isFormField(HttpHeaders headers) {
+<span class="fc" id="L96">		MediaType contentType = headers.getContentType();</span>
+<span class="pc bpc" id="L97" title="2 of 4 branches missed.">		return (contentType == null || MediaType.TEXT_PLAIN.equalsTypeAndSubtype(contentType)) &amp;&amp;</span>
+<span class="fc bfc" id="L98" title="All 2 branches covered.">				headers.getContentDisposition().getFilename() == null;</span>
+	}
+
+	@Override
+	public void onBody(DataBuffer buffer, boolean last) {
+		try {
+<span class="fc" id="L104">			this.state.onBody(buffer, last);</span>
+		}
+<span class="nc" id="L106">		catch (Throwable ex) {</span>
+<span class="nc" id="L107">			deleteParts();</span>
+<span class="nc" id="L108">			throw ex;</span>
+<span class="fc" id="L109">		}</span>
+<span class="fc" id="L110">	}</span>
+
+	void deleteParts() {
+		try {
+<span class="nc bnc" id="L114" title="All 2 branches missed.">			for (List&lt;Part&gt; partList : this.parts.values()) {</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">				for (Part part : partList) {</span>
+<span class="nc" id="L116">					part.delete();</span>
+<span class="nc" id="L117">				}</span>
+<span class="nc" id="L118">			}</span>
+		}
+<span class="nc" id="L120">		catch (IOException ex) {</span>
+			// ignored
+<span class="nc" id="L122">		}</span>
+<span class="nc" id="L123">	}</span>
+
+	@Override
+	public void onComplete() {
+<span class="pc bpc" id="L127" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L128">			logger.trace(&quot;Finished reading &quot; + this.partCount + &quot; part(s)&quot;);</span>
+		}
+<span class="fc" id="L130">	}</span>
+
+	@Override
+	public void onError(Throwable error) {
+<span class="nc" id="L134">		deleteParts();</span>
+<span class="nc" id="L135">		throw new HttpMessageConversionException(&quot;Cannot decode multipart body&quot;, error);</span>
+	}
+
+	void addPart(Part part) {
+<span class="pc bpc" id="L139" title="3 of 4 branches missed.">		if (this.maxParts != -1 &amp;&amp; this.partCount == this.maxParts) {</span>
+<span class="nc" id="L140">			throw new HttpMessageConversionException(&quot;Maximum number of parts exceeded: &quot; + this.maxParts);</span>
+		}
+		try {
+<span class="fc" id="L143">			this.partCount++;</span>
+<span class="fc" id="L144">			this.parts.add(part.name(), part);</span>
+		}
+<span class="nc" id="L146">		catch (Exception exc) {</span>
+<span class="nc" id="L147">			throw new HttpMessageConversionException(&quot;Part #&quot; + this.partCount + &quot; is unnamed&quot;, exc);</span>
+<span class="fc" id="L148">		}</span>
+<span class="fc" id="L149">	}</span>
+
+	/**
+	 * Represents the internal state of the {@link PartGenerator} for creating a single {@link Part}.
+	 * {@link State} instances are stateful, and created when a new
+	 * {@link MultipartParser.PartListener#onHeaders(HttpHeaders) headers instance} is accepted.
+	 * The following rules determine which state the creator will have:
+	 * &lt;ol&gt;
+	 * &lt;li&gt;If the part is a {@linkplain #isFormField(HttpHeaders) form field},
+	 * the creator will be in the {@link FormFieldState}.&lt;/li&gt;
+	 * &lt;li&gt;Otherwise, the creator will initially be in the
+	 * {@link InMemoryState}, but will switch over to {@link FileState}
+	 * when the part byte count exceeds {@link #maxInMemorySize}&lt;/li&gt;
+	 * &lt;/ol&gt;
+	 */
+	private interface State {
+
+		/**
+		 * Invoked when a {@link MultipartParser.PartListener#onBody(DataBuffer, boolean)} is received.
+		 */
+		void onBody(DataBuffer dataBuffer, boolean last);
+
+	}
+
+	/**
+	 * The initial state of the creator. Throws an exception for {@link #onBody(DataBuffer, boolean)}.
+	 */
+	private static final class InitialState implements State {
+
+		private InitialState() {
+		}
+
+		@Override
+		public void onBody(DataBuffer dataBuffer, boolean last) {
+<span class="nc" id="L183">			DataBufferUtils.release(dataBuffer);</span>
+<span class="nc" id="L184">			throw new HttpMessageConversionException(&quot;Body token not expected&quot;);</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L189">			return &quot;INITIAL&quot;;</span>
+		}
+	}
+
+	/**
+	 * The creator state when a form field is received.
+	 * Stores all body buffers in memory (up until {@link #maxInMemorySize}).
+	 */
+	private final class FormFieldState implements State {
+
+<span class="fc" id="L199">		private final FastByteArrayOutputStream value = new FastByteArrayOutputStream();</span>
+
+		private final HttpHeaders headers;
+
+<span class="fc" id="L203">		public FormFieldState(HttpHeaders headers) {</span>
+<span class="fc" id="L204">			this.headers = headers;</span>
+<span class="fc" id="L205">		}</span>
+
+		@Override
+		public void onBody(DataBuffer dataBuffer, boolean last) {
+<span class="fc" id="L209">			int size = this.value.size() + dataBuffer.readableByteCount();</span>
+<span class="pc bpc" id="L210" title="2 of 4 branches missed.">			if (PartGenerator.this.maxInMemorySize == -1 ||</span>
+					size &lt; PartGenerator.this.maxInMemorySize) {
+<span class="fc" id="L212">				store(dataBuffer);</span>
+			}
+			else {
+<span class="nc" id="L215">				DataBufferUtils.release(dataBuffer);</span>
+<span class="nc" id="L216">				throw new HttpMessageConversionException(&quot;Form field value exceeded the memory usage limit of &quot; +</span>
+						PartGenerator.this.maxInMemorySize + &quot; bytes&quot;);
+			}
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">			if (last) {</span>
+<span class="fc" id="L220">				byte[] bytes = this.value.toByteArrayUnsafe();</span>
+<span class="fc" id="L221">				String value = new String(bytes, MultipartUtils.charset(this.headers));</span>
+<span class="fc" id="L222">				FormFieldPart formFieldPart = DefaultParts.formFieldPart(this.headers, value);</span>
+<span class="fc" id="L223">				PartGenerator.this.addPart(formFieldPart);</span>
+			}
+<span class="fc" id="L225">		}</span>
+
+		private void store(DataBuffer dataBuffer) {
+			try {
+<span class="fc" id="L229">				byte[] bytes = new byte[dataBuffer.readableByteCount()];</span>
+<span class="fc" id="L230">				dataBuffer.read(bytes);</span>
+<span class="fc" id="L231">				this.value.write(bytes);</span>
+			}
+<span class="nc" id="L233">			catch (IOException ex) {</span>
+<span class="nc" id="L234">				throw new HttpMessageConversionException(&quot;Cannot store multipart body&quot;, ex);</span>
+			}
+			finally {
+<span class="fc" id="L237">				DataBufferUtils.release(dataBuffer);</span>
+			}
+<span class="fc" id="L239">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L243">			return &quot;FORM-FIELD&quot;;</span>
+		}
+	}
+
+	/**
+	 * The creator state when not handling a form field.
+	 * Stores all received buffers in a queue.
+	 * If the byte count exceeds {@link #maxInMemorySize}, the creator state
+	 * is changed to {@link FileState}.
+	 */
+	private final class InMemoryState implements State {
+
+<span class="fc" id="L255">		private final Queue&lt;DataBuffer&gt; content = new ArrayDeque&lt;&gt;();</span>
+
+		private long byteCount;
+
+		private final HttpHeaders headers;
+
+
+<span class="fc" id="L262">		public InMemoryState(HttpHeaders headers) {</span>
+<span class="fc" id="L263">			this.headers = headers;</span>
+<span class="fc" id="L264">		}</span>
+
+		@Override
+		public void onBody(DataBuffer dataBuffer, boolean last) {
+<span class="fc" id="L268">			this.byteCount += dataBuffer.readableByteCount();</span>
+<span class="pc bpc" id="L269" title="2 of 4 branches missed.">			if (PartGenerator.this.maxInMemorySize == -1 ||</span>
+					this.byteCount &lt;= PartGenerator.this.maxInMemorySize) {
+<span class="fc" id="L271">				this.content.add(dataBuffer);</span>
+<span class="pc bpc" id="L272" title="1 of 2 branches missed.">				if (last) {</span>
+<span class="fc" id="L273">					emitMemoryPart();</span>
+				}
+			}
+			else {
+<span class="nc" id="L277">				switchToFile(dataBuffer, last);</span>
+			}
+<span class="fc" id="L279">		}</span>
+
+		private void switchToFile(DataBuffer current, boolean last) {
+<span class="nc" id="L282">			FileState newState = new FileState(this.headers, PartGenerator.this.fileStorageDirectory);</span>
+<span class="nc" id="L283">			this.content.forEach(newState::writeBuffer);</span>
+<span class="nc" id="L284">			newState.onBody(current, last);</span>
+<span class="nc" id="L285">			PartGenerator.this.state = newState;</span>
+<span class="nc" id="L286">		}</span>
+
+		private void emitMemoryPart() {
+<span class="fc" id="L289">			byte[] bytes = new byte[(int) this.byteCount];</span>
+<span class="fc" id="L290">			int idx = 0;</span>
+<span class="fc bfc" id="L291" title="All 2 branches covered.">			for (DataBuffer buffer : this.content) {</span>
+<span class="fc" id="L292">				int len = buffer.readableByteCount();</span>
+<span class="fc" id="L293">				buffer.read(bytes, idx, len);</span>
+<span class="fc" id="L294">				idx += len;</span>
+<span class="fc" id="L295">				DataBufferUtils.release(buffer);</span>
+<span class="fc" id="L296">			}</span>
+<span class="fc" id="L297">			this.content.clear();</span>
+<span class="fc" id="L298">			DefaultDataBuffer content = DefaultDataBufferFactory.sharedInstance.wrap(bytes);</span>
+<span class="fc" id="L299">			Part part = DefaultParts.part(this.headers, content);</span>
+<span class="fc" id="L300">			PartGenerator.this.addPart(part);</span>
+<span class="fc" id="L301">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L305">			return &quot;IN-MEMORY&quot;;</span>
+		}
+	}
+
+	/**
+	 * The creator state when writing for a temporary file.
+	 * {@link InMemoryState} initially switches to this state when the byte
+	 * count exceeds {@link #maxInMemorySize}.
+	 */
+	private final class FileState implements State {
+
+		private final HttpHeaders headers;
+
+		private final Path file;
+
+		private final OutputStream outputStream;
+
+		private long byteCount;
+
+
+<span class="nc" id="L325">		public FileState(HttpHeaders headers, Path folder) {</span>
+<span class="nc" id="L326">			this.headers = headers;</span>
+<span class="nc" id="L327">			this.file = createFile(folder);</span>
+<span class="nc" id="L328">			this.outputStream = createOutputStream(this.file);</span>
+<span class="nc" id="L329">		}</span>
+
+		@Override
+		public void onBody(DataBuffer dataBuffer, boolean last) {
+<span class="nc" id="L333">			this.byteCount += dataBuffer.readableByteCount();</span>
+<span class="nc bnc" id="L334" title="All 4 branches missed.">			if (PartGenerator.this.maxDiskUsagePerPart == -1 || this.byteCount &lt;= PartGenerator.this.maxDiskUsagePerPart) {</span>
+<span class="nc" id="L335">				writeBuffer(dataBuffer);</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">				if (last) {</span>
+<span class="nc" id="L337">					Part part = DefaultParts.part(this.headers, this.file);</span>
+<span class="nc" id="L338">					PartGenerator.this.addPart(part);</span>
+<span class="nc" id="L339">				}</span>
+			}
+			else {
+				try {
+<span class="nc" id="L343">					this.outputStream.close();</span>
+				}
+<span class="nc" id="L345">				catch (IOException exc) {</span>
+					// ignored
+<span class="nc" id="L347">				}</span>
+<span class="nc" id="L348">				throw new HttpMessageConversionException(&quot;Part exceeded the disk usage limit of &quot; +</span>
+						PartGenerator.this.maxDiskUsagePerPart + &quot; bytes&quot;);
+			}
+<span class="nc" id="L351">		}</span>
+
+		private Path createFile(Path directory) {
+			try {
+<span class="nc" id="L355">				Path tempFile = Files.createTempFile(directory, null, &quot;.multipart&quot;);</span>
+<span class="nc bnc" id="L356" title="All 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L357">					logger.trace(&quot;Storing multipart data in file &quot; + tempFile);</span>
+				}
+<span class="nc" id="L359">				return tempFile;</span>
+			}
+<span class="nc" id="L361">			catch (IOException ex) {</span>
+<span class="nc" id="L362">				throw new UncheckedIOException(&quot;Could not create temp file in &quot; + directory, ex);</span>
+			}
+		}
+
+		private OutputStream createOutputStream(Path file) {
+			try {
+<span class="nc" id="L368">				return Files.newOutputStream(file, StandardOpenOption.WRITE);</span>
+			}
+<span class="nc" id="L370">			catch (IOException ex) {</span>
+<span class="nc" id="L371">				throw new UncheckedIOException(&quot;Could not write to temp file &quot; + file, ex);</span>
+			}
+		}
+
+		private void writeBuffer(DataBuffer dataBuffer) {
+<span class="nc" id="L376">			try (InputStream in = dataBuffer.asInputStream()) {</span>
+<span class="nc" id="L377">				in.transferTo(this.outputStream);</span>
+<span class="nc" id="L378">				this.outputStream.flush();</span>
+			}
+<span class="nc" id="L380">			catch (IOException exc) {</span>
+<span class="nc" id="L381">				throw new UncheckedIOException(&quot;Could not write to temp file &quot;, exc);</span>
+			}
+			finally {
+<span class="nc" id="L384">				DataBufferUtils.release(dataBuffer);</span>
+			}
+<span class="nc" id="L386">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L390">			return &quot;WRITE-FILE&quot;;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

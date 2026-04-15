@@ -1,0 +1,810 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StompSubProtocolHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.socket.messaging</a> &gt; <span class="el_source">StompSubProtocolHandler.java</span></div><h1>StompSubProtocolHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.socket.messaging;
+
+import java.io.IOException;
+import java.nio.ByteBuffer;
+import java.security.Principal;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.context.ApplicationEvent;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.ApplicationEventPublisherAware;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.simp.SimpAttributes;
+import org.springframework.messaging.simp.SimpAttributesContextHolder;
+import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
+import org.springframework.messaging.simp.SimpMessageType;
+import org.springframework.messaging.simp.broker.OrderedMessageChannelDecorator;
+import org.springframework.messaging.simp.stomp.BufferingStompDecoder;
+import org.springframework.messaging.simp.stomp.StompCommand;
+import org.springframework.messaging.simp.stomp.StompDecoder;
+import org.springframework.messaging.simp.stomp.StompEncoder;
+import org.springframework.messaging.simp.stomp.StompHeaderAccessor;
+import org.springframework.messaging.support.AbstractMessageChannel;
+import org.springframework.messaging.support.ChannelInterceptor;
+import org.springframework.messaging.support.ImmutableMessageChannelInterceptor;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.messaging.support.MessageHeaderInitializer;
+import org.springframework.util.Assert;
+import org.springframework.util.MimeTypeUtils;
+import org.springframework.web.socket.BinaryMessage;
+import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.TextMessage;
+import org.springframework.web.socket.WebSocketMessage;
+import org.springframework.web.socket.WebSocketSession;
+import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
+import org.springframework.web.socket.handler.SessionLimitExceededException;
+import org.springframework.web.socket.handler.WebSocketSessionDecorator;
+import org.springframework.web.socket.sockjs.transport.SockJsSession;
+
+/**
+ * A {@link SubProtocolHandler} for STOMP that supports versions 1.0, 1.1, and 1.2
+ * of the STOMP specification.
+ *
+ * @author Rossen Stoyanchev
+ * @author Andy Wilkinson
+ * @since 4.0
+ */
+<span class="fc" id="L75">public class StompSubProtocolHandler implements SubProtocolHandler, ApplicationEventPublisherAware {</span>
+
+	/**
+	 * This handler supports assembling large STOMP messages split into multiple
+	 * WebSocket messages and STOMP clients (like stomp.js) indeed split large STOMP
+	 * messages at 16K boundaries. Therefore the WebSocket server input message
+	 * buffer size must allow 16K at least plus a little extra for SockJS framing.
+	 */
+	public static final int MINIMUM_WEBSOCKET_MESSAGE_SIZE = 16 * 1024 + 256;
+
+	/**
+	 * The name of the header set on the CONNECTED frame indicating the name
+	 * of the user authenticated on the WebSocket session.
+	 */
+	public static final String CONNECTED_USER_HEADER = &quot;user-name&quot;;
+
+<span class="fc" id="L91">	private static final String[] SUPPORTED_VERSIONS = {&quot;1.2&quot;, &quot;1.1&quot;, &quot;1.0&quot;};</span>
+
+<span class="fc" id="L93">	private static final Log logger = LogFactory.getLog(StompSubProtocolHandler.class);</span>
+
+<span class="fc" id="L95">	private static final byte[] EMPTY_PAYLOAD = new byte[0];</span>
+
+
+	private @Nullable StompSubProtocolErrorHandler errorHandler;
+
+<span class="fc" id="L100">	private int messageSizeLimit = 64 * 1024;</span>
+
+<span class="fc" id="L102">	private StompEncoder stompEncoder = new StompEncoder();</span>
+
+<span class="fc" id="L104">	private StompDecoder stompDecoder = new StompDecoder();</span>
+
+<span class="fc" id="L106">	private final Map&lt;String, BufferingStompDecoder&gt; decoders = new ConcurrentHashMap&lt;&gt;();</span>
+
+	private @Nullable MessageHeaderInitializer headerInitializer;
+
+<span class="fc" id="L110">	private final Map&lt;String, SessionInfo&gt; sessions = new ConcurrentHashMap&lt;&gt;();</span>
+
+	private boolean preserveReceiveOrder;
+
+	private @Nullable Boolean immutableMessageInterceptorPresent;
+
+	private @Nullable ApplicationEventPublisher eventPublisher;
+
+<span class="fc" id="L118">	private final DefaultStats stats = new DefaultStats();</span>
+
+
+	/**
+	 * Configure a handler for error messages sent to clients which allows
+	 * customizing the error messages or preventing them from being sent.
+	 * &lt;p&gt;By default this isn't configured in which case an ERROR frame is sent
+	 * with a message header reflecting the error.
+	 * @param errorHandler the error handler
+	 */
+	public void setErrorHandler(StompSubProtocolErrorHandler errorHandler) {
+<span class="fc" id="L129">		this.errorHandler = errorHandler;</span>
+<span class="fc" id="L130">	}</span>
+
+	/**
+	 * Return the configured error handler.
+	 */
+	public @Nullable StompSubProtocolErrorHandler getErrorHandler() {
+<span class="fc" id="L136">		return this.errorHandler;</span>
+	}
+
+	/**
+	 * Configure the maximum size allowed for an incoming STOMP message.
+	 * Since a STOMP message can be received in multiple WebSocket messages,
+	 * buffering may be required and therefore it is necessary to know the maximum
+	 * allowed message size.
+	 * &lt;p&gt;By default this property is set to 64K.
+	 * @since 4.0.3
+	 */
+	public void setMessageSizeLimit(int messageSizeLimit) {
+<span class="fc" id="L148">		this.messageSizeLimit = messageSizeLimit;</span>
+<span class="fc" id="L149">	}</span>
+
+	/**
+	 * Get the configured message buffer size limit in bytes.
+	 * @since 4.0.3
+	 */
+	public int getMessageSizeLimit() {
+<span class="fc" id="L156">		return this.messageSizeLimit;</span>
+	}
+
+	/**
+	 * Configure a {@link StompEncoder} for encoding STOMP frames.
+	 * @since 4.3.5
+	 */
+	public void setEncoder(StompEncoder encoder) {
+<span class="nc" id="L164">		this.stompEncoder = encoder;</span>
+<span class="nc" id="L165">	}</span>
+
+	/**
+	 * Configure a {@link StompDecoder} for decoding STOMP frames.
+	 * @since 4.3.5
+	 */
+	public void setDecoder(StompDecoder decoder) {
+<span class="nc" id="L172">		this.stompDecoder = decoder;</span>
+<span class="nc" id="L173">	}</span>
+
+	/**
+	 * Configure a {@link MessageHeaderInitializer} to apply to the headers of all
+	 * messages created from decoded STOMP frames and other messages sent to the
+	 * client inbound channel.
+	 * &lt;p&gt;By default this property is not set.
+	 */
+	public void setHeaderInitializer(@Nullable MessageHeaderInitializer headerInitializer) {
+<span class="nc" id="L182">		this.headerInitializer = headerInitializer;</span>
+<span class="nc" id="L183">		this.stompDecoder.setHeaderInitializer(headerInitializer);</span>
+<span class="nc" id="L184">	}</span>
+
+	/**
+	 * Return the configured header initializer.
+	 */
+	public @Nullable MessageHeaderInitializer getHeaderInitializer() {
+<span class="fc" id="L190">		return this.headerInitializer;</span>
+	}
+
+	/**
+	 * Whether client messages must be handled in the order received.
+	 * &lt;p&gt;By default messages sent to the {@code &quot;clientInboundChannel&quot;} may
+	 * not be handled in the same order because the channel is backed by a
+	 * ThreadPoolExecutor that in turn does not guarantee processing in order.
+	 * &lt;p&gt;When this flag is set to {@code true} messages within the same session
+	 * will be sent to the {@code &quot;clientInboundChannel&quot;} one at a time to
+	 * preserve the order in which they were received.
+	 * @param preserveReceiveOrder whether to publish in order
+	 * @since 6.1
+	 */
+	public void setPreserveReceiveOrder(boolean preserveReceiveOrder) {
+<span class="fc" id="L205">		this.preserveReceiveOrder = preserveReceiveOrder;</span>
+<span class="fc" id="L206">	}</span>
+
+	/**
+	 * Whether the handler is configured to handle inbound messages in the
+	 * order in which they were received.
+	 * @since 6.1
+	 */
+	public boolean isPreserveReceiveOrder() {
+<span class="fc" id="L214">		return this.preserveReceiveOrder;</span>
+	}
+
+	@Override
+	public List&lt;String&gt; getSupportedProtocols() {
+<span class="fc" id="L219">		return Arrays.asList(&quot;v10.stomp&quot;, &quot;v11.stomp&quot;, &quot;v12.stomp&quot;);</span>
+	}
+
+	@Override
+	public void setApplicationEventPublisher(ApplicationEventPublisher applicationEventPublisher) {
+<span class="fc" id="L224">		this.eventPublisher = applicationEventPublisher;</span>
+<span class="fc" id="L225">	}</span>
+
+	/**
+	 * Return a String describing internal state and counters.
+	 * Effectively {@code toString()} on {@link #getStats() getStats()}.
+	 */
+	public String getStatsInfo() {
+<span class="nc" id="L232">		return this.stats.toString();</span>
+	}
+
+	/**
+	 * Return a structured object with internal state and counters.
+	 * @since 5.2
+	 */
+	public Stats getStats() {
+<span class="fc" id="L240">		return this.stats;</span>
+	}
+
+
+	/**
+	 * Handle incoming WebSocket messages from clients.
+	 */
+	@Override
+	public void handleMessageFromClient(WebSocketSession session,
+			WebSocketMessage&lt;?&gt; webSocketMessage, MessageChannel channel) {
+
+		List&lt;Message&lt;byte[]&gt;&gt; messages;
+		try {
+			ByteBuffer byteBuffer;
+<span class="pc bpc" id="L254" title="1 of 2 branches missed.">			if (webSocketMessage instanceof TextMessage textMessage) {</span>
+<span class="fc" id="L255">				byteBuffer = ByteBuffer.wrap(textMessage.asBytes());</span>
+			}
+<span class="nc bnc" id="L257" title="All 2 branches missed.">			else if (webSocketMessage instanceof BinaryMessage binaryMessage) {</span>
+<span class="nc" id="L258">				byteBuffer = binaryMessage.getPayload();</span>
+			}
+			else {
+<span class="nc" id="L261">				return;</span>
+			}
+
+<span class="fc" id="L264">			BufferingStompDecoder decoder = this.decoders.get(session.getId());</span>
+<span class="pc bpc" id="L265" title="1 of 2 branches missed.">			if (decoder == null) {</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">				if (!session.isOpen()) {</span>
+<span class="nc" id="L267">					logger.trace(&quot;Dropped inbound WebSocket message due to closed session&quot;);</span>
+<span class="nc" id="L268">					return;</span>
+				}
+<span class="nc" id="L270">				throw new IllegalStateException(&quot;No decoder for session id '&quot; + session.getId() + &quot;'&quot;);</span>
+			}
+
+<span class="fc" id="L273">			messages = decoder.decode(byteBuffer);</span>
+<span class="fc bfc" id="L274" title="All 2 branches covered.">			if (messages.isEmpty()) {</span>
+<span class="pc bpc" id="L275" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L276">					logger.trace(&quot;Incomplete STOMP frame content received in session &quot; +</span>
+<span class="nc" id="L277">							session + &quot;, bufferSize=&quot; + decoder.getBufferSize() +</span>
+<span class="nc" id="L278">							&quot;, bufferSizeLimit=&quot; + decoder.getBufferSizeLimit() + &quot;.&quot;);</span>
+				}
+<span class="fc" id="L280">				return;</span>
+			}
+		}
+<span class="fc" id="L283">		catch (Throwable ex) {</span>
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">			if (logger.isErrorEnabled()) {</span>
+<span class="fc" id="L285">				logger.error(&quot;Failed to parse &quot; + webSocketMessage +</span>
+<span class="fc" id="L286">						&quot; in session &quot; + session.getId() + &quot;. Sending STOMP ERROR to client.&quot;, ex);</span>
+			}
+<span class="fc" id="L288">			handleError(session, ex, null);</span>
+<span class="fc" id="L289">			return;</span>
+<span class="fc" id="L290">		}</span>
+
+<span class="fc" id="L292">		SessionInfo info = this.sessions.get(session.getId());</span>
+<span class="fc bfc" id="L293" title="All 2 branches covered.">		MessageChannel channelToUse = (info != null ? info.getMessageChannelToUse() : null);</span>
+
+<span class="fc bfc" id="L295" title="All 2 branches covered.">		for (Message&lt;byte[]&gt; message : messages) {</span>
+<span class="fc" id="L296">			StompHeaderAccessor headerAccessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);</span>
+<span class="pc bpc" id="L297" title="1 of 2 branches missed.">			Assert.state(headerAccessor != null, &quot;No StompHeaderAccessor&quot;);</span>
+
+<span class="fc" id="L299">			StompCommand command = headerAccessor.getCommand();</span>
+<span class="fc bfc" id="L300" title="All 4 branches covered.">			boolean isConnect = (StompCommand.CONNECT.equals(command) || StompCommand.STOMP.equals(command));</span>
+<span class="fc" id="L301">			String sessionId = session.getId();</span>
+<span class="fc" id="L302">			boolean sent = false;</span>
+
+			try {
+<span class="fc bfc" id="L305" title="All 2 branches covered.">				if (isConnect) {</span>
+<span class="fc bfc" id="L306" title="All 2 branches covered.">					channelToUse = (this.preserveReceiveOrder ? new OrderedMessageChannelDecorator(channel, logger) : channel);</span>
+<span class="fc" id="L307">					info = new SessionInfo(channelToUse, session.getPrincipal());</span>
+<span class="fc" id="L308">					SessionInfo prevInfo = this.sessions.putIfAbsent(sessionId, info);</span>
+<span class="pc bpc" id="L309" title="1 of 2 branches missed.">					Assert.state(prevInfo == null, &quot;Session already exists&quot;);</span>
+<span class="fc" id="L310">					headerAccessor.setUserChangeCallback(info);</span>
+<span class="fc" id="L311">				}</span>
+				else {
+<span class="pc bpc" id="L313" title="1 of 2 branches missed.">					Assert.state(channelToUse != null, &quot;Unknown session: &quot; + sessionId);</span>
+				}
+
+<span class="fc" id="L316">				headerAccessor.setSessionId(sessionId);</span>
+<span class="fc" id="L317">				headerAccessor.setSessionAttributes(session.getAttributes());</span>
+<span class="fc" id="L318">				headerAccessor.setUser(getUser(session));</span>
+<span class="fc" id="L319">				headerAccessor.setHeader(SimpMessageHeaderAccessor.HEART_BEAT_HEADER, headerAccessor.getHeartbeat());</span>
+
+<span class="fc bfc" id="L321" title="All 2 branches covered.">				if (!detectImmutableMessageInterceptor(channel)) {</span>
+<span class="fc" id="L322">					headerAccessor.setImmutable();</span>
+				}
+
+<span class="pc bpc" id="L325" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L326">					logger.trace(&quot;From client: &quot; + headerAccessor.getShortLogMessage(message.getPayload()));</span>
+				}
+
+<span class="fc bfc" id="L329" title="All 2 branches covered.">				if (isConnect) {</span>
+<span class="fc" id="L330">					this.stats.incrementConnectCount();</span>
+				}
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">				else if (StompCommand.DISCONNECT.equals(command)) {</span>
+<span class="nc" id="L333">					this.stats.incrementDisconnectCount();</span>
+				}
+
+				try {
+<span class="fc" id="L337">					SimpAttributesContextHolder.setAttributesFromMessage(message);</span>
+<span class="fc" id="L338">					sent = channelToUse.send(message);</span>
+
+<span class="pc bpc" id="L340" title="1 of 2 branches missed.">					if (sent) {</span>
+<span class="fc bfc" id="L341" title="All 2 branches covered.">						if (this.eventPublisher != null) {</span>
+<span class="fc" id="L342">							Principal user = getUser(session);</span>
+<span class="fc bfc" id="L343" title="All 2 branches covered.">							if (isConnect) {</span>
+<span class="fc" id="L344">								publishEvent(this.eventPublisher, new SessionConnectEvent(this, message, user));</span>
+							}
+<span class="fc bfc" id="L346" title="All 2 branches covered.">							else if (StompCommand.SUBSCRIBE.equals(command)) {</span>
+<span class="fc" id="L347">								publishEvent(this.eventPublisher, new SessionSubscribeEvent(this, message, user));</span>
+							}
+<span class="fc bfc" id="L349" title="All 2 branches covered.">							else if (StompCommand.UNSUBSCRIBE.equals(command)) {</span>
+<span class="fc" id="L350">								publishEvent(this.eventPublisher, new SessionUnsubscribeEvent(this, message, user));</span>
+							}
+						}
+					}
+				}
+				finally {
+<span class="fc" id="L356">					SimpAttributesContextHolder.resetAttributes();</span>
+				}
+			}
+<span class="nc" id="L359">			catch (Throwable ex) {</span>
+<span class="nc bnc" id="L360" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L361">					logger.debug(&quot;Failed to send message to MessageChannel in session &quot; + sessionId, ex);</span>
+				}
+<span class="nc bnc" id="L363" title="All 2 branches missed.">				else if (logger.isErrorEnabled()) {</span>
+					// Skip for unsent CONNECT or SUBSCRIBE (likely authentication/authorization issues)
+<span class="nc bnc" id="L365" title="All 6 branches missed.">					if (sent || !(isConnect || StompCommand.SUBSCRIBE.equals(command))) {</span>
+<span class="nc" id="L366">						logger.error(&quot;Failed to send message to MessageChannel in session &quot; +</span>
+<span class="nc" id="L367">								sessionId + &quot;:&quot; + ex.getMessage());</span>
+					}
+				}
+<span class="nc" id="L370">				handleError(session, ex, message);</span>
+<span class="fc" id="L371">			}</span>
+
+<span class="pc bpc" id="L373" title="3 of 4 branches missed.">			if (!sent &amp;&amp; isConnect) {</span>
+<span class="nc" id="L374">				this.sessions.remove(sessionId);</span>
+<span class="nc" id="L375">				break;</span>
+			}
+<span class="fc" id="L377">		}</span>
+<span class="fc" id="L378">	}</span>
+
+	private @Nullable Principal getUser(WebSocketSession session) {
+<span class="fc" id="L381">		SessionInfo info = this.sessions.get(session.getId());</span>
+<span class="fc bfc" id="L382" title="All 2 branches covered.">		return (info != null ? info.getUser() : session.getPrincipal());</span>
+	}
+
+	private void handleError(WebSocketSession session, Throwable ex, @Nullable Message&lt;byte[]&gt; clientMessage) {
+<span class="pc bpc" id="L386" title="1 of 2 branches missed.">		if (getErrorHandler() == null) {</span>
+<span class="fc" id="L387">			sendErrorMessage(session, ex);</span>
+<span class="fc" id="L388">			return;</span>
+		}
+<span class="nc" id="L390">		Message&lt;byte[]&gt; message = getErrorHandler().handleClientMessageProcessingError(clientMessage, ex);</span>
+<span class="nc bnc" id="L391" title="All 2 branches missed.">		if (message == null) {</span>
+<span class="nc" id="L392">			return;</span>
+		}
+<span class="nc" id="L394">		StompHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);</span>
+<span class="nc bnc" id="L395" title="All 2 branches missed.">		Assert.state(accessor != null, &quot;No StompHeaderAccessor&quot;);</span>
+<span class="nc" id="L396">		sendToClient(session, accessor, message.getPayload());</span>
+<span class="nc" id="L397">	}</span>
+
+	/**
+	 * Invoked when no
+	 * {@link #setErrorHandler(StompSubProtocolErrorHandler) errorHandler}
+	 * is configured to send an ERROR frame to the client.
+	 */
+	private void sendErrorMessage(WebSocketSession session, Throwable error) {
+<span class="fc" id="L405">		StompHeaderAccessor headerAccessor = StompHeaderAccessor.create(StompCommand.ERROR);</span>
+<span class="fc" id="L406">		headerAccessor.setMessage(error.getMessage());</span>
+
+<span class="fc" id="L408">		byte[] bytes = this.stompEncoder.encode(headerAccessor.getMessageHeaders(), EMPTY_PAYLOAD);</span>
+		// We cannot use try-with-resources here for the WebSocketSession, since we have
+		// custom handling of the close() method in a finally-block.
+		try {
+<span class="fc" id="L412">			session.sendMessage(new TextMessage(bytes));</span>
+		}
+<span class="nc" id="L414">		catch (Throwable ex) {</span>
+			// Could be part of normal workflow (for example, browser tab closed)
+<span class="nc" id="L416">			logger.debug(&quot;Failed to send STOMP ERROR to client&quot;, ex);</span>
+		}
+		finally {
+			try {
+<span class="fc" id="L420">				session.close(CloseStatus.PROTOCOL_ERROR);</span>
+			}
+<span class="nc" id="L422">			catch (IOException ignored) {</span>
+<span class="fc" id="L423">			}</span>
+		}
+<span class="fc" id="L425">	}</span>
+
+	private boolean detectImmutableMessageInterceptor(MessageChannel channel) {
+<span class="fc bfc" id="L428" title="All 2 branches covered.">		if (this.immutableMessageInterceptorPresent != null) {</span>
+<span class="fc" id="L429">			return this.immutableMessageInterceptorPresent;</span>
+		}
+
+<span class="fc bfc" id="L432" title="All 2 branches covered.">		if (channel instanceof AbstractMessageChannel abstractMessageChannel) {</span>
+<span class="fc bfc" id="L433" title="All 2 branches covered.">			for (ChannelInterceptor interceptor : abstractMessageChannel.getInterceptors()) {</span>
+<span class="fc bfc" id="L434" title="All 2 branches covered.">				if (interceptor instanceof ImmutableMessageChannelInterceptor) {</span>
+<span class="fc" id="L435">					this.immutableMessageInterceptorPresent = true;</span>
+<span class="fc" id="L436">					return true;</span>
+				}
+<span class="fc" id="L438">			}</span>
+		}
+<span class="fc" id="L440">		this.immutableMessageInterceptorPresent = false;</span>
+<span class="fc" id="L441">		return false;</span>
+	}
+
+	private void publishEvent(ApplicationEventPublisher publisher, ApplicationEvent event) {
+		try {
+<span class="fc" id="L446">			publisher.publishEvent(event);</span>
+		}
+<span class="nc" id="L448">		catch (Throwable ex) {</span>
+<span class="nc bnc" id="L449" title="All 2 branches missed.">			if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L450">				logger.error(&quot;Error publishing &quot; + event, ex);</span>
+			}
+<span class="fc" id="L452">		}</span>
+<span class="fc" id="L453">	}</span>
+
+	/**
+	 * Handle STOMP messages going back out to WebSocket clients.
+	 */
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public void handleMessageToClient(WebSocketSession session, Message&lt;?&gt; message) {
+<span class="pc bpc" id="L461" title="1 of 2 branches missed.">		if (!(message.getPayload() instanceof byte[] payload)) {</span>
+<span class="nc bnc" id="L462" title="All 2 branches missed.">			if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L463">				logger.error(&quot;Expected byte[] payload. Ignoring &quot; + message + &quot;.&quot;);</span>
+			}
+<span class="nc" id="L465">			return;</span>
+		}
+
+<span class="fc" id="L468">		StompHeaderAccessor accessor = getStompHeaderAccessor(message);</span>
+<span class="fc" id="L469">		StompCommand command = accessor.getCommand();</span>
+
+<span class="fc bfc" id="L471" title="All 2 branches covered.">		if (StompCommand.MESSAGE.equals(command)) {</span>
+<span class="pc bpc" id="L472" title="3 of 4 branches missed.">			if (accessor.getSubscriptionId() == null &amp;&amp; logger.isWarnEnabled()) {</span>
+<span class="nc" id="L473">				logger.warn(&quot;No STOMP \&quot;subscription\&quot; header in &quot; + message);</span>
+			}
+<span class="fc" id="L475">			String origDestination = accessor.getFirstNativeHeader(SimpMessageHeaderAccessor.ORIGINAL_DESTINATION);</span>
+<span class="fc bfc" id="L476" title="All 2 branches covered.">			if (origDestination != null) {</span>
+<span class="fc" id="L477">				accessor = toMutableAccessor(accessor, message);</span>
+<span class="fc" id="L478">				accessor.removeNativeHeader(SimpMessageHeaderAccessor.ORIGINAL_DESTINATION);</span>
+<span class="fc" id="L479">				accessor.setDestination(origDestination);</span>
+			}
+<span class="fc" id="L481">		}</span>
+<span class="fc bfc" id="L482" title="All 2 branches covered.">		else if (StompCommand.CONNECTED.equals(command)) {</span>
+<span class="fc" id="L483">			this.stats.incrementConnectedCount();</span>
+<span class="fc" id="L484">			accessor = afterStompSessionConnected(message, accessor, session);</span>
+<span class="fc bfc" id="L485" title="All 2 branches covered.">			if (this.eventPublisher != null) {</span>
+				try {
+<span class="fc" id="L487">					SimpAttributes simpAttributes = new SimpAttributes(session.getId(), session.getAttributes());</span>
+<span class="fc" id="L488">					SimpAttributesContextHolder.setAttributes(simpAttributes);</span>
+<span class="fc" id="L489">					Principal user = getUser(session);</span>
+<span class="fc" id="L490">					publishEvent(this.eventPublisher, new SessionConnectedEvent(this, (Message&lt;byte[]&gt;) message, user));</span>
+				}
+				finally {
+<span class="fc" id="L493">					SimpAttributesContextHolder.resetAttributes();</span>
+				}
+			}
+		}
+
+<span class="pc bpc" id="L498" title="1 of 4 branches missed.">		if (StompCommand.ERROR.equals(command) &amp;&amp; getErrorHandler() != null) {</span>
+<span class="nc" id="L499">			Message&lt;byte[]&gt; errorMessage = getErrorHandler().handleErrorMessageToClient(</span>
+<span class="nc" id="L500">					MessageBuilder.createMessage(payload, accessor.getMessageHeaders()));</span>
+<span class="nc bnc" id="L501" title="All 2 branches missed.">			if (errorMessage != null) {</span>
+<span class="nc" id="L502">				accessor = MessageHeaderAccessor.getAccessor(errorMessage, StompHeaderAccessor.class);</span>
+<span class="nc bnc" id="L503" title="All 2 branches missed.">				Assert.state(accessor != null, &quot;No StompHeaderAccessor&quot;);</span>
+<span class="nc" id="L504">				payload = errorMessage.getPayload();</span>
+			}
+		}
+
+<span class="fc" id="L508">		Runnable task = OrderedMessageChannelDecorator.getNextMessageTask(message);</span>
+<span class="fc bfc" id="L509" title="All 2 branches covered.">		if (task != null) {</span>
+<span class="fc" id="L510">			Assert.isInstanceOf(ConcurrentWebSocketSessionDecorator.class, session);</span>
+<span class="fc" id="L511">			((ConcurrentWebSocketSessionDecorator) session).setMessageCallback(m -&gt; task.run());</span>
+		}
+
+<span class="fc" id="L514">		sendToClient(session, accessor, payload);</span>
+<span class="fc" id="L515">	}</span>
+
+	private void sendToClient(WebSocketSession session, StompHeaderAccessor stompAccessor, byte[] payload) {
+<span class="fc" id="L518">		StompCommand command = stompAccessor.getCommand();</span>
+		try {
+<span class="fc" id="L520">			byte[] bytes = this.stompEncoder.encode(stompAccessor.getMessageHeaders(), payload);</span>
+<span class="pc bpc" id="L521" title="1 of 4 branches missed.">			boolean useBinary = (payload.length &gt; 0 &amp;&amp; !(session instanceof SockJsSession) &amp;&amp;</span>
+<span class="fc bfc" id="L522" title="All 2 branches covered.">					MimeTypeUtils.APPLICATION_OCTET_STREAM.isCompatibleWith(stompAccessor.getContentType()));</span>
+<span class="fc bfc" id="L523" title="All 2 branches covered.">			if (useBinary) {</span>
+<span class="fc" id="L524">				session.sendMessage(new BinaryMessage(bytes));</span>
+			}
+			else {
+<span class="fc" id="L527">				session.sendMessage(new TextMessage(bytes));</span>
+			}
+		}
+<span class="fc" id="L530">		catch (SessionLimitExceededException ex) {</span>
+			// Bad session, just get out
+<span class="fc" id="L532">			throw ex;</span>
+		}
+<span class="nc" id="L534">		catch (Throwable ex) {</span>
+			// Could be part of normal workflow (for example, browser tab closed)
+<span class="nc bnc" id="L536" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L537">				logger.debug(&quot;Failed to send WebSocket message to client in session &quot; + session.getId(), ex);</span>
+			}
+<span class="nc" id="L539">			command = StompCommand.ERROR;</span>
+		}
+		finally {
+<span class="fc bfc" id="L542" title="All 2 branches covered.">			if (StompCommand.ERROR.equals(command)) {</span>
+				try {
+<span class="fc" id="L544">					session.close(CloseStatus.PROTOCOL_ERROR);</span>
+				}
+<span class="nc" id="L546">				catch (IOException ex) {</span>
+					// Ignore
+<span class="fc" id="L548">				}</span>
+			}
+		}
+<span class="fc" id="L551">	}</span>
+
+	private StompHeaderAccessor getStompHeaderAccessor(Message&lt;?&gt; message) {
+<span class="fc" id="L554">		MessageHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, MessageHeaderAccessor.class);</span>
+<span class="fc bfc" id="L555" title="All 2 branches covered.">		if (accessor instanceof StompHeaderAccessor stompHeaderAccessor) {</span>
+<span class="fc" id="L556">			return stompHeaderAccessor;</span>
+		}
+		else {
+<span class="fc" id="L559">			StompHeaderAccessor stompAccessor = StompHeaderAccessor.wrap(message);</span>
+<span class="fc" id="L560">			SimpMessageType messageType = SimpMessageHeaderAccessor.getMessageType(message.getHeaders());</span>
+<span class="fc bfc" id="L561" title="All 2 branches covered.">			if (SimpMessageType.CONNECT_ACK.equals(messageType)) {</span>
+<span class="fc" id="L562">				stompAccessor = convertConnectAcktoStompConnected(stompAccessor);</span>
+			}
+<span class="fc bfc" id="L564" title="All 2 branches covered.">			else if (SimpMessageType.DISCONNECT_ACK.equals(messageType)) {</span>
+<span class="fc" id="L565">				String receipt = getDisconnectReceipt(stompAccessor);</span>
+<span class="fc bfc" id="L566" title="All 2 branches covered.">				if (receipt != null) {</span>
+<span class="fc" id="L567">					stompAccessor = StompHeaderAccessor.create(StompCommand.RECEIPT);</span>
+<span class="fc" id="L568">					stompAccessor.setReceiptId(receipt);</span>
+				}
+				else {
+<span class="fc" id="L571">					stompAccessor = StompHeaderAccessor.create(StompCommand.ERROR);</span>
+<span class="fc" id="L572">					stompAccessor.setMessage(&quot;Session closed.&quot;);</span>
+				}
+<span class="fc" id="L574">			}</span>
+<span class="fc bfc" id="L575" title="All 2 branches covered.">			else if (SimpMessageType.HEARTBEAT.equals(messageType)) {</span>
+<span class="fc" id="L576">				stompAccessor = StompHeaderAccessor.createForHeartbeat();</span>
+			}
+<span class="pc bpc" id="L578" title="1 of 4 branches missed.">			else if (stompAccessor.getCommand() == null || StompCommand.SEND.equals(stompAccessor.getCommand())) {</span>
+<span class="fc" id="L579">				stompAccessor.updateStompCommandAsServerMessage();</span>
+			}
+<span class="fc" id="L581">			return stompAccessor;</span>
+		}
+	}
+
+	/**
+	 * The simple broker produces {@code SimpMessageType.CONNECT_ACK} that's not STOMP
+	 * specific and needs to be turned into a STOMP CONNECTED frame.
+	 */
+	private StompHeaderAccessor convertConnectAcktoStompConnected(StompHeaderAccessor connectAckHeaders) {
+<span class="fc" id="L590">		String name = StompHeaderAccessor.CONNECT_MESSAGE_HEADER;</span>
+<span class="fc" id="L591">		Message&lt;?&gt; message = (Message&lt;?&gt;) connectAckHeaders.getHeader(name);</span>
+<span class="pc bpc" id="L592" title="1 of 2 branches missed.">		if (message == null) {</span>
+<span class="nc" id="L593">			throw new IllegalStateException(&quot;Original STOMP CONNECT not found in &quot; + connectAckHeaders);</span>
+		}
+
+<span class="fc" id="L596">		StompHeaderAccessor connectHeaders = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);</span>
+<span class="fc" id="L597">		StompHeaderAccessor connectedHeaders = StompHeaderAccessor.create(StompCommand.CONNECTED);</span>
+
+<span class="pc bpc" id="L599" title="1 of 2 branches missed.">		if (connectHeaders != null) {</span>
+<span class="fc" id="L600">			Set&lt;String&gt; acceptVersions = connectHeaders.getAcceptVersion();</span>
+<span class="fc" id="L601">			connectedHeaders.setVersion(</span>
+<span class="fc" id="L602">					Arrays.stream(SUPPORTED_VERSIONS)</span>
+<span class="fc" id="L603">							.filter(acceptVersions::contains)</span>
+<span class="fc" id="L604">							.findAny()</span>
+<span class="pc" id="L605">							.orElseThrow(() -&gt; new IllegalArgumentException(</span>
+									&quot;Unsupported STOMP version '&quot; + acceptVersions + &quot;'&quot;)));
+		}
+
+<span class="fc" id="L609">		long[] heartbeat = (long[]) connectAckHeaders.getHeader(SimpMessageHeaderAccessor.HEART_BEAT_HEADER);</span>
+<span class="fc bfc" id="L610" title="All 2 branches covered.">		if (heartbeat != null) {</span>
+<span class="fc" id="L611">			connectedHeaders.setHeartbeat(heartbeat[0], heartbeat[1]);</span>
+		}
+		else {
+<span class="fc" id="L614">			connectedHeaders.setHeartbeat(0, 0);</span>
+		}
+
+<span class="fc" id="L617">		return connectedHeaders;</span>
+	}
+
+	private @Nullable String getDisconnectReceipt(SimpMessageHeaderAccessor simpHeaders) {
+<span class="fc" id="L621">		String name = StompHeaderAccessor.DISCONNECT_MESSAGE_HEADER;</span>
+<span class="fc" id="L622">		Message&lt;?&gt; message = (Message&lt;?&gt;) simpHeaders.getHeader(name);</span>
+<span class="pc bpc" id="L623" title="1 of 2 branches missed.">		if (message != null) {</span>
+<span class="fc" id="L624">			StompHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);</span>
+<span class="pc bpc" id="L625" title="1 of 2 branches missed.">			if (accessor != null) {</span>
+<span class="fc" id="L626">				return accessor.getReceipt();</span>
+			}
+		}
+<span class="nc" id="L629">		return null;</span>
+	}
+
+	protected StompHeaderAccessor toMutableAccessor(StompHeaderAccessor headerAccessor, Message&lt;?&gt; message) {
+<span class="fc bfc" id="L633" title="All 2 branches covered.">		return (headerAccessor.isMutable() ? headerAccessor : StompHeaderAccessor.wrap(message));</span>
+	}
+
+	private StompHeaderAccessor afterStompSessionConnected(Message&lt;?&gt; message, StompHeaderAccessor accessor,
+			WebSocketSession session) {
+
+<span class="fc" id="L639">		Principal principal = getUser(session);</span>
+<span class="fc bfc" id="L640" title="All 2 branches covered.">		if (principal != null) {</span>
+<span class="fc" id="L641">			accessor = toMutableAccessor(accessor, message);</span>
+<span class="fc" id="L642">			accessor.setNativeHeader(CONNECTED_USER_HEADER, principal.getName());</span>
+		}
+
+<span class="fc" id="L645">		long[] heartbeat = accessor.getHeartbeat();</span>
+<span class="fc bfc" id="L646" title="All 2 branches covered.">		if (heartbeat[1] &gt; 0) {</span>
+<span class="fc" id="L647">			session = WebSocketSessionDecorator.unwrap(session);</span>
+<span class="fc bfc" id="L648" title="All 2 branches covered.">			if (session instanceof SockJsSession sockJsSession) {</span>
+<span class="fc" id="L649">				sockJsSession.disableHeartbeat();</span>
+			}
+		}
+
+<span class="fc" id="L653">		return accessor;</span>
+	}
+
+	@Override
+	public @Nullable String resolveSessionId(Message&lt;?&gt; message) {
+<span class="fc" id="L658">		return SimpMessageHeaderAccessor.getSessionId(message.getHeaders());</span>
+	}
+
+	@Override
+	public void afterSessionStarted(WebSocketSession session, MessageChannel outputChannel) {
+<span class="fc bfc" id="L663" title="All 2 branches covered.">		if (session.getTextMessageSizeLimit() &lt; MINIMUM_WEBSOCKET_MESSAGE_SIZE) {</span>
+<span class="fc" id="L664">			session.setTextMessageSizeLimit(MINIMUM_WEBSOCKET_MESSAGE_SIZE);</span>
+		}
+<span class="fc" id="L666">		this.decoders.put(session.getId(), new BufferingStompDecoder(this.stompDecoder, getMessageSizeLimit()));</span>
+<span class="fc" id="L667">	}</span>
+
+	@Override
+	public void afterSessionEnded(WebSocketSession session, CloseStatus closeStatus, MessageChannel outputChannel) {
+<span class="fc" id="L671">		this.decoders.remove(session.getId());</span>
+
+<span class="fc" id="L673">		Message&lt;byte[]&gt; message = createDisconnectMessage(session);</span>
+<span class="fc" id="L674">		SimpAttributes simpAttributes = SimpAttributes.fromMessage(message);</span>
+		try {
+<span class="fc" id="L676">			SimpAttributesContextHolder.setAttributes(simpAttributes);</span>
+<span class="fc bfc" id="L677" title="All 2 branches covered.">			if (this.eventPublisher != null) {</span>
+<span class="fc" id="L678">				Principal user = getUser(session);</span>
+<span class="fc" id="L679">				publishEvent(this.eventPublisher, new SessionDisconnectEvent(this, message, session.getId(), closeStatus, user));</span>
+			}
+<span class="fc" id="L681">			outputChannel.send(message);</span>
+		}
+		finally {
+<span class="fc" id="L684">			this.sessions.remove(session.getId());</span>
+<span class="fc" id="L685">			SimpAttributesContextHolder.resetAttributes();</span>
+<span class="fc" id="L686">			simpAttributes.sessionCompleted();</span>
+		}
+<span class="fc" id="L688">	}</span>
+
+	private Message&lt;byte[]&gt; createDisconnectMessage(WebSocketSession session) {
+<span class="fc" id="L691">		StompHeaderAccessor headerAccessor = StompHeaderAccessor.create(StompCommand.DISCONNECT);</span>
+<span class="pc bpc" id="L692" title="1 of 2 branches missed.">		if (getHeaderInitializer() != null) {</span>
+<span class="nc" id="L693">			getHeaderInitializer().initHeaders(headerAccessor);</span>
+		}
+
+<span class="fc" id="L696">		headerAccessor.setSessionId(session.getId());</span>
+<span class="fc" id="L697">		headerAccessor.setSessionAttributes(session.getAttributes());</span>
+
+<span class="fc" id="L699">		Principal user = getUser(session);</span>
+<span class="fc bfc" id="L700" title="All 2 branches covered.">		if (user != null) {</span>
+<span class="fc" id="L701">			headerAccessor.setUser(user);</span>
+		}
+
+<span class="fc" id="L704">		return MessageBuilder.createMessage(EMPTY_PAYLOAD, headerAccessor.getMessageHeaders());</span>
+	}
+
+
+	@Override
+	public String toString() {
+<span class="fc" id="L710">		return &quot;StompSubProtocolHandler&quot; + getSupportedProtocols();</span>
+	}
+
+
+	private static class SessionInfo implements Consumer&lt;Principal&gt; {
+
+		private final MessageChannel channel;
+
+		private final @Nullable Principal webSocketUser;
+
+		private volatile @Nullable Principal stompUser;
+
+<span class="fc" id="L722">		SessionInfo(MessageChannel channel, @Nullable Principal user) {</span>
+<span class="fc" id="L723">			this.channel = channel;</span>
+<span class="fc" id="L724">			this.webSocketUser = user;</span>
+<span class="fc" id="L725">		}</span>
+
+		public MessageChannel getMessageChannelToUse() {
+<span class="fc" id="L728">			return this.channel;</span>
+		}
+
+		public @Nullable Principal getUser() {
+<span class="fc bfc" id="L732" title="All 2 branches covered.">			return (this.stompUser != null ? this.stompUser : this.webSocketUser);</span>
+		}
+
+		@Override
+		public void accept(@Nullable Principal stompUser) {
+<span class="fc bfc" id="L737" title="All 4 branches covered.">			if (stompUser != null &amp;&amp; stompUser != this.webSocketUser) {</span>
+<span class="fc" id="L738">				this.stompUser = stompUser;</span>
+			}
+<span class="fc" id="L740">		}</span>
+	}
+
+
+	/**
+	 * Contract for access to session counters.
+	 * @since 5.2
+	 */
+	public interface Stats {
+
+		/**
+		 * The number of CONNECT frames processed.
+		 */
+		int getTotalConnect();
+
+		/**
+		 * The number of CONNECTED frames processed.
+		 */
+		int getTotalConnected();
+
+		/**
+		 * The number of DISCONNECT frames processed.
+		 */
+		int getTotalDisconnect();
+	}
+
+
+<span class="fc" id="L767">	private static class DefaultStats implements Stats {</span>
+
+<span class="fc" id="L769">		private final AtomicInteger connect = new AtomicInteger();</span>
+
+<span class="fc" id="L771">		private final AtomicInteger connected = new AtomicInteger();</span>
+
+<span class="fc" id="L773">		private final AtomicInteger disconnect = new AtomicInteger();</span>
+
+		public void incrementConnectCount() {
+<span class="fc" id="L776">			this.connect.incrementAndGet();</span>
+<span class="fc" id="L777">		}</span>
+
+		public void incrementConnectedCount() {
+<span class="fc" id="L780">			this.connected.incrementAndGet();</span>
+<span class="fc" id="L781">		}</span>
+
+		public void incrementDisconnectCount() {
+<span class="nc" id="L784">			this.disconnect.incrementAndGet();</span>
+<span class="nc" id="L785">		}</span>
+
+		@Override
+		public int getTotalConnect() {
+<span class="nc" id="L789">			return this.connect.get();</span>
+		}
+
+		@Override
+		public int getTotalConnected() {
+<span class="nc" id="L794">			return this.connected.get();</span>
+		}
+
+		@Override
+		public int getTotalDisconnect() {
+<span class="nc" id="L799">			return this.disconnect.get();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="fc" id="L804">			return &quot;processed CONNECT(&quot; + this.connect.get() + &quot;)-CONNECTED(&quot; +</span>
+<span class="fc" id="L805">					this.connected.get() + &quot;)-DISCONNECT(&quot; + this.disconnect.get() + &quot;)&quot;;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

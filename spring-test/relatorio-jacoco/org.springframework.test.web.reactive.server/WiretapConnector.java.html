@@ -1,0 +1,303 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WiretapConnector.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.web.reactive.server</a> &gt; <span class="el_source">WiretapConnector.java</span></div><h1>WiretapConnector.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.web.reactive.server;
+
+import java.net.URI;
+import java.time.Duration;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import reactor.core.Scannable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.Sinks;
+
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.client.reactive.ClientHttpConnector;
+import org.springframework.http.client.reactive.ClientHttpRequest;
+import org.springframework.http.client.reactive.ClientHttpRequestDecorator;
+import org.springframework.http.client.reactive.ClientHttpResponse;
+import org.springframework.http.client.reactive.ClientHttpResponseDecorator;
+import org.springframework.test.json.JsonConverterDelegate;
+import org.springframework.util.Assert;
+
+/**
+ * Decorate another {@link ClientHttpConnector} with the purpose of
+ * intercepting, capturing, and exposing actual request and response data
+ * transmitted to and received from the server.
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ * @see HttpHandlerConnector
+ */
+class WiretapConnector implements ClientHttpConnector {
+
+	private final ClientHttpConnector delegate;
+
+	private final @Nullable JsonConverterDelegate converterDelegate;
+
+<span class="fc" id="L60">	private final Map&lt;String, ClientExchangeInfo&gt; exchanges = new ConcurrentHashMap&lt;&gt;();</span>
+
+
+<span class="fc" id="L63">	WiretapConnector(ClientHttpConnector delegate, @Nullable JsonEncoderDecoder encoderDecoder) {</span>
+<span class="fc" id="L64">		this.delegate = delegate;</span>
+<span class="fc bfc" id="L65" title="All 2 branches covered.">		this.converterDelegate = (encoderDecoder != null ? encoderDecoder.createJsonConverterDelegate() : null);</span>
+<span class="fc" id="L66">	}</span>
+
+
+	@Override
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	public Mono&lt;ClientHttpResponse&gt; connect(HttpMethod method, URI uri,
+			Function&lt;? super ClientHttpRequest, Mono&lt;Void&gt;&gt; requestCallback) {
+
+<span class="fc" id="L74">		AtomicReference&lt;WiretapClientHttpRequest&gt; requestRef = new AtomicReference&lt;&gt;();</span>
+
+<span class="fc" id="L76">		return this.delegate</span>
+<span class="fc" id="L77">				.connect(method, uri, request -&gt; {</span>
+<span class="fc" id="L78">					WiretapClientHttpRequest wrapped = new WiretapClientHttpRequest(request);</span>
+<span class="fc" id="L79">					requestRef.set(wrapped);</span>
+<span class="fc" id="L80">					return requestCallback.apply(wrapped);</span>
+				})
+<span class="fc" id="L82">				.map(response -&gt; {</span>
+<span class="fc" id="L83">					WiretapClientHttpRequest wrappedRequest = requestRef.get();</span>
+<span class="fc" id="L84">					String header = WebTestClient.WEBTESTCLIENT_REQUEST_ID;</span>
+<span class="fc" id="L85">					String requestId = wrappedRequest.getHeaders().getFirst(header);</span>
+<span class="pc bpc" id="L86" title="1 of 2 branches missed.">					Assert.state(requestId != null, () -&gt; &quot;No \&quot;&quot; + header + &quot;\&quot; header&quot;);</span>
+<span class="fc" id="L87">					WiretapClientHttpResponse wrappedResponse = new WiretapClientHttpResponse(response);</span>
+<span class="fc" id="L88">					this.exchanges.put(requestId, new ClientExchangeInfo(wrappedRequest, wrappedResponse));</span>
+<span class="fc" id="L89">					return wrappedResponse;</span>
+				});
+	}
+
+	/**
+	 * Create the {@link ExchangeResult} for the given &quot;request-id&quot; header value.
+	 */
+	ExchangeResult getExchangeResult(String requestId, @Nullable String uriTemplate, Duration timeout) {
+<span class="fc" id="L97">		ClientExchangeInfo clientInfo = this.exchanges.remove(requestId);</span>
+<span class="pc bpc" id="L98" title="1 of 2 branches missed.">		Assert.state(clientInfo != null, () -&gt; &quot;No match for %s=%s&quot;.formatted(</span>
+				WebTestClient.WEBTESTCLIENT_REQUEST_ID, requestId));
+<span class="fc" id="L100">		return new ExchangeResult(clientInfo.getRequest(), clientInfo.getResponse(),</span>
+<span class="fc" id="L101">				clientInfo.getRequest().getRecorder().getContent(),</span>
+<span class="fc" id="L102">				clientInfo.getResponse().getRecorder().getContent(),</span>
+				timeout, uriTemplate,
+<span class="fc" id="L104">				clientInfo.getResponse().getMockServerResult(),</span>
+				this.converterDelegate);
+	}
+
+
+	/**
+	 * Holder for {@link WiretapClientHttpRequest} and {@link WiretapClientHttpResponse}.
+	 */
+	private static class ClientExchangeInfo {
+
+		private final WiretapClientHttpRequest request;
+
+		private final WiretapClientHttpResponse response;
+
+<span class="fc" id="L118">		public ClientExchangeInfo(WiretapClientHttpRequest request, WiretapClientHttpResponse response) {</span>
+<span class="fc" id="L119">			this.request = request;</span>
+<span class="fc" id="L120">			this.response = response;</span>
+<span class="fc" id="L121">		}</span>
+
+		public WiretapClientHttpRequest getRequest() {
+<span class="fc" id="L124">			return this.request;</span>
+		}
+
+		public WiretapClientHttpResponse getResponse() {
+<span class="fc" id="L128">			return this.response;</span>
+		}
+	}
+
+
+	/**
+	 * Tap into a Publisher of data buffers to save the content.
+	 */
+	static final class WiretapRecorder {
+
+		private final @Nullable Flux&lt;? extends DataBuffer&gt; publisher;
+
+		private final @Nullable Flux&lt;? extends Publisher&lt;? extends DataBuffer&gt;&gt; publisherNested;
+
+<span class="fc" id="L142">		private final DataBuffer buffer = DefaultDataBufferFactory.sharedInstance.allocateBuffer(256);</span>
+
+		// unsafe(): we're intercepting, already serialized Publisher signals
+<span class="fc" id="L145">		private final Sinks.One&lt;byte[]&gt; content = Sinks.unsafe().one();</span>
+
+		private boolean hasContentConsumer;
+
+
+		public WiretapRecorder(@Nullable Publisher&lt;? extends DataBuffer&gt; publisher,
+<span class="fc" id="L151">				@Nullable Publisher&lt;? extends Publisher&lt;? extends DataBuffer&gt;&gt; publisherNested) {</span>
+
+<span class="pc bpc" id="L153" title="1 of 4 branches missed.">			if (publisher != null &amp;&amp; publisherNested != null) {</span>
+<span class="nc" id="L154">				throw new IllegalArgumentException(&quot;At most one publisher expected&quot;);</span>
+			}
+
+<span class="fc bfc" id="L157" title="All 2 branches covered.">			this.publisher = publisher != null ?</span>
+<span class="fc" id="L158">					Flux.from(publisher)</span>
+<span class="fc" id="L159">							.doOnSubscribe(s -&gt; this.hasContentConsumer = true)</span>
+<span class="fc" id="L160">							.doOnNext(this.buffer::write)</span>
+<span class="fc" id="L161">							.doOnError(this::handleOnError)</span>
+<span class="fc" id="L162">							.doOnCancel(this::handleOnComplete)</span>
+<span class="fc" id="L163">							.doOnComplete(this::handleOnComplete) : null;</span>
+
+<span class="pc bpc" id="L165" title="1 of 2 branches missed.">			this.publisherNested = publisherNested != null ?</span>
+<span class="nc" id="L166">					Flux.from(publisherNested)</span>
+<span class="nc" id="L167">							.doOnSubscribe(s -&gt; this.hasContentConsumer = true)</span>
+<span class="nc" id="L168">							.map(p -&gt; Flux.from(p).doOnNext(this.buffer::write).doOnError(this::handleOnError))</span>
+<span class="nc" id="L169">							.doOnError(this::handleOnError)</span>
+<span class="nc" id="L170">							.doOnCancel(this::handleOnComplete)</span>
+<span class="pc" id="L171">							.doOnComplete(this::handleOnComplete) : null;</span>
+
+<span class="pc bpc" id="L173" title="1 of 4 branches missed.">			if (publisher == null &amp;&amp; publisherNested == null) {</span>
+<span class="fc" id="L174">				this.content.tryEmitEmpty();</span>
+			}
+<span class="fc" id="L176">		}</span>
+
+
+		public Publisher&lt;? extends DataBuffer&gt; getPublisherToUse() {
+<span class="fc" id="L180">			Assert.notNull(this.publisher, &quot;Publisher not in use.&quot;);</span>
+<span class="fc" id="L181">			return this.publisher;</span>
+		}
+
+		public Publisher&lt;? extends Publisher&lt;? extends DataBuffer&gt;&gt; getNestedPublisherToUse() {
+<span class="nc" id="L185">			Assert.notNull(this.publisherNested, &quot;Nested publisher not in use.&quot;);</span>
+<span class="nc" id="L186">			return this.publisherNested;</span>
+		}
+
+		@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+		public Mono&lt;byte[]&gt; getContent() {
+<span class="fc" id="L191">			return Mono.defer(() -&gt; {</span>
+<span class="fc bfc" id="L192" title="All 2 branches covered.">				if (this.content.scan(Scannable.Attr.TERMINATED) == Boolean.TRUE) {</span>
+<span class="fc" id="L193">					return this.content.asMono();</span>
+				}
+<span class="pc bpc" id="L195" title="1 of 2 branches missed.">				if (!this.hasContentConsumer) {</span>
+					// Couple of possible cases:
+					//  1. Mock server never consumed request body (for example, error before read)
+					//  2. FluxExchangeResult: getResponseBodyContent called before getResponseBody
+					//noinspection ConstantConditions
+<span class="pc bpc" id="L200" title="1 of 2 branches missed.">					if (this.publisher != null) {</span>
+<span class="fc" id="L201">						this.publisher.doOnNext(DataBufferUtils::release)</span>
+<span class="pc" id="L202">								.onErrorMap(ex -&gt; new IllegalStateException(</span>
+										&quot;Content has not been consumed, and &quot; +
+												&quot;an error was raised while attempting to produce it.&quot;, ex))
+<span class="fc" id="L205">								.subscribe();</span>
+					}
+<span class="nc bnc" id="L207" title="All 2 branches missed.">					else if (this.publisherNested != null) {</span>
+<span class="nc" id="L208">						this.publisherNested</span>
+<span class="nc" id="L209">								.map(pub -&gt; Flux.from(pub).doOnNext(DataBufferUtils::release))</span>
+<span class="nc" id="L210">								.onErrorMap(ex -&gt; new IllegalStateException(</span>
+										&quot;Content has not been consumed, and &quot; +
+												&quot;an error was raised while attempting to produce it.&quot;, ex))
+<span class="nc" id="L213">								.subscribe();</span>
+					}
+				}
+<span class="fc" id="L216">				return this.content.asMono();</span>
+			});
+		}
+
+
+		private void handleOnError(Throwable ex) {
+			// Ignore result: signals cannot compete
+<span class="nc" id="L223">			this.content.tryEmitError(ex);</span>
+<span class="nc" id="L224">		}</span>
+
+		private void handleOnComplete() {
+<span class="fc" id="L227">			byte[] bytes = new byte[this.buffer.readableByteCount()];</span>
+<span class="fc" id="L228">			this.buffer.read(bytes);</span>
+			// Ignore result: signals cannot compete
+<span class="fc" id="L230">			this.content.tryEmitValue(bytes);</span>
+<span class="fc" id="L231">		}</span>
+	}
+
+
+	/**
+	 * ClientHttpRequestDecorator that intercepts and saves the request body.
+	 */
+	private static class WiretapClientHttpRequest extends ClientHttpRequestDecorator {
+
+		private @Nullable WiretapRecorder recorder;
+
+
+		public WiretapClientHttpRequest(ClientHttpRequest delegate) {
+<span class="fc" id="L244">			super(delegate);</span>
+<span class="fc" id="L245">		}</span>
+
+		public WiretapRecorder getRecorder() {
+<span class="fc" id="L248">			Assert.notNull(this.recorder, &quot;No WiretapRecorder: was the client request written?&quot;);</span>
+<span class="fc" id="L249">			return this.recorder;</span>
+		}
+
+		@Override
+		public Mono&lt;Void&gt; writeWith(Publisher&lt;? extends DataBuffer&gt; publisher) {
+<span class="fc" id="L254">			this.recorder = new WiretapRecorder(publisher, null);</span>
+<span class="fc" id="L255">			return super.writeWith(this.recorder.getPublisherToUse());</span>
+		}
+
+		@Override
+		public Mono&lt;Void&gt; writeAndFlushWith(Publisher&lt;? extends Publisher&lt;? extends DataBuffer&gt;&gt; publisher) {
+<span class="nc" id="L260">			this.recorder = new WiretapRecorder(null, publisher);</span>
+<span class="nc" id="L261">			return super.writeAndFlushWith(this.recorder.getNestedPublisherToUse());</span>
+		}
+
+		@Override
+		public Mono&lt;Void&gt; setComplete() {
+<span class="fc" id="L266">			this.recorder = new WiretapRecorder(null, null);</span>
+<span class="fc" id="L267">			return super.setComplete();</span>
+		}
+	}
+
+
+	/**
+	 * ClientHttpResponseDecorator that intercepts and saves the response body.
+	 */
+	private static class WiretapClientHttpResponse extends ClientHttpResponseDecorator {
+
+		private final WiretapRecorder recorder;
+
+
+		public WiretapClientHttpResponse(ClientHttpResponse delegate) {
+<span class="fc" id="L281">			super(delegate);</span>
+<span class="fc" id="L282">			this.recorder = new WiretapRecorder(super.getBody(), null);</span>
+<span class="fc" id="L283">		}</span>
+
+
+		public WiretapRecorder getRecorder() {
+<span class="fc" id="L287">			return this.recorder;</span>
+		}
+
+		@Override
+		@SuppressWarnings(&quot;ConstantConditions&quot;)
+		public Flux&lt;DataBuffer&gt; getBody() {
+<span class="fc" id="L293">			return Flux.from(this.recorder.getPublisherToUse());</span>
+		}
+
+		public @Nullable Object getMockServerResult() {
+<span class="fc bfc" id="L297" title="All 2 branches covered.">			return (getDelegate() instanceof MockServerClientHttpResponse mockResponse ?</span>
+<span class="fc" id="L298">					mockResponse.getServerResult() : null);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

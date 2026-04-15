@@ -1,0 +1,343 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>GenericMessageEndpointManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jca.endpoint</a> &gt; <span class="el_source">GenericMessageEndpointManager.java</span></div><h1>GenericMessageEndpointManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jca.endpoint;
+
+import jakarta.resource.ResourceException;
+import jakarta.resource.spi.ActivationSpec;
+import jakarta.resource.spi.ResourceAdapter;
+import jakarta.resource.spi.endpoint.MessageEndpointFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.context.SmartLifecycle;
+import org.springframework.util.Assert;
+
+/**
+ * Generic bean that manages JCA 1.7 message endpoints within a Spring
+ * application context, activating and deactivating the endpoint as part
+ * of the application context's lifecycle.
+ *
+ * &lt;p&gt;This class is completely generic in that it may work with any
+ * ResourceAdapter, any MessageEndpointFactory, and any ActivationSpec.
+ * It can be configured in standard bean style, for example through
+ * Spring's XML bean definition format, as follows:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;bean class=&quot;org.springframework.jca.endpoint.GenericMessageEndpointManager&quot;&amp;gt;
+ *  &amp;lt;property name=&quot;resourceAdapter&quot; ref=&quot;resourceAdapter&quot;/&amp;gt;
+ *  &amp;lt;property name=&quot;messageEndpointFactory&quot;&amp;gt;
+ *    &amp;lt;bean class=&quot;org.springframework.jca.endpoint.GenericMessageEndpointFactory&quot;&amp;gt;
+ *      &amp;lt;property name=&quot;messageListener&quot; ref=&quot;messageListener&quot;/&amp;gt;
+ *    &amp;lt;/bean&amp;gt;
+ *  &amp;lt;/property&amp;gt;
+ *  &amp;lt;property name=&quot;activationSpec&quot;&amp;gt;
+ *    &amp;lt;bean class=&quot;org.apache.activemq.ra.ActiveMQActivationSpec&quot;&amp;gt;
+ *      &amp;lt;property name=&quot;destination&quot; value=&quot;myQueue&quot;/&amp;gt;
+ *      &amp;lt;property name=&quot;destinationType&quot; value=&quot;jakarta.jms.Queue&quot;/&amp;gt;
+ *    &amp;lt;/bean&amp;gt;
+ *  &amp;lt;/property&amp;gt;
+ * &amp;lt;/bean&amp;gt;
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;In this example, Spring's own {@link GenericMessageEndpointFactory} is used
+ * to point to a standard message listener object that happens to be supported
+ * by the specified target ResourceAdapter: in this case, a JMS
+ * {@link jakarta.jms.MessageListener} object as supported by the ActiveMQ
+ * message broker, defined as a Spring bean:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;bean id=&quot;messageListener&quot; class=&quot;com.myorg.messaging.myMessageListener&quot;&amp;gt;
+ *   &amp;lt;!-- ... --&amp;gt;
+ * &amp;lt;/bean&amp;gt;
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;The target ResourceAdapter may be configured as a local Spring bean as well
+ * (the typical case) or obtained from JNDI. For the example above, a local
+ * ResourceAdapter bean could be defined as follows (matching the &quot;resourceAdapter&quot;
+ * bean reference above):
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;bean id=&quot;resourceAdapter&quot; class=&quot;org.springframework.jca.support.ResourceAdapterFactoryBean&quot;&amp;gt;
+ *  &amp;lt;property name=&quot;resourceAdapter&quot;&amp;gt;
+ *    &amp;lt;bean class=&quot;org.apache.activemq.ra.ActiveMQResourceAdapter&quot;&amp;gt;
+ *      &amp;lt;property name=&quot;serverUrl&quot; value=&quot;tcp://localhost:61616&quot;/&amp;gt;
+ *    &amp;lt;/bean&amp;gt;
+ *  &amp;lt;/property&amp;gt;
+ *  &amp;lt;property name=&quot;workManager&quot;&amp;gt;
+ *    &amp;lt;bean class=&quot;...&quot;/&amp;gt;
+ *  &amp;lt;/property&amp;gt;
+ * &amp;lt;/bean&amp;gt;
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;For a different target resource, the configuration would simply point to a
+ * different ResourceAdapter and a different ActivationSpec object (which are
+ * both specific to the resource provider), and possibly a different message
+ * listener (for example, a CCI {@link jakarta.resource.cci.MessageListener} for a
+ * resource adapter which is based on the JCA Common Client Interface).
+ *
+ * &lt;p&gt;The asynchronous execution strategy can be customized through the
+ * &quot;workManager&quot; property on the ResourceAdapterFactoryBean as shown above,
+ * where {@code &lt;bean class=&quot;...&quot;/&gt;} should be replaced with configuration for
+ * any JCA-compliant {@code WorkManager}.
+ *
+ * &lt;p&gt;Transactional execution is a responsibility of the concrete message endpoint,
+ * as built by the specified MessageEndpointFactory. {@link GenericMessageEndpointFactory}
+ * supports XA transaction participation through its &quot;transactionManager&quot; property,
+ * typically with a Spring {@link org.springframework.transaction.jta.JtaTransactionManager}
+ * or a plain {@link jakarta.transaction.TransactionManager} implementation specified there.
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;bean class=&quot;org.springframework.jca.endpoint.GenericMessageEndpointManager&quot;&amp;gt;
+ *  &amp;lt;property name=&quot;resourceAdapter&quot; ref=&quot;resourceAdapter&quot;/&amp;gt;
+ *  &amp;lt;property name=&quot;messageEndpointFactory&quot;&amp;gt;
+ *    &amp;lt;bean class=&quot;org.springframework.jca.endpoint.GenericMessageEndpointFactory&quot;&amp;gt;
+ *      &amp;lt;property name=&quot;messageListener&quot; ref=&quot;messageListener&quot;/&amp;gt;
+ *      &amp;lt;property name=&quot;transactionManager&quot; ref=&quot;transactionManager&quot;/&amp;gt;
+ *    &amp;lt;/bean&amp;gt;
+ *  &amp;lt;/property&amp;gt;
+ *  &amp;lt;property name=&quot;activationSpec&quot;&amp;gt;
+ *    &amp;lt;bean class=&quot;org.apache.activemq.ra.ActiveMQActivationSpec&quot;&amp;gt;
+ *      &amp;lt;property name=&quot;destination&quot; value=&quot;myQueue&quot;/&amp;gt;
+ *      &amp;lt;property name=&quot;destinationType&quot; value=&quot;jakarta.jms.Queue&quot;/&amp;gt;
+ *    &amp;lt;/bean&amp;gt;
+ *  &amp;lt;/property&amp;gt;
+ * &amp;lt;/bean&amp;gt;
+ *
+ * &amp;lt;bean id=&quot;transactionManager&quot; class=&quot;org.springframework.transaction.jta.JtaTransactionManager&quot;/&amp;gt;
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;Alternatively, check out your resource provider's ActivationSpec object,
+ * which should support local transactions through a provider-specific config flag,
+ * for example, ActiveMQActivationSpec's &quot;useRAManagedTransaction&quot; bean property.
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;bean class=&quot;org.springframework.jca.endpoint.GenericMessageEndpointManager&quot;&amp;gt;
+ *  &amp;lt;property name=&quot;resourceAdapter&quot; ref=&quot;resourceAdapter&quot;/&amp;gt;
+ *  &amp;lt;property name=&quot;messageEndpointFactory&quot;&amp;gt;
+ *    &amp;lt;bean class=&quot;org.springframework.jca.endpoint.GenericMessageEndpointFactory&quot;&amp;gt;
+ *      &amp;lt;property name=&quot;messageListener&quot; ref=&quot;messageListener&quot;/&amp;gt;
+ *    &amp;lt;/bean&amp;gt;
+ *  &amp;lt;/property&amp;gt;
+ *  &amp;lt;property name=&quot;activationSpec&quot;&amp;gt;
+ *    &amp;lt;bean class=&quot;org.apache.activemq.ra.ActiveMQActivationSpec&quot;&amp;gt;
+ *      &amp;lt;property name=&quot;destination&quot; value=&quot;myQueue&quot;/&amp;gt;
+ *      &amp;lt;property name=&quot;destinationType&quot; value=&quot;jakarta.jms.Queue&quot;/&amp;gt;
+ *      &amp;lt;property name=&quot;useRAManagedTransaction&quot; value=&quot;true&quot;/&amp;gt;
+ *    &amp;lt;/bean&amp;gt;
+ *  &amp;lt;/property&amp;gt;
+ * &amp;lt;/bean&amp;gt;
+ * &lt;/pre&gt;
+ *
+ * @author Juergen Hoeller
+ * @since 2.5
+ * @see jakarta.resource.spi.ResourceAdapter#endpointActivation
+ * @see jakarta.resource.spi.ResourceAdapter#endpointDeactivation
+ * @see jakarta.resource.spi.endpoint.MessageEndpointFactory
+ * @see jakarta.resource.spi.ActivationSpec
+ */
+<span class="nc" id="L153">public class GenericMessageEndpointManager implements SmartLifecycle, InitializingBean, DisposableBean {</span>
+
+	private @Nullable ResourceAdapter resourceAdapter;
+
+	private @Nullable MessageEndpointFactory messageEndpointFactory;
+
+	private @Nullable ActivationSpec activationSpec;
+
+<span class="nc" id="L161">	private boolean autoStartup = true;</span>
+
+<span class="nc" id="L163">	private int phase = DEFAULT_PHASE;</span>
+
+	private volatile boolean running;
+
+<span class="nc" id="L167">	private final Object lifecycleMonitor = new Object();</span>
+
+
+	/**
+	 * Set the JCA ResourceAdapter to manage endpoints for.
+	 */
+	public void setResourceAdapter(@Nullable ResourceAdapter resourceAdapter) {
+<span class="nc" id="L174">		this.resourceAdapter = resourceAdapter;</span>
+<span class="nc" id="L175">	}</span>
+
+	/**
+	 * Return the JCA ResourceAdapter to manage endpoints for.
+	 */
+	public @Nullable ResourceAdapter getResourceAdapter() {
+<span class="nc" id="L181">		return this.resourceAdapter;</span>
+	}
+
+	/**
+	 * Set the JCA MessageEndpointFactory to activate, pointing to a
+	 * MessageListener object that the endpoints will delegate to.
+	 * &lt;p&gt;A MessageEndpointFactory instance may be shared across multiple
+	 * endpoints (i.e. multiple GenericMessageEndpointManager instances),
+	 * with different {@link #setActivationSpec ActivationSpec} objects applied.
+	 * @see GenericMessageEndpointFactory#setMessageListener
+	 */
+	public void setMessageEndpointFactory(@Nullable MessageEndpointFactory messageEndpointFactory) {
+<span class="nc" id="L193">		this.messageEndpointFactory = messageEndpointFactory;</span>
+<span class="nc" id="L194">	}</span>
+
+	/**
+	 * Return the JCA MessageEndpointFactory to activate.
+	 */
+	public @Nullable MessageEndpointFactory getMessageEndpointFactory() {
+<span class="nc" id="L200">		return this.messageEndpointFactory;</span>
+	}
+
+	/**
+	 * Set the JCA ActivationSpec to use for activating the endpoint.
+	 * &lt;p&gt;Note that this ActivationSpec instance should not be shared
+	 * across multiple ResourceAdapter instances.
+	 */
+	public void setActivationSpec(@Nullable ActivationSpec activationSpec) {
+<span class="nc" id="L209">		this.activationSpec = activationSpec;</span>
+<span class="nc" id="L210">	}</span>
+
+	/**
+	 * Return the JCA ActivationSpec to use for activating the endpoint.
+	 */
+	public @Nullable ActivationSpec getActivationSpec() {
+<span class="nc" id="L216">		return this.activationSpec;</span>
+	}
+
+	/**
+	 * Set whether to auto-start the endpoint activation after this endpoint
+	 * manager has been initialized and the context has been refreshed.
+	 * &lt;p&gt;Default is &quot;true&quot;. Turn this flag off to defer the endpoint
+	 * activation until an explicit {@link #start()} call.
+	 */
+	public void setAutoStartup(boolean autoStartup) {
+<span class="nc" id="L226">		this.autoStartup = autoStartup;</span>
+<span class="nc" id="L227">	}</span>
+
+	/**
+	 * Return the value for the 'autoStartup' property.	If &quot;true&quot;, this
+	 * endpoint manager will start upon a ContextRefreshedEvent.
+	 */
+	@Override
+	public boolean isAutoStartup() {
+<span class="nc" id="L235">		return this.autoStartup;</span>
+	}
+
+	/**
+	 * Specify the phase in which this endpoint manager should be started
+	 * and stopped. The startup order proceeds from lowest to highest, and
+	 * the shutdown order is the reverse of that. By default, this value is
+	 * {@code Integer.MAX_VALUE} meaning that this endpoint manager starts
+	 * as late as possible and stops as soon as possible.
+	 */
+	public void setPhase(int phase) {
+<span class="nc" id="L246">		this.phase = phase;</span>
+<span class="nc" id="L247">	}</span>
+
+	/**
+	 * Return the phase in which this endpoint manager will be started and stopped.
+	 */
+	@Override
+	public int getPhase() {
+<span class="nc" id="L254">		return this.phase;</span>
+	}
+
+	/**
+	 * Prepares the message endpoint, and automatically activates it
+	 * if the &quot;autoStartup&quot; flag is set to &quot;true&quot;.
+	 */
+	@Override
+	public void afterPropertiesSet() throws ResourceException {
+<span class="nc bnc" id="L263" title="All 2 branches missed.">		if (getResourceAdapter() == null) {</span>
+<span class="nc" id="L264">			throw new IllegalArgumentException(&quot;Property 'resourceAdapter' is required&quot;);</span>
+		}
+<span class="nc bnc" id="L266" title="All 2 branches missed.">		if (getMessageEndpointFactory() == null) {</span>
+<span class="nc" id="L267">			throw new IllegalArgumentException(&quot;Property 'messageEndpointFactory' is required&quot;);</span>
+		}
+<span class="nc" id="L269">		ActivationSpec activationSpec = getActivationSpec();</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">		if (activationSpec == null) {</span>
+<span class="nc" id="L271">			throw new IllegalArgumentException(&quot;Property 'activationSpec' is required&quot;);</span>
+		}
+
+<span class="nc bnc" id="L274" title="All 2 branches missed.">		if (activationSpec.getResourceAdapter() == null) {</span>
+<span class="nc" id="L275">			activationSpec.setResourceAdapter(getResourceAdapter());</span>
+		}
+<span class="nc bnc" id="L277" title="All 2 branches missed.">		else if (activationSpec.getResourceAdapter() != getResourceAdapter()) {</span>
+<span class="nc" id="L278">			throw new IllegalArgumentException(&quot;ActivationSpec [&quot; + activationSpec +</span>
+<span class="nc" id="L279">					&quot;] is associated with a different ResourceAdapter: &quot; + activationSpec.getResourceAdapter());</span>
+		}
+<span class="nc" id="L281">	}</span>
+
+	/**
+	 * Activates the configured message endpoint.
+	 */
+	@Override
+	public void start() {
+<span class="nc" id="L288">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">			if (!this.running) {</span>
+<span class="nc" id="L290">				ResourceAdapter resourceAdapter = getResourceAdapter();</span>
+<span class="nc bnc" id="L291" title="All 2 branches missed.">				Assert.state(resourceAdapter != null, &quot;No ResourceAdapter set&quot;);</span>
+				try {
+<span class="nc" id="L293">					resourceAdapter.endpointActivation(getMessageEndpointFactory(), getActivationSpec());</span>
+				}
+<span class="nc" id="L295">				catch (ResourceException ex) {</span>
+<span class="nc" id="L296">					throw new IllegalStateException(&quot;Could not activate message endpoint&quot;, ex);</span>
+<span class="nc" id="L297">				}</span>
+<span class="nc" id="L298">				this.running = true;</span>
+			}
+<span class="nc" id="L300">		}</span>
+<span class="nc" id="L301">	}</span>
+
+	/**
+	 * Deactivates the configured message endpoint.
+	 */
+	@Override
+	public void stop() {
+<span class="nc" id="L308">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc bnc" id="L309" title="All 2 branches missed.">			if (this.running) {</span>
+<span class="nc" id="L310">				ResourceAdapter resourceAdapter = getResourceAdapter();</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">				Assert.state(resourceAdapter != null, &quot;No ResourceAdapter set&quot;);</span>
+<span class="nc" id="L312">				resourceAdapter.endpointDeactivation(getMessageEndpointFactory(), getActivationSpec());</span>
+<span class="nc" id="L313">				this.running = false;</span>
+			}
+<span class="nc" id="L315">		}</span>
+<span class="nc" id="L316">	}</span>
+
+	@Override
+	public void stop(Runnable callback) {
+<span class="nc" id="L320">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L321">			stop();</span>
+<span class="nc" id="L322">			callback.run();</span>
+<span class="nc" id="L323">		}</span>
+<span class="nc" id="L324">	}</span>
+
+	/**
+	 * Return whether the configured message endpoint is currently active.
+	 */
+	@Override
+	public boolean isRunning() {
+<span class="nc" id="L331">		return this.running;</span>
+	}
+
+	/**
+	 * Deactivates the message endpoint, preparing it for shutdown.
+	 */
+	@Override
+	public void destroy() {
+<span class="nc" id="L339">		stop();</span>
+<span class="nc" id="L340">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

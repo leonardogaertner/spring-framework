@@ -1,0 +1,372 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DelegatingFilterProxy.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.filter</a> &gt; <span class="el_source">DelegatingFilterProxy.java</span></div><h1>DelegatingFilterProxy.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.filter;
+
+import java.io.IOException;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
+
+import jakarta.servlet.Filter;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.util.Assert;
+import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.context.support.WebApplicationContextUtils;
+
+/**
+ * Proxy for a standard Servlet Filter, delegating to a Spring-managed bean that
+ * implements the Filter interface. Supports a &quot;targetBeanName&quot; filter init-param
+ * in {@code web.xml}, specifying the name of the target bean in the Spring
+ * application context.
+ *
+ * &lt;p&gt;{@code web.xml} will usually contain a {@code DelegatingFilterProxy} definition,
+ * with the specified {@code filter-name} corresponding to a bean name in
+ * Spring's root application context. All calls to the filter proxy will then
+ * be delegated to that bean in the Spring context, which is required to implement
+ * the standard Servlet Filter interface.
+ *
+ * &lt;p&gt;This approach is particularly useful for Filter implementations with complex
+ * setup needs, allowing to apply the full Spring bean definition machinery to
+ * Filter instances. Alternatively, consider standard Filter setup in combination
+ * with looking up service beans from the Spring root application context.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; The lifecycle methods defined by the Servlet Filter interface
+ * will by default &lt;i&gt;not&lt;/i&gt; be delegated to the target bean, relying on the
+ * Spring application context to manage the lifecycle of that bean. Specifying
+ * the &quot;targetFilterLifecycle&quot; filter init-param as &quot;true&quot; will enforce invocation
+ * of the {@link Filter#init(jakarta.servlet.FilterConfig)} and
+ * {@link Filter#destroy()} lifecycle methods on the target bean, letting the
+ * Servlet container manage the filter lifecycle.
+ *
+ * &lt;p&gt;{@code DelegatingFilterProxy} can optionally accept constructor parameters
+ * when using a Servlet container's instance-based filter registration methods,
+ * usually in conjunction with Spring's
+ * {@link org.springframework.web.WebApplicationInitializer} SPI. These constructors allow
+ * for providing the delegate Filter bean directly, or providing the application context
+ * and bean name to fetch, avoiding the need to look up the application context from the
+ * ServletContext.
+ *
+ * &lt;p&gt;This class was originally inspired by Spring Security's {@code FilterToBeanProxy}
+ * class, written by Ben Alex.
+ *
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @author Chris Beams
+ * @since 1.2
+ * @see #setTargetBeanName
+ * @see #setTargetFilterLifecycle
+ * @see jakarta.servlet.Filter#doFilter
+ * @see jakarta.servlet.Filter#init
+ * @see jakarta.servlet.Filter#destroy
+ * @see #DelegatingFilterProxy(Filter)
+ * @see #DelegatingFilterProxy(String)
+ * @see #DelegatingFilterProxy(String, WebApplicationContext)
+ * @see jakarta.servlet.ServletContext#addFilter(String, Filter)
+ * @see org.springframework.web.WebApplicationInitializer
+ */
+public class DelegatingFilterProxy extends GenericFilterBean {
+
+	private @Nullable String contextAttribute;
+
+	private @Nullable WebApplicationContext webApplicationContext;
+
+	private @Nullable String targetBeanName;
+
+<span class="nc" id="L94">	private boolean targetFilterLifecycle = false;</span>
+
+	private volatile @Nullable Filter delegate;
+
+<span class="nc" id="L98">	private final Lock delegateLock = new ReentrantLock();</span>
+
+
+	/**
+	 * Create a new {@code DelegatingFilterProxy}. For traditional use in {@code web.xml}.
+	 * @see #setTargetBeanName(String)
+	 */
+<span class="nc" id="L105">	public DelegatingFilterProxy() {</span>
+<span class="nc" id="L106">	}</span>
+
+	/**
+	 * Create a new {@code DelegatingFilterProxy} with the given {@link Filter} delegate.
+	 * Bypasses entirely the need for interacting with a Spring application context,
+	 * specifying the {@linkplain #setTargetBeanName target bean name}, etc.
+	 * &lt;p&gt;For use with instance-based registration of filters.
+	 * @param delegate the {@code Filter} instance that this proxy will delegate to and
+	 * manage the lifecycle for (must not be {@code null}).
+	 * @see #doFilter(ServletRequest, ServletResponse, FilterChain)
+	 * @see #invokeDelegate(Filter, ServletRequest, ServletResponse, FilterChain)
+	 * @see #destroy()
+	 * @see #setEnvironment(org.springframework.core.env.Environment)
+	 */
+<span class="nc" id="L120">	public DelegatingFilterProxy(Filter delegate) {</span>
+<span class="nc" id="L121">		Assert.notNull(delegate, &quot;Delegate Filter must not be null&quot;);</span>
+<span class="nc" id="L122">		this.delegate = delegate;</span>
+<span class="nc" id="L123">	}</span>
+
+	/**
+	 * Create a new {@code DelegatingFilterProxy} that will retrieve the named target
+	 * bean from the Spring {@code WebApplicationContext} found in the {@code ServletContext}
+	 * (either the 'root' application context or the context named by
+	 * {@link #setContextAttribute}).
+	 * &lt;p&gt;For use with instance-based registration of filters.
+	 * &lt;p&gt;The target bean must implement the standard Servlet Filter interface.
+	 * @param targetBeanName name of the target filter bean to look up in the Spring
+	 * application context (must not be {@code null}).
+	 * @see #findWebApplicationContext()
+	 * @see #setEnvironment(org.springframework.core.env.Environment)
+	 */
+	public DelegatingFilterProxy(String targetBeanName) {
+<span class="nc" id="L138">		this(targetBeanName, null);</span>
+<span class="nc" id="L139">	}</span>
+
+	/**
+	 * Create a new {@code DelegatingFilterProxy} that will retrieve the named target
+	 * bean from the given Spring {@code WebApplicationContext}.
+	 * &lt;p&gt;For use with instance-based registration of filters.
+	 * &lt;p&gt;The target bean must implement the standard Servlet Filter interface.
+	 * &lt;p&gt;The given {@code WebApplicationContext} may or may not be refreshed when passed
+	 * in. If it has not, and if the context implements {@link ConfigurableApplicationContext},
+	 * a {@link ConfigurableApplicationContext#refresh() refresh()} will be attempted before
+	 * retrieving the named target bean.
+	 * &lt;p&gt;This proxy's {@code Environment} will be inherited from the given
+	 * {@code WebApplicationContext}.
+	 * @param targetBeanName name of the target filter bean in the Spring application
+	 * context (must not be {@code null}).
+	 * @param wac the application context from which the target filter will be retrieved;
+	 * if {@code null}, an application context will be looked up from {@code ServletContext}
+	 * as a fallback.
+	 * @see #findWebApplicationContext()
+	 * @see #setEnvironment(org.springframework.core.env.Environment)
+	 */
+<span class="nc" id="L160">	public DelegatingFilterProxy(String targetBeanName, @Nullable WebApplicationContext wac) {</span>
+<span class="nc" id="L161">		Assert.hasText(targetBeanName, &quot;Target Filter bean name must not be null or empty&quot;);</span>
+<span class="nc" id="L162">		setTargetBeanName(targetBeanName);</span>
+<span class="nc" id="L163">		this.webApplicationContext = wac;</span>
+<span class="nc bnc" id="L164" title="All 2 branches missed.">		if (wac != null) {</span>
+<span class="nc" id="L165">			setEnvironment(wac.getEnvironment());</span>
+		}
+<span class="nc" id="L167">	}</span>
+
+	/**
+	 * Set the name of the ServletContext attribute which should be used to retrieve the
+	 * {@link WebApplicationContext} from which to load the delegate {@link Filter} bean.
+	 */
+	public void setContextAttribute(@Nullable String contextAttribute) {
+<span class="nc" id="L174">		this.contextAttribute = contextAttribute;</span>
+<span class="nc" id="L175">	}</span>
+
+	/**
+	 * Return the name of the ServletContext attribute which should be used to retrieve the
+	 * {@link WebApplicationContext} from which to load the delegate {@link Filter} bean.
+	 */
+	public @Nullable String getContextAttribute() {
+<span class="nc" id="L182">		return this.contextAttribute;</span>
+	}
+
+	/**
+	 * Set the name of the target bean in the Spring application context.
+	 * The target bean must implement the standard Servlet Filter interface.
+	 * &lt;p&gt;By default, the {@code filter-name} as specified for the
+	 * DelegatingFilterProxy in {@code web.xml} will be used.
+	 */
+	public void setTargetBeanName(@Nullable String targetBeanName) {
+<span class="nc" id="L192">		this.targetBeanName = targetBeanName;</span>
+<span class="nc" id="L193">	}</span>
+
+	/**
+	 * Return the name of the target bean in the Spring application context.
+	 */
+	protected @Nullable String getTargetBeanName() {
+<span class="nc" id="L199">		return this.targetBeanName;</span>
+	}
+
+	/**
+	 * Set whether to invoke the {@code Filter.init} and
+	 * {@code Filter.destroy} lifecycle methods on the target bean.
+	 * &lt;p&gt;Default is &quot;false&quot;; target beans usually rely on the Spring application
+	 * context for managing their lifecycle. Setting this flag to &quot;true&quot; means
+	 * that the servlet container will control the lifecycle of the target
+	 * Filter, with this proxy delegating the corresponding calls.
+	 */
+	public void setTargetFilterLifecycle(boolean targetFilterLifecycle) {
+<span class="nc" id="L211">		this.targetFilterLifecycle = targetFilterLifecycle;</span>
+<span class="nc" id="L212">	}</span>
+
+	/**
+	 * Return whether to invoke the {@code Filter.init} and
+	 * {@code Filter.destroy} lifecycle methods on the target bean.
+	 */
+	protected boolean isTargetFilterLifecycle() {
+<span class="nc" id="L219">		return this.targetFilterLifecycle;</span>
+	}
+
+
+	@Override
+	protected void initFilterBean() throws ServletException {
+<span class="nc" id="L225">		this.delegateLock.lock();</span>
+		try {
+<span class="nc bnc" id="L227" title="All 2 branches missed.">			if (this.delegate == null) {</span>
+				// If no target bean name specified, use filter name.
+<span class="nc bnc" id="L229" title="All 2 branches missed.">				if (this.targetBeanName == null) {</span>
+<span class="nc" id="L230">					this.targetBeanName = getFilterName();</span>
+				}
+				// Fetch Spring root application context and initialize the delegate early,
+				// if possible. If the root application context will be started after this
+				// filter proxy, we'll have to resort to lazy initialization.
+<span class="nc" id="L235">				WebApplicationContext wac = findWebApplicationContext();</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">				if (wac != null) {</span>
+<span class="nc" id="L237">					this.delegate = initDelegate(wac);</span>
+				}
+			}
+		}
+		finally {
+<span class="nc" id="L242">			this.delegateLock.unlock();</span>
+		}
+<span class="nc" id="L244">	}</span>
+
+	@Override
+	public void doFilter(ServletRequest request, ServletResponse response, FilterChain filterChain)
+			throws ServletException, IOException {
+
+		// Lazily initialize the delegate if necessary.
+<span class="nc" id="L251">		Filter delegateToUse = this.delegate;</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">		if (delegateToUse == null) {</span>
+<span class="nc" id="L253">			this.delegateLock.lock();</span>
+			try {
+<span class="nc" id="L255">				delegateToUse = this.delegate;</span>
+<span class="nc bnc" id="L256" title="All 2 branches missed.">				if (delegateToUse == null) {</span>
+<span class="nc" id="L257">					WebApplicationContext wac = findWebApplicationContext();</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">					if (wac == null) {</span>
+<span class="nc" id="L259">						throw new IllegalStateException(&quot;No WebApplicationContext found: &quot; +</span>
+								&quot;no ContextLoaderListener or DispatcherServlet registered?&quot;);
+					}
+<span class="nc" id="L262">					delegateToUse = initDelegate(wac);</span>
+				}
+<span class="nc" id="L264">				this.delegate = delegateToUse;</span>
+			}
+			finally {
+<span class="nc" id="L267">				this.delegateLock.unlock();</span>
+			}
+		}
+
+		// Let the delegate perform the actual doFilter operation.
+<span class="nc" id="L272">		invokeDelegate(delegateToUse, request, response, filterChain);</span>
+<span class="nc" id="L273">	}</span>
+
+	@Override
+	public void destroy() {
+<span class="nc" id="L277">		Filter delegateToUse = this.delegate;</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">		if (delegateToUse != null) {</span>
+<span class="nc" id="L279">			destroyDelegate(delegateToUse);</span>
+		}
+<span class="nc" id="L281">	}</span>
+
+
+	/**
+	 * Return the {@code WebApplicationContext} passed in at construction time, if available.
+	 * Otherwise, attempt to retrieve a {@code WebApplicationContext} from the
+	 * {@code ServletContext} attribute with the {@linkplain #setContextAttribute
+	 * configured name} if set. Otherwise look up a {@code WebApplicationContext} under
+	 * the well-known &quot;root&quot; application context attribute. The
+	 * {@code WebApplicationContext} must have already been loaded and stored in the
+	 * {@code ServletContext} before this filter gets initialized (or invoked).
+	 * &lt;p&gt;Subclasses may override this method to provide a different
+	 * {@code WebApplicationContext} retrieval strategy.
+	 * @return the {@code WebApplicationContext} for this proxy, or {@code null} if not found
+	 * @see #DelegatingFilterProxy(String, WebApplicationContext)
+	 * @see #getContextAttribute()
+	 * @see WebApplicationContextUtils#getWebApplicationContext(jakarta.servlet.ServletContext)
+	 * @see WebApplicationContext#ROOT_WEB_APPLICATION_CONTEXT_ATTRIBUTE
+	 */
+	protected @Nullable WebApplicationContext findWebApplicationContext() {
+<span class="nc bnc" id="L301" title="All 2 branches missed.">		if (this.webApplicationContext != null) {</span>
+			// The user has injected a context at construction time -&gt; use it...
+<span class="nc bnc" id="L303" title="All 4 branches missed.">			if (this.webApplicationContext instanceof ConfigurableApplicationContext cac &amp;&amp; !cac.isActive()) {</span>
+				// The context has not yet been refreshed -&gt; do so before returning it...
+<span class="nc" id="L305">				cac.refresh();</span>
+			}
+<span class="nc" id="L307">			return this.webApplicationContext;</span>
+		}
+<span class="nc" id="L309">		String attrName = getContextAttribute();</span>
+<span class="nc bnc" id="L310" title="All 2 branches missed.">		if (attrName != null) {</span>
+<span class="nc" id="L311">			return WebApplicationContextUtils.getWebApplicationContext(getServletContext(), attrName);</span>
+		}
+		else {
+<span class="nc" id="L314">			return WebApplicationContextUtils.findWebApplicationContext(getServletContext());</span>
+		}
+	}
+
+	/**
+	 * Initialize the Filter delegate, defined as bean the given Spring
+	 * application context.
+	 * &lt;p&gt;The default implementation fetches the bean from the application context
+	 * and calls the standard {@code Filter.init} method on it, passing
+	 * in the FilterConfig of this Filter proxy.
+	 * @param wac the root application context
+	 * @return the initialized delegate Filter
+	 * @throws ServletException if thrown by the Filter
+	 * @see #getTargetBeanName()
+	 * @see #isTargetFilterLifecycle()
+	 * @see #getFilterConfig()
+	 * @see jakarta.servlet.Filter#init(jakarta.servlet.FilterConfig)
+	 */
+	protected Filter initDelegate(WebApplicationContext wac) throws ServletException {
+<span class="nc" id="L333">		String targetBeanName = getTargetBeanName();</span>
+<span class="nc bnc" id="L334" title="All 2 branches missed.">		Assert.state(targetBeanName != null, &quot;No target bean name set&quot;);</span>
+<span class="nc" id="L335">		Filter delegate = wac.getBean(targetBeanName, Filter.class);</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">		if (isTargetFilterLifecycle()) {</span>
+<span class="nc" id="L337">			delegate.init(getFilterConfig());</span>
+		}
+<span class="nc" id="L339">		return delegate;</span>
+	}
+
+	/**
+	 * Actually invoke the delegate Filter with the given request and response.
+	 * @param delegate the delegate Filter
+	 * @param request the current HTTP request
+	 * @param response the current HTTP response
+	 * @param filterChain the current FilterChain
+	 * @throws ServletException if thrown by the Filter
+	 * @throws IOException if thrown by the Filter
+	 */
+	protected void invokeDelegate(
+			Filter delegate, ServletRequest request, ServletResponse response, FilterChain filterChain)
+			throws ServletException, IOException {
+
+<span class="nc" id="L355">		delegate.doFilter(request, response, filterChain);</span>
+<span class="nc" id="L356">	}</span>
+
+	/**
+	 * Destroy the Filter delegate.
+	 * Default implementation simply calls {@code Filter.destroy} on it.
+	 * @param delegate the Filter delegate (never {@code null})
+	 * @see #isTargetFilterLifecycle()
+	 * @see jakarta.servlet.Filter#destroy()
+	 */
+	protected void destroyDelegate(Filter delegate) {
+<span class="nc bnc" id="L366" title="All 2 branches missed.">		if (isTargetFilterLifecycle()) {</span>
+<span class="nc" id="L367">			delegate.destroy();</span>
+		}
+<span class="nc" id="L369">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

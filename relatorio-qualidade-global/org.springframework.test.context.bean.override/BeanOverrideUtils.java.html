@@ -1,0 +1,290 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BeanOverrideUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context.bean.override</a> &gt; <span class="el_source">BeanOverrideUtils.java</span></div><h1>BeanOverrideUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context.bean.override;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Parameter;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.BiConsumer;
+
+import kotlin.jvm.JvmClassMappingKt;
+import kotlin.reflect.KClass;
+import kotlin.reflect.KFunction;
+import kotlin.reflect.full.KClasses;
+import kotlin.reflect.jvm.ReflectJvmMapping;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.core.KotlinDetector;
+import org.springframework.core.annotation.MergedAnnotation;
+import org.springframework.core.annotation.MergedAnnotations;
+import org.springframework.test.context.TestContextAnnotationUtils;
+import org.springframework.util.Assert;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * Utility methods for working with bean overrides.
+ *
+ * &lt;p&gt;Primarily intended for use within the framework.
+ *
+ * @author Sam Brannen
+ * @since 7.1
+ */
+<span class="nc" id="L58">public abstract class BeanOverrideUtils {</span>
+
+<span class="fc" id="L60">	private static final boolean KOTLIN_REFLECT_PRESENT = KotlinDetector.isKotlinReflectPresent();</span>
+
+<span class="fc" id="L62">	private static final Comparator&lt;MergedAnnotation&lt;? extends Annotation&gt;&gt; reversedMetaDistance =</span>
+<span class="fc" id="L63">			Comparator.&lt;MergedAnnotation&lt;? extends Annotation&gt;&gt; comparingInt(MergedAnnotation::getDistance).reversed();</span>
+
+
+	/**
+	 * Resolve the {@link BeanOverrideHandler} for the given {@link Parameter}.
+	 * @param parameter the parameter to process
+	 * @param testClass the test class to process
+	 * @return the bean override handler for the parameter, or {@code null} if no
+	 * handler was found
+	 * @see BeanOverrideProcessor#createHandler(Annotation, Class, Parameter)
+	 * @see #findAllHandlers(Class)
+	 */
+	public static @Nullable BeanOverrideHandler resolveHandlerForParameter(Parameter parameter, Class&lt;?&gt; testClass) {
+<span class="fc" id="L76">		AtomicReference&lt;BeanOverrideHandler&gt; handlerReference = new AtomicReference&lt;&gt;();</span>
+<span class="fc" id="L77">		AtomicBoolean overrideAnnotationFound = new AtomicBoolean();</span>
+<span class="fc" id="L78">		processElement(parameter, (processor, composedAnnotation) -&gt; {</span>
+<span class="pc bpc" id="L79" title="1 of 2 branches missed.">			Assert.state(!overrideAnnotationFound.getPlain(),</span>
+<span class="nc" id="L80">					() -&gt; &quot;Multiple @BeanOverride annotations found on parameter: &quot; + parameter);</span>
+<span class="fc" id="L81">			overrideAnnotationFound.setPlain(true);</span>
+<span class="fc" id="L82">			BeanOverrideHandler handler = processor.createHandler(composedAnnotation, testClass, parameter);</span>
+<span class="pc bpc" id="L83" title="1 of 2 branches missed.">			Assert.state(handler != null,</span>
+<span class="nc" id="L84">					() -&gt; &quot;BeanOverrideProcessor [%s] returned null BeanOverrideHandler for parameter [%s]&quot;</span>
+<span class="nc" id="L85">							.formatted(processor.getClass().getSimpleName(), parameter));</span>
+<span class="fc" id="L86">			handlerReference.setPlain(handler);</span>
+<span class="fc" id="L87">		});</span>
+<span class="fc" id="L88">		return handlerReference.getPlain();</span>
+	}
+
+	/**
+	 * Process the given {@code testClass} and build the corresponding
+	 * {@link BeanOverrideHandler} list derived from {@link BeanOverride @BeanOverride}
+	 * fields in the test class and its type hierarchy.
+	 * &lt;p&gt;This method does not search the enclosing class hierarchy, does not
+	 * search for {@code @BeanOverride} declarations on classes or interfaces, and
+	 * does not search for {@code @BeanOverride} declarations on constructor
+	 * parameters.
+	 * @param testClass the test class to process
+	 * @return a list of bean override handlers
+	 * @see #findAllHandlers(Class)
+	 */
+	public static List&lt;BeanOverrideHandler&gt; findHandlersForFields(Class&lt;?&gt; testClass) {
+<span class="fc" id="L104">		return findHandlers(testClass, true);</span>
+	}
+
+	/**
+	 * Process the given {@code testClass} and build the corresponding
+	 * {@link BeanOverrideHandler} list derived from {@link BeanOverride @BeanOverride}
+	 * fields in the test class and in its type hierarchy as well as from
+	 * {@code @BeanOverride} declarations on classes and interfaces and
+	 * {@code @BeanOverride} declarations on constructor parameters.
+	 * &lt;p&gt;This method additionally searches for {@code @BeanOverride} declarations
+	 * in the enclosing class hierarchy based on
+	 * {@link TestContextAnnotationUtils#searchEnclosingClass(Class)} semantics.
+	 * @param testClass the test class to process
+	 * @return a list of bean override handlers
+	 * @see #findHandlersForFields(Class)
+	 */
+	public static List&lt;BeanOverrideHandler&gt; findAllHandlers(Class&lt;?&gt; testClass) {
+<span class="fc" id="L121">		return findHandlers(testClass, false);</span>
+	}
+
+	private static List&lt;BeanOverrideHandler&gt; findHandlers(Class&lt;?&gt; testClass, boolean localFieldsOnly) {
+<span class="fc" id="L125">		List&lt;BeanOverrideHandler&gt; handlers = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L126">		findHandlers(testClass, testClass, handlers, localFieldsOnly, false, new HashSet&lt;&gt;());</span>
+<span class="fc" id="L127">		return handlers;</span>
+	}
+
+	/**
+	 * Find handlers using tail recursion to ensure that &quot;locally declared&quot; bean overrides
+	 * take precedence over inherited bean overrides.
+	 * &lt;p&gt;Note: the search algorithm is effectively the inverse of the algorithm used in
+	 * {@link org.springframework.test.context.TestContextAnnotationUtils#findAnnotationDescriptor(Class, Class)},
+	 * but with tail recursion the semantics should be the same.
+	 * @param clazz the class in/on which to search
+	 * @param testClass the original test class
+	 * @param handlers the list of handlers found
+	 * @param localFieldsOnly whether to search only on local fields within the type hierarchy
+	 * @param fromNestedClass whether the search originated from a nested test class
+	 * @param visitedTypes the set of types already visited
+	 * @since 6.2.2
+	 */
+	private static void findHandlers(Class&lt;?&gt; clazz, Class&lt;?&gt; testClass, List&lt;BeanOverrideHandler&gt; handlers,
+			boolean localFieldsOnly, boolean fromNestedClass, Set&lt;Class&lt;?&gt;&gt; visitedTypes) {
+
+		// 0) Ensure that we do not process the same class or interface multiple times.
+<span class="fc bfc" id="L148" title="All 2 branches covered.">		if (!visitedTypes.add(clazz)) {</span>
+<span class="fc" id="L149">			return;</span>
+		}
+
+		// 1) Search enclosing class hierarchy.
+<span class="fc bfc" id="L153" title="All 4 branches covered.">		if (!localFieldsOnly &amp;&amp; TestContextAnnotationUtils.searchEnclosingClass(clazz)) {</span>
+<span class="fc" id="L154">			findHandlers(clazz.getEnclosingClass(), testClass, handlers, localFieldsOnly, true, visitedTypes);</span>
+		}
+
+		// 2) Search class hierarchy.
+<span class="fc" id="L158">		Class&lt;?&gt; superclass = clazz.getSuperclass();</span>
+<span class="fc bfc" id="L159" title="All 4 branches covered.">		if (superclass != null &amp;&amp; superclass != Object.class) {</span>
+<span class="fc" id="L160">			findHandlers(superclass, testClass, handlers, localFieldsOnly, false, visitedTypes);</span>
+		}
+
+<span class="fc bfc" id="L163" title="All 2 branches covered.">		if (!localFieldsOnly) {</span>
+			// 3) Search interfaces.
+<span class="fc bfc" id="L165" title="All 2 branches covered.">			for (Class&lt;?&gt; ifc : clazz.getInterfaces()) {</span>
+<span class="fc" id="L166">				findHandlers(ifc, testClass, handlers, localFieldsOnly, false, visitedTypes);</span>
+			}
+
+			// 4) Process current class.
+<span class="fc" id="L170">			processClass(clazz, testClass, handlers);</span>
+
+			// 5) Process test class constructor parameters.
+			// Specifically, we only process the constructor for the current test class
+			// and enclosing test classes. In other words, we do not process constructors
+			// for superclasses.
+<span class="fc bfc" id="L176" title="All 4 branches covered.">			if (testClass == clazz || fromNestedClass) {</span>
+<span class="fc" id="L177">				Constructor&lt;?&gt; constructor = findConstructorWithParameters(clazz);</span>
+<span class="fc bfc" id="L178" title="All 2 branches covered.">				if (constructor != null) {</span>
+<span class="fc bfc" id="L179" title="All 2 branches covered.">					for (Parameter parameter : constructor.getParameters()) {</span>
+<span class="fc" id="L180">						processParameter(parameter, testClass, handlers);</span>
+					}
+				}
+			}
+		}
+
+		// 6) Process fields in current class.
+<span class="fc" id="L187">		ReflectionUtils.doWithLocalFields(clazz, field -&gt; processField(field, testClass, handlers));</span>
+<span class="fc" id="L188">	}</span>
+
+	private static void processClass(Class&lt;?&gt; clazz, Class&lt;?&gt; testClass, List&lt;BeanOverrideHandler&gt; handlers) {
+<span class="fc" id="L191">		processElement(clazz, (processor, composedAnnotation) -&gt;</span>
+<span class="fc" id="L192">				processor.createHandlers(composedAnnotation, testClass).forEach(handlers::add));</span>
+<span class="fc" id="L193">	}</span>
+
+	private static void processParameter(Parameter parameter, Class&lt;?&gt; testClass, List&lt;BeanOverrideHandler&gt; handlers) {
+<span class="fc" id="L196">		BeanOverrideHandler handler = resolveHandlerForParameter(parameter, testClass);</span>
+<span class="fc bfc" id="L197" title="All 2 branches covered.">		if (handler != null) {</span>
+<span class="fc" id="L198">			handlers.add(handler);</span>
+		}
+<span class="fc" id="L200">	}</span>
+
+	private static void processField(Field field, Class&lt;?&gt; testClass, List&lt;BeanOverrideHandler&gt; handlers) {
+<span class="fc" id="L203">		Class&lt;?&gt; declaringClass = field.getDeclaringClass();</span>
+		// For Java records, the Java compiler propagates @BeanOverride annotations from
+		// canonical constructor parameters to the corresponding component fields, resulting
+		// in duplicates. Similarly for Kotlin types, the Kotlin compiler propagates
+		// @BeanOverride annotations from primary constructor parameters to their corresponding
+		// backing fields, resulting in duplicates. Thus, if we detect either of those scenarios,
+		// we ignore the field.
+<span class="pc bpc" id="L210" title="1 of 4 branches missed.">		if (declaringClass.isRecord() || (KOTLIN_REFLECT_PRESENT &amp;&amp;</span>
+<span class="fc bfc" id="L211" title="All 2 branches covered.">				KotlinDetector.isKotlinType(declaringClass) &amp;&amp;</span>
+<span class="fc bfc" id="L212" title="All 2 branches covered.">				KotlinDelegate.isFieldForBeanOverrideConstructorParameter(field))) {</span>
+<span class="fc" id="L213">			return;</span>
+		}
+
+<span class="fc" id="L216">		AtomicBoolean overrideAnnotationFound = new AtomicBoolean();</span>
+<span class="fc" id="L217">		processElement(field, (processor, composedAnnotation) -&gt; {</span>
+<span class="fc bfc" id="L218" title="All 2 branches covered.">			Assert.state(!Modifier.isStatic(field.getModifiers()),</span>
+<span class="fc" id="L219">					() -&gt; &quot;@BeanOverride field must not be static: &quot; + field);</span>
+<span class="fc bfc" id="L220" title="All 2 branches covered.">			Assert.state(!overrideAnnotationFound.getPlain(),</span>
+<span class="fc" id="L221">					() -&gt; &quot;Multiple @BeanOverride annotations found on field: &quot; + field);</span>
+<span class="fc" id="L222">			overrideAnnotationFound.setPlain(true);</span>
+<span class="fc" id="L223">			handlers.add(processor.createHandler(composedAnnotation, testClass, field));</span>
+<span class="fc" id="L224">		});</span>
+<span class="fc" id="L225">	}</span>
+
+	private static void processElement(AnnotatedElement element, BiConsumer&lt;BeanOverrideProcessor, Annotation&gt; consumer) {
+<span class="fc" id="L228">		MergedAnnotations.from(element)</span>
+<span class="fc" id="L229">				.stream(BeanOverride.class)</span>
+<span class="fc" id="L230">				.sorted(reversedMetaDistance)</span>
+<span class="fc" id="L231">				.forEach(mergedAnnotation -&gt; {</span>
+<span class="fc" id="L232">					MergedAnnotation&lt;?&gt; metaSource = mergedAnnotation.getMetaSource();</span>
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">					Assert.state(metaSource != null, &quot;@BeanOverride annotation must be meta-present&quot;);</span>
+
+<span class="fc" id="L235">					BeanOverride beanOverride = mergedAnnotation.synthesize();</span>
+<span class="fc" id="L236">					BeanOverrideProcessor processor = BeanUtils.instantiateClass(beanOverride.value());</span>
+<span class="fc" id="L237">					Annotation composedAnnotation = metaSource.synthesize();</span>
+<span class="fc" id="L238">					consumer.accept(processor, composedAnnotation);</span>
+<span class="fc" id="L239">				});</span>
+<span class="fc" id="L240">	}</span>
+
+	/**
+	 * Find a single constructor for the supplied test class that declares parameters.
+	 * &lt;p&gt;If the test class declares multiple constructors, this method returns
+	 * {@code null}.
+	 * @param testClass the test class to process
+	 * @return the candidate constructor, or {@code null} if no suitable candidate
+	 * was found
+	 */
+	private static @Nullable Constructor&lt;?&gt; findConstructorWithParameters(Class&lt;?&gt; testClass) {
+<span class="fc" id="L251">		List&lt;Constructor&lt;?&gt;&gt; constructors = Arrays.stream(testClass.getDeclaredConstructors())</span>
+<span class="pc bpc" id="L252" title="1 of 4 branches missed.">				.filter(constructor -&gt; !constructor.isSynthetic() &amp;&amp; constructor.getParameterCount() &gt; 0)</span>
+<span class="fc" id="L253">				.toList();</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">		return (constructors.size() == 1 ? constructors.get(0) : null);</span>
+	}
+
+
+	/**
+	 * Inner class to avoid a hard dependency on Kotlin at runtime.
+	 */
+	private static class KotlinDelegate {
+
+		/**
+		 * Determine if the supplied field corresponds to a primary constructor
+		 * parameter in the field's declaring Kotlin class, where the primary
+		 * constructor parameter is annotated with {@link BeanOverride @BeanOverride}.
+		 */
+		static boolean isFieldForBeanOverrideConstructorParameter(Field field) {
+<span class="fc" id="L269">			KClass&lt;?&gt; kClass = JvmClassMappingKt.getKotlinClass(field.getDeclaringClass());</span>
+<span class="fc" id="L270">			KFunction&lt;?&gt; primaryConstructor = KClasses.getPrimaryConstructor(kClass);</span>
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">			if (primaryConstructor == null) {</span>
+<span class="nc" id="L272">				return false;</span>
+			}
+<span class="fc" id="L274">			Constructor&lt;?&gt; javaConstructor = ReflectJvmMapping.getJavaConstructor(primaryConstructor);</span>
+<span class="pc bpc" id="L275" title="1 of 2 branches missed.">			if (javaConstructor == null) {</span>
+<span class="nc" id="L276">				return false;</span>
+			}
+<span class="fc" id="L278">			String fieldName = field.getName();</span>
+<span class="fc bfc" id="L279" title="All 2 branches covered.">			for (Parameter parameter : javaConstructor.getParameters()) {</span>
+<span class="fc bfc" id="L280" title="All 2 branches covered.">				if (parameter.getName().equals(fieldName) &amp;&amp;</span>
+<span class="fc bfc" id="L281" title="All 2 branches covered.">						MergedAnnotations.from(parameter).isPresent(BeanOverride.class)) {</span>
+<span class="fc" id="L282">					return true;</span>
+				}
+			}
+<span class="fc" id="L285">			return false;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

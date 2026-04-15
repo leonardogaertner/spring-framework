@@ -1,0 +1,517 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>AbstractJacksonHttpMessageConverter.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.converter</a> &gt; <span class="el_source">AbstractJacksonHttpMessageConverter.java</span></div><h1>AbstractJacksonHttpMessageConverter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.converter;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.Reader;
+import java.lang.reflect.Type;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.function.Consumer;
+
+import com.fasterxml.jackson.annotation.JsonView;
+import org.jspecify.annotations.Nullable;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.JsonEncoding;
+import tools.jackson.core.JsonGenerator;
+import tools.jackson.core.PrettyPrinter;
+import tools.jackson.core.util.DefaultIndenter;
+import tools.jackson.core.util.DefaultPrettyPrinter;
+import tools.jackson.databind.JacksonModule;
+import tools.jackson.databind.JavaType;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectReader;
+import tools.jackson.databind.ObjectWriter;
+import tools.jackson.databind.SerializationConfig;
+import tools.jackson.databind.SerializationFeature;
+import tools.jackson.databind.cfg.MapperBuilder;
+import tools.jackson.databind.exc.InvalidDefinitionException;
+import tools.jackson.databind.ser.FilterProvider;
+
+import org.springframework.core.GenericTypeResolver;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ResolvableType;
+import org.springframework.http.HttpInputMessage;
+import org.springframework.http.HttpOutputMessage;
+import org.springframework.http.MediaType;
+import org.springframework.http.ProblemDetail;
+import org.springframework.http.converter.json.JacksonJsonHttpMessageConverter;
+import org.springframework.http.converter.json.MappingJacksonInputMessage;
+import org.springframework.http.converter.json.MappingJacksonValue;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.StreamUtils;
+import org.springframework.util.TypeUtils;
+
+/**
+ * Abstract base class for Jackson based and content type independent
+ * {@link HttpMessageConverter} implementations.
+ *
+ * &lt;p&gt;The following hint entries are supported:
+ * &lt;ul&gt;
+ *     &lt;li&gt;A JSON view with a &lt;code&gt;com.fasterxml.jackson.annotation.JsonView&lt;/code&gt;
+ *         key and the class name of the JSON view as value.&lt;/li&gt;
+ *     &lt;li&gt;A filter provider with a &lt;code&gt;tools.jackson.databind.ser.FilterProvider&lt;/code&gt;
+ *         key and the filter provider class name as value.&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Sebastien Deleuze
+ * @since 7.0
+ * @param &lt;T&gt; the type of {@link ObjectMapper}
+ * @see JacksonJsonHttpMessageConverter
+ */
+public abstract class AbstractJacksonHttpMessageConverter&lt;T extends ObjectMapper&gt; extends AbstractSmartHttpMessageConverter&lt;Object&gt; {
+
+<span class="fc" id="L90">	private static final String JSON_VIEW_HINT = JsonView.class.getName();</span>
+
+<span class="fc" id="L92">	private static final String FILTER_PROVIDER_HINT = FilterProvider.class.getName();</span>
+
+	private static final Map&lt;String, JsonEncoding&gt; ENCODINGS;
+
+<span class="fc" id="L96">	private static volatile @Nullable List&lt;JacksonModule&gt; modules = null;</span>
+
+	static {
+<span class="fc" id="L99">		ENCODINGS = CollectionUtils.newHashMap(JsonEncoding.values().length);</span>
+<span class="fc bfc" id="L100" title="All 2 branches covered.">		for (JsonEncoding encoding : JsonEncoding.values()) {</span>
+<span class="fc" id="L101">			ENCODINGS.put(encoding.getJavaName(), encoding);</span>
+		}
+<span class="fc" id="L103">		ENCODINGS.put(&quot;US-ASCII&quot;, JsonEncoding.UTF8);</span>
+<span class="fc" id="L104">	}</span>
+
+
+	protected final T defaultMapper;
+
+	private @Nullable Map&lt;Class&lt;?&gt;, Map&lt;MediaType, T&gt;&gt; mapperRegistrations;
+
+	private final @Nullable PrettyPrinter ssePrettyPrinter;
+
+
+	/**
+	 * Construct a new instance with the provided {@link MapperBuilder builder}
+	 * customized with the {@link tools.jackson.databind.JacksonModule}s found
+	 * by {@link MapperBuilder#findModules(ClassLoader)}.
+	 */
+<span class="fc" id="L119">	private AbstractJacksonHttpMessageConverter(MapperBuilder&lt;T, ?&gt; builder) {</span>
+<span class="fc" id="L120">		this.defaultMapper = builder.addModules(initModules()).build();</span>
+<span class="fc" id="L121">		this.ssePrettyPrinter = initSsePrettyPrinter();</span>
+<span class="fc" id="L122">	}</span>
+
+	/**
+	 * Construct a new instance with the provided {@link MapperBuilder builder}
+	 * customized with the {@link tools.jackson.databind.JacksonModule}s found
+	 * by {@link MapperBuilder#findModules(ClassLoader)} and {@link MediaType}.
+	 */
+	protected AbstractJacksonHttpMessageConverter(MapperBuilder&lt;T, ?&gt; builder, MediaType supportedMediaType) {
+<span class="fc" id="L130">		this(builder);</span>
+<span class="fc" id="L131">		setSupportedMediaTypes(Collections.singletonList(supportedMediaType));</span>
+<span class="fc" id="L132">	}</span>
+
+	/**
+	 * Construct a new instance with the provided {@link MapperBuilder builder}
+	 * customized with the {@link tools.jackson.databind.JacksonModule}s found
+	 * by {@link MapperBuilder#findModules(ClassLoader)} and {@link MediaType}s.
+	 */
+	protected AbstractJacksonHttpMessageConverter(MapperBuilder&lt;T, ?&gt; builder, MediaType... supportedMediaTypes) {
+<span class="fc" id="L140">		this(builder);</span>
+<span class="fc" id="L141">		setSupportedMediaTypes(Arrays.asList(supportedMediaTypes));</span>
+<span class="fc" id="L142">	}</span>
+
+	/**
+	 * Construct a new instance with the provided {@link ObjectMapper}.
+	 */
+<span class="fc" id="L147">	protected AbstractJacksonHttpMessageConverter(T mapper) {</span>
+<span class="fc" id="L148">		this.defaultMapper = mapper;</span>
+<span class="fc" id="L149">		this.ssePrettyPrinter = initSsePrettyPrinter();</span>
+<span class="fc" id="L150">	}</span>
+
+	/**
+	 * Construct a new instance with the provided {@link ObjectMapper} and {@link MediaType}.
+	 */
+	protected AbstractJacksonHttpMessageConverter(T mapper, MediaType supportedMediaType) {
+<span class="nc" id="L156">		this(mapper);</span>
+<span class="nc" id="L157">		setSupportedMediaTypes(Collections.singletonList(supportedMediaType));</span>
+<span class="nc" id="L158">	}</span>
+
+	/**
+	 * Construct a new instance with the provided {@link ObjectMapper} and {@link MediaType}s.
+	 */
+	protected AbstractJacksonHttpMessageConverter(T mapper, MediaType... supportedMediaTypes) {
+<span class="fc" id="L164">		this(mapper);</span>
+<span class="fc" id="L165">		setSupportedMediaTypes(Arrays.asList(supportedMediaTypes));</span>
+<span class="fc" id="L166">	}</span>
+
+	private List&lt;JacksonModule&gt; initModules() {
+<span class="fc bfc" id="L169" title="All 2 branches covered.">		if (modules == null) {</span>
+<span class="fc" id="L170">			modules = MapperBuilder.findModules(AbstractJacksonHttpMessageConverter.class.getClassLoader());</span>
+
+		}
+<span class="fc" id="L173">		return Objects.requireNonNull(modules);</span>
+	}
+
+	private PrettyPrinter initSsePrettyPrinter() {
+<span class="fc" id="L177">		DefaultPrettyPrinter prettyPrinter = new DefaultPrettyPrinter();</span>
+<span class="fc" id="L178">		prettyPrinter.indentObjectsWith(new DefaultIndenter(&quot;  &quot;, &quot;\ndata:&quot;));</span>
+<span class="fc" id="L179">		return prettyPrinter;</span>
+	}
+
+	@Override
+	public void setSupportedMediaTypes(List&lt;MediaType&gt; supportedMediaTypes) {
+<span class="fc" id="L184">		super.setSupportedMediaTypes(supportedMediaTypes);</span>
+<span class="fc" id="L185">	}</span>
+
+	/**
+	 * Return the main {@link ObjectMapper} in use.
+	 */
+	public T getMapper() {
+<span class="fc" id="L191">		return this.defaultMapper;</span>
+	}
+
+	/**
+	 * Configure the {@link ObjectMapper} instances to use for the given
+	 * {@link Class}. This is useful when you want to deviate from the
+	 * {@link #getMapper() default} ObjectMapper or have the
+	 * {@code ObjectMapper} vary by {@code MediaType}.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; Use of this method effectively turns off use of
+	 * the default {@link #getMapper() ObjectMapper} and
+	 * {@link #setSupportedMediaTypes(List) supportedMediaTypes} for the given
+	 * class. Therefore it is important for the mappings configured here to
+	 * {@link MediaType#includes(MediaType) include} every MediaType that must
+	 * be supported for the given class.
+	 * @param clazz the type of Object to register ObjectMapper instances for
+	 * @param registrar a consumer to populate or otherwise update the
+	 * MediaType-to-ObjectMapper associations for the given Class
+	 */
+	public void registerMappersForType(Class&lt;?&gt; clazz, Consumer&lt;Map&lt;MediaType, T&gt;&gt; registrar) {
+<span class="pc bpc" id="L210" title="1 of 2 branches missed.">		if (this.mapperRegistrations == null) {</span>
+<span class="fc" id="L211">			this.mapperRegistrations = new LinkedHashMap&lt;&gt;();</span>
+		}
+<span class="fc" id="L213">		Map&lt;MediaType, T&gt; registrations =</span>
+<span class="fc" id="L214">				this.mapperRegistrations.computeIfAbsent(clazz, c -&gt; new LinkedHashMap&lt;&gt;());</span>
+<span class="fc" id="L215">		registrar.accept(registrations);</span>
+<span class="fc" id="L216">	}</span>
+
+	/**
+	 * Return ObjectMapper registrations for the given class, if any.
+	 * @param clazz the class to look up for registrations for
+	 * @return a map with registered MediaType-to-ObjectMapper registrations,
+	 * or empty if in case of no registrations for the given class.
+	 */
+	public Map&lt;MediaType, T&gt; getMappersForType(Class&lt;?&gt; clazz) {
+<span class="nc bnc" id="L225" title="All 2 branches missed.">		for (Map.Entry&lt;Class&lt;?&gt;, Map&lt;MediaType, T&gt;&gt; entry : getMapperRegistrations().entrySet()) {</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">			if (entry.getKey().isAssignableFrom(clazz)) {</span>
+<span class="nc" id="L227">				return entry.getValue();</span>
+			}
+<span class="nc" id="L229">		}</span>
+<span class="nc" id="L230">		return Collections.emptyMap();</span>
+	}
+
+	@Override
+	public List&lt;MediaType&gt; getSupportedMediaTypes(Class&lt;?&gt; clazz) {
+<span class="fc" id="L235">		List&lt;MediaType&gt; result = null;</span>
+<span class="fc bfc" id="L236" title="All 2 branches covered.">		for (Map.Entry&lt;Class&lt;?&gt;, Map&lt;MediaType, T&gt;&gt; entry : getMapperRegistrations().entrySet()) {</span>
+<span class="pc bpc" id="L237" title="1 of 2 branches missed.">			if (entry.getKey().isAssignableFrom(clazz)) {</span>
+<span class="pc bpc" id="L238" title="1 of 2 branches missed.">				result = (result != null ? result : new ArrayList&lt;&gt;(entry.getValue().size()));</span>
+<span class="fc" id="L239">				result.addAll(entry.getValue().keySet());</span>
+			}
+<span class="fc" id="L241">		}</span>
+<span class="fc bfc" id="L242" title="All 2 branches covered.">		if (!CollectionUtils.isEmpty(result)) {</span>
+<span class="fc" id="L243">			return result;</span>
+		}
+<span class="fc bfc" id="L245" title="All 2 branches covered.">		return (ProblemDetail.class.isAssignableFrom(clazz) ?</span>
+<span class="fc" id="L246">				getMediaTypesForProblemDetail() : getSupportedMediaTypes());</span>
+	}
+
+	private Map&lt;Class&lt;?&gt;, Map&lt;MediaType, T&gt;&gt; getMapperRegistrations() {
+<span class="fc bfc" id="L250" title="All 2 branches covered.">		return (this.mapperRegistrations != null ? this.mapperRegistrations : Collections.emptyMap());</span>
+	}
+
+	/**
+	 * Return the supported media type(s) for {@link ProblemDetail}.
+	 * By default, an empty list, unless overridden in subclasses.
+	 */
+	protected List&lt;MediaType&gt; getMediaTypesForProblemDetail() {
+<span class="nc" id="L258">		return Collections.emptyList();</span>
+	}
+
+
+	@Override
+	public boolean canRead(ResolvableType type, @Nullable MediaType mediaType) {
+<span class="fc bfc" id="L264" title="All 2 branches covered.">		if (!canRead(mediaType)) {</span>
+<span class="fc" id="L265">			return false;</span>
+		}
+<span class="pc bpc" id="L267" title="3 of 4 branches missed.">		return this.mapperRegistrations == null || selectMapper(type.toClass(), mediaType) != null;</span>
+	}
+
+	@Override
+	@SuppressWarnings(&quot;removal&quot;)
+	public boolean canWrite(ResolvableType type, Class&lt;?&gt; valueClass, @Nullable MediaType mediaType) {
+<span class="fc bfc" id="L273" title="All 2 branches covered.">		if (!canWrite(mediaType)) {</span>
+<span class="fc" id="L274">			return false;</span>
+		}
+<span class="fc bfc" id="L276" title="All 4 branches covered.">		if (mediaType != null &amp;&amp; mediaType.getCharset() != null) {</span>
+<span class="fc" id="L277">			Charset charset = mediaType.getCharset();</span>
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">			if (!ENCODINGS.containsKey(charset.name())) {</span>
+<span class="nc" id="L279">				return false;</span>
+			}
+		}
+<span class="pc bpc" id="L282" title="1 of 2 branches missed.">		if (MappingJacksonValue.class.isAssignableFrom(valueClass)) {</span>
+<span class="nc" id="L283">			throw new UnsupportedOperationException(&quot;MappingJacksonValue is not supported, use hints instead&quot;);</span>
+		}
+<span class="pc bpc" id="L285" title="1 of 4 branches missed.">		return this.mapperRegistrations == null || selectMapper(valueClass, mediaType) != null;</span>
+	}
+
+	@Override
+	public boolean canWriteRepeatedly(Object o, @Nullable MediaType contentType) {
+<span class="fc" id="L290">		return true;</span>
+	}
+
+	/**
+	 * Select an ObjectMapper to use, either the main ObjectMapper or another
+	 * if the handling for the given Class has been customized through
+	 * {@link #registerMappersForType(Class, Consumer)}.
+	 */
+	private @Nullable T selectMapper(Class&lt;?&gt; targetType, @Nullable MediaType targetMediaType) {
+<span class="fc bfc" id="L299" title="All 4 branches covered.">		if (targetMediaType == null || CollectionUtils.isEmpty(this.mapperRegistrations)) {</span>
+<span class="fc" id="L300">			return this.defaultMapper;</span>
+		}
+<span class="pc bpc" id="L302" title="1 of 2 branches missed.">		for (Map.Entry&lt;Class&lt;?&gt;, Map&lt;MediaType, T&gt;&gt; typeEntry : getMapperRegistrations().entrySet()) {</span>
+<span class="pc bpc" id="L303" title="1 of 2 branches missed.">			if (typeEntry.getKey().isAssignableFrom(targetType)) {</span>
+<span class="pc bpc" id="L304" title="1 of 2 branches missed.">				for (Map.Entry&lt;MediaType, T&gt; mapperEntry : typeEntry.getValue().entrySet()) {</span>
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">					if (mapperEntry.getKey().includes(targetMediaType)) {</span>
+<span class="fc" id="L306">						return mapperEntry.getValue();</span>
+					}
+<span class="nc" id="L308">				}</span>
+				// No matching registrations
+<span class="nc" id="L310">				return null;</span>
+			}
+<span class="nc" id="L312">		}</span>
+		// No registrations
+<span class="nc" id="L314">		return this.defaultMapper;</span>
+	}
+
+	@Override
+	public Object read(ResolvableType type, HttpInputMessage inputMessage, @Nullable Map&lt;String, Object&gt; hints)
+			throws IOException, HttpMessageNotReadableException {
+
+<span class="fc bfc" id="L321" title="All 2 branches covered.">		Class&lt;?&gt; contextClass = (type.getSource() instanceof MethodParameter parameter ? parameter.getContainingClass() :</span>
+<span class="fc bfc" id="L322" title="All 2 branches covered.">				(hints != null ? (Class&lt;?&gt;) hints.get(&quot;contextClass&quot;) : null));</span>
+<span class="fc" id="L323">		JavaType javaType = getJavaType(type.getType(), contextClass);</span>
+<span class="fc" id="L324">		return readJavaType(javaType, inputMessage, hints);</span>
+	}
+
+	@Override
+	protected Object readInternal(Class&lt;?&gt; clazz, HttpInputMessage inputMessage)
+			throws IOException, HttpMessageNotReadableException {
+
+<span class="fc" id="L331">		JavaType javaType = getJavaType(clazz, null);</span>
+<span class="fc" id="L332">		return readJavaType(javaType, inputMessage, null);</span>
+	}
+
+	@SuppressWarnings(&quot;removal&quot;)
+	private Object readJavaType(JavaType javaType, HttpInputMessage inputMessage, @Nullable Map&lt;String, Object&gt; hints) throws IOException {
+<span class="fc" id="L337">		MediaType contentType = inputMessage.getHeaders().getContentType();</span>
+<span class="fc" id="L338">		Charset charset = getCharset(contentType);</span>
+
+<span class="fc" id="L340">		T mapper = selectMapper(javaType.getRawClass(), contentType);</span>
+<span class="pc bpc" id="L341" title="1 of 2 branches missed.">		Assert.state(mapper != null, () -&gt; &quot;No ObjectMapper for &quot; + javaType);</span>
+
+<span class="pc bpc" id="L343" title="1 of 2 branches missed.">		boolean isUnicode = ENCODINGS.containsKey(charset.name()) ||</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">				&quot;UTF-16&quot;.equals(charset.name()) ||</span>
+<span class="pc bnc" id="L345" title="All 2 branches missed.">				&quot;UTF-32&quot;.equals(charset.name());</span>
+		try {
+<span class="fc" id="L347">			InputStream inputStream = StreamUtils.nonClosing(inputMessage.getBody());</span>
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">			if (inputMessage instanceof MappingJacksonInputMessage) {</span>
+<span class="nc" id="L349">				throw new UnsupportedOperationException(&quot;MappingJacksonInputMessage is not supported, use hints instead&quot;);</span>
+			}
+<span class="fc" id="L351">			ObjectReader objectReader = mapper.readerFor(javaType);</span>
+<span class="fc bfc" id="L352" title="All 4 branches covered.">			if (hints != null &amp;&amp; hints.containsKey(JSON_VIEW_HINT)) {</span>
+<span class="fc" id="L353">				objectReader = objectReader.withView((Class&lt;?&gt;) hints.get(JSON_VIEW_HINT));</span>
+			}
+<span class="fc" id="L355">			objectReader = customizeReader(objectReader, javaType);</span>
+<span class="pc bpc" id="L356" title="1 of 2 branches missed.">			if (isUnicode) {</span>
+<span class="fc" id="L357">				return objectReader.readValue(inputStream);</span>
+			}
+			else {
+<span class="nc" id="L360">				Reader reader = new InputStreamReader(inputStream, charset);</span>
+<span class="nc" id="L361">				return objectReader.readValue(reader);</span>
+			}
+		}
+<span class="nc" id="L364">		catch (InvalidDefinitionException ex) {</span>
+<span class="nc" id="L365">			throw new HttpMessageConversionException(&quot;Type definition error: &quot; + ex.getType(), ex);</span>
+		}
+<span class="fc" id="L367">		catch (JacksonException ex) {</span>
+<span class="fc" id="L368">			throw new HttpMessageNotReadableException(&quot;JSON parse error: &quot; + ex.getOriginalMessage(), ex, inputMessage);</span>
+		}
+	}
+
+	/**
+	 * Subclasses can use this method to customize the {@link ObjectReader} used
+	 * for reading values.
+	 * @param reader the reader instance to customize
+	 * @param javaType the type of element values to read
+	 * @return the customized {@link ObjectReader}
+	 */
+	protected ObjectReader customizeReader(ObjectReader reader, JavaType javaType) {
+<span class="fc" id="L380">		return reader;</span>
+	}
+
+	/**
+	 * Determine the charset to use for JSON input.
+	 * &lt;p&gt;By default this is either the charset from the input {@code MediaType}
+	 * or otherwise {@code UTF-8}. Can be overridden in subclasses.
+	 * @param contentType the content type of the HTTP input message
+	 * @return the charset to use
+	 */
+	protected Charset getCharset(@Nullable MediaType contentType) {
+<span class="pc bpc" id="L391" title="1 of 4 branches missed.">		if (contentType != null &amp;&amp; contentType.getCharset() != null) {</span>
+<span class="nc" id="L392">			return contentType.getCharset();</span>
+		}
+		else {
+<span class="fc" id="L395">			return StandardCharsets.UTF_8;</span>
+		}
+	}
+
+	@Override
+	protected void writeInternal(Object object, ResolvableType resolvableType, HttpOutputMessage outputMessage, @Nullable Map&lt;String, Object&gt; hints)
+			throws IOException, HttpMessageNotWritableException {
+
+<span class="fc" id="L403">		MediaType contentType = outputMessage.getHeaders().getContentType();</span>
+<span class="fc" id="L404">		JsonEncoding encoding = getJsonEncoding(contentType);</span>
+
+<span class="fc" id="L406">		Class&lt;?&gt; clazz = object.getClass();</span>
+<span class="fc" id="L407">		T mapper = selectMapper(clazz, contentType);</span>
+<span class="pc bpc" id="L408" title="1 of 2 branches missed.">		Assert.state(mapper != null, () -&gt; &quot;No ObjectMapper for &quot; + clazz.getName());</span>
+
+<span class="fc" id="L410">		OutputStream outputStream = StreamUtils.nonClosing(outputMessage.getBody());</span>
+<span class="fc" id="L411">		Class&lt;?&gt; jsonView = null;</span>
+<span class="fc" id="L412">		FilterProvider filters = null;</span>
+<span class="fc" id="L413">		JavaType javaType = null;</span>
+
+<span class="fc" id="L415">		Type type = resolvableType.getType();</span>
+<span class="fc bfc" id="L416" title="All 2 branches covered.">		if (TypeUtils.isAssignable(type, object.getClass())) {</span>
+<span class="fc" id="L417">			javaType = getJavaType(type, null);</span>
+		}
+<span class="fc bfc" id="L419" title="All 2 branches covered.">		if (hints != null) {</span>
+<span class="fc" id="L420">			jsonView = (Class&lt;?&gt;) hints.get(JSON_VIEW_HINT);</span>
+<span class="fc" id="L421">			filters = (FilterProvider) hints.get(FILTER_PROVIDER_HINT);</span>
+		}
+
+<span class="fc bfc" id="L424" title="All 2 branches covered.">		ObjectWriter objectWriter = (jsonView != null ?</span>
+<span class="fc" id="L425">				mapper.writerWithView(jsonView) : mapper.writer());</span>
+<span class="pc bpc" id="L426" title="1 of 2 branches missed.">		if (filters != null) {</span>
+<span class="nc" id="L427">			objectWriter = objectWriter.with(filters);</span>
+		}
+<span class="pc bpc" id="L429" title="1 of 6 branches missed.">		if (javaType != null &amp;&amp; (javaType.isContainerType() || javaType.isTypeOrSubTypeOf(Optional.class))) {</span>
+<span class="fc" id="L430">			objectWriter = objectWriter.forType(javaType);</span>
+		}
+<span class="fc" id="L432">		SerializationConfig config = objectWriter.getConfig();</span>
+<span class="pc bpc" id="L433" title="1 of 4 branches missed.">		if (contentType != null &amp;&amp; contentType.isCompatibleWith(MediaType.TEXT_EVENT_STREAM) &amp;&amp;</span>
+<span class="fc bfc" id="L434" title="All 2 branches covered.">				config.isEnabled(SerializationFeature.INDENT_OUTPUT)) {</span>
+<span class="fc" id="L435">			objectWriter = objectWriter.with(this.ssePrettyPrinter);</span>
+		}
+<span class="fc" id="L437">		objectWriter = customizeWriter(objectWriter, javaType, contentType);</span>
+
+<span class="fc" id="L439">		try (JsonGenerator generator = objectWriter.createGenerator(outputStream, encoding)) {</span>
+<span class="fc" id="L440">			writePrefix(generator, object);</span>
+<span class="fc" id="L441">			objectWriter.writeValue(generator, object);</span>
+<span class="fc" id="L442">			writeSuffix(generator, object);</span>
+<span class="fc" id="L443">			generator.flush();</span>
+		}
+<span class="nc" id="L445">		catch (InvalidDefinitionException ex) {</span>
+<span class="nc" id="L446">			throw new HttpMessageConversionException(&quot;Type definition error: &quot; + ex.getType(), ex);</span>
+		}
+<span class="nc" id="L448">		catch (JacksonException ex) {</span>
+<span class="nc" id="L449">			throw new HttpMessageNotWritableException(&quot;Could not write JSON: &quot; + ex.getOriginalMessage(), ex);</span>
+<span class="fc" id="L450">		}</span>
+<span class="fc" id="L451">	}</span>
+
+	/**
+	 * Subclasses can use this method to customize the {@link ObjectWriter} used
+	 * for writing values.
+	 * @param writer the writer instance to customize
+	 * @param javaType the type of element values to write
+	 * @param contentType the selected media type
+	 * @return the customized {@link ObjectWriter}
+	 */
+	protected ObjectWriter customizeWriter(
+			ObjectWriter writer, @Nullable JavaType javaType, @Nullable MediaType contentType) {
+
+<span class="fc" id="L464">		return writer;</span>
+	}
+
+	/**
+	 * Write a prefix before the main content.
+	 * @param generator the generator to use for writing content.
+	 * @param object the object to write to the output message
+	 */
+	protected void writePrefix(JsonGenerator generator, Object object) {
+<span class="fc" id="L473">	}</span>
+
+	/**
+	 * Write a suffix after the main content.
+	 * @param generator the generator to use for writing content.
+	 * @param object the object to write to the output message
+	 */
+	protected void writeSuffix(JsonGenerator generator, Object object) {
+<span class="fc" id="L481">	}</span>
+
+	/**
+	 * Return the Jackson {@link JavaType} for the specified type and context class.
+	 * @param type the generic type to return the Jackson JavaType for
+	 * @param contextClass a context class for the target type, for example a class
+	 * in which the target type appears in a method signature (can be {@code null})
+	 * @return the Jackson JavaType
+	 */
+	protected JavaType getJavaType(Type type, @Nullable Class&lt;?&gt; contextClass) {
+<span class="fc" id="L491">		return this.defaultMapper.constructType(GenericTypeResolver.resolveType(type, contextClass));</span>
+	}
+
+	/**
+	 * Determine the JSON encoding to use for the given content type.
+	 * @param contentType the media type as requested by the caller
+	 * @return the JSON encoding to use (never {@code null})
+	 */
+	protected JsonEncoding getJsonEncoding(@Nullable MediaType contentType) {
+<span class="pc bpc" id="L500" title="1 of 4 branches missed.">		if (contentType != null &amp;&amp; contentType.getCharset() != null) {</span>
+<span class="fc" id="L501">			Charset charset = contentType.getCharset();</span>
+<span class="fc" id="L502">			JsonEncoding encoding = ENCODINGS.get(charset.name());</span>
+<span class="pc bpc" id="L503" title="1 of 2 branches missed.">			if (encoding != null) {</span>
+<span class="fc" id="L504">				return encoding;</span>
+			}
+		}
+<span class="fc" id="L507">		return JsonEncoding.UTF8;</span>
+	}
+
+	@Override
+	@SuppressWarnings(&quot;removal&quot;)
+	protected boolean supportsRepeatableWrites(Object o) {
+<span class="nc" id="L513">		return true;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,184 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ForwardedHeaderTransformer.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.server.adapter</a> &gt; <span class="el_source">ForwardedHeaderTransformer.java</span></div><h1>ForwardedHeaderTransformer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.server.adapter;
+
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.util.Collections;
+import java.util.Locale;
+import java.util.Set;
+import java.util.function.Function;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.context.ApplicationContext;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.util.LinkedCaseInsensitiveMap;
+import org.springframework.util.StringUtils;
+import org.springframework.web.util.ForwardedHeaderUtils;
+import org.springframework.web.util.UriComponents;
+
+/**
+ * Extract values from &quot;Forwarded&quot; and &quot;X-Forwarded-*&quot; headers to override
+ * the request URI (i.e. {@link ServerHttpRequest#getURI()}) so it reflects
+ * the client-originated protocol and address.
+ *
+ * &lt;p&gt;An instance of this class is typically declared as a bean with the name
+ * &quot;forwardedHeaderTransformer&quot; and detected by
+ * {@link WebHttpHandlerBuilder#applicationContext(ApplicationContext)}, or it
+ * can also be registered directly via
+ * {@link WebHttpHandlerBuilder#forwardedHeaderTransformer(ForwardedHeaderTransformer)}.
+ *
+ * &lt;p&gt;There are security considerations for forwarded headers since an application
+ * cannot know if the headers were added by a proxy, as intended, or by a malicious
+ * client. This is why a proxy at the boundary of trust should be configured to
+ * remove untrusted Forwarded headers that come from the outside.
+ *
+ * &lt;p&gt;You can also configure the ForwardedHeaderFilter with {@link #setRemoveOnly removeOnly},
+ * in which case it removes but does not use the headers.
+ *
+ * @author Rossen Stoyanchev
+ * @author Sebastien Deleuze
+ * @author Mengqi Xu
+ * @since 5.1
+ * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc7239&quot;&gt;https://tools.ietf.org/html/rfc7239&lt;/a&gt;
+ * @see &lt;a href=&quot;https://docs.spring.io/spring-framework/reference/web/webflux/reactive-spring.html#webflux-forwarded-headers&quot;&gt;Forwarded Headers&lt;/a&gt;
+ */
+<span class="nc" id="L63">public class ForwardedHeaderTransformer implements Function&lt;ServerHttpRequest, ServerHttpRequest&gt; {</span>
+
+<span class="nc" id="L65">	static final Set&lt;String&gt; FORWARDED_HEADER_NAMES =</span>
+<span class="nc" id="L66">			Collections.newSetFromMap(new LinkedCaseInsensitiveMap&lt;&gt;(10, Locale.ROOT));</span>
+
+	static {
+<span class="nc" id="L69">		FORWARDED_HEADER_NAMES.add(&quot;Forwarded&quot;);</span>
+<span class="nc" id="L70">		FORWARDED_HEADER_NAMES.add(&quot;X-Forwarded-Host&quot;);</span>
+<span class="nc" id="L71">		FORWARDED_HEADER_NAMES.add(&quot;X-Forwarded-Port&quot;);</span>
+<span class="nc" id="L72">		FORWARDED_HEADER_NAMES.add(&quot;X-Forwarded-Proto&quot;);</span>
+<span class="nc" id="L73">		FORWARDED_HEADER_NAMES.add(&quot;X-Forwarded-Prefix&quot;);</span>
+<span class="nc" id="L74">		FORWARDED_HEADER_NAMES.add(&quot;X-Forwarded-Ssl&quot;);</span>
+<span class="nc" id="L75">		FORWARDED_HEADER_NAMES.add(&quot;X-Forwarded-For&quot;);</span>
+<span class="nc" id="L76">	}</span>
+
+
+	private boolean removeOnly;
+
+
+	/**
+	 * Enable mode in which any &quot;Forwarded&quot; or &quot;X-Forwarded-*&quot; headers are
+	 * removed only and the information in them ignored.
+	 * @param removeOnly whether to discard and ignore forwarded headers
+	 */
+	public void setRemoveOnly(boolean removeOnly) {
+<span class="nc" id="L88">		this.removeOnly = removeOnly;</span>
+<span class="nc" id="L89">	}</span>
+
+	/**
+	 * Whether the &quot;remove only&quot; mode is on.
+	 * @see #setRemoveOnly
+	 */
+	public boolean isRemoveOnly() {
+<span class="nc" id="L96">		return this.removeOnly;</span>
+	}
+
+
+	/**
+	 * Apply and remove, or remove Forwarded type headers.
+	 * @param request the request
+	 */
+	@Override
+	public ServerHttpRequest apply(ServerHttpRequest request) {
+<span class="nc bnc" id="L106" title="All 2 branches missed.">		if (hasForwardedHeaders(request)) {</span>
+<span class="nc" id="L107">			ServerHttpRequest.Builder builder = request.mutate();</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">			if (!this.removeOnly) {</span>
+<span class="nc" id="L109">				URI originalUri = request.getURI();</span>
+<span class="nc" id="L110">				HttpHeaders headers = request.getHeaders();</span>
+<span class="nc" id="L111">				URI uri = adaptFromForwardedHeaders(originalUri, headers);</span>
+<span class="nc" id="L112">				builder.uri(uri);</span>
+<span class="nc" id="L113">				String prefix = getForwardedPrefix(request);</span>
+<span class="nc bnc" id="L114" title="All 2 branches missed.">				if (prefix != null) {</span>
+<span class="nc" id="L115">					builder.path(prefix + uri.getRawPath());</span>
+<span class="nc" id="L116">					builder.contextPath(prefix);</span>
+				}
+<span class="nc" id="L118">				InetSocketAddress remoteAddress = request.getRemoteAddress();</span>
+<span class="nc" id="L119">				remoteAddress = ForwardedHeaderUtils.parseForwardedFor(originalUri, headers, remoteAddress);</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">				if (remoteAddress != null) {</span>
+<span class="nc" id="L121">					builder.remoteAddress(remoteAddress);</span>
+				}
+<span class="nc" id="L123">				InetSocketAddress localAddress = request.getLocalAddress();</span>
+<span class="nc" id="L124">				localAddress = ForwardedHeaderUtils.parseForwardedBy(originalUri, headers, localAddress);</span>
+<span class="nc bnc" id="L125" title="All 2 branches missed.">				if (localAddress != null) {</span>
+<span class="nc" id="L126">					builder.localAddress(localAddress);</span>
+				}
+			}
+<span class="nc" id="L129">			removeForwardedHeaders(builder);</span>
+<span class="nc" id="L130">			request = builder.build();</span>
+		}
+<span class="nc" id="L132">		return request;</span>
+	}
+
+	private static URI adaptFromForwardedHeaders(URI uri, HttpHeaders headers) {
+		// GH-30137: assume URI is encoded, but avoid build(true) for more lenient handling
+<span class="nc" id="L137">		UriComponents components = ForwardedHeaderUtils.adaptFromForwardedHeaders(uri, headers).build();</span>
+		try {
+<span class="nc" id="L139">			return new URI(components.toUriString());</span>
+		}
+<span class="nc" id="L141">		catch (URISyntaxException ex) {</span>
+<span class="nc" id="L142">			throw new IllegalStateException(&quot;Could not create URI object: &quot; + ex.getMessage(), ex);</span>
+		}
+	}
+
+	/**
+	 * Whether the request has any Forwarded headers.
+	 * @param request the request
+	 */
+	protected boolean hasForwardedHeaders(ServerHttpRequest request) {
+<span class="nc" id="L151">		HttpHeaders headers = request.getHeaders();</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">		for (String headerName : FORWARDED_HEADER_NAMES) {</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">			if (headers.containsHeader(headerName)) {</span>
+<span class="nc" id="L154">				return true;</span>
+			}
+<span class="nc" id="L156">		}</span>
+<span class="nc" id="L157">		return false;</span>
+	}
+
+	private void removeForwardedHeaders(ServerHttpRequest.Builder builder) {
+<span class="nc" id="L161">		builder.headers(map -&gt; FORWARDED_HEADER_NAMES.forEach(map::remove));</span>
+<span class="nc" id="L162">	}</span>
+
+
+	private static @Nullable String getForwardedPrefix(ServerHttpRequest request) {
+<span class="nc" id="L166">		HttpHeaders headers = request.getHeaders();</span>
+<span class="nc" id="L167">		String header = headers.getFirst(&quot;X-Forwarded-Prefix&quot;);</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">		if (header == null) {</span>
+<span class="nc" id="L169">			return null;</span>
+		}
+<span class="nc" id="L171">		StringBuilder prefix = new StringBuilder(header.length());</span>
+<span class="nc" id="L172">		String[] rawPrefixes = StringUtils.tokenizeToStringArray(header, &quot;,&quot;);</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">		for (String rawPrefix : rawPrefixes) {</span>
+<span class="nc" id="L174">			int endIndex = rawPrefix.length();</span>
+<span class="nc bnc" id="L175" title="All 4 branches missed.">			while (endIndex &gt; 0 &amp;&amp; rawPrefix.charAt(endIndex - 1) == '/') {</span>
+<span class="nc" id="L176">				endIndex--;</span>
+			}
+<span class="nc bnc" id="L178" title="All 2 branches missed.">			prefix.append((endIndex != rawPrefix.length() ? rawPrefix.substring(0, endIndex) : rawPrefix));</span>
+		}
+<span class="nc" id="L180">		return prefix.toString();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,760 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>PathPattern.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.util.pattern</a> &gt; <span class="el_source">PathPattern.java</span></div><h1>PathPattern.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.util.pattern;
+
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.StringJoiner;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.http.server.PathContainer;
+import org.springframework.http.server.PathContainer.Element;
+import org.springframework.http.server.PathContainer.PathSegment;
+import org.springframework.http.server.PathContainer.Separator;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.StringUtils;
+
+/**
+ * Representation of a parsed path pattern. Includes a chain of path elements
+ * for fast matching and accumulates computed state for quick comparison of
+ * patterns.
+ *
+ * &lt;p&gt;{@code PathPattern} matches URL paths using the following rules:&lt;br&gt;
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code ?} matches one character&lt;/li&gt;
+ * &lt;li&gt;{@code *} matches zero or more characters within a path segment&lt;/li&gt;
+ * &lt;li&gt;{@code **} matches zero or more &lt;em&gt;path segments&lt;/em&gt; until the end of the path&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;{spring}&lt;/code&gt; matches a &lt;em&gt;path segment&lt;/em&gt; and captures it as a variable named &quot;spring&quot;&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;{spring:[a-z]+}&lt;/code&gt; matches the regexp {@code [a-z]+} against a path segment
+ * and captures it as a path variable named &quot;spring&quot;&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;{*spring}&lt;/code&gt; matches zero or more &lt;em&gt;path segments&lt;/em&gt; until the end of the path
+ * and captures it as a variable named &quot;spring&quot;&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; In contrast to
+ * {@link org.springframework.util.AntPathMatcher}, {@code **} is supported only
+ * at the end of a pattern. For example {@code /pages/{**}} is valid but
+ * {@code /pages/{**}/details} is not. The same applies also to the capturing
+ * variant &lt;code&gt;{*spring}&lt;/code&gt;. The aim is to eliminate ambiguity when
+ * comparing patterns for specificity.
+ *
+ * &lt;h3&gt;Examples&lt;/h3&gt;
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code /pages/t?st.html} &amp;mdash; matches {@code /pages/test.html} as well as
+ * {@code /pages/tXst.html} but not {@code /pages/toast.html}&lt;/li&gt;
+ * &lt;li&gt;{@code /resources/*.png} &amp;mdash; matches all {@code .png} files in the
+ * {@code resources} directory&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;/resources/&amp;#42;&amp;#42;&lt;/code&gt; &amp;mdash; matches all files
+ * underneath the {@code /resources/} path, including {@code /resources/image.png}
+ * and {@code /resources/css/spring.css}&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;/resources/{&amp;#42;path}&lt;/code&gt; &amp;mdash; matches all files
+ * underneath the {@code /resources/}, as well as {@code /resources}, and captures
+ * their relative path in a variable named &quot;path&quot;; {@code /resources/image.png}
+ * will match with &quot;path&quot; &amp;rarr; &quot;/image.png&quot;, and {@code /resources/css/spring.css}
+ * will match with &quot;path&quot; &amp;rarr; &quot;/css/spring.css&quot;&lt;/li&gt;
+ * &lt;li&gt;&lt;code&gt;/resources/{filename:\\w+}.dat&lt;/code&gt; will match {@code /resources/spring.dat}
+ * and assign the value {@code &quot;spring&quot;} to the {@code filename} variable&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * @author Andy Clement
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ * @see PathContainer
+ */
+public class PathPattern implements Comparable&lt;PathPattern&gt; {
+
+<span class="fc" id="L85">	private static final PathContainer EMPTY_PATH = PathContainer.parsePath(&quot;&quot;);</span>
+
+	/**
+	 * Comparator that sorts patterns by specificity as follows:
+	 * &lt;ol&gt;
+	 * &lt;li&gt;Null instances are last.
+	 * &lt;li&gt;Catch-all patterns are last.
+	 * &lt;li&gt;If both patterns are catch-all, consider the length (longer wins).
+	 * &lt;li&gt;Compare wildcard and captured variable count (lower wins).
+	 * &lt;li&gt;Consider length (longer wins)
+	 * &lt;/ol&gt;
+	 */
+<span class="fc" id="L97">	public static final Comparator&lt;PathPattern&gt; SPECIFICITY_COMPARATOR =</span>
+<span class="fc" id="L98">			Comparator.nullsLast(</span>
+					Comparator.&lt;PathPattern&gt;
+<span class="fc bfc" id="L100" title="All 2 branches covered.">							comparingInt(p -&gt; p.isCatchAll() ? 1 : 0)</span>
+<span class="fc bfc" id="L101" title="All 2 branches covered.">							.thenComparingInt(p -&gt; p.isCatchAll() ? scoreByNormalizedLength(p) : 0)</span>
+<span class="fc" id="L102">							.thenComparingInt(PathPattern::getScore)</span>
+<span class="fc" id="L103">							.thenComparingInt(PathPattern::scoreByNormalizedLength)</span>
+			);
+
+
+	/** The text of the parsed pattern. */
+	private final String patternString;
+
+	/** The parser used to construct this pattern. */
+	private final PathPatternParser parser;
+
+	/** The options to use to parse a pattern. */
+	private final PathContainer.Options pathOptions;
+
+	/** Will this match candidates in a case-sensitive way? (case sensitivity  at parse time). */
+	private final boolean caseSensitive;
+
+	/** First path element in the parsed chain of path elements for this pattern. */
+	private final @Nullable PathElement head;
+
+	/** How many variables are captured in this pattern. */
+	private int capturedVariableCount;
+
+	/**
+	 * The normalized length is trying to measure the 'active' part of the pattern. It is computed
+	 * by assuming all captured variables have a normalized length of 1. Effectively this means changing
+	 * your variable name lengths isn't going to change the length of the active part of the pattern.
+	 * Useful when comparing two patterns.
+	 */
+	private int normalizedLength;
+
+	/**
+	 * Does the pattern end with '&amp;lt;separator&amp;gt;'.
+	 */
+<span class="fc" id="L136">	private boolean endsWithSeparatorWildcard = false;</span>
+
+	/**
+	 * Score is used to quickly compare patterns. Different pattern components are given different
+	 * weights. A 'lower score' is more specific. Current weights:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;Captured variables are worth 1
+	 * &lt;li&gt;Wildcard is worth 100
+	 * &lt;/ul&gt;
+	 */
+	private int score;
+
+	/** Does the pattern end with {*...}. */
+<span class="fc" id="L149">	private boolean catchAll = false;</span>
+
+
+<span class="fc" id="L152">	PathPattern(String patternText, PathPatternParser parser, @Nullable PathElement head) {</span>
+<span class="fc" id="L153">		this.patternString = patternText;</span>
+<span class="fc" id="L154">		this.parser = parser;</span>
+<span class="fc" id="L155">		this.pathOptions = parser.getPathOptions();</span>
+<span class="fc" id="L156">		this.caseSensitive = parser.isCaseSensitive();</span>
+<span class="fc" id="L157">		this.head = head;</span>
+
+		// Compute fields for fast comparison
+<span class="fc" id="L160">		PathElement elem = head;</span>
+<span class="fc bfc" id="L161" title="All 2 branches covered.">		while (elem != null) {</span>
+<span class="fc" id="L162">			this.capturedVariableCount += elem.getCaptureCount();</span>
+<span class="fc" id="L163">			this.normalizedLength += elem.getNormalizedLength();</span>
+<span class="fc" id="L164">			this.score += elem.getScore();</span>
+<span class="fc bfc" id="L165" title="All 4 branches covered.">			if (elem instanceof CaptureSegmentsPathElement || elem instanceof WildcardSegmentsPathElement) {</span>
+<span class="fc" id="L166">				this.catchAll = true;</span>
+			}
+<span class="fc bfc" id="L168" title="All 6 branches covered.">			if (elem instanceof SeparatorPathElement &amp;&amp; elem.next instanceof WildcardPathElement &amp;&amp; elem.next.next == null) {</span>
+<span class="fc" id="L169">				this.endsWithSeparatorWildcard = true;</span>
+			}
+<span class="fc" id="L171">			elem = elem.next;</span>
+		}
+<span class="fc" id="L173">	}</span>
+
+
+	/**
+	 * Return the original String that was parsed to create this PathPattern.
+	 */
+	public String getPatternString() {
+<span class="fc" id="L180">		return this.patternString;</span>
+	}
+
+	/**
+	 * Whether the pattern string contains pattern syntax that would require
+	 * use of {@link #matches(PathContainer)}, or if it is a regular String that
+	 * could be compared directly to others.
+	 * @since 5.2
+	 */
+	public boolean hasPatternSyntax() {
+<span class="fc bfc" id="L190" title="All 6 branches covered.">		return (this.score &gt; 0 || this.catchAll || this.patternString.indexOf('?') != -1);</span>
+	}
+
+	/**
+	 * Whether this pattern matches the given path.
+	 * @param pathContainer the candidate path to attempt to match against
+	 * @return {@code true} if the path matches this pattern
+	 */
+	public boolean matches(PathContainer pathContainer) {
+<span class="fc bfc" id="L199" title="All 2 branches covered.">		if (this.head == null) {</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">			return !hasLength(pathContainer);</span>
+		}
+<span class="fc bfc" id="L202" title="All 2 branches covered.">		else if (!hasLength(pathContainer)) {</span>
+<span class="pc bpc" id="L203" title="2 of 4 branches missed.">			if (this.head instanceof WildcardSegmentsPathElement || this.head instanceof CaptureSegmentsPathElement) {</span>
+<span class="nc" id="L204">				pathContainer = EMPTY_PATH; // Will allow CaptureTheRest to bind the variable to empty</span>
+			}
+			else {
+<span class="fc" id="L207">				return false;</span>
+			}
+		}
+<span class="fc" id="L210">		MatchingContext matchingContext = new MatchingContext(pathContainer, false);</span>
+<span class="fc" id="L211">		return this.head.matches(0, matchingContext);</span>
+	}
+
+	/**
+	 * Match this pattern to the given URI path and return extracted URI template
+	 * variables as well as path parameters (matrix variables).
+	 * @param pathContainer the candidate path to attempt to match against
+	 * @return info object with the extracted variables, or {@code null} for no match
+	 */
+	public @Nullable PathMatchInfo matchAndExtract(PathContainer pathContainer) {
+<span class="fc bfc" id="L221" title="All 2 branches covered.">		if (this.head == null) {</span>
+<span class="pc bpc" id="L222" title="3 of 4 branches missed.">			return (hasLength(pathContainer) &amp;&amp; !pathContainerIsJustSeparator(pathContainer) ? null : PathMatchInfo.EMPTY);</span>
+		}
+<span class="fc bfc" id="L224" title="All 2 branches covered.">		else if (!hasLength(pathContainer)) {</span>
+<span class="pc bpc" id="L225" title="2 of 4 branches missed.">			if (this.head instanceof WildcardSegmentsPathElement || this.head instanceof CaptureSegmentsPathElement) {</span>
+<span class="nc" id="L226">				pathContainer = EMPTY_PATH; // Will allow CaptureTheRest to bind the variable to empty</span>
+			}
+			else {
+<span class="fc" id="L229">				return null;</span>
+			}
+		}
+<span class="fc" id="L232">		MatchingContext matchingContext = new MatchingContext(pathContainer, true);</span>
+<span class="fc bfc" id="L233" title="All 2 branches covered.">		return this.head.matches(0, matchingContext) ? matchingContext.getPathMatchResult() : null;</span>
+	}
+
+	/**
+	 * Match the beginning of the given path and return the remaining portion
+	 * not covered by this pattern. This is useful for matching nested routes
+	 * where the path is matched incrementally at each level.
+	 * @param pathContainer the candidate path to attempt to match against
+	 * @return info object with the match result or {@code null} for no match
+	 */
+	public @Nullable PathRemainingMatchInfo matchStartOfPath(PathContainer pathContainer) {
+<span class="pc bpc" id="L244" title="1 of 2 branches missed.">		if (this.head == null) {</span>
+<span class="nc" id="L245">			return new PathRemainingMatchInfo(EMPTY_PATH, pathContainer);</span>
+		}
+<span class="fc bfc" id="L247" title="All 2 branches covered.">		else if (!hasLength(pathContainer)) {</span>
+<span class="fc" id="L248">			return null;</span>
+		}
+
+<span class="fc" id="L251">		MatchingContext matchingContext = new MatchingContext(pathContainer, true);</span>
+<span class="fc" id="L252">		matchingContext.setMatchAllowExtraPath();</span>
+<span class="fc" id="L253">		boolean matches = this.head.matches(0, matchingContext);</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">		if (!matches) {</span>
+<span class="fc" id="L255">			return null;</span>
+		}
+		else {
+			PathContainer pathMatched;
+			PathContainer pathRemaining;
+<span class="fc bfc" id="L260" title="All 2 branches covered.">			if (matchingContext.remainingPathIndex == pathContainer.elements().size()) {</span>
+<span class="fc" id="L261">				pathMatched = pathContainer;</span>
+<span class="fc" id="L262">				pathRemaining = EMPTY_PATH;</span>
+			}
+			else {
+<span class="fc" id="L265">				pathMatched = pathContainer.subPath(0, matchingContext.remainingPathIndex);</span>
+<span class="fc" id="L266">				pathRemaining = pathContainer.subPath(matchingContext.remainingPathIndex);</span>
+			}
+<span class="fc" id="L268">			return new PathRemainingMatchInfo(pathMatched, pathRemaining, matchingContext.getPathMatchResult());</span>
+		}
+	}
+
+	/**
+	 * Determine the pattern-mapped part for the given path.
+	 * &lt;p&gt;For example: &lt;ul&gt;
+	 * &lt;li&gt;'{@code /docs/cvs/commit.html}' and '{@code /docs/cvs/commit.html} &amp;rarr; ''&lt;/li&gt;
+	 * &lt;li&gt;'{@code /docs/*}' and '{@code /docs/cvs/commit}' &amp;rarr; '{@code cvs/commit}'&lt;/li&gt;
+	 * &lt;li&gt;'{@code /docs/cvs/*.html}' and '{@code /docs/cvs/commit.html} &amp;rarr; '{@code commit.html}'&lt;/li&gt;
+	 * &lt;li&gt;'{@code /docs/**}' and '{@code /docs/cvs/commit} &amp;rarr; '{@code cvs/commit}'&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * &lt;p&gt;&lt;b&gt;Notes:&lt;/b&gt;
+	 * &lt;ul&gt;
+	 * &lt;li&gt;Assumes that {@link #matches} returns {@code true} for
+	 * the same path but does &lt;strong&gt;not&lt;/strong&gt; enforce this.
+	 * &lt;li&gt;Duplicate occurrences of separators within the returned result are removed
+	 * &lt;li&gt;Leading and trailing separators are removed from the returned result
+	 * &lt;/ul&gt;
+	 * @param path a path that matches this pattern
+	 * @return the subset of the path that is matched by pattern or &quot;&quot; if none
+	 * of it is matched by pattern elements
+	 */
+	public PathContainer extractPathWithinPattern(PathContainer path) {
+<span class="fc" id="L292">		List&lt;Element&gt; pathElements = path.elements();</span>
+<span class="fc" id="L293">		int pathElementsCount = pathElements.size();</span>
+
+<span class="fc" id="L295">		int startIndex = 0;</span>
+		// Find first path element that is not a separator or a literal (i.e. the first pattern based element)
+<span class="fc" id="L297">		PathElement elem = this.head;</span>
+<span class="fc bfc" id="L298" title="All 2 branches covered.">		while (elem != null) {</span>
+<span class="fc bfc" id="L299" title="All 2 branches covered.">			if (!elem.isLiteral()) {</span>
+<span class="fc" id="L300">				break;</span>
+			}
+<span class="fc" id="L302">			elem = elem.next;</span>
+<span class="fc" id="L303">			startIndex++;</span>
+		}
+<span class="fc bfc" id="L305" title="All 2 branches covered.">		if (elem == null) {</span>
+			// There is no pattern piece
+<span class="fc" id="L307">			return PathContainer.parsePath(&quot;&quot;);</span>
+		}
+
+		// Skip leading separators that would be in the result
+<span class="pc bpc" id="L311" title="1 of 4 branches missed.">		while (startIndex &lt; pathElementsCount &amp;&amp; (pathElements.get(startIndex) instanceof Separator)) {</span>
+<span class="fc" id="L312">			startIndex++;</span>
+		}
+
+<span class="fc" id="L315">		int endIndex = pathElements.size();</span>
+		// Skip trailing separators that would be in the result
+<span class="pc bpc" id="L317" title="2 of 4 branches missed.">		while (endIndex &gt; 0 &amp;&amp; (pathElements.get(endIndex - 1) instanceof Separator)) {</span>
+<span class="nc" id="L318">			endIndex--;</span>
+		}
+
+<span class="fc" id="L321">		boolean multipleAdjacentSeparators = false;</span>
+<span class="fc bfc" id="L322" title="All 2 branches covered.">		for (int i = startIndex; i &lt; (endIndex - 1); i++) {</span>
+<span class="pc bpc" id="L323" title="1 of 4 branches missed.">			if ((pathElements.get(i) instanceof Separator) &amp;&amp; (pathElements.get(i+1) instanceof Separator)) {</span>
+<span class="nc" id="L324">				multipleAdjacentSeparators=true;</span>
+<span class="nc" id="L325">				break;</span>
+			}
+		}
+
+<span class="fc" id="L329">		PathContainer resultPath = null;</span>
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">		if (multipleAdjacentSeparators) {</span>
+			// Need to rebuild the path without the duplicate adjacent separators
+<span class="nc" id="L332">			StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L333">			int i = startIndex;</span>
+<span class="nc bnc" id="L334" title="All 2 branches missed.">			while (i &lt; endIndex) {</span>
+<span class="nc" id="L335">				Element e = pathElements.get(i++);</span>
+<span class="nc" id="L336">				sb.append(e.value());</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">				if (e instanceof Separator) {</span>
+<span class="nc bnc" id="L338" title="All 4 branches missed.">					while (i &lt; endIndex &amp;&amp; (pathElements.get(i) instanceof Separator)) {</span>
+<span class="nc" id="L339">						i++;</span>
+					}
+				}
+<span class="nc" id="L342">			}</span>
+<span class="nc" id="L343">			resultPath = PathContainer.parsePath(sb.toString(), this.pathOptions);</span>
+<span class="nc" id="L344">		}</span>
+<span class="pc bpc" id="L345" title="1 of 2 branches missed.">		else if (startIndex &gt;= endIndex) {</span>
+<span class="nc" id="L346">			resultPath = PathContainer.parsePath(&quot;&quot;);</span>
+		}
+		else {
+<span class="fc" id="L349">			resultPath = path.subPath(startIndex, endIndex);</span>
+		}
+<span class="fc" id="L351">		return resultPath;</span>
+	}
+
+	/**
+	 * Compare this pattern with a supplied pattern: return -1,0,+1 if this pattern
+	 * is more specific, the same or less specific than the supplied pattern.
+	 * The aim is to sort more specific patterns first.
+	 */
+	@Override
+	public int compareTo(@Nullable PathPattern otherPattern) {
+<span class="fc" id="L361">		int result = SPECIFICITY_COMPARATOR.compare(this, otherPattern);</span>
+<span class="pc bpc" id="L362" title="1 of 4 branches missed.">		return (result == 0 &amp;&amp; otherPattern != null ?</span>
+<span class="fc" id="L363">				this.patternString.compareTo(otherPattern.patternString) : result);</span>
+	}
+
+	/**
+	 * Combine this pattern with the one given as parameter, returning a new
+	 * {@code PathPattern} instance that concatenates or merges both.
+	 * This operation is not commutative, meaning {@code pattern1.combine(pattern2)}
+	 * is not equal to {@code pattern2.combine(pattern1)}.
+	 *
+	 * &lt;p&gt;Combining two &quot;fixed&quot; patterns effectively concatenates them:
+	 * &lt;ul&gt;
+	 *     &lt;li&gt;&lt;code&gt; &quot;/projects&quot; + &quot;/spring-framework&quot; =&gt; &quot;/projects/spring-framework&quot;&lt;/code&gt;
+ *     &lt;/ul&gt;
+	 * Combining a &quot;fixed&quot; pattern with a &quot;matching&quot; pattern concatenates them:
+	 * &lt;ul&gt;
+	 *     &lt;li&gt;&lt;code&gt; &quot;/projects&quot; + &quot;/{project}&quot; =&gt; &quot;/projects/{project}&quot;&lt;/code&gt;
+	 * &lt;/ul&gt;
+	 * Combining a &quot;matching&quot; pattern with a &quot;fixed&quot; pattern merges them:
+	 * &lt;ul&gt;
+	 *     &lt;li&gt;&lt;code&gt; &quot;/projects/&amp;#42;&quot; + &quot;/spring-framework&quot; =&gt; &quot;/projects/spring-framework&quot;&lt;/code&gt;
+	 *     &lt;li&gt;&lt;code&gt; &quot;/projects/&amp;#42;.html&quot; + &quot;/spring-framework.html&quot; =&gt; &quot;/projects/spring-framework.html&quot;&lt;/code&gt;
+	 * &lt;/ul&gt;
+	 * Combining two &quot;matching&quot; patterns merges them:
+	 * &lt;ul&gt;
+	 *     &lt;li&gt;&lt;code&gt; &quot;/projects/&amp;#42;&amp;#42;&quot; + &quot;/&amp;#42;.html&quot; =&gt; &quot;/projects/&amp;#42;.html&quot;&lt;/code&gt;
+	 *     &lt;li&gt;&lt;code&gt; &quot;/projects/&amp;#42;&quot; + &quot;/{project}&quot; =&gt; &quot;/projects/{project}&quot;&lt;/code&gt;
+	 *     &lt;li&gt;&lt;code&gt; &quot;/projects/&amp;#42;.html&quot; + &quot;/spring-framework.&amp;#42;&quot; =&gt; &quot;/projects/spring-framework.html&quot;&lt;/code&gt;
+	 * &lt;/ul&gt;
+	 * Note, if a pattern does not end with a &quot;matching&quot; segment, it is considered as a &quot;fixed&quot; one:
+	 * &lt;ul&gt;
+	 *     &lt;li&gt;&lt;code&gt; &quot;/projects/&amp;#42;/releases&quot; + &quot;/{id}&quot; =&gt; &quot;/projects/&amp;#42;/releases/{id}&quot;&lt;/code&gt;
+	 * &lt;/ul&gt;
+	 * @param otherPattern the pattern to be combined with the current one
+	 * @return the new {@code PathPattern} that combines both patterns
+	 * @throws IllegalArgumentException if the combination is not allowed
+	 */
+	public PathPattern combine(PathPattern otherPattern) {
+		// If one of them is empty, the result is the other. If both are empty, the result is &quot;&quot;
+<span class="pc bpc" id="L401" title="1 of 2 branches missed.">		if (!StringUtils.hasLength(this.patternString)) {</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">			if (!StringUtils.hasLength(otherPattern.patternString)) {</span>
+<span class="nc" id="L403">				return this.parser.parse(&quot;&quot;);</span>
+			}
+			else {
+<span class="nc" id="L406">				return otherPattern;</span>
+			}
+		}
+<span class="pc bpc" id="L409" title="1 of 2 branches missed.">		else if (!StringUtils.hasLength(otherPattern.patternString)) {</span>
+<span class="nc" id="L410">			return this;</span>
+		}
+
+		// /* + /hotel =&gt; /hotel
+		// /*.* + /*.html =&gt; /*.html
+		// However:
+		// /usr + /user =&gt; /usr/user
+		// /{foo} + /bar =&gt; /{foo}/bar
+<span class="pc bpc" id="L418" title="1 of 4 branches missed.">		if (!this.patternString.equals(otherPattern.patternString) &amp;&amp; this.capturedVariableCount == 0 &amp;&amp;</span>
+<span class="fc bfc" id="L419" title="All 2 branches covered.">				matches(PathContainer.parsePath(otherPattern.patternString))) {</span>
+<span class="fc" id="L420">			return otherPattern;</span>
+		}
+
+		// /hotels/* + /booking =&gt; /hotels/booking
+		// /hotels/* + booking =&gt; /hotels/booking
+<span class="fc bfc" id="L425" title="All 2 branches covered.">		if (this.endsWithSeparatorWildcard) {</span>
+<span class="pc bpc" id="L426" title="1 of 2 branches missed.">			String prefix = this.patternString.length() &gt; 2 ?</span>
+<span class="fc" id="L427">					this.patternString.substring(0, this.patternString.length() - 2) :</span>
+<span class="pc" id="L428">					String.valueOf(getSeparator());</span>
+<span class="fc" id="L429">			return this.parser.parse(concat(prefix, otherPattern.patternString));</span>
+		}
+
+		// /hotels/** +  &quot;/booking/rooms =&gt; /hotels/booking/rooms
+<span class="pc bpc" id="L433" title="1 of 2 branches missed.">		if (this.catchAll) {</span>
+<span class="nc" id="L434">			return this.parser.parse(concat(this.patternString.substring(0, this.patternString.length() - 3),</span>
+					otherPattern.patternString));
+		}
+
+		// /hotels + /booking =&gt; /hotels/booking
+		// /hotels + booking =&gt; /hotels/booking
+<span class="fc" id="L440">		int firstStarDotPos = this.patternString.indexOf(&quot;*.&quot;);  // Are there any file prefix/suffix things to consider?</span>
+<span class="pc bpc" id="L441" title="1 of 6 branches missed.">		if (this.capturedVariableCount != 0 || firstStarDotPos == -1 || getSeparator() == '.') {</span>
+<span class="fc" id="L442">			return this.parser.parse(concat(this.patternString, otherPattern.patternString));</span>
+		}
+
+		// /*.html + /hotel =&gt; /hotel.html
+		// /*.html + /hotel.* =&gt; /hotel.html
+<span class="fc" id="L447">		int secondDotPos = otherPattern.patternString.indexOf('.');</span>
+
+<span class="fc" id="L449">		String firstExtension = this.patternString.substring(firstStarDotPos + 1);  // looking for the first extension</span>
+<span class="fc bfc" id="L450" title="All 2 branches covered.">		String secondExtension = (secondDotPos == -1 ? &quot;&quot; : otherPattern.patternString.substring(secondDotPos));</span>
+<span class="pc bpc" id="L451" title="2 of 4 branches missed.">		boolean isFirstExtensionWildcard = (firstExtension.equals(&quot;.*&quot;) || firstExtension.isEmpty());</span>
+<span class="pc bpc" id="L452" title="1 of 4 branches missed.">		boolean isSecondExtensionWildcard = (secondExtension.equals(&quot;.*&quot;) || secondExtension.isEmpty());</span>
+<span class="pc bpc" id="L453" title="2 of 4 branches missed.">		if (!isFirstExtensionWildcard &amp;&amp; !isSecondExtensionWildcard) {</span>
+<span class="nc" id="L454">			throw new IllegalArgumentException(</span>
+					&quot;Cannot combine patterns: &quot; + this.patternString + &quot; and &quot; + otherPattern);
+		}
+
+<span class="fc" id="L458">		String firstPath = this.patternString.substring(0, this.patternString.lastIndexOf(getSeparator()));</span>
+<span class="fc" id="L459">		String secondPath = otherPattern.patternString.substring(0, otherPattern.patternString.lastIndexOf(getSeparator()));</span>
+<span class="pc bpc" id="L460" title="1 of 2 branches missed.">		if (!this.parser.parse(firstPath).matches(PathContainer.parsePath(secondPath))) {</span>
+<span class="nc" id="L461">			throw new IllegalArgumentException(</span>
+					&quot;Cannot combine patterns: &quot; + this.patternString + &quot; and &quot; + otherPattern);
+		}
+
+<span class="fc bfc" id="L465" title="All 2 branches covered.">		String secondFile = (secondDotPos == -1 ? otherPattern.patternString : otherPattern.patternString.substring(0, secondDotPos));</span>
+<span class="pc bpc" id="L466" title="1 of 2 branches missed.">		return this.parser.parse(secondFile + (isFirstExtensionWildcard ? secondExtension : firstExtension));</span>
+	}
+
+	@Override
+	public boolean equals(@Nullable Object other) {
+<span class="pc bpc" id="L471" title="1 of 4 branches missed.">		return (this == other || (other instanceof PathPattern that &amp;&amp;</span>
+<span class="pc bpc" id="L472" title="1 of 2 branches missed.">				this.patternString.equals(that.getPatternString()) &amp;&amp;</span>
+<span class="pc bpc" id="L473" title="2 of 4 branches missed.">				getSeparator() == that.getSeparator() &amp;&amp;</span>
+				this.caseSensitive == that.caseSensitive));
+	}
+
+	@Override
+	public int hashCode() {
+<span class="pc bpc" id="L479" title="1 of 2 branches missed.">		return (this.patternString.hashCode() + getSeparator()) * 17 + (this.caseSensitive ? 1 : 0);</span>
+	}
+
+	@Override
+	public String toString() {
+<span class="fc" id="L484">		return this.patternString;</span>
+	}
+
+
+	int getScore() {
+<span class="fc" id="L489">		return this.score;</span>
+	}
+
+	boolean isCatchAll() {
+<span class="fc" id="L493">		return this.catchAll;</span>
+	}
+
+	/**
+	 * The normalized length is trying to measure the 'active' part of the pattern. It is computed
+	 * by assuming all capture variables have a normalized length of 1. Effectively this means changing
+	 * your variable name lengths isn't going to change the length of the active part of the pattern.
+	 * Useful when comparing two patterns.
+	 */
+	int getNormalizedLength() {
+<span class="fc" id="L503">		return this.normalizedLength;</span>
+	}
+
+	char getSeparator() {
+<span class="fc" id="L507">		return this.pathOptions.separator();</span>
+	}
+
+	int getCapturedVariableCount() {
+<span class="nc" id="L511">		return this.capturedVariableCount;</span>
+	}
+
+	String toChainString() {
+<span class="nc" id="L515">		StringJoiner stringJoiner = new StringJoiner(&quot; &quot;);</span>
+<span class="nc" id="L516">		PathElement pe = this.head;</span>
+<span class="nc bnc" id="L517" title="All 2 branches missed.">		while (pe != null) {</span>
+<span class="nc" id="L518">			stringJoiner.add(pe.toString());</span>
+<span class="nc" id="L519">			pe = pe.next;</span>
+		}
+<span class="nc" id="L521">		return stringJoiner.toString();</span>
+	}
+
+	/**
+	 * Return the string form of the pattern built from walking the path element chain.
+	 * @return the string form of the pattern
+	 */
+	String computePatternString() {
+<span class="nc" id="L529">		StringBuilder sb = new StringBuilder();</span>
+<span class="nc" id="L530">		PathElement pe = this.head;</span>
+<span class="nc bnc" id="L531" title="All 2 branches missed.">		while (pe != null) {</span>
+<span class="nc" id="L532">			sb.append(pe.getChars());</span>
+<span class="nc" id="L533">			pe = pe.next;</span>
+		}
+<span class="nc" id="L535">		return sb.toString();</span>
+	}
+
+	@Nullable PathElement getHeadSection() {
+<span class="nc" id="L539">		return this.head;</span>
+	}
+
+	/**
+	 * Join two paths together including a separator if necessary.
+	 * Extraneous separators are removed (if the first path
+	 * ends with one and the second path starts with one).
+	 * @param path1 first path
+	 * @param path2 second path
+	 * @return joined path that may include separator if necessary
+	 */
+	private String concat(String path1, String path2) {
+<span class="fc bfc" id="L551" title="All 2 branches covered.">		boolean path1EndsWithSeparator = (path1.charAt(path1.length() - 1) == getSeparator());</span>
+<span class="pc bpc" id="L552" title="1 of 2 branches missed.">		boolean path2StartsWithSeparator = (path2.charAt(0) == getSeparator());</span>
+<span class="pc bpc" id="L553" title="1 of 4 branches missed.">		if (path1EndsWithSeparator &amp;&amp; path2StartsWithSeparator) {</span>
+<span class="fc" id="L554">			return path1 + path2.substring(1);</span>
+		}
+<span class="pc bpc" id="L556" title="2 of 4 branches missed.">		else if (path1EndsWithSeparator || path2StartsWithSeparator) {</span>
+<span class="fc" id="L557">			return path1 + path2;</span>
+		}
+		else {
+<span class="nc" id="L560">			return path1 + getSeparator() + path2;</span>
+		}
+	}
+
+	/**
+	 * Return if the container is not null and has more than zero elements.
+	 * @param container a path container
+	 * @return {@code true} has more than zero elements
+	 */
+	private boolean hasLength(@Nullable PathContainer container) {
+<span class="pc bpc" id="L570" title="1 of 4 branches missed.">		return container != null &amp;&amp; container.elements().size() &gt; 0;</span>
+	}
+
+	private static int scoreByNormalizedLength(PathPattern pattern) {
+<span class="fc" id="L574">		return -pattern.getNormalizedLength();</span>
+	}
+
+	private boolean pathContainerIsJustSeparator(PathContainer pathContainer) {
+<span class="nc bnc" id="L578" title="All 2 branches missed.">		return pathContainer.value().length() == 1 &amp;&amp;</span>
+<span class="nc bnc" id="L579" title="All 2 branches missed.">				pathContainer.value().charAt(0) == getSeparator();</span>
+	}
+
+
+	/**
+	 * Holder for URI variables and path parameters (matrix variables) extracted
+	 * based on the pattern for a given matched path.
+	 */
+	public static class PathMatchInfo {
+
+<span class="fc" id="L589">		private static final PathMatchInfo EMPTY = new PathMatchInfo(Collections.emptyMap(), Collections.emptyMap());</span>
+
+		private final Map&lt;String, String&gt; uriVariables;
+
+		private final Map&lt;String, MultiValueMap&lt;String, String&gt;&gt; matrixVariables;
+
+<span class="fc" id="L595">		PathMatchInfo(Map&lt;String, String&gt; uriVars, @Nullable Map&lt;String, MultiValueMap&lt;String, String&gt;&gt; matrixVars) {</span>
+<span class="fc" id="L596">			this.uriVariables = Collections.unmodifiableMap(uriVars);</span>
+<span class="fc bfc" id="L597" title="All 2 branches covered.">			this.matrixVariables = (matrixVars != null ?</span>
+<span class="fc" id="L598">					Collections.unmodifiableMap(matrixVars) : Collections.emptyMap());</span>
+<span class="fc" id="L599">		}</span>
+
+		/**
+		 * Return the extracted URI variables.
+		 */
+		public Map&lt;String, String&gt; getUriVariables() {
+<span class="fc" id="L605">			return this.uriVariables;</span>
+		}
+
+		/**
+		 * Return maps of matrix variables per path segment, keyed off by URI
+		 * variable name.
+		 */
+		public Map&lt;String, MultiValueMap&lt;String, String&gt;&gt; getMatrixVariables() {
+<span class="fc" id="L613">			return this.matrixVariables;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L618">			return &quot;PathMatchInfo[uriVariables=&quot; + this.uriVariables + &quot;, &quot; +</span>
+					&quot;matrixVariables=&quot; + this.matrixVariables + &quot;]&quot;;
+		}
+	}
+
+
+	/**
+	 * Holder for the result of a match on the start of a pattern.
+	 * Provides access to the remaining path not matched to the pattern as well
+	 * as any variables bound in that first part that was matched.
+	 */
+	public static class PathRemainingMatchInfo {
+
+		private final PathContainer pathMatched;
+
+		private final PathContainer pathRemaining;
+
+		private final PathMatchInfo pathMatchInfo;
+
+		PathRemainingMatchInfo(PathContainer pathMatched, PathContainer pathRemaining) {
+<span class="nc" id="L638">			this(pathMatched, pathRemaining, PathMatchInfo.EMPTY);</span>
+<span class="nc" id="L639">		}</span>
+
+<span class="fc" id="L641">		PathRemainingMatchInfo(PathContainer pathMatched, PathContainer pathRemaining, PathMatchInfo pathMatchInfo) {</span>
+<span class="fc" id="L642">			this.pathRemaining = pathRemaining;</span>
+<span class="fc" id="L643">			this.pathMatched = pathMatched;</span>
+<span class="fc" id="L644">			this.pathMatchInfo = pathMatchInfo;</span>
+<span class="fc" id="L645">		}</span>
+
+		/**
+		 * Return the part of a path that was matched by a pattern.
+		 * @since 5.3
+		 */
+		public PathContainer getPathMatched() {
+<span class="fc" id="L652">			return this.pathMatched;</span>
+		}
+
+		/**
+		 * Return the part of a path that was not matched by a pattern.
+		 */
+		public PathContainer getPathRemaining() {
+<span class="nc" id="L659">			return this.pathRemaining;</span>
+		}
+
+		/**
+		 * Return variables that were bound in the part of the path that was
+		 * successfully matched or an empty map.
+		 */
+		public Map&lt;String, String&gt; getUriVariables() {
+<span class="fc" id="L667">			return this.pathMatchInfo.getUriVariables();</span>
+		}
+
+		/**
+		 * Return the path parameters for each bound variable.
+		 */
+		public Map&lt;String, MultiValueMap&lt;String, String&gt;&gt; getMatrixVariables() {
+<span class="nc" id="L674">			return this.pathMatchInfo.getMatrixVariables();</span>
+		}
+	}
+
+
+	/**
+	 * Encapsulates context when attempting a match. Includes some fixed state like the
+	 * candidate currently being considered for a match but also some accumulators for
+	 * extracted variables.
+	 */
+	static class MatchingContext {
+
+		final PathContainer candidate;
+
+		final List&lt;Element&gt; pathElements;
+
+		final int pathLength;
+
+		private @Nullable Map&lt;String, String&gt; extractedUriVariables;
+
+		private @Nullable Map&lt;String, MultiValueMap&lt;String, String&gt;&gt; extractedMatrixVariables;
+
+		boolean extractingVariables;
+
+<span class="fc" id="L698">		boolean determineRemainingPath = false;</span>
+
+		// if determineRemaining is true, this is set to the position in
+		// the candidate where the pattern finished matching - i.e. it
+		// points to the remaining path that wasn't consumed
+		int remainingPathIndex;
+
+<span class="fc" id="L705">		public MatchingContext(PathContainer pathContainer, boolean extractVariables) {</span>
+<span class="fc" id="L706">			this.candidate = pathContainer;</span>
+<span class="fc" id="L707">			this.pathElements = pathContainer.elements();</span>
+<span class="fc" id="L708">			this.pathLength = this.pathElements.size();</span>
+<span class="fc" id="L709">			this.extractingVariables = extractVariables;</span>
+<span class="fc" id="L710">		}</span>
+
+		public void setMatchAllowExtraPath() {
+<span class="fc" id="L713">			this.determineRemainingPath = true;</span>
+<span class="fc" id="L714">		}</span>
+
+		public void set(String key, String value, MultiValueMap&lt;String,String&gt; parameters) {
+<span class="fc bfc" id="L717" title="All 2 branches covered.">			if (this.extractedUriVariables == null) {</span>
+<span class="fc" id="L718">				this.extractedUriVariables = new HashMap&lt;&gt;();</span>
+			}
+<span class="fc" id="L720">			this.extractedUriVariables.put(key, value);</span>
+
+<span class="fc bfc" id="L722" title="All 2 branches covered.">			if (!parameters.isEmpty()) {</span>
+<span class="fc bfc" id="L723" title="All 2 branches covered.">				if (this.extractedMatrixVariables == null) {</span>
+<span class="fc" id="L724">					this.extractedMatrixVariables = new HashMap&lt;&gt;();</span>
+				}
+<span class="fc" id="L726">				this.extractedMatrixVariables.put(key, CollectionUtils.unmodifiableMultiValueMap(parameters));</span>
+			}
+<span class="fc" id="L728">		}</span>
+
+		public PathMatchInfo getPathMatchResult() {
+<span class="fc bfc" id="L731" title="All 2 branches covered.">			if (this.extractedUriVariables == null) {</span>
+<span class="fc" id="L732">				return PathMatchInfo.EMPTY;</span>
+			}
+			else {
+<span class="fc" id="L735">				return new PathMatchInfo(this.extractedUriVariables, this.extractedMatrixVariables);</span>
+			}
+		}
+
+		/**
+		 * Return if element at specified index is a separator.
+		 * @param pathIndex possible index of a separator
+		 * @return {@code true} if element is a separator
+		 */
+		boolean isSeparator(int pathIndex) {
+<span class="fc" id="L745">			return this.pathElements.get(pathIndex) instanceof Separator;</span>
+		}
+
+		/**
+		 * Return the decoded value of the specified element.
+		 * @param pathIndex path element index
+		 * @return the decoded value
+		 */
+		String pathElementValue(int pathIndex) {
+<span class="pc bpc" id="L754" title="1 of 2 branches missed.">			Element element = (pathIndex &lt; this.pathLength) ? this.pathElements.get(pathIndex) : null;</span>
+<span class="pc bpc" id="L755" title="1 of 2 branches missed.">			return (element instanceof PathSegment pathSegment ? pathSegment.valueToMatch() : &quot;&quot;);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

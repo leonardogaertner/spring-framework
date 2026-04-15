@@ -1,0 +1,574 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MultiServerUserRegistry.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.simp.user</a> &gt; <span class="el_source">MultiServerUserRegistry.java</span></div><h1>MultiServerUserRegistry.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.simp.user;
+
+import java.net.InetAddress;
+import java.net.UnknownHostException;
+import java.security.Principal;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.context.ApplicationEvent;
+import org.springframework.context.event.SmartApplicationListener;
+import org.springframework.core.Ordered;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.converter.MessageConverter;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ObjectUtils;
+
+/**
+ * {@code SimpUserRegistry} that looks up users in a &quot;local&quot; user registry as
+ * well as a set of &quot;remote&quot; user registries. The local registry is provided as
+ * a constructor argument while remote registries are updated via broadcasts
+ * handled by {@link UserRegistryMessageHandler} which in turn notifies this
+ * registry when updates are received.
+ *
+ * @author Rossen Stoyanchev
+ * @since 4.2
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class MultiServerUserRegistry implements SimpUserRegistry, SmartApplicationListener {
+
+	private final String id;
+
+	private final SimpUserRegistry localRegistry;
+
+<span class="fc" id="L59">	private final Map&lt;String, UserRegistrySnapshot&gt; remoteRegistries = new ConcurrentHashMap&lt;&gt;();</span>
+
+	private final boolean delegateApplicationEvents;
+
+	/* Cross-server session lookup (for example, same user connected to multiple servers) */
+<span class="fc" id="L64">	private final SessionLookup sessionLookup = new SessionLookup();</span>
+
+
+	/**
+	 * Create an instance wrapping the local user registry.
+	 */
+<span class="fc" id="L70">	public MultiServerUserRegistry(SimpUserRegistry localRegistry) {</span>
+<span class="fc" id="L71">		Assert.notNull(localRegistry, &quot;'localRegistry' is required&quot;);</span>
+<span class="fc" id="L72">		this.id = generateId();</span>
+<span class="fc" id="L73">		this.localRegistry = localRegistry;</span>
+<span class="fc" id="L74">		this.delegateApplicationEvents = this.localRegistry instanceof SmartApplicationListener;</span>
+<span class="fc" id="L75">	}</span>
+
+	private static String generateId() {
+		String host;
+		try {
+<span class="fc" id="L80">			host = InetAddress.getLocalHost().getHostAddress();</span>
+		}
+<span class="nc" id="L82">		catch (UnknownHostException ex) {</span>
+<span class="nc" id="L83">			host = &quot;unknown&quot;;</span>
+<span class="fc" id="L84">		}</span>
+<span class="fc" id="L85">		return host + '-' + UUID.randomUUID();</span>
+	}
+
+
+	@Override
+	public int getOrder() {
+<span class="nc bnc" id="L91" title="All 2 branches missed.">		return (this.delegateApplicationEvents ?</span>
+<span class="nc" id="L92">				((SmartApplicationListener) this.localRegistry).getOrder() : Ordered.LOWEST_PRECEDENCE);</span>
+	}
+
+
+	// SmartApplicationListener methods
+
+	@Override
+	public boolean supportsEventType(Class&lt;? extends ApplicationEvent&gt; eventType) {
+<span class="pc bpc" id="L100" title="1 of 2 branches missed.">		return (this.delegateApplicationEvents &amp;&amp;</span>
+<span class="pc bnc" id="L101" title="All 2 branches missed.">				((SmartApplicationListener) this.localRegistry).supportsEventType(eventType));</span>
+	}
+
+	@Override
+	public boolean supportsSourceType(@Nullable Class&lt;?&gt; sourceType) {
+<span class="nc bnc" id="L106" title="All 2 branches missed.">		return (this.delegateApplicationEvents &amp;&amp;</span>
+<span class="nc bnc" id="L107" title="All 2 branches missed.">				((SmartApplicationListener) this.localRegistry).supportsSourceType(sourceType));</span>
+	}
+
+	@Override
+	public void onApplicationEvent(ApplicationEvent event) {
+<span class="nc bnc" id="L112" title="All 2 branches missed.">		if (this.delegateApplicationEvents) {</span>
+<span class="nc" id="L113">			((SmartApplicationListener) this.localRegistry).onApplicationEvent(event);</span>
+		}
+<span class="nc" id="L115">	}</span>
+
+
+	// SimpUserRegistry methods
+
+	@Override
+	public @Nullable SimpUser getUser(String userName) {
+		// Prefer remote registries due to cross-server SessionLookup
+<span class="fc bfc" id="L123" title="All 2 branches covered.">		for (UserRegistrySnapshot registry : this.remoteRegistries.values()) {</span>
+<span class="fc" id="L124">			SimpUser user = registry.getUserMap().get(userName);</span>
+<span class="pc bpc" id="L125" title="1 of 2 branches missed.">			if (user != null) {</span>
+<span class="fc" id="L126">				return user;</span>
+			}
+<span class="nc" id="L128">		}</span>
+<span class="fc" id="L129">		return this.localRegistry.getUser(userName);</span>
+	}
+
+	@Override
+	public Set&lt;SimpUser&gt; getUsers() {
+		// Prefer remote registries due to cross-server SessionLookup
+<span class="fc" id="L135">		Set&lt;SimpUser&gt; result = new HashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">		for (UserRegistrySnapshot registry : this.remoteRegistries.values()) {</span>
+<span class="fc" id="L137">			result.addAll(registry.getUserMap().values());</span>
+<span class="fc" id="L138">		}</span>
+<span class="fc" id="L139">		result.addAll(this.localRegistry.getUsers());</span>
+<span class="fc" id="L140">		return result;</span>
+	}
+
+	@Override
+	public int getUserCount() {
+<span class="fc" id="L145">		int userCount = 0;</span>
+<span class="fc bfc" id="L146" title="All 2 branches covered.">		for (UserRegistrySnapshot registry : this.remoteRegistries.values()) {</span>
+<span class="fc" id="L147">			userCount += registry.getUserMap().size();</span>
+<span class="fc" id="L148">		}</span>
+<span class="fc" id="L149">		userCount += this.localRegistry.getUserCount();</span>
+<span class="fc" id="L150">		return userCount;</span>
+	}
+
+	@Override
+	public Set&lt;SimpSubscription&gt; findSubscriptions(SimpSubscriptionMatcher matcher) {
+<span class="fc" id="L155">		Set&lt;SimpSubscription&gt; result = new HashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L156" title="All 2 branches covered.">		for (UserRegistrySnapshot registry : this.remoteRegistries.values()) {</span>
+<span class="fc" id="L157">			result.addAll(registry.findSubscriptions(matcher));</span>
+<span class="fc" id="L158">		}</span>
+<span class="fc" id="L159">		result.addAll(this.localRegistry.findSubscriptions(matcher));</span>
+<span class="fc" id="L160">		return result;</span>
+	}
+
+
+	// Internal methods for UserRegistryMessageHandler to manage broadcasts
+
+	Object getLocalRegistryDto() {
+<span class="fc" id="L167">		return new UserRegistrySnapshot(this.id, this.localRegistry);</span>
+	}
+
+	void addRemoteRegistryDto(Message&lt;?&gt; message, MessageConverter converter, long expirationPeriod) {
+<span class="fc" id="L171">		UserRegistrySnapshot registry = (UserRegistrySnapshot) converter.fromMessage(message, UserRegistrySnapshot.class);</span>
+<span class="pc bpc" id="L172" title="1 of 4 branches missed.">		if (registry != null &amp;&amp; !registry.getId().equals(this.id)) {</span>
+<span class="fc" id="L173">			registry.init(expirationPeriod, this.sessionLookup);</span>
+<span class="fc" id="L174">			this.remoteRegistries.put(registry.getId(), registry);</span>
+		}
+<span class="fc" id="L176">	}</span>
+
+	void purgeExpiredRegistries() {
+<span class="fc" id="L179">		long now = System.currentTimeMillis();</span>
+<span class="fc" id="L180">		this.remoteRegistries.entrySet().removeIf(entry -&gt; entry.getValue().isExpired(now));</span>
+<span class="fc" id="L181">	}</span>
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L186">		return &quot;local=[&quot; + this.localRegistry + &quot;], remote=&quot; + this.remoteRegistries;</span>
+	}
+
+
+	/**
+	 * Holds a copy of a SimpUserRegistry for the purpose of broadcasting to and
+	 * receiving broadcasts from other application servers.
+	 */
+	private static class UserRegistrySnapshot {
+
+<span class="fc" id="L196">		private String id = &quot;&quot;;</span>
+
+<span class="fc" id="L198">		private Map&lt;String, TransferSimpUser&gt; users = Collections.emptyMap();</span>
+
+		private long expirationTime;
+
+		/**
+		 * Default constructor for JSON deserialization.
+		 */
+		@SuppressWarnings(&quot;unused&quot;)
+<span class="fc" id="L206">		public UserRegistrySnapshot() {</span>
+<span class="fc" id="L207">		}</span>
+
+		/**
+		 * Constructor to create DTO from a local user registry.
+		 */
+<span class="fc" id="L212">		UserRegistrySnapshot(String id, SimpUserRegistry registry) {</span>
+<span class="fc" id="L213">			this.id = id;</span>
+<span class="fc" id="L214">			Set&lt;SimpUser&gt; users = registry.getUsers();</span>
+<span class="fc" id="L215">			this.users = CollectionUtils.newHashMap(users.size());</span>
+<span class="fc bfc" id="L216" title="All 2 branches covered.">			for (SimpUser user : users) {</span>
+<span class="fc" id="L217">				this.users.put(user.getName(), new TransferSimpUser(user));</span>
+<span class="fc" id="L218">			}</span>
+<span class="fc" id="L219">		}</span>
+
+		@SuppressWarnings(&quot;unused&quot;)
+		public void setId(String id) {
+<span class="fc" id="L223">			this.id = id;</span>
+<span class="fc" id="L224">		}</span>
+
+		public String getId() {
+<span class="fc" id="L227">			return this.id;</span>
+		}
+
+		@SuppressWarnings(&quot;unused&quot;)
+		public void setUserMap(Map&lt;String, TransferSimpUser&gt; users) {
+<span class="fc" id="L232">			this.users = users;</span>
+<span class="fc" id="L233">		}</span>
+
+		public Map&lt;String, TransferSimpUser&gt; getUserMap() {
+<span class="fc" id="L236">			return this.users;</span>
+		}
+
+		public boolean isExpired(long now) {
+<span class="pc bpc" id="L240" title="1 of 2 branches missed.">			return (now &gt; this.expirationTime);</span>
+		}
+
+		public void init(long expirationPeriod, SessionLookup sessionLookup) {
+<span class="fc" id="L244">			this.expirationTime = System.currentTimeMillis() + expirationPeriod;</span>
+<span class="fc bfc" id="L245" title="All 2 branches covered.">			for (TransferSimpUser user : this.users.values()) {</span>
+<span class="fc" id="L246">				user.afterDeserialization(sessionLookup);</span>
+<span class="fc" id="L247">			}</span>
+<span class="fc" id="L248">		}</span>
+
+		public Set&lt;SimpSubscription&gt; findSubscriptions(SimpSubscriptionMatcher matcher) {
+<span class="fc" id="L251">			Set&lt;SimpSubscription&gt; result = new HashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L252" title="All 2 branches covered.">			for (TransferSimpUser user : this.users.values()) {</span>
+<span class="fc bfc" id="L253" title="All 2 branches covered.">				for (TransferSimpSession session : user.sessions) {</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">					for (SimpSubscription subscription : session.subscriptions) {</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">						if (matcher.match(subscription)) {</span>
+<span class="fc" id="L256">							result.add(subscription);</span>
+						}
+<span class="fc" id="L258">					}</span>
+<span class="fc" id="L259">				}</span>
+<span class="fc" id="L260">			}</span>
+<span class="fc" id="L261">			return result;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L266">			return &quot;id=&quot; + this.id + &quot;, users=&quot; + this.users;</span>
+		}
+	}
+
+
+	/**
+	 * SimpUser that can be (de)serialized and broadcast to other servers.
+	 */
+	private static class TransferSimpUser implements SimpUser {
+
+<span class="fc" id="L276">		private String name = &quot;&quot;;</span>
+
+		// User sessions from &quot;this&quot; registry only (i.e. one server)
+		private final Set&lt;TransferSimpSession&gt; sessions;
+
+		// Cross-server session lookup (for example, user connected to multiple servers)
+		private @Nullable SessionLookup sessionLookup;
+
+		/**
+		 * Default constructor for JSON deserialization.
+		 */
+		@SuppressWarnings(&quot;unused&quot;)
+<span class="fc" id="L288">		public TransferSimpUser() {</span>
+<span class="fc" id="L289">			this.sessions = new HashSet&lt;&gt;(1);</span>
+<span class="fc" id="L290">		}</span>
+
+		/**
+		 * Constructor to create user from a local user.
+		 */
+<span class="fc" id="L295">		public TransferSimpUser(SimpUser user) {</span>
+<span class="fc" id="L296">			this.name = user.getName();</span>
+<span class="fc" id="L297">			Set&lt;SimpSession&gt; sessions = user.getSessions();</span>
+<span class="fc" id="L298">			this.sessions = new HashSet&lt;&gt;(sessions.size());</span>
+<span class="fc bfc" id="L299" title="All 2 branches covered.">			for (SimpSession session : sessions) {</span>
+<span class="fc" id="L300">				this.sessions.add(new TransferSimpSession(session));</span>
+<span class="fc" id="L301">			}</span>
+<span class="fc" id="L302">		}</span>
+
+		@SuppressWarnings(&quot;unused&quot;)
+		public void setName(String name) {
+<span class="fc" id="L306">			this.name = name;</span>
+<span class="fc" id="L307">		}</span>
+
+		@Override
+		public String getName() {
+<span class="fc" id="L311">			return this.name;</span>
+		}
+
+		@Override
+		public @Nullable Principal getPrincipal() {
+<span class="fc" id="L316">			return null;</span>
+		}
+
+		@Override
+		public boolean hasSessions() {
+<span class="pc bpc" id="L321" title="1 of 2 branches missed.">			if (this.sessionLookup != null) {</span>
+<span class="pc bpc" id="L322" title="1 of 2 branches missed.">				return !this.sessionLookup.findSessions(getName()).isEmpty();</span>
+			}
+<span class="nc bnc" id="L324" title="All 2 branches missed.">			return !this.sessions.isEmpty();</span>
+		}
+
+		@Override
+		public @Nullable SimpSession getSession(String sessionId) {
+<span class="pc bpc" id="L329" title="1 of 2 branches missed.">			if (this.sessionLookup != null) {</span>
+<span class="fc" id="L330">				return this.sessionLookup.findSessions(getName()).get(sessionId);</span>
+			}
+<span class="nc bnc" id="L332" title="All 2 branches missed.">			for (TransferSimpSession session : this.sessions) {</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">				if (session.getId().equals(sessionId)) {</span>
+<span class="nc" id="L334">					return session;</span>
+				}
+<span class="nc" id="L336">			}</span>
+<span class="nc" id="L337">			return null;</span>
+		}
+
+		@SuppressWarnings(&quot;unused&quot;)
+		public void setSessions(Set&lt;TransferSimpSession&gt; sessions) {
+<span class="fc" id="L342">			this.sessions.addAll(sessions);</span>
+<span class="fc" id="L343">		}</span>
+
+		@Override
+		public Set&lt;SimpSession&gt; getSessions() {
+<span class="fc bfc" id="L347" title="All 2 branches covered.">			if (this.sessionLookup != null) {</span>
+<span class="fc" id="L348">				Map&lt;String, SimpSession&gt; sessions = this.sessionLookup.findSessions(getName());</span>
+<span class="fc" id="L349">				return new HashSet&lt;&gt;(sessions.values());</span>
+			}
+<span class="fc" id="L351">			return new HashSet&lt;&gt;(this.sessions);</span>
+		}
+
+		private void afterDeserialization(SessionLookup sessionLookup) {
+<span class="fc" id="L355">			this.sessionLookup = sessionLookup;</span>
+<span class="fc bfc" id="L356" title="All 2 branches covered.">			for (TransferSimpSession session : this.sessions) {</span>
+<span class="fc" id="L357">				session.setUser(this);</span>
+<span class="fc" id="L358">				session.afterDeserialization();</span>
+<span class="fc" id="L359">			}</span>
+<span class="fc" id="L360">		}</span>
+
+		private void addSessions(Map&lt;String, SimpSession&gt; map) {
+<span class="fc bfc" id="L363" title="All 2 branches covered.">			for (SimpSession session : this.sessions) {</span>
+<span class="fc" id="L364">				map.put(session.getId(), session);</span>
+<span class="fc" id="L365">			}</span>
+<span class="fc" id="L366">		}</span>
+
+
+		@Override
+		public boolean equals(@Nullable Object other) {
+<span class="nc bnc" id="L371" title="All 6 branches missed.">			return (this == other || (other instanceof SimpUser that &amp;&amp; this.name.equals(that.getName())));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="fc" id="L376">			return this.name.hashCode();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L381">			return &quot;name=&quot; + this.name + &quot;, sessions=&quot; + this.sessions;</span>
+		}
+	}
+
+
+	/**
+	 * SimpSession that can be (de)serialized and broadcast to other servers.
+	 */
+	private static class TransferSimpSession implements SimpSession {
+
+		private String id;
+
+		private TransferSimpUser user;
+
+		private final Set&lt;TransferSimpSubscription&gt; subscriptions;
+
+		/**
+		 * Default constructor for JSON deserialization.
+		 */
+		@SuppressWarnings(&quot;unused&quot;)
+<span class="fc" id="L401">		public TransferSimpSession() {</span>
+<span class="fc" id="L402">			this.id = &quot;&quot;;</span>
+<span class="fc" id="L403">			this.user = new TransferSimpUser();</span>
+<span class="fc" id="L404">			this.subscriptions = new HashSet&lt;&gt;(4);</span>
+<span class="fc" id="L405">		}</span>
+
+		/**
+		 * Constructor to create DTO from the local user session.
+		 */
+<span class="fc" id="L410">		public TransferSimpSession(SimpSession session) {</span>
+<span class="fc" id="L411">			this.id = session.getId();</span>
+<span class="fc" id="L412">			this.user = new TransferSimpUser();</span>
+<span class="fc" id="L413">			Set&lt;SimpSubscription&gt; subscriptions = session.getSubscriptions();</span>
+<span class="fc" id="L414">			this.subscriptions = CollectionUtils.newHashSet(subscriptions.size());</span>
+<span class="fc bfc" id="L415" title="All 2 branches covered.">			for (SimpSubscription subscription : subscriptions) {</span>
+<span class="fc" id="L416">				this.subscriptions.add(new TransferSimpSubscription(subscription));</span>
+<span class="fc" id="L417">			}</span>
+<span class="fc" id="L418">		}</span>
+
+		@SuppressWarnings(&quot;unused&quot;)
+		public void setId(String id) {
+<span class="fc" id="L422">			this.id = id;</span>
+<span class="fc" id="L423">		}</span>
+
+		@Override
+		public String getId() {
+<span class="fc" id="L427">			return this.id;</span>
+		}
+
+		public void setUser(TransferSimpUser user) {
+<span class="fc" id="L431">			this.user = user;</span>
+<span class="fc" id="L432">		}</span>
+
+		@Override
+		public TransferSimpUser getUser() {
+<span class="fc" id="L436">			return this.user;</span>
+		}
+
+		@SuppressWarnings(&quot;unused&quot;)
+		public void setSubscriptions(Set&lt;TransferSimpSubscription&gt; subscriptions) {
+<span class="fc" id="L441">			this.subscriptions.addAll(subscriptions);</span>
+<span class="fc" id="L442">		}</span>
+
+		@Override
+		public Set&lt;SimpSubscription&gt; getSubscriptions() {
+<span class="fc" id="L446">			return new HashSet&lt;&gt;(this.subscriptions);</span>
+		}
+
+		private void afterDeserialization() {
+<span class="fc bfc" id="L450" title="All 2 branches covered.">			for (TransferSimpSubscription subscription : this.subscriptions) {</span>
+<span class="fc" id="L451">				subscription.setSession(this);</span>
+<span class="fc" id="L452">			}</span>
+<span class="fc" id="L453">		}</span>
+
+		@Override
+		public boolean equals(@Nullable Object other) {
+<span class="pc bpc" id="L457" title="2 of 6 branches missed.">			return (this == other || (other instanceof SimpSession that &amp;&amp; this.id.equals(that.getId())));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="fc" id="L462">			return getId().hashCode();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L467">			return &quot;id=&quot; + this.id + &quot;, subscriptions=&quot; + this.subscriptions;</span>
+		}
+	}
+
+
+	/**
+	 * SimpSubscription that can be (de)serialized and broadcast to other servers.
+	 */
+	private static class TransferSimpSubscription implements SimpSubscription {
+
+		private String id;
+
+		private TransferSimpSession session;
+
+		private String destination;
+
+		/**
+		 * Default constructor for JSON deserialization.
+		 */
+		@SuppressWarnings(&quot;unused&quot;)
+<span class="fc" id="L487">		public TransferSimpSubscription() {</span>
+<span class="fc" id="L488">			this.id = &quot;&quot;;</span>
+<span class="fc" id="L489">			this.session = new TransferSimpSession();</span>
+<span class="fc" id="L490">			this.destination = &quot;&quot;;</span>
+<span class="fc" id="L491">		}</span>
+
+		/**
+		 * Constructor to create DTO from a local user subscription.
+		 */
+<span class="fc" id="L496">		public TransferSimpSubscription(SimpSubscription subscription) {</span>
+<span class="fc" id="L497">			this.id = subscription.getId();</span>
+<span class="fc" id="L498">			this.session = new TransferSimpSession();</span>
+<span class="fc" id="L499">			this.destination = subscription.getDestination();</span>
+<span class="fc" id="L500">		}</span>
+
+		@SuppressWarnings(&quot;unused&quot;)
+		public void setId(String id) {
+<span class="fc" id="L504">			this.id = id;</span>
+<span class="fc" id="L505">		}</span>
+
+		@Override
+		public String getId() {
+<span class="fc" id="L509">			return this.id;</span>
+		}
+
+		public void setSession(TransferSimpSession session) {
+<span class="fc" id="L513">			this.session = session;</span>
+<span class="fc" id="L514">		}</span>
+
+		@Override
+		public TransferSimpSession getSession() {
+<span class="fc" id="L518">			return this.session;</span>
+		}
+
+		@SuppressWarnings(&quot;unused&quot;)
+		public void setDestination(String destination) {
+<span class="fc" id="L523">			this.destination = destination;</span>
+<span class="fc" id="L524">		}</span>
+
+		@Override
+		public String getDestination() {
+<span class="fc" id="L528">			return this.destination;</span>
+		}
+
+		@Override
+		public boolean equals(@Nullable Object other) {
+<span class="nc bnc" id="L533" title="All 4 branches missed.">			return (this == other || (other instanceof SimpSubscription that &amp;&amp;</span>
+<span class="nc bnc" id="L534" title="All 2 branches missed.">					getId().equals(that.getId()) &amp;&amp;</span>
+<span class="nc bnc" id="L535" title="All 2 branches missed.">					ObjectUtils.nullSafeEquals(getSession(), that.getSession())));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="fc" id="L540">			return Objects.hash(getId(), getSession());</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L545">			return &quot;destination=&quot; + this.destination;</span>
+		}
+	}
+
+
+	/**
+	 * Helper class to find user sessions across all servers.
+	 */
+<span class="fc" id="L553">	private class SessionLookup {</span>
+
+		public Map&lt;String, SimpSession&gt; findSessions(String userName) {
+<span class="fc" id="L556">			Map&lt;String, SimpSession&gt; map = new HashMap&lt;&gt;(4);</span>
+<span class="fc" id="L557">			SimpUser user = localRegistry.getUser(userName);</span>
+<span class="fc bfc" id="L558" title="All 2 branches covered.">			if (user != null) {</span>
+<span class="fc bfc" id="L559" title="All 2 branches covered.">				for (SimpSession session : user.getSessions()) {</span>
+<span class="fc" id="L560">					map.put(session.getId(), session);</span>
+<span class="fc" id="L561">				}</span>
+			}
+<span class="fc bfc" id="L563" title="All 2 branches covered.">			for (UserRegistrySnapshot registry : remoteRegistries.values()) {</span>
+<span class="fc" id="L564">				TransferSimpUser transferUser = registry.getUserMap().get(userName);</span>
+<span class="pc bpc" id="L565" title="1 of 2 branches missed.">				if (transferUser != null) {</span>
+<span class="fc" id="L566">					transferUser.addSessions(map);</span>
+				}
+<span class="fc" id="L568">			}</span>
+<span class="fc" id="L569">			return map;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

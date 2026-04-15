@@ -1,0 +1,249 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ServerSentEventHttpMessageReader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.codec</a> &gt; <span class="el_source">ServerSentEventHttpMessageReader.java</span></div><h1>ServerSentEventHttpMessageReader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.codec;
+
+import java.nio.charset.StandardCharsets;
+import java.time.Duration;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.ResolvableType;
+import org.springframework.core.codec.CodecException;
+import org.springframework.core.codec.Decoder;
+import org.springframework.core.codec.StringDecoder;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferLimitException;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.http.MediaType;
+import org.springframework.http.ReactiveHttpInputMessage;
+
+/**
+ * Reader that supports a stream of {@link ServerSentEvent ServerSentEvents} and also plain
+ * {@link Object Objects} which is the same as an {@link ServerSentEvent} with data only.
+ *
+ * @author Sebastien Deleuze
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @since 5.0
+ */
+public class ServerSentEventHttpMessageReader implements HttpMessageReader&lt;Object&gt; {
+
+<span class="nc" id="L50">	private static final ResolvableType STRING_TYPE = ResolvableType.forClass(String.class);</span>
+
+
+	private final @Nullable Decoder&lt;?&gt; decoder;
+
+<span class="nc" id="L55">	private final StringDecoder lineDecoder = StringDecoder.textPlainOnly();</span>
+
+
+	/**
+	 * Constructor without a {@code Decoder}. In this mode only {@code String}
+	 * is supported as the data of an event.
+	 */
+	public ServerSentEventHttpMessageReader() {
+<span class="nc" id="L63">		this(null);</span>
+<span class="nc" id="L64">	}</span>
+
+	/**
+	 * Constructor with JSON {@code Decoder} for decoding to Objects.
+	 * Support for decoding to {@code String} event data is built-in.
+	 */
+<span class="nc" id="L70">	public ServerSentEventHttpMessageReader(@Nullable Decoder&lt;?&gt; decoder) {</span>
+<span class="nc" id="L71">		this.decoder = decoder;</span>
+<span class="nc" id="L72">	}</span>
+
+
+	/**
+	 * Return the configured {@code Decoder}.
+	 */
+	public @Nullable Decoder&lt;?&gt; getDecoder() {
+<span class="nc" id="L79">		return this.decoder;</span>
+	}
+
+	/**
+	 * Configure a limit on the maximum number of bytes per SSE event which are
+	 * buffered before the event is parsed.
+	 * &lt;p&gt;Note that the {@link #getDecoder() data decoder}, if provided, must
+	 * also be customized accordingly to raise the limit if necessary in order
+	 * to be able to parse the data portion of the event.
+	 * &lt;p&gt;By default this is set to 256K.
+	 * @param byteCount the max number of bytes to buffer, or -1 for unlimited
+	 * @since 5.1.13
+	 */
+	public void setMaxInMemorySize(int byteCount) {
+<span class="nc" id="L93">		this.lineDecoder.setMaxInMemorySize(byteCount);</span>
+<span class="nc" id="L94">	}</span>
+
+	/**
+	 * Return the {@link #setMaxInMemorySize configured} byte count limit.
+	 * @since 5.1.13
+	 */
+	public int getMaxInMemorySize() {
+<span class="nc" id="L101">		return this.lineDecoder.getMaxInMemorySize();</span>
+	}
+
+
+	@Override
+	public List&lt;MediaType&gt; getReadableMediaTypes() {
+<span class="nc" id="L107">		return Collections.singletonList(MediaType.TEXT_EVENT_STREAM);</span>
+	}
+
+	@Override
+	public boolean canRead(ResolvableType elementType, @Nullable MediaType mediaType) {
+<span class="nc bnc" id="L112" title="All 4 branches missed.">		return (MediaType.TEXT_EVENT_STREAM.includes(mediaType) || isServerSentEvent(elementType));</span>
+	}
+
+	private boolean isServerSentEvent(ResolvableType elementType) {
+<span class="nc" id="L116">		return ServerSentEvent.class.isAssignableFrom(elementType.toClass());</span>
+	}
+
+
+	@Override
+	public Flux&lt;Object&gt; read(
+			ResolvableType elementType, ReactiveHttpInputMessage message, Map&lt;String, Object&gt; hints) {
+
+<span class="nc" id="L124">		LimitTracker limitTracker = new LimitTracker();</span>
+
+<span class="nc" id="L126">		boolean shouldWrap = isServerSentEvent(elementType);</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">		ResolvableType valueType = (shouldWrap ? elementType.getGeneric() : elementType);</span>
+
+<span class="nc" id="L129">		return this.lineDecoder.decode(message.getBody(), STRING_TYPE, null, hints)</span>
+<span class="nc" id="L130">				.doOnNext(limitTracker::afterLineParsed)</span>
+<span class="nc" id="L131">				.bufferUntil(String::isEmpty)</span>
+<span class="nc" id="L132">				.concatMap(lines -&gt; {</span>
+<span class="nc" id="L133">					Object event = buildEvent(lines, valueType, shouldWrap, hints);</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">					return (event != null ? Mono.just(event) : Mono.empty());</span>
+				});
+	}
+
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	private @Nullable Object buildEvent(List&lt;String&gt; lines, ResolvableType valueType, boolean shouldWrap,
+			Map&lt;String, Object&gt; hints) {
+
+<span class="nc bnc" id="L142" title="All 2 branches missed.">		ServerSentEvent.Builder&lt;Object&gt; sseBuilder = (shouldWrap ? ServerSentEvent.builder() : null);</span>
+<span class="nc" id="L143">		StringBuilder data = null;</span>
+<span class="nc" id="L144">		StringBuilder comment = null;</span>
+
+<span class="nc bnc" id="L146" title="All 2 branches missed.">		for (String line : lines) {</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">			if (line.startsWith(&quot;data:&quot;)) {</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">				data = (data != null ? data : new StringBuilder());</span>
+<span class="nc" id="L149">				int length = line.length();</span>
+<span class="nc bnc" id="L150" title="All 2 branches missed.">				if (length &gt; 5) {</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">					int index = (line.charAt(5) != ' ' ? 5 : 6);</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">					if (length &gt; index) {</span>
+<span class="nc" id="L153">						data.append(line, index, line.length());</span>
+					}
+				}
+<span class="nc" id="L156">				data.append('\n');</span>
+<span class="nc" id="L157">			}</span>
+<span class="nc bnc" id="L158" title="All 2 branches missed.">			else if (shouldWrap) {</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">				if (line.startsWith(&quot;id:&quot;)) {</span>
+<span class="nc" id="L160">					sseBuilder.id(line.substring(3).trim());</span>
+				}
+<span class="nc bnc" id="L162" title="All 2 branches missed.">				else if (line.startsWith(&quot;event:&quot;)) {</span>
+<span class="nc" id="L163">					sseBuilder.event(line.substring(6).trim());</span>
+				}
+<span class="nc bnc" id="L165" title="All 2 branches missed.">				else if (line.startsWith(&quot;retry:&quot;)) {</span>
+<span class="nc" id="L166">					sseBuilder.retry(Duration.ofMillis(Long.parseLong(line.substring(6).trim())));</span>
+				}
+<span class="nc bnc" id="L168" title="All 2 branches missed.">				else if (line.startsWith(&quot;:&quot;)) {</span>
+<span class="nc bnc" id="L169" title="All 2 branches missed.">					comment = (comment != null ? comment : new StringBuilder());</span>
+<span class="nc" id="L170">					comment.append(line.substring(1).trim()).append('\n');</span>
+				}
+			}
+<span class="nc" id="L173">		}</span>
+
+<span class="nc bnc" id="L175" title="All 2 branches missed.">		Object decodedData = (data != null ? decodeData(data, valueType, hints) : null);</span>
+
+<span class="nc bnc" id="L177" title="All 2 branches missed.">		if (shouldWrap) {</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">			if (comment != null) {</span>
+<span class="nc" id="L179">				sseBuilder.comment(comment.substring(0, comment.length() - 1));</span>
+			}
+<span class="nc bnc" id="L181" title="All 2 branches missed.">			if (decodedData != null) {</span>
+<span class="nc" id="L182">				sseBuilder.data(decodedData);</span>
+			}
+<span class="nc" id="L184">			return sseBuilder.build();</span>
+		}
+		else {
+<span class="nc" id="L187">			return decodedData;</span>
+		}
+	}
+
+	private @Nullable Object decodeData(StringBuilder data, ResolvableType dataType, Map&lt;String, Object&gt; hints) {
+<span class="nc bnc" id="L192" title="All 2 branches missed.">		if (String.class == dataType.resolve()) {</span>
+<span class="nc" id="L193">			return data.substring(0, data.length() - 1);</span>
+		}
+<span class="nc bnc" id="L195" title="All 2 branches missed.">		if (this.decoder == null) {</span>
+<span class="nc" id="L196">			throw new CodecException(&quot;No SSE decoder configured and the data is not String.&quot;);</span>
+		}
+<span class="nc" id="L198">		byte[] bytes = data.toString().getBytes(StandardCharsets.UTF_8);</span>
+<span class="nc" id="L199">		DataBuffer buffer = DefaultDataBufferFactory.sharedInstance.wrap(bytes);  // wrapping only, no allocation</span>
+<span class="nc" id="L200">		return this.decoder.decode(buffer, dataType, MediaType.TEXT_EVENT_STREAM, hints);</span>
+	}
+
+	@Override
+	public Mono&lt;Object&gt; readMono(
+			ResolvableType elementType, ReactiveHttpInputMessage message, Map&lt;String, Object&gt; hints) {
+
+		// In order of readers, we're ahead of String + &quot;*/*&quot;
+		// If this is called, simply delegate to StringDecoder
+
+<span class="nc bnc" id="L210" title="All 2 branches missed.">		if (elementType.resolve() == String.class) {</span>
+<span class="nc" id="L211">			Flux&lt;DataBuffer&gt; body = message.getBody();</span>
+<span class="nc" id="L212">			return this.lineDecoder.decodeToMono(body, elementType, null, null).cast(Object.class);</span>
+		}
+
+<span class="nc" id="L215">		return Mono.error(new UnsupportedOperationException(</span>
+				&quot;ServerSentEventHttpMessageReader only supports reading stream of events as a Flux&quot;));
+	}
+
+
+<span class="nc" id="L220">	private class LimitTracker {</span>
+
+<span class="nc" id="L222">		private int accumulated = 0;</span>
+
+		public void afterLineParsed(String line) {
+<span class="nc bnc" id="L225" title="All 2 branches missed.">			if (getMaxInMemorySize() &lt; 0) {</span>
+<span class="nc" id="L226">				return;</span>
+			}
+<span class="nc bnc" id="L228" title="All 2 branches missed.">			if (line.isEmpty()) {</span>
+<span class="nc" id="L229">				this.accumulated = 0;</span>
+			}
+<span class="nc bnc" id="L231" title="All 2 branches missed.">			if (line.length() &gt; Integer.MAX_VALUE - this.accumulated) {</span>
+<span class="nc" id="L232">				raiseLimitException();</span>
+			}
+			else {
+<span class="nc" id="L235">				this.accumulated += line.length();</span>
+<span class="nc bnc" id="L236" title="All 2 branches missed.">				if (this.accumulated &gt; getMaxInMemorySize()) {</span>
+<span class="nc" id="L237">					raiseLimitException();</span>
+				}
+			}
+<span class="nc" id="L240">		}</span>
+
+		private void raiseLimitException() {
+			// Do not release here, it's likely down via doOnDiscard..
+<span class="nc" id="L244">			throw new DataBufferLimitException(&quot;Exceeded limit on max bytes to buffer : &quot; + getMaxInMemorySize());</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

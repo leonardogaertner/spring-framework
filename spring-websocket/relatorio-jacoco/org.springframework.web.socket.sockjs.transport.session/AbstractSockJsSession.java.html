@@ -1,0 +1,460 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractSockJsSession.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.socket.sockjs.transport.session</a> &gt; <span class="el_source">AbstractSockJsSession.java</span></div><h1>AbstractSockJsSession.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.socket.sockjs.transport.session;
+
+import java.io.IOException;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledFuture;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.util.Assert;
+import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.TextMessage;
+import org.springframework.web.socket.WebSocketHandler;
+import org.springframework.web.socket.WebSocketMessage;
+import org.springframework.web.socket.sockjs.SockJsMessageDeliveryException;
+import org.springframework.web.socket.sockjs.SockJsTransportFailureException;
+import org.springframework.web.socket.sockjs.frame.SockJsFrame;
+import org.springframework.web.socket.sockjs.frame.SockJsMessageCodec;
+import org.springframework.web.socket.sockjs.transport.SockJsServiceConfig;
+import org.springframework.web.socket.sockjs.transport.SockJsSession;
+import org.springframework.web.util.DisconnectedClientHelper;
+
+/**
+ * An abstract base class for SockJS sessions implementing {@link SockJsSession}.
+ *
+ * @author Rossen Stoyanchev
+ * @author Sam Brannen
+ * @since 4.0
+ */
+public abstract class AbstractSockJsSession implements SockJsSession {
+
+<span class="fc" id="L55">	private enum State {NEW, OPEN, CLOSED}</span>
+
+
+	/**
+	 * Log category to use for network failure after a client has gone away.
+	 * @see DisconnectedClientHelper
+	 */
+	public static final String DISCONNECTED_CLIENT_LOG_CATEGORY =
+			&quot;org.springframework.web.socket.sockjs.DisconnectedClient&quot;;
+
+<span class="fc" id="L65">	private static final DisconnectedClientHelper disconnectedClientHelper =</span>
+			new DisconnectedClientHelper(DISCONNECTED_CLIENT_LOG_CATEGORY);
+
+
+<span class="fc" id="L69">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+<span class="fc" id="L71">	protected final Object responseLock = new Object();</span>
+
+	private final String id;
+
+	private final SockJsServiceConfig config;
+
+	private final WebSocketHandler handler;
+
+<span class="fc" id="L79">	private final Map&lt;String, Object&gt; attributes = new ConcurrentHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L81">	private volatile State state = State.NEW;</span>
+
+<span class="fc" id="L83">	private final long timeCreated = System.currentTimeMillis();</span>
+
+<span class="fc" id="L85">	private volatile long timeLastActive = this.timeCreated;</span>
+
+	private @Nullable ScheduledFuture&lt;?&gt; heartbeatFuture;
+
+	private @Nullable HeartbeatTask heartbeatTask;
+
+	private volatile boolean heartbeatDisabled;
+
+
+	/**
+	 * Create a new instance.
+	 * @param id the session ID
+	 * @param config the SockJS service configuration options
+	 * @param handler the recipient of SockJS messages
+	 * @param attributes the attributes from the HTTP handshake to associate with the WebSocket
+	 * session; the provided attributes are copied, the original map is not used.
+	 */
+	public AbstractSockJsSession(String id, SockJsServiceConfig config, WebSocketHandler handler,
+<span class="fc" id="L103">			@Nullable Map&lt;String, Object&gt; attributes) {</span>
+
+<span class="fc" id="L105">		Assert.notNull(id, &quot;Session id must not be null&quot;);</span>
+<span class="fc" id="L106">		Assert.notNull(config, &quot;SockJsServiceConfig must not be null&quot;);</span>
+<span class="fc" id="L107">		Assert.notNull(handler, &quot;WebSocketHandler must not be null&quot;);</span>
+
+<span class="fc" id="L109">		this.id = id;</span>
+<span class="fc" id="L110">		this.config = config;</span>
+<span class="fc" id="L111">		this.handler = handler;</span>
+
+<span class="fc bfc" id="L113" title="All 2 branches covered.">		if (attributes != null) {</span>
+<span class="fc" id="L114">			this.attributes.putAll(attributes);</span>
+		}
+<span class="fc" id="L116">	}</span>
+
+
+	@Override
+	public String getId() {
+<span class="fc" id="L121">		return this.id;</span>
+	}
+
+	protected SockJsMessageCodec getMessageCodec() {
+<span class="fc" id="L125">		return this.config.getMessageCodec();</span>
+	}
+
+	public SockJsServiceConfig getSockJsServiceConfig() {
+<span class="fc" id="L129">		return this.config;</span>
+	}
+
+	@Override
+	public Map&lt;String, Object&gt; getAttributes() {
+<span class="nc" id="L134">		return this.attributes;</span>
+	}
+
+
+	// Message sending
+
+	@Override
+	public final void sendMessage(WebSocketMessage&lt;?&gt; message) throws IOException {
+<span class="pc bpc" id="L142" title="1 of 2 branches missed.">		Assert.state(!isClosed(), &quot;Cannot send a message when session is closed&quot;);</span>
+<span class="fc" id="L143">		Assert.isInstanceOf(TextMessage.class, message, &quot;SockJS supports text messages only&quot;);</span>
+<span class="fc" id="L144">		sendMessageInternal(((TextMessage) message).getPayload());</span>
+<span class="fc" id="L145">	}</span>
+
+	protected abstract void sendMessageInternal(String message) throws IOException;
+
+
+	// Lifecycle related methods
+
+	public boolean isNew() {
+<span class="fc" id="L153">		return State.NEW.equals(this.state);</span>
+	}
+
+	@Override
+	public boolean isOpen() {
+<span class="fc" id="L158">		return State.OPEN.equals(this.state);</span>
+	}
+
+	public boolean isClosed() {
+<span class="fc" id="L162">		return State.CLOSED.equals(this.state);</span>
+	}
+
+	/**
+	 * Performs cleanup and notify the {@link WebSocketHandler}.
+	 */
+	@Override
+	public final void close() throws IOException {
+<span class="fc" id="L170">		close(new CloseStatus(3000, &quot;Go away!&quot;));</span>
+<span class="fc" id="L171">	}</span>
+
+	/**
+	 * Performs cleanup and notify the {@link WebSocketHandler}.
+	 */
+	@Override
+	public final void close(CloseStatus status) throws IOException {
+<span class="fc bfc" id="L178" title="All 2 branches covered.">		if (isOpen()) {</span>
+<span class="pc bpc" id="L179" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L180">				logger.debug(&quot;Closing SockJS session &quot; + getId() + &quot; with &quot; + status);</span>
+			}
+<span class="fc" id="L182">			this.state = State.CLOSED;</span>
+			try {
+<span class="pc bpc" id="L184" title="1 of 4 branches missed.">				if (isActive() &amp;&amp; !CloseStatus.SESSION_NOT_RELIABLE.equals(status)) {</span>
+					try {
+<span class="fc" id="L186">						writeFrameInternal(SockJsFrame.closeFrame(status.getCode(), status.getReason()));</span>
+					}
+<span class="fc" id="L188">					catch (Throwable ex) {</span>
+<span class="fc" id="L189">						logger.debug(&quot;Failure while sending SockJS close frame&quot;, ex);</span>
+<span class="fc" id="L190">					}</span>
+				}
+<span class="fc" id="L192">				updateLastActiveTime();</span>
+<span class="fc" id="L193">				cancelHeartbeat();</span>
+<span class="fc" id="L194">				disconnect(status);</span>
+			}
+			finally {
+				try {
+<span class="fc" id="L198">					this.handler.afterConnectionClosed(this, status);</span>
+				}
+<span class="fc" id="L200">				catch (Throwable ex) {</span>
+<span class="fc" id="L201">					logger.debug(&quot;Error from WebSocketHandler.afterConnectionClosed in &quot; + this, ex);</span>
+<span class="fc" id="L202">				}</span>
+			}
+		}
+<span class="fc" id="L205">	}</span>
+
+	@Override
+	public long getTimeSinceLastActive() {
+<span class="fc bfc" id="L209" title="All 2 branches covered.">		if (isNew()) {</span>
+<span class="fc" id="L210">			return (System.currentTimeMillis() - this.timeCreated);</span>
+		}
+		else {
+<span class="fc bfc" id="L213" title="All 2 branches covered.">			return (isActive() ? 0 : System.currentTimeMillis() - this.timeLastActive);</span>
+		}
+	}
+
+	/**
+	 * Should be invoked whenever the session becomes inactive.
+	 */
+	protected void updateLastActiveTime() {
+<span class="fc" id="L221">		this.timeLastActive = System.currentTimeMillis();</span>
+<span class="fc" id="L222">	}</span>
+
+	@Override
+	public void disableHeartbeat() {
+<span class="fc" id="L226">		this.heartbeatDisabled = true;</span>
+<span class="fc" id="L227">		cancelHeartbeat();</span>
+<span class="fc" id="L228">	}</span>
+
+	protected void sendHeartbeat() throws SockJsTransportFailureException {
+<span class="fc" id="L231">		synchronized (this.responseLock) {</span>
+<span class="pc bpc" id="L232" title="1 of 4 branches missed.">			if (isActive() &amp;&amp; !this.heartbeatDisabled) {</span>
+<span class="fc" id="L233">				writeFrame(SockJsFrame.heartbeatFrame());</span>
+<span class="fc" id="L234">				scheduleHeartbeat();</span>
+			}
+<span class="fc" id="L236">		}</span>
+<span class="fc" id="L237">	}</span>
+
+	protected void scheduleHeartbeat() {
+<span class="pc bpc" id="L240" title="1 of 2 branches missed.">		if (this.heartbeatDisabled) {</span>
+<span class="nc" id="L241">			return;</span>
+		}
+<span class="fc" id="L243">		synchronized (this.responseLock) {</span>
+<span class="fc" id="L244">			cancelHeartbeat();</span>
+<span class="fc bfc" id="L245" title="All 2 branches covered.">			if (!isActive()) {</span>
+<span class="fc" id="L246">				return;</span>
+			}
+<span class="fc" id="L248">			Instant time = Instant.now().plus(this.config.getHeartbeatTime(), ChronoUnit.MILLIS);</span>
+<span class="fc" id="L249">			this.heartbeatTask = new HeartbeatTask();</span>
+<span class="fc" id="L250">			this.heartbeatFuture = this.config.getTaskScheduler().schedule(this.heartbeatTask, time);</span>
+<span class="pc bpc" id="L251" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L252">				logger.trace(&quot;Scheduled heartbeat in session &quot; + getId());</span>
+			}
+<span class="fc" id="L254">		}</span>
+<span class="fc" id="L255">	}</span>
+
+	protected void cancelHeartbeat() {
+<span class="fc" id="L258">		synchronized (this.responseLock) {</span>
+<span class="fc bfc" id="L259" title="All 2 branches covered.">			if (this.heartbeatFuture != null) {</span>
+<span class="pc bpc" id="L260" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L261">					logger.trace(&quot;Cancelling heartbeat in session &quot; + getId());</span>
+				}
+<span class="fc" id="L263">				this.heartbeatFuture.cancel(false);</span>
+<span class="fc" id="L264">				this.heartbeatFuture = null;</span>
+			}
+<span class="fc bfc" id="L266" title="All 2 branches covered.">			if (this.heartbeatTask != null) {</span>
+<span class="fc" id="L267">				this.heartbeatTask.cancel();</span>
+<span class="fc" id="L268">				this.heartbeatTask = null;</span>
+			}
+<span class="fc" id="L270">		}</span>
+<span class="fc" id="L271">	}</span>
+
+	/**
+	 * Polling and Streaming sessions periodically close the current HTTP request and
+	 * wait for the next request to come through. During this &quot;downtime&quot; the session is
+	 * still open but inactive and unable to send messages and therefore has to buffer
+	 * them temporarily. A WebSocket session by contrast is stateful and remain active
+	 * until closed.
+	 */
+	public abstract boolean isActive();
+
+	/**
+	 * Actually close the underlying WebSocket session or in the case of HTTP
+	 * transports complete the underlying request.
+	 */
+	protected abstract void disconnect(CloseStatus status) throws IOException;
+
+
+	// Frame writing
+
+	/**
+	 * For internal use within a TransportHandler and the (TransportHandler-specific)
+	 * session class.
+	 */
+	protected void writeFrame(SockJsFrame frame) throws SockJsTransportFailureException {
+<span class="pc bpc" id="L296" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L297">			logger.trace(&quot;Preparing to write &quot; + frame);</span>
+		}
+		try {
+<span class="fc" id="L300">			writeFrameInternal(frame);</span>
+		}
+<span class="fc" id="L302">		catch (Exception ex) {</span>
+<span class="fc" id="L303">			logWriteFrameFailure(ex);</span>
+			try {
+				// Force disconnect (so we won't try to send close frame)
+<span class="fc" id="L306">				disconnect(CloseStatus.SERVER_ERROR);</span>
+			}
+<span class="nc" id="L308">			catch (Throwable disconnectFailure) {</span>
+				// Ignore
+<span class="fc" id="L310">			}</span>
+			try {
+<span class="fc" id="L312">				close(CloseStatus.SERVER_ERROR);</span>
+			}
+<span class="nc" id="L314">			catch (Throwable closeFailure) {</span>
+				// Nothing of consequence, already forced disconnect
+<span class="fc" id="L316">			}</span>
+<span class="fc" id="L317">			throw new SockJsTransportFailureException(&quot;Failed to write &quot; + frame, getId(), ex);</span>
+<span class="fc" id="L318">		}</span>
+<span class="fc" id="L319">	}</span>
+
+	protected abstract void writeFrameInternal(SockJsFrame frame) throws IOException;
+
+	private void logWriteFrameFailure(Throwable ex) {
+<span class="pc bpc" id="L324" title="1 of 2 branches missed.">		if (!disconnectedClientHelper.checkAndLogClientDisconnectedException(ex)) {</span>
+<span class="fc" id="L325">			logger.debug(&quot;Terminating connection after failure to send message to client&quot;, ex);</span>
+		}
+<span class="fc" id="L327">	}</span>
+
+
+	// Delegation methods
+
+	public void delegateConnectionEstablished() throws Exception {
+<span class="fc" id="L333">		this.state = State.OPEN;</span>
+<span class="fc" id="L334">		this.handler.afterConnectionEstablished(this);</span>
+<span class="fc" id="L335">	}</span>
+
+	public void delegateMessages(String... messages) throws SockJsMessageDeliveryException {
+<span class="fc bfc" id="L338" title="All 2 branches covered.">		for (int i = 0; i &lt; messages.length; i++) {</span>
+			try {
+<span class="fc bfc" id="L340" title="All 2 branches covered.">				if (isClosed()) {</span>
+<span class="fc" id="L341">					logUndeliveredMessages(i, messages);</span>
+<span class="fc" id="L342">					return;</span>
+				}
+<span class="fc" id="L344">				this.handler.handleMessage(this, new TextMessage(messages[i]));</span>
+			}
+<span class="fc" id="L346">			catch (Exception ex) {</span>
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">				if (isClosed()) {</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L349">						logger.trace(&quot;Failed to handle message '&quot; + messages[i] + &quot;'&quot;, ex);</span>
+					}
+<span class="nc" id="L351">					logUndeliveredMessages(i, messages);</span>
+<span class="nc" id="L352">					return;</span>
+				}
+<span class="fc" id="L354">				throw new SockJsMessageDeliveryException(this.id, getUndelivered(messages, i), ex);</span>
+<span class="fc" id="L355">			}</span>
+		}
+<span class="fc" id="L357">	}</span>
+
+	private void logUndeliveredMessages(int index, String[] messages) {
+<span class="fc" id="L360">		List&lt;String&gt; undelivered = getUndelivered(messages, index);</span>
+<span class="pc bpc" id="L361" title="3 of 4 branches missed.">		if (logger.isTraceEnabled() &amp;&amp; !undelivered.isEmpty()) {</span>
+<span class="nc" id="L362">			logger.trace(&quot;Dropped inbound message(s) due to closed session: &quot; + undelivered);</span>
+		}
+<span class="fc" id="L364">	}</span>
+
+	private static List&lt;String&gt; getUndelivered(String[] messages, int i) {
+<span class="pc bpc" id="L367" title="1 of 3 branches missed.">		return switch (messages.length - i) {</span>
+<span class="nc" id="L368">			case 0 -&gt; Collections.emptyList();</span>
+<span class="pc bpc" id="L369" title="1 of 2 branches missed.">			case 1 -&gt; (messages[i].trim().isEmpty() ?</span>
+<span class="pc" id="L370">					Collections.&lt;String&gt;emptyList() : Collections.singletonList(messages[i]));</span>
+<span class="fc" id="L371">			default -&gt; Arrays.stream(Arrays.copyOfRange(messages, i, messages.length))</span>
+<span class="pc bpc" id="L372" title="1 of 2 branches missed.">					.filter(message -&gt; !message.trim().isEmpty())</span>
+<span class="fc" id="L373">					.toList();</span>
+		};
+	}
+
+	/**
+	 * Invoked when the underlying connection is closed.
+	 */
+	public final void delegateConnectionClosed(CloseStatus status) throws Exception {
+<span class="pc bpc" id="L381" title="1 of 2 branches missed.">		if (!isClosed()) {</span>
+			try {
+<span class="fc" id="L383">				updateLastActiveTime();</span>
+				// Avoid cancelHeartbeat() and responseLock within server &quot;close&quot; callback
+<span class="fc" id="L385">				ScheduledFuture&lt;?&gt; future = this.heartbeatFuture;</span>
+<span class="pc bpc" id="L386" title="1 of 2 branches missed.">				if (future != null) {</span>
+<span class="nc" id="L387">					this.heartbeatFuture = null;</span>
+<span class="nc" id="L388">					future.cancel(false);</span>
+				}
+			}
+			finally {
+<span class="fc" id="L392">				this.state = State.CLOSED;</span>
+<span class="fc" id="L393">				this.handler.afterConnectionClosed(this, status);</span>
+			}
+		}
+<span class="fc" id="L396">	}</span>
+
+	/**
+	 * Close due to error arising from SockJS transport handling.
+	 */
+	public void tryCloseWithSockJsTransportError(Throwable error, CloseStatus closeStatus) {
+<span class="pc bpc" id="L402" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L403">			logger.debug(&quot;Closing due to transport error for &quot; + this);</span>
+		}
+		try {
+<span class="fc" id="L406">			delegateError(error);</span>
+		}
+<span class="nc" id="L408">		catch (Throwable delegateException) {</span>
+			// Ignore
+<span class="nc" id="L410">			logger.debug(&quot;Exception from error handling delegate&quot;, delegateException);</span>
+<span class="fc" id="L411">		}</span>
+		try {
+<span class="fc" id="L413">			close(closeStatus);</span>
+		}
+<span class="nc" id="L415">		catch (Throwable closeException) {</span>
+<span class="nc" id="L416">			logger.debug(&quot;Failure while closing &quot; + this, closeException);</span>
+<span class="fc" id="L417">		}</span>
+<span class="fc" id="L418">	}</span>
+
+	public void delegateError(Throwable ex) throws Exception {
+<span class="fc" id="L421">		this.handler.handleTransportError(this, ex);</span>
+<span class="fc" id="L422">	}</span>
+
+
+	// Self description
+
+	@Override
+	public String toString() {
+<span class="fc" id="L429">		return getClass().getSimpleName() + &quot;[id=&quot; + getId() + &quot;]&quot;;</span>
+	}
+
+
+<span class="fc" id="L433">	private class HeartbeatTask implements Runnable {</span>
+
+		private boolean expired;
+
+		@Override
+		public void run() {
+<span class="nc" id="L439">			synchronized (responseLock) {</span>
+<span class="nc bnc" id="L440" title="All 4 branches missed.">				if (!this.expired &amp;&amp; !isClosed()) {</span>
+					try {
+<span class="nc" id="L442">						sendHeartbeat();</span>
+					}
+<span class="nc" id="L444">					catch (Throwable ex) {</span>
+						// Ignore: already handled in writeFrame...
+					}
+					finally {
+<span class="nc" id="L448">						this.expired = true;</span>
+					}
+				}
+<span class="nc" id="L451">			}</span>
+<span class="nc" id="L452">		}</span>
+
+		void cancel() {
+<span class="fc" id="L455">			this.expired = true;</span>
+<span class="fc" id="L456">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

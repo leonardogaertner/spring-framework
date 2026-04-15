@@ -1,0 +1,897 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MvcUriComponentsBuilder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.mvc.method.annotation</a> &gt; <span class="el_source">MvcUriComponentsBuilder.java</span></div><h1>MvcUriComponentsBuilder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.mvc.method.annotation;
+
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+import jakarta.servlet.http.HttpServletRequest;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aot.AotDetector;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.config.EmbeddedValueResolver;
+import org.springframework.cglib.core.SpringNamingPolicy;
+import org.springframework.cglib.proxy.Callback;
+import org.springframework.cglib.proxy.Enhancer;
+import org.springframework.cglib.proxy.Factory;
+import org.springframework.cglib.proxy.MethodInterceptor;
+import org.springframework.cglib.proxy.MethodProxy;
+import org.springframework.core.MethodIntrospector;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.annotation.AnnotatedMethod;
+import org.springframework.objenesis.ObjenesisException;
+import org.springframework.objenesis.SpringObjenesis;
+import org.springframework.util.AntPathMatcher;
+import org.springframework.util.Assert;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.PathMatcher;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.ReflectionUtils.MethodFilter;
+import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.context.WebApplicationContext;
+import org.springframework.web.context.request.RequestAttributes;
+import org.springframework.web.context.request.RequestContextHolder;
+import org.springframework.web.context.request.ServletRequestAttributes;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.method.annotation.RequestParamMethodArgumentResolver;
+import org.springframework.web.method.support.CompositeUriComponentsContributor;
+import org.springframework.web.servlet.DispatcherServlet;
+import org.springframework.web.servlet.mvc.method.RequestMappingInfoHandlerMapping;
+import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
+import org.springframework.web.util.UriComponentsBuilder;
+import org.springframework.web.util.pattern.PathPatternParser;
+
+/**
+ * Creates instances of {@link org.springframework.web.util.UriComponentsBuilder}
+ * by pointing to {@code @RequestMapping} methods on Spring MVC controllers.
+ *
+ * &lt;p&gt;There are several groups of methods:
+ * &lt;ul&gt;
+ * &lt;li&gt;Static {@code fromXxx(...)} methods to prepare links using information
+ * from the current request as determined by a call to
+ * {@link org.springframework.web.servlet.support.ServletUriComponentsBuilder#fromCurrentServletMapping()}.
+ * &lt;li&gt;Static {@code fromXxx(UriComponentsBuilder,...)} methods can be given
+ * a baseUrl when operating outside the context of a request.
+ * &lt;li&gt;Instance-based {@code withXxx(...)} methods where an instance of
+ * MvcUriComponentsBuilder is created with a baseUrl via
+ * {@link #relativeTo(org.springframework.web.util.UriComponentsBuilder)}.
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; As of 5.1, methods in this class do not extract
+ * {@code &quot;Forwarded&quot;} and {@code &quot;X-Forwarded-*&quot;} headers that specify the
+ * client-originated address. Please, use
+ * {@link org.springframework.web.filter.ForwardedHeaderFilter
+ * ForwardedHeaderFilter}, or similar from the underlying server, to extract
+ * and use such headers, or to discard them.
+ *
+ * @author Oliver Gierke
+ * @author Rossen Stoyanchev
+ * @author Sam Brannen
+ * @author Juergen Hoeller
+ * @since 4.0
+ */
+public class MvcUriComponentsBuilder {
+
+	/**
+	 * Well-known name for the {@link CompositeUriComponentsContributor} object in the bean factory.
+	 */
+	public static final String MVC_URI_COMPONENTS_CONTRIBUTOR_BEAN_NAME = &quot;mvcUriComponentsContributor&quot;;
+
+
+<span class="fc" id="L107">	private static final Log logger = LogFactory.getLog(MvcUriComponentsBuilder.class);</span>
+
+<span class="fc" id="L109">	private static final SpringObjenesis objenesis = new SpringObjenesis();</span>
+
+<span class="fc" id="L111">	private static final PathMatcher pathMatcher = new AntPathMatcher();</span>
+
+	private static final CompositeUriComponentsContributor defaultUriComponentsContributor;
+
+	static {
+<span class="fc" id="L116">		defaultUriComponentsContributor = new CompositeUriComponentsContributor(</span>
+				new PathVariableMethodArgumentResolver(), new RequestParamMethodArgumentResolver(false));
+<span class="fc" id="L118">	}</span>
+
+	private final UriComponentsBuilder baseUrl;
+
+
+	/**
+	 * Default constructor. Protected to prevent direct instantiation.
+	 * @see #fromController(Class)
+	 * @see #fromMethodName(Class, String, Object...)
+	 * @see #fromMethodCall(Object)
+	 * @see #fromMappingName(String)
+	 * @see #fromMethod(Class, Method, Object...)
+	 */
+<span class="fc" id="L131">	protected MvcUriComponentsBuilder(UriComponentsBuilder baseUrl) {</span>
+<span class="fc" id="L132">		Assert.notNull(baseUrl, &quot;'baseUrl' is required&quot;);</span>
+<span class="fc" id="L133">		this.baseUrl = baseUrl;</span>
+<span class="fc" id="L134">	}</span>
+
+
+	/**
+	 * Create an instance of this class with a base URL. After that calls to one
+	 * of the instance based {@code withXxx(...)} methods will create URLs relative
+	 * to the given base URL.
+	 */
+	public static MvcUriComponentsBuilder relativeTo(UriComponentsBuilder baseUrl) {
+<span class="fc" id="L143">		return new MvcUriComponentsBuilder(baseUrl);</span>
+	}
+
+
+	/**
+	 * Create a {@link UriComponentsBuilder} from the mapping of a controller class
+	 * and current request information including Servlet mapping. If the controller
+	 * contains multiple mappings, only the first one is used.
+	 * @param controllerType the controller to build a URI for
+	 * @return a UriComponentsBuilder instance (never {@code null})
+	 */
+	public static UriComponentsBuilder fromController(Class&lt;?&gt; controllerType) {
+<span class="fc" id="L155">		return fromController(null, controllerType);</span>
+	}
+
+	/**
+	 * An alternative to {@link #fromController(Class)} that accepts a
+	 * {@code UriComponentsBuilder} representing the base URL. This is useful
+	 * when using MvcUriComponentsBuilder outside the context of processing a
+	 * request or to apply a custom baseUrl not matching the current request.
+	 * @param builder the builder for the base URL; the builder will be cloned
+	 * and therefore not modified and may be re-used for further calls.
+	 * @param controllerType the controller to build a URI for
+	 * @return a UriComponentsBuilder instance (never {@code null})
+	 */
+	public static UriComponentsBuilder fromController(@Nullable UriComponentsBuilder builder,
+			Class&lt;?&gt; controllerType) {
+
+<span class="fc" id="L171">		builder = getBaseUrlToUse(builder);</span>
+
+		// Externally configured prefix via PathConfigurer..
+<span class="fc" id="L174">		String prefix = getPathPrefix(controllerType);</span>
+<span class="fc" id="L175">		builder.path(prefix);</span>
+
+<span class="fc" id="L177">		String mapping = getClassMapping(controllerType);</span>
+<span class="fc bfc" id="L178" title="All 2 branches covered.">		mapping = (!StringUtils.hasText(prefix + mapping) ? &quot;/&quot; : mapping);</span>
+<span class="fc" id="L179">		builder.path(mapping);</span>
+
+<span class="fc" id="L181">		return builder;</span>
+	}
+
+	/**
+	 * Create a {@link UriComponentsBuilder} from the mapping of a controller
+	 * method and an array of method argument values. This method delegates
+	 * to {@link #fromMethod(Class, Method, Object...)}.
+	 * @param controllerType the controller
+	 * @param methodName the method name
+	 * @param args the argument values
+	 * @return a UriComponentsBuilder instance, never {@code null}
+	 * @throws IllegalArgumentException if there is no matching or
+	 * if there is more than one matching method
+	 */
+	public static UriComponentsBuilder fromMethodName(Class&lt;?&gt; controllerType,
+			String methodName, Object... args) {
+
+<span class="fc" id="L198">		Method method = getMethod(controllerType, methodName, args);</span>
+<span class="fc" id="L199">		return fromMethodInternal(null, controllerType, method, args);</span>
+	}
+
+	/**
+	 * An alternative to {@link #fromMethodName(Class, String, Object...)} that
+	 * accepts a {@code UriComponentsBuilder} representing the base URL. This is
+	 * useful when using MvcUriComponentsBuilder outside the context of processing
+	 * a request or to apply a custom baseUrl not matching the current request.
+	 * @param builder the builder for the base URL; the builder will be cloned
+	 * and therefore not modified and may be re-used for further calls.
+	 * @param controllerType the controller
+	 * @param methodName the method name
+	 * @param args the argument values
+	 * @return a UriComponentsBuilder instance, never {@code null}
+	 * @throws IllegalArgumentException if there is no matching or
+	 * if there is more than one matching method
+	 */
+	public static UriComponentsBuilder fromMethodName(UriComponentsBuilder builder,
+			Class&lt;?&gt; controllerType, String methodName, Object... args) {
+
+<span class="fc" id="L219">		Method method = getMethod(controllerType, methodName, args);</span>
+<span class="fc" id="L220">		return fromMethodInternal(builder, controllerType, method, args);</span>
+	}
+
+	/**
+	 * Create a {@link UriComponentsBuilder} from the mapping of a controller method
+	 * and an array of method argument values. The array of values  must match the
+	 * signature of the controller method. Values for {@code @RequestParam} and
+	 * {@code @PathVariable} are used for building the URI (via implementations of
+	 * {@link org.springframework.web.method.support.UriComponentsContributor
+	 * UriComponentsContributor}) while remaining argument values are ignored and
+	 * can be {@code null}.
+	 * @param controllerType the controller type
+	 * @param method the controller method
+	 * @param args argument values for the controller method
+	 * @return a UriComponentsBuilder instance, never {@code null}
+	 * @since 4.2
+	 */
+	public static UriComponentsBuilder fromMethod(Class&lt;?&gt; controllerType, Method method, Object... args) {
+<span class="nc" id="L238">		return fromMethodInternal(null, controllerType, method, args);</span>
+	}
+
+	/**
+	 * An alternative to {@link #fromMethod(Class, Method, Object...)}
+	 * that accepts a {@code UriComponentsBuilder} representing the base URL.
+	 * This is useful when using MvcUriComponentsBuilder outside the context of
+	 * processing a request or to apply a custom baseUrl not matching the
+	 * current request.
+	 * @param baseUrl the builder for the base URL; the builder will be cloned
+	 * and therefore not modified and may be re-used for further calls.
+	 * @param controllerType the controller type
+	 * @param method the controller method
+	 * @param args argument values for the controller method
+	 * @return a UriComponentsBuilder instance (never {@code null})
+	 * @since 4.2
+	 */
+	public static UriComponentsBuilder fromMethod(UriComponentsBuilder baseUrl,
+			@Nullable Class&lt;?&gt; controllerType, Method method, Object... args) {
+
+<span class="nc" id="L258">		return fromMethodInternal(baseUrl,</span>
+<span class="nc bnc" id="L259" title="All 2 branches missed.">				(controllerType != null ? controllerType : method.getDeclaringClass()), method, args);</span>
+	}
+
+	/**
+	 * Create a {@link UriComponentsBuilder} by invoking a &quot;mock&quot; controller method.
+	 * The controller method and the supplied argument values are then used to
+	 * delegate to {@link #fromMethod(Class, Method, Object...)}.
+	 * &lt;p&gt;For example, given this controller:
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * &amp;#064;RequestMapping(&quot;/people/{id}/addresses&quot;)
+	 * class AddressController {
+	 *
+	 *   &amp;#064;GetMapping(&quot;/{country}&quot;)
+	 *   public HttpEntity&amp;lt;Void&amp;gt; getAddressesForCountry(&amp;#064;PathVariable String country) { ... }
+	 *
+	 *   &amp;#064;PostMapping
+	 *   public void addAddress(Address address) { ... }
+	 * }
+	 * &lt;/pre&gt;
+	 * A UriComponentsBuilder can be created:
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * // Inline style with static import of &quot;MvcUriComponentsBuilder.on&quot;
+	 *
+	 * MvcUriComponentsBuilder.fromMethodCall(
+	 * 		on(AddressController.class).getAddressesForCountry(&quot;US&quot;)).buildAndExpand(1);
+	 *
+	 * // Longer form useful for repeated invocation (and void controller methods)
+	 *
+	 * AddressController controller = MvcUriComponentsBuilder.on(AddressController.class);
+	 * controller.addAddress(null);
+	 * builder = MvcUriComponentsBuilder.fromMethodCall(controller);
+	 * controller.getAddressesForCountry(&quot;US&quot;)
+	 * builder = MvcUriComponentsBuilder.fromMethodCall(controller);
+	 * &lt;/pre&gt;
+	 * @param info either the value returned from a &quot;mock&quot; controller
+	 * invocation or the &quot;mock&quot; controller itself after an invocation
+	 * @return a UriComponents instance
+	 * @see #on(Class)
+	 * @see #controller(Class)
+	 */
+	public static UriComponentsBuilder fromMethodCall(Object info) {
+<span class="fc" id="L300">		Assert.isInstanceOf(MethodInvocationInfo.class, info, &quot;MethodInvocationInfo required&quot;);</span>
+<span class="fc" id="L301">		MethodInvocationInfo invocationInfo = (MethodInvocationInfo) info;</span>
+<span class="fc" id="L302">		Class&lt;?&gt; controllerType = invocationInfo.getControllerType();</span>
+<span class="fc" id="L303">		Method method = invocationInfo.getControllerMethod();</span>
+<span class="fc" id="L304">		Object[] arguments = invocationInfo.getArgumentValues();</span>
+<span class="fc" id="L305">		return fromMethodInternal(null, controllerType, method, arguments);</span>
+	}
+
+	/**
+	 * An alternative to {@link #fromMethodCall(Object)} that accepts a
+	 * {@code UriComponentsBuilder} representing the base URL. This is useful
+	 * when using MvcUriComponentsBuilder outside the context of processing a
+	 * request or to apply a custom baseUrl not matching the current request.
+	 * @param builder the builder for the base URL; the builder will be cloned
+	 * and therefore not modified and may be re-used for further calls.
+	 * @param info either the value returned from a &quot;mock&quot; controller
+	 * invocation or the &quot;mock&quot; controller itself after an invocation
+	 * @return a UriComponents instance
+	 */
+	public static UriComponentsBuilder fromMethodCall(UriComponentsBuilder builder, Object info) {
+<span class="fc" id="L320">		Assert.isInstanceOf(MethodInvocationInfo.class, info, &quot;MethodInvocationInfo required&quot;);</span>
+<span class="fc" id="L321">		MethodInvocationInfo invocationInfo = (MethodInvocationInfo) info;</span>
+<span class="fc" id="L322">		Class&lt;?&gt; controllerType = invocationInfo.getControllerType();</span>
+<span class="fc" id="L323">		Method method = invocationInfo.getControllerMethod();</span>
+<span class="fc" id="L324">		Object[] arguments = invocationInfo.getArgumentValues();</span>
+<span class="fc" id="L325">		return fromMethodInternal(builder, controllerType, method, arguments);</span>
+	}
+
+	/**
+	 * Return a &quot;mock&quot; controller instance. When an {@code @RequestMapping} method
+	 * on the controller is invoked, the supplied argument values are remembered
+	 * and the result can then be used to create a {@code UriComponentsBuilder}
+	 * via {@link #fromMethodCall(Object)}.
+	 * &lt;p&gt;Note that this is a shorthand version of {@link #controller(Class)} intended
+	 * for inline use (with a static import), for example:
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * MvcUriComponentsBuilder.fromMethodCall(on(FooController.class).getFoo(1)).build();
+	 * &lt;/pre&gt;
+	 * @param controllerType the target controller
+	 */
+	public static &lt;T&gt; T on(Class&lt;T&gt; controllerType) {
+<span class="fc" id="L341">		return controller(controllerType);</span>
+	}
+
+	/**
+	 * Return a &quot;mock&quot; controller instance. When an {@code @RequestMapping} method
+	 * on the controller is invoked, the supplied argument values are remembered
+	 * and the result can then be used to create {@code UriComponentsBuilder} via
+	 * {@link #fromMethodCall(Object)}.
+	 * &lt;p&gt;This is a longer version of {@link #on(Class)}. It is needed with controller
+	 * methods returning void as well for repeated invocations.
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * FooController fooController = controller(FooController.class);
+	 *
+	 * fooController.saveFoo(1, null);
+	 * builder = MvcUriComponentsBuilder.fromMethodCall(fooController);
+	 *
+	 * fooController.saveFoo(2, null);
+	 * builder = MvcUriComponentsBuilder.fromMethodCall(fooController);
+	 * &lt;/pre&gt;
+	 * @param controllerType the target controller
+	 */
+	public static &lt;T&gt; T controller(Class&lt;T&gt; controllerType) {
+<span class="fc" id="L363">		Assert.notNull(controllerType, &quot;'controllerType' must not be null&quot;);</span>
+<span class="fc" id="L364">		return ControllerMethodInvocationInterceptor.initProxy(controllerType, null);</span>
+	}
+
+	/**
+	 * Create a URL from the name of a Spring MVC controller method's request mapping.
+	 * &lt;p&gt;The configured
+	 * {@link org.springframework.web.servlet.handler.HandlerMethodMappingNamingStrategy
+	 * HandlerMethodMappingNamingStrategy} determines the names of controller
+	 * method request mappings at startup. By default, all mappings are assigned
+	 * a name based on the capital letters of the class name, followed by &quot;#&quot; as
+	 * separator, and then the method name. For example &quot;PC#getPerson&quot;
+	 * for a class named PersonController with method getPerson. In case the
+	 * naming convention does not produce unique results, an explicit name may
+	 * be assigned through the name attribute of the {@code @RequestMapping}
+	 * annotation.
+	 * &lt;p&gt;This is aimed primarily for use in view rendering technologies and EL
+	 * expressions. The Spring URL tag library registers this method as a function
+	 * called &quot;mvcUrl&quot;.
+	 * &lt;p&gt;For example, given this controller:
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * &amp;#064;RequestMapping(&quot;/people&quot;)
+	 * class PersonController {
+	 *
+	 *   &amp;#064;RequestMapping(&quot;/{id}&quot;)
+	 *   public HttpEntity&amp;lt;Void&amp;gt; getPerson(&amp;#064;PathVariable String id) { ... }
+	 *
+	 * }
+	 * &lt;/pre&gt;
+	 *
+	 * A JSP can prepare a URL to the controller method as follows:
+	 *
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * &amp;lt;%@ taglib uri=&quot;http://www.springframework.org/tags&quot; prefix=&quot;s&quot; %&amp;gt;
+	 *
+	 * &amp;lt;a href=&quot;${s:mvcUrl('PC#getPerson').arg(0,&quot;123&quot;).build()}&quot;&amp;gt;Get Person&amp;lt;/a&amp;gt;
+	 * &lt;/pre&gt;
+	 * &lt;p&gt;Note that it's not necessary to specify all arguments. Only the ones
+	 * required to prepare the URL, mainly {@code @RequestParam} and {@code @PathVariable}).
+	 * @param mappingName the mapping name
+	 * @return a builder to prepare the URI String
+	 * @throws IllegalArgumentException if the mapping name is not found or
+	 * if there is no unique match
+	 * @since 4.1
+	 */
+	public static MethodArgumentBuilder fromMappingName(String mappingName) {
+<span class="fc" id="L409">		return fromMappingName(null, mappingName);</span>
+	}
+
+	/**
+	 * An alternative to {@link #fromMappingName(String)} that accepts a
+	 * {@code UriComponentsBuilder} representing the base URL. This is useful
+	 * when using MvcUriComponentsBuilder outside the context of processing a
+	 * request or to apply a custom baseUrl not matching the current request.
+	 * @param builder the builder for the base URL; the builder will be cloned
+	 * and therefore not modified and may be re-used for further calls.
+	 * @param name the mapping name
+	 * @return a builder to prepare the URI String
+	 * @throws IllegalArgumentException if the mapping name is not found or
+	 * if there is no unique match
+	 * @since 4.2
+	 */
+	public static MethodArgumentBuilder fromMappingName(@Nullable UriComponentsBuilder builder, String name) {
+<span class="fc" id="L426">		WebApplicationContext wac = getWebApplicationContext();</span>
+<span class="pc bpc" id="L427" title="1 of 2 branches missed.">		Assert.state(wac != null, &quot;No WebApplicationContext&quot;);</span>
+<span class="fc" id="L428">		Map&lt;String, RequestMappingInfoHandlerMapping&gt; map = wac.getBeansOfType(RequestMappingInfoHandlerMapping.class);</span>
+<span class="fc" id="L429">		List&lt;HandlerMethod&gt; handlerMethods = null;</span>
+<span class="pc bpc" id="L430" title="1 of 2 branches missed.">		for (RequestMappingInfoHandlerMapping mapping : map.values()) {</span>
+<span class="fc" id="L431">			handlerMethods = mapping.getHandlerMethodsForMappingName(name);</span>
+<span class="pc bpc" id="L432" title="1 of 2 branches missed.">			if (handlerMethods != null) {</span>
+<span class="fc" id="L433">				break;</span>
+			}
+<span class="nc" id="L435">		}</span>
+<span class="pc bpc" id="L436" title="1 of 2 branches missed.">		if (handlerMethods == null) {</span>
+<span class="nc" id="L437">			throw new IllegalArgumentException(&quot;Mapping not found: &quot; + name);</span>
+		}
+<span class="pc bpc" id="L439" title="1 of 2 branches missed.">		else if (handlerMethods.size() != 1) {</span>
+<span class="nc" id="L440">			throw new IllegalArgumentException(&quot;No unique match for mapping &quot; + name + &quot;: &quot; + handlerMethods);</span>
+		}
+		else {
+<span class="fc" id="L443">			HandlerMethod handlerMethod = handlerMethods.get(0);</span>
+<span class="fc" id="L444">			Class&lt;?&gt; controllerType = handlerMethod.getBeanType();</span>
+<span class="fc" id="L445">			Method method = handlerMethod.getMethod();</span>
+<span class="fc" id="L446">			return new MethodArgumentBuilder(builder, controllerType, method);</span>
+		}
+	}
+
+
+	// Instance methods, relative to a base UriComponentsBuilder...
+
+	/**
+	 * An alternative to {@link #fromController(Class)} for use with an instance
+	 * of this class created via a call to {@link #relativeTo}.
+	 * @since 4.2
+	 */
+	public UriComponentsBuilder withController(Class&lt;?&gt; controllerType) {
+<span class="fc" id="L459">		return fromController(this.baseUrl, controllerType);</span>
+	}
+
+	/**
+	 * An alternative to {@link #fromMethodName(Class, String, Object...)} for
+	 * use with an instance of this class created via {@link #relativeTo}.
+	 * @since 4.2
+	 */
+	public UriComponentsBuilder withMethodName(Class&lt;?&gt; controllerType, String methodName, Object... args) {
+<span class="fc" id="L468">		return fromMethodName(this.baseUrl, controllerType, methodName, args);</span>
+	}
+
+	/**
+	 * An alternative to {@link #fromMethodCall(Object)} for use with an instance
+	 * of this class created via {@link #relativeTo}.
+	 * @since 4.2
+	 */
+	public UriComponentsBuilder withMethodCall(Object invocationInfo) {
+<span class="fc" id="L477">		return fromMethodCall(this.baseUrl, invocationInfo);</span>
+	}
+
+	/**
+	 * An alternative to {@link #fromMappingName(String)} for use with an instance
+	 * of this class created via {@link #relativeTo}.
+	 * @since 4.2
+	 */
+	public MethodArgumentBuilder withMappingName(String mappingName) {
+<span class="fc" id="L486">		return fromMappingName(this.baseUrl, mappingName);</span>
+	}
+
+	/**
+	 * An alternative to {@link #fromMethod(Class, Method, Object...)}
+	 * for use with an instance of this class created via {@link #relativeTo}.
+	 * @since 4.2
+	 */
+	public UriComponentsBuilder withMethod(Class&lt;?&gt; controllerType, Method method, Object... args) {
+<span class="nc" id="L495">		return fromMethod(this.baseUrl, controllerType, method, args);</span>
+	}
+
+
+	private static UriComponentsBuilder fromMethodInternal(@Nullable UriComponentsBuilder builder,
+			Class&lt;?&gt; controllerType, Method method, Object... args) {
+
+<span class="fc" id="L502">		AnnotatedMethod annotatedMethod = new AnnotatedMethod(method);</span>
+<span class="fc" id="L503">		builder = getBaseUrlToUse(builder);</span>
+
+		// Externally configured prefix via PathConfigurer..
+<span class="fc" id="L506">		String prefix = getPathPrefix(controllerType);</span>
+<span class="fc" id="L507">		builder.path(prefix);</span>
+
+<span class="fc" id="L509">		String typePath = getClassMapping(controllerType);</span>
+<span class="fc" id="L510">		String methodPath = getMethodMapping(annotatedMethod);</span>
+<span class="fc" id="L511">		String path = pathMatcher.combine(typePath, methodPath);</span>
+<span class="fc" id="L512">		path = PathPatternParser.defaultInstance.initFullPathPattern(path);</span>
+<span class="fc bfc" id="L513" title="All 2 branches covered.">		if (!StringUtils.hasText(prefix + path)) {</span>
+<span class="fc" id="L514">			path = &quot;/&quot;;</span>
+		}
+<span class="fc" id="L516">		builder.path(path);</span>
+
+<span class="fc" id="L518">		return applyContributors(builder, annotatedMethod, args);</span>
+	}
+
+	private static UriComponentsBuilder getBaseUrlToUse(@Nullable UriComponentsBuilder baseUrl) {
+<span class="fc bfc" id="L522" title="All 2 branches covered.">		return baseUrl == null ?</span>
+<span class="fc" id="L523">				ServletUriComponentsBuilder.fromCurrentServletMapping() :</span>
+<span class="fc" id="L524">				baseUrl.cloneBuilder();</span>
+	}
+
+	private static String getPathPrefix(Class&lt;?&gt; controllerType) {
+<span class="fc" id="L528">		WebApplicationContext wac = getWebApplicationContext();</span>
+<span class="fc bfc" id="L529" title="All 2 branches covered.">		if (wac != null) {</span>
+<span class="fc" id="L530">			Map&lt;String, RequestMappingHandlerMapping&gt; map = wac.getBeansOfType(RequestMappingHandlerMapping.class);</span>
+<span class="fc bfc" id="L531" title="All 2 branches covered.">			for (RequestMappingHandlerMapping mapping : map.values()) {</span>
+<span class="fc bfc" id="L532" title="All 2 branches covered.">				if (mapping.isHandler(controllerType)) {</span>
+<span class="fc" id="L533">					String prefix = mapping.getPathPrefix(controllerType);</span>
+<span class="fc bfc" id="L534" title="All 2 branches covered.">					if (prefix != null) {</span>
+<span class="fc" id="L535">						return prefix;</span>
+					}
+				}
+<span class="fc" id="L538">			}</span>
+		}
+<span class="fc" id="L540">		return &quot;&quot;;</span>
+	}
+
+	private static String getClassMapping(Class&lt;?&gt; controllerType) {
+<span class="fc" id="L544">		Assert.notNull(controllerType, &quot;'controllerType' must not be null&quot;);</span>
+<span class="fc" id="L545">		RequestMapping mapping = AnnotatedElementUtils.findMergedAnnotation(controllerType, RequestMapping.class);</span>
+<span class="fc bfc" id="L546" title="All 2 branches covered.">		if (mapping == null) {</span>
+<span class="fc" id="L547">			return &quot;&quot;;</span>
+		}
+<span class="fc" id="L549">		return getPathMapping(mapping, controllerType.getName());</span>
+	}
+
+	private static String getMethodMapping(AnnotatedMethod annotatedMethod) {
+<span class="fc" id="L553">		RequestMapping requestMapping = annotatedMethod.getMethodAnnotation(RequestMapping.class);</span>
+<span class="pc bpc" id="L554" title="1 of 2 branches missed.">		if (requestMapping == null) {</span>
+<span class="nc" id="L555">			throw new IllegalArgumentException(&quot;No @RequestMapping on: &quot; + annotatedMethod.getMethod().toGenericString());</span>
+		}
+<span class="fc" id="L557">		return getPathMapping(requestMapping, annotatedMethod.getMethod().toGenericString());</span>
+	}
+
+	private static String getPathMapping(RequestMapping requestMapping, String source) {
+<span class="fc" id="L561">		String[] paths = requestMapping.path();</span>
+<span class="pc bpc" id="L562" title="1 of 4 branches missed.">		if (ObjectUtils.isEmpty(paths) || !StringUtils.hasLength(paths[0])) {</span>
+<span class="fc" id="L563">			return &quot;&quot;;</span>
+		}
+<span class="pc bpc" id="L565" title="1 of 4 branches missed.">		if (paths.length &gt; 1 &amp;&amp; logger.isTraceEnabled()) {</span>
+<span class="nc" id="L566">			logger.trace(&quot;Using first of multiple paths on &quot; + source);</span>
+		}
+<span class="fc" id="L568">		return resolveEmbeddedValue(paths[0]);</span>
+	}
+
+	private static Method getMethod(Class&lt;?&gt; controllerType, final String methodName, final Object... args) {
+<span class="fc" id="L572">		MethodFilter selector = method -&gt; {</span>
+<span class="fc" id="L573">			String name = method.getName();</span>
+<span class="fc" id="L574">			int argLength = method.getParameterCount();</span>
+<span class="pc bpc" id="L575" title="1 of 4 branches missed.">			return (name.equals(methodName) &amp;&amp; argLength == args.length);</span>
+		};
+<span class="fc" id="L577">		Set&lt;Method&gt; methods = MethodIntrospector.selectMethods(controllerType, selector);</span>
+<span class="pc bpc" id="L578" title="1 of 2 branches missed.">		if (methods.size() == 1) {</span>
+<span class="fc" id="L579">			return methods.iterator().next();</span>
+		}
+<span class="nc bnc" id="L581" title="All 2 branches missed.">		else if (methods.size() &gt; 1) {</span>
+<span class="nc" id="L582">			throw new IllegalArgumentException(String.format(</span>
+					&quot;Found two methods named '%s' accepting arguments %s in controller %s: [%s]&quot;,
+<span class="nc" id="L584">					methodName, Arrays.asList(args), controllerType.getName(), methods));</span>
+		}
+		else {
+<span class="nc" id="L587">			throw new IllegalArgumentException(&quot;No method named '&quot; + methodName + &quot;' with &quot; + args.length +</span>
+<span class="nc" id="L588">					&quot; arguments found in controller &quot; + controllerType.getName());</span>
+		}
+	}
+
+	private static UriComponentsBuilder applyContributors(UriComponentsBuilder builder,
+			AnnotatedMethod annotatedMethod, Object... args) {
+
+<span class="fc" id="L595">		CompositeUriComponentsContributor contributor = getUriComponentsContributor();</span>
+
+<span class="fc" id="L597">		int paramCount = annotatedMethod.getMethodParameters().length;</span>
+<span class="fc" id="L598">		int argCount = args.length;</span>
+<span class="pc bpc" id="L599" title="1 of 2 branches missed.">		if (paramCount != argCount) {</span>
+<span class="nc" id="L600">			throw new IllegalArgumentException(&quot;Number of method parameters &quot; + paramCount +</span>
+					&quot; does not match number of argument values &quot; + argCount);
+		}
+
+<span class="fc" id="L604">		final Map&lt;String, Object&gt; uriVars = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L605" title="All 2 branches covered.">		for (int i = 0; i &lt; paramCount; i++) {</span>
+<span class="fc" id="L606">			MethodParameter param = annotatedMethod.getMethodParameters()[i];</span>
+<span class="fc" id="L607">			contributor.contributeMethodArgument(param, args[i], builder, uriVars);</span>
+		}
+
+		// This may not be all the URI variables, supply what we have so far.
+<span class="fc" id="L611">		return builder.uriVariables(uriVars);</span>
+	}
+
+	private static CompositeUriComponentsContributor getUriComponentsContributor() {
+<span class="fc" id="L615">		WebApplicationContext wac = getWebApplicationContext();</span>
+<span class="fc bfc" id="L616" title="All 2 branches covered.">		if (wac != null) {</span>
+			try {
+<span class="fc" id="L618">				return wac.getBean(MVC_URI_COMPONENTS_CONTRIBUTOR_BEAN_NAME, CompositeUriComponentsContributor.class);</span>
+			}
+<span class="nc" id="L620">			catch (NoSuchBeanDefinitionException ignored) {</span>
+			}
+		}
+<span class="fc" id="L623">		return defaultUriComponentsContributor;</span>
+	}
+
+	private static String resolveEmbeddedValue(String value) {
+<span class="fc bfc" id="L627" title="All 2 branches covered.">		if (hasPlaceholderOrExpression(value)) {</span>
+<span class="fc" id="L628">			WebApplicationContext wac = getWebApplicationContext();</span>
+<span class="pc bpc" id="L629" title="1 of 4 branches missed.">			if (wac != null &amp;&amp; wac.getAutowireCapableBeanFactory() instanceof ConfigurableBeanFactory cbf) {</span>
+<span class="fc" id="L630">				EmbeddedValueResolver valueResolver = new EmbeddedValueResolver(cbf);</span>
+<span class="fc" id="L631">				String resolvedValue = valueResolver.resolveStringValue(value);</span>
+<span class="pc bpc" id="L632" title="1 of 2 branches missed.">				if (resolvedValue != null) {</span>
+<span class="fc" id="L633">					return resolvedValue;</span>
+				}
+			}
+		}
+<span class="fc" id="L637">		return value;</span>
+	}
+
+	private static boolean hasPlaceholderOrExpression(String value) {
+<span class="fc" id="L641">		char prev = 0;</span>
+<span class="fc bfc" id="L642" title="All 2 branches covered.">		for (int i = 0; i &lt; value.length(); i++) {</span>
+<span class="fc" id="L643">			char c = value.charAt(i);</span>
+<span class="fc bfc" id="L644" title="All 6 branches covered.">			if (c == '{' &amp;&amp; (prev == '$' || prev == '#')) {</span>
+<span class="fc" id="L645">				return true;</span>
+			}
+<span class="fc" id="L647">			prev = c;</span>
+		}
+<span class="fc" id="L649">		return false;</span>
+	}
+
+	private static @Nullable WebApplicationContext getWebApplicationContext() {
+<span class="fc" id="L653">		RequestAttributes requestAttributes = RequestContextHolder.getRequestAttributes();</span>
+<span class="pc bpc" id="L654" title="1 of 2 branches missed.">		if (requestAttributes == null) {</span>
+<span class="nc" id="L655">			return null;</span>
+		}
+<span class="fc" id="L657">		HttpServletRequest request = ((ServletRequestAttributes) requestAttributes).getRequest();</span>
+<span class="fc" id="L658">		String attributeName = DispatcherServlet.WEB_APPLICATION_CONTEXT_ATTRIBUTE;</span>
+<span class="fc" id="L659">		WebApplicationContext wac = (WebApplicationContext) request.getAttribute(attributeName);</span>
+<span class="fc bfc" id="L660" title="All 2 branches covered.">		if (wac == null) {</span>
+<span class="fc" id="L661">			return null;</span>
+		}
+<span class="fc" id="L663">		return wac;</span>
+	}
+
+
+
+	/**
+	 * Method invocation information.
+	 */
+	public interface MethodInvocationInfo {
+
+		/**
+		 * Return the controller types.
+		 */
+		Class&lt;?&gt; getControllerType();
+
+		/**
+		 * Return the controller method.
+		 */
+		Method getControllerMethod();
+
+		/**
+		 * Return the argument values.
+		 */
+		Object[] getArgumentValues();
+	}
+
+
+	private static class ControllerMethodInvocationInterceptor
+			implements MethodInterceptor, InvocationHandler, MethodInvocationInfo {
+
+		private final Class&lt;?&gt; controllerType;
+
+		private @Nullable Method controllerMethod;
+
+		private Object @Nullable [] argumentValues;
+
+<span class="fc" id="L699">		ControllerMethodInvocationInterceptor(Class&lt;?&gt; controllerType) {</span>
+<span class="fc" id="L700">			this.controllerType = controllerType;</span>
+<span class="fc" id="L701">		}</span>
+
+		@Override
+		public @Nullable Object intercept(@Nullable Object obj, Method method, Object[] args, @Nullable MethodProxy proxy) {
+<span class="fc bfc" id="L705" title="All 4 branches covered.">			switch (method.getName()) {</span>
+				case &quot;getControllerType&quot; -&gt; {
+<span class="fc" id="L707">					return this.controllerType;</span>
+				}
+				case &quot;getControllerMethod&quot; -&gt; {
+<span class="fc" id="L710">					return this.controllerMethod;</span>
+				}
+				case &quot;getArgumentValues&quot; -&gt; {
+<span class="fc" id="L713">					return this.argumentValues;</span>
+				}
+				default -&gt; {
+<span class="pc bpc" id="L716" title="1 of 2 branches missed.">					if (ReflectionUtils.isObjectMethod(method)) {</span>
+<span class="nc" id="L717">						return ReflectionUtils.invokeMethod(method, obj, args);</span>
+					}
+					else {
+<span class="fc" id="L720">						this.controllerMethod = method;</span>
+<span class="fc" id="L721">						this.argumentValues = args;</span>
+<span class="fc" id="L722">						Class&lt;?&gt; returnType = method.getReturnType();</span>
+						try {
+<span class="fc bfc" id="L724" title="All 2 branches covered.">							return (returnType == void.class ? null : returnType.cast(initProxy(returnType, this)));</span>
+						}
+<span class="fc" id="L726">						catch (Throwable ex) {</span>
+<span class="fc" id="L727">							throw new IllegalStateException(</span>
+									&quot;Failed to create proxy for controller method return type: &quot; + method, ex);
+						}
+					}
+				}
+			}
+		}
+
+		@Override
+		public @Nullable Object invoke(Object proxy, Method method, Object @Nullable [] args) {
+<span class="fc bfc" id="L737" title="All 2 branches covered.">			return intercept(proxy, method, (args != null ? args : new Object[0]), null);</span>
+		}
+
+		@Override
+		public Class&lt;?&gt; getControllerType() {
+<span class="fc" id="L742">			return this.controllerType;</span>
+		}
+
+		@Override
+		public Method getControllerMethod() {
+<span class="pc bpc" id="L747" title="1 of 2 branches missed.">			Assert.state(this.controllerMethod != null, &quot;Not initialized yet&quot;);</span>
+<span class="fc" id="L748">			return this.controllerMethod;</span>
+		}
+
+		@Override
+		public Object[] getArgumentValues() {
+<span class="pc bpc" id="L753" title="1 of 2 branches missed.">			Assert.state(this.argumentValues != null, &quot;Not initialized yet&quot;);</span>
+<span class="fc" id="L754">			return this.argumentValues;</span>
+		}
+
+
+		@SuppressWarnings(&quot;unchecked&quot;)
+		private static &lt;T&gt; T initProxy(
+				Class&lt;?&gt; controllerType, @Nullable ControllerMethodInvocationInterceptor interceptor) {
+
+<span class="fc bfc" id="L762" title="All 2 branches covered.">			interceptor = (interceptor != null ?</span>
+<span class="fc" id="L763">					interceptor : new ControllerMethodInvocationInterceptor(controllerType));</span>
+
+<span class="fc bfc" id="L765" title="All 2 branches covered.">			if (controllerType == Object.class) {</span>
+<span class="fc" id="L766">				return (T) interceptor;</span>
+			}
+
+<span class="fc bfc" id="L769" title="All 2 branches covered.">			else if (controllerType.isInterface()) {</span>
+<span class="fc" id="L770">				ClassLoader classLoader = controllerType.getClassLoader();</span>
+<span class="fc bfc" id="L771" title="All 2 branches covered.">				if (classLoader == null) {</span>
+					// JDK bootstrap loader -&gt; use MethodInvocationInfo ClassLoader instead.
+<span class="fc" id="L773">					classLoader = MethodInvocationInfo.class.getClassLoader();</span>
+				}
+<span class="fc bfc" id="L775" title="All 2 branches covered.">				else if (classLoader.getParent() == null) {</span>
+					// Potentially the JDK platform loader on JDK 9+
+<span class="fc" id="L777">					ClassLoader miiClassLoader = MethodInvocationInfo.class.getClassLoader();</span>
+<span class="fc" id="L778">					ClassLoader miiParent = miiClassLoader.getParent();</span>
+<span class="pc bpc" id="L779" title="1 of 2 branches missed.">					while (miiParent != null) {</span>
+<span class="pc bpc" id="L780" title="1 of 2 branches missed.">						if (classLoader == miiParent) {</span>
+							// Suggested ClassLoader is ancestor of MethodInvocationInfo ClassLoader
+							// -&gt; use MethodInvocationInfo ClassLoader itself instead.
+<span class="fc" id="L783">							classLoader = miiClassLoader;</span>
+<span class="fc" id="L784">							break;</span>
+						}
+<span class="nc" id="L786">						miiParent = miiParent.getParent();</span>
+					}
+				}
+<span class="fc" id="L789">				Class&lt;?&gt;[] ifcs = new Class&lt;?&gt;[] {controllerType, MethodInvocationInfo.class};</span>
+<span class="fc" id="L790">				return (T) Proxy.newProxyInstance(classLoader, ifcs, interceptor);</span>
+			}
+
+			else {
+<span class="fc" id="L794">				Enhancer enhancer = new Enhancer();</span>
+<span class="fc" id="L795">				enhancer.setSuperclass(controllerType);</span>
+<span class="fc" id="L796">				enhancer.setInterfaces(new Class&lt;?&gt;[] {MethodInvocationInfo.class});</span>
+<span class="fc" id="L797">				enhancer.setNamingPolicy(SpringNamingPolicy.INSTANCE);</span>
+<span class="fc" id="L798">				enhancer.setAttemptLoad(AotDetector.useGeneratedArtifacts());</span>
+<span class="fc" id="L799">				enhancer.setCallbackType(MethodInterceptor.class);</span>
+
+<span class="fc" id="L801">				Class&lt;?&gt; proxyClass = enhancer.createClass();</span>
+<span class="fc" id="L802">				Object proxy = null;</span>
+
+<span class="pc bpc" id="L804" title="1 of 2 branches missed.">				if (objenesis.isWorthTrying()) {</span>
+					try {
+<span class="fc" id="L806">						proxy = objenesis.newInstance(proxyClass, enhancer.getUseCache());</span>
+					}
+<span class="nc" id="L808">					catch (ObjenesisException ex) {</span>
+<span class="nc" id="L809">						logger.debug(&quot;Failed to create controller proxy, falling back on default constructor&quot;, ex);</span>
+<span class="fc" id="L810">					}</span>
+				}
+
+<span class="pc bpc" id="L813" title="1 of 2 branches missed.">				if (proxy == null) {</span>
+					try {
+<span class="nc" id="L815">						proxy = ReflectionUtils.accessibleConstructor(proxyClass).newInstance();</span>
+					}
+<span class="nc" id="L817">					catch (Throwable ex) {</span>
+<span class="nc" id="L818">						throw new IllegalStateException(</span>
+								&quot;Failed to create controller proxy or use default constructor&quot;, ex);
+<span class="nc" id="L820">					}</span>
+				}
+
+<span class="fc" id="L823">				((Factory) proxy).setCallbacks(new Callback[] {interceptor});</span>
+<span class="fc" id="L824">				return (T) proxy;</span>
+			}
+		}
+	}
+
+
+	/**
+	 * Builder class to create URLs for method arguments.
+	 */
+	public static class MethodArgumentBuilder {
+
+		private final Class&lt;?&gt; controllerType;
+
+		private final Method method;
+
+		private final Object[] argumentValues;
+
+		private final UriComponentsBuilder baseUrl;
+
+		/**
+		 * Create a new {@link MethodArgumentBuilder} instance.
+		 * @since 4.2
+		 */
+		public MethodArgumentBuilder(Class&lt;?&gt; controllerType, Method method) {
+<span class="nc" id="L848">			this(null, controllerType, method);</span>
+<span class="nc" id="L849">		}</span>
+
+		/**
+		 * Create a new {@link MethodArgumentBuilder} instance.
+		 * @since 4.2
+		 */
+<span class="fc" id="L855">		public MethodArgumentBuilder(@Nullable UriComponentsBuilder baseUrl, Class&lt;?&gt; controllerType, Method method) {</span>
+<span class="fc" id="L856">			Assert.notNull(controllerType, &quot;'controllerType' is required&quot;);</span>
+<span class="fc" id="L857">			Assert.notNull(method, &quot;'method' is required&quot;);</span>
+<span class="fc bfc" id="L858" title="All 2 branches covered.">			this.baseUrl = (baseUrl != null ? baseUrl : UriComponentsBuilder.fromPath(getPath()));</span>
+<span class="fc" id="L859">			this.controllerType = controllerType;</span>
+<span class="fc" id="L860">			this.method = method;</span>
+<span class="fc" id="L861">			this.argumentValues = new Object[method.getParameterCount()];</span>
+<span class="fc" id="L862">		}</span>
+
+		private static String getPath() {
+<span class="fc" id="L865">			UriComponentsBuilder builder = ServletUriComponentsBuilder.fromCurrentServletMapping();</span>
+<span class="fc" id="L866">			String path = builder.build().getPath();</span>
+<span class="pc bpc" id="L867" title="1 of 2 branches missed.">			return (path != null ? path : &quot;&quot;);</span>
+		}
+
+		public MethodArgumentBuilder arg(int index, Object value) {
+<span class="fc" id="L871">			this.argumentValues[index] = value;</span>
+<span class="fc" id="L872">			return this;</span>
+		}
+
+		/**
+		 * Use this method only if you need to apply strong encoding to expanded
+		 * URI variables by quoting all characters with reserved meaning.
+		 * @since 5.0.8
+		 */
+		public MethodArgumentBuilder encode() {
+<span class="fc" id="L881">			this.baseUrl.encode();</span>
+<span class="fc" id="L882">			return this;</span>
+		}
+
+		public String build() {
+<span class="nc" id="L886">			return fromMethodInternal(this.baseUrl, this.controllerType, this.method, this.argumentValues)</span>
+<span class="nc" id="L887">					.build().encode().toUriString();</span>
+		}
+
+		public String buildAndExpand(Object... uriVars) {
+<span class="fc" id="L891">			return fromMethodInternal(this.baseUrl, this.controllerType, this.method, this.argumentValues)</span>
+<span class="fc" id="L892">					.buildAndExpand(uriVars).encode().toString();</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

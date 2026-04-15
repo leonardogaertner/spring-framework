@@ -1,0 +1,553 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>DisposableBeanAdapter.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.support</a> &gt; <span class="el_source">DisposableBeanAdapter.java</span></div><h1>DisposableBeanAdapter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.support;
+
+import java.io.Serializable;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Future;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.config.DestructionAwareBeanPostProcessor;
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Adapter that implements the {@link DisposableBean} and {@link Runnable}
+ * interfaces performing various destruction steps on a given bean instance:
+ * &lt;ul&gt;
+ * &lt;li&gt;DestructionAwareBeanPostProcessors;
+ * &lt;li&gt;the bean implementing DisposableBean itself;
+ * &lt;li&gt;a custom destroy method specified on the bean definition.
+ * &lt;/ul&gt;
+ *
+ * @author Juergen Hoeller
+ * @author Costin Leau
+ * @author Stephane Nicoll
+ * @author Sam Brannen
+ * @author Sebastien Deleuze
+ * @since 2.0
+ * @see AbstractBeanFactory
+ * @see org.springframework.beans.factory.DisposableBean
+ * @see org.springframework.beans.factory.config.DestructionAwareBeanPostProcessor
+ * @see AbstractBeanDefinition#getDestroyMethodNames()
+ */
+@SuppressWarnings(&quot;serial&quot;)
+class DisposableBeanAdapter implements DisposableBean, Runnable, Serializable {
+
+	private static final String DESTROY_METHOD_NAME = &quot;destroy&quot;;
+
+	private static final String CLOSE_METHOD_NAME = &quot;close&quot;;
+
+	private static final String SHUTDOWN_METHOD_NAME = &quot;shutdown&quot;;
+
+
+<span class="fc" id="L77">	private static final Log logger = LogFactory.getLog(DisposableBeanAdapter.class);</span>
+
+<span class="fc" id="L79">	private static final boolean REACTIVE_STREAMS_PRESENT = ClassUtils.isPresent(</span>
+<span class="fc" id="L80">			&quot;org.reactivestreams.Publisher&quot;, DisposableBeanAdapter.class.getClassLoader());</span>
+
+
+	private final Object bean;
+
+	private final String beanName;
+
+	private final boolean nonPublicAccessAllowed;
+
+	private final boolean invokeDisposableBean;
+
+	private boolean invokeAutoCloseable;
+
+	private String @Nullable [] destroyMethodNames;
+
+	private transient Method @Nullable [] destroyMethods;
+
+	private final @Nullable List&lt;DestructionAwareBeanPostProcessor&gt; beanPostProcessors;
+
+
+	/**
+	 * Create a new DisposableBeanAdapter for the given bean.
+	 * @param bean the bean instance (never {@code null})
+	 * @param beanName the name of the bean
+	 * @param beanDefinition the merged bean definition
+	 * @param postProcessors the List of BeanPostProcessors
+	 * (potentially DestructionAwareBeanPostProcessor), if any
+	 */
+	public DisposableBeanAdapter(Object bean, String beanName, RootBeanDefinition beanDefinition,
+<span class="fc" id="L109">			List&lt;DestructionAwareBeanPostProcessor&gt; postProcessors) {</span>
+
+<span class="fc" id="L111">		Assert.notNull(bean, &quot;Disposable bean must not be null&quot;);</span>
+<span class="fc" id="L112">		this.bean = bean;</span>
+<span class="fc" id="L113">		this.beanName = beanName;</span>
+<span class="fc" id="L114">		this.nonPublicAccessAllowed = beanDefinition.isNonPublicAccessAllowed();</span>
+<span class="fc bfc" id="L115" title="All 2 branches covered.">		this.invokeDisposableBean = (bean instanceof DisposableBean &amp;&amp;</span>
+<span class="fc bfc" id="L116" title="All 2 branches covered.">				!beanDefinition.hasAnyExternallyManagedDestroyMethod(DESTROY_METHOD_NAME));</span>
+
+<span class="fc" id="L118">		String[] destroyMethodNames = inferDestroyMethodsIfNecessary(bean.getClass(), beanDefinition);</span>
+<span class="fc bfc" id="L119" title="All 4 branches covered.">		if (!ObjectUtils.isEmpty(destroyMethodNames) &amp;&amp;</span>
+<span class="fc bfc" id="L120" title="All 2 branches covered.">				!(this.invokeDisposableBean &amp;&amp; DESTROY_METHOD_NAME.equals(destroyMethodNames[0])) &amp;&amp;</span>
+<span class="fc bfc" id="L121" title="All 2 branches covered.">				!beanDefinition.hasAnyExternallyManagedDestroyMethod(destroyMethodNames[0])) {</span>
+
+<span class="fc bfc" id="L123" title="All 2 branches covered.">			this.invokeAutoCloseable =</span>
+<span class="fc bfc" id="L124" title="All 2 branches covered.">					(bean instanceof AutoCloseable &amp;&amp; CLOSE_METHOD_NAME.equals(destroyMethodNames[0]));</span>
+<span class="fc bfc" id="L125" title="All 2 branches covered.">			if (!this.invokeAutoCloseable) {</span>
+<span class="fc" id="L126">				this.destroyMethodNames = destroyMethodNames;</span>
+<span class="fc" id="L127">				List&lt;Method&gt; destroyMethods = new ArrayList&lt;&gt;(destroyMethodNames.length);</span>
+<span class="fc bfc" id="L128" title="All 2 branches covered.">				for (String destroyMethodName : destroyMethodNames) {</span>
+<span class="fc" id="L129">					Method destroyMethod = determineDestroyMethod(destroyMethodName);</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">					if (destroyMethod == null) {</span>
+<span class="fc bfc" id="L131" title="All 2 branches covered.">						if (beanDefinition.isEnforceDestroyMethod()) {</span>
+<span class="fc" id="L132">							throw new BeanDefinitionValidationException(&quot;Could not find a destroy method named '&quot; +</span>
+									destroyMethodName + &quot;' on bean with name '&quot; + beanName + &quot;'&quot;);
+						}
+					}
+					else {
+<span class="pc bpc" id="L137" title="1 of 2 branches missed.">						if (destroyMethod.getParameterCount() &gt; 0) {</span>
+<span class="nc" id="L138">							Class&lt;?&gt;[] paramTypes = destroyMethod.getParameterTypes();</span>
+<span class="nc bnc" id="L139" title="All 2 branches missed.">							if (paramTypes.length &gt; 1) {</span>
+<span class="nc" id="L140">								throw new BeanDefinitionValidationException(&quot;Method '&quot; + destroyMethodName + &quot;' of bean '&quot; +</span>
+										beanName + &quot;' has more than one parameter - not supported as destroy method&quot;);
+							}
+<span class="nc bnc" id="L143" title="All 4 branches missed.">							else if (paramTypes.length == 1 &amp;&amp; boolean.class != paramTypes[0]) {</span>
+<span class="nc" id="L144">								throw new BeanDefinitionValidationException(&quot;Method '&quot; + destroyMethodName + &quot;' of bean '&quot; +</span>
+										beanName + &quot;' has a non-boolean parameter - not supported as destroy method&quot;);
+							}
+						}
+<span class="fc" id="L148">						destroyMethod = ClassUtils.getPubliclyAccessibleMethodIfPossible(destroyMethod, bean.getClass());</span>
+<span class="fc" id="L149">						destroyMethods.add(destroyMethod);</span>
+					}
+				}
+<span class="fc" id="L152">				this.destroyMethods = destroyMethods.toArray(Method[]::new);</span>
+			}
+		}
+
+<span class="fc" id="L156">		this.beanPostProcessors = filterPostProcessors(postProcessors, bean);</span>
+<span class="fc" id="L157">	}</span>
+
+	/**
+	 * Create a new DisposableBeanAdapter for the given bean.
+	 * @param bean the bean instance (never {@code null})
+	 * @param postProcessors the List of BeanPostProcessors
+	 * (potentially DestructionAwareBeanPostProcessor), if any
+	 */
+<span class="fc" id="L165">	public DisposableBeanAdapter(Object bean, List&lt;DestructionAwareBeanPostProcessor&gt; postProcessors) {</span>
+<span class="fc" id="L166">		Assert.notNull(bean, &quot;Disposable bean must not be null&quot;);</span>
+<span class="fc" id="L167">		this.bean = bean;</span>
+<span class="fc" id="L168">		this.beanName = bean.getClass().getName();</span>
+<span class="fc" id="L169">		this.nonPublicAccessAllowed = true;</span>
+<span class="fc" id="L170">		this.invokeDisposableBean = (this.bean instanceof DisposableBean);</span>
+<span class="fc" id="L171">		this.beanPostProcessors = filterPostProcessors(postProcessors, bean);</span>
+<span class="fc" id="L172">	}</span>
+
+	/**
+	 * Create a new DisposableBeanAdapter for the given bean.
+	 */
+	private DisposableBeanAdapter(Object bean, String beanName, boolean nonPublicAccessAllowed,
+			boolean invokeDisposableBean, boolean invokeAutoCloseable, String @Nullable [] destroyMethodNames,
+<span class="fc" id="L179">			@Nullable List&lt;DestructionAwareBeanPostProcessor&gt; postProcessors) {</span>
+
+<span class="fc" id="L181">		this.bean = bean;</span>
+<span class="fc" id="L182">		this.beanName = beanName;</span>
+<span class="fc" id="L183">		this.nonPublicAccessAllowed = nonPublicAccessAllowed;</span>
+<span class="fc" id="L184">		this.invokeDisposableBean = invokeDisposableBean;</span>
+<span class="fc" id="L185">		this.invokeAutoCloseable = invokeAutoCloseable;</span>
+<span class="fc" id="L186">		this.destroyMethodNames = destroyMethodNames;</span>
+<span class="fc" id="L187">		this.beanPostProcessors = postProcessors;</span>
+<span class="fc" id="L188">	}</span>
+
+
+	@Override
+	public void run() {
+<span class="fc" id="L193">		destroy();</span>
+<span class="fc" id="L194">	}</span>
+
+	@Override
+	public void destroy() {
+<span class="fc bfc" id="L198" title="All 2 branches covered.">		if (!CollectionUtils.isEmpty(this.beanPostProcessors)) {</span>
+<span class="fc bfc" id="L199" title="All 2 branches covered.">			for (DestructionAwareBeanPostProcessor processor : this.beanPostProcessors) {</span>
+<span class="fc" id="L200">				processor.postProcessBeforeDestruction(this.bean, this.beanName);</span>
+<span class="fc" id="L201">			}</span>
+		}
+
+<span class="fc bfc" id="L204" title="All 2 branches covered.">		if (this.invokeDisposableBean) {</span>
+<span class="pc bpc" id="L205" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L206">				logger.trace(&quot;Invoking destroy() on bean with name '&quot; + this.beanName + &quot;'&quot;);</span>
+			}
+			try {
+<span class="fc" id="L209">				((DisposableBean) this.bean).destroy();</span>
+			}
+<span class="fc" id="L211">			catch (Throwable ex) {</span>
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">				if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L213">					String msg = &quot;Invocation of destroy method failed on bean with name '&quot; + this.beanName + &quot;'&quot;;</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+						// Log at warn level like below but add the exception stacktrace only with debug level
+<span class="nc" id="L216">						logger.warn(msg, ex);</span>
+					}
+					else {
+<span class="nc" id="L219">						logger.warn(msg + &quot;: &quot; + ex);</span>
+					}
+				}
+<span class="fc" id="L222">			}</span>
+		}
+
+<span class="fc bfc" id="L225" title="All 2 branches covered.">		if (this.invokeAutoCloseable) {</span>
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L227">				logger.trace(&quot;Invoking close() on bean with name '&quot; + this.beanName + &quot;'&quot;);</span>
+			}
+			try {
+<span class="fc" id="L230">				((AutoCloseable) this.bean).close();</span>
+			}
+<span class="nc" id="L232">			catch (Throwable ex) {</span>
+<span class="nc bnc" id="L233" title="All 2 branches missed.">				if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L234">					String msg = &quot;Invocation of close method failed on bean with name '&quot; + this.beanName + &quot;'&quot;;</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+						// Log at warn level like below but add the exception stacktrace only with debug level
+<span class="nc" id="L237">						logger.warn(msg, ex);</span>
+					}
+					else {
+<span class="nc" id="L240">						logger.warn(msg + &quot;: &quot; + ex);</span>
+					}
+				}
+<span class="pc" id="L243">			}</span>
+		}
+<span class="fc bfc" id="L245" title="All 2 branches covered.">		else if (this.destroyMethods != null) {</span>
+<span class="fc bfc" id="L246" title="All 2 branches covered.">			for (Method destroyMethod : this.destroyMethods) {</span>
+<span class="fc" id="L247">				invokeCustomDestroyMethod(destroyMethod);</span>
+			}
+		}
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">		else if (this.destroyMethodNames != null) {</span>
+<span class="nc bnc" id="L251" title="All 2 branches missed.">			for (String destroyMethodName : this.destroyMethodNames) {</span>
+<span class="nc" id="L252">				Method destroyMethod = determineDestroyMethod(destroyMethodName);</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">				if (destroyMethod != null) {</span>
+<span class="nc" id="L254">					destroyMethod = ClassUtils.getPubliclyAccessibleMethodIfPossible(destroyMethod, this.bean.getClass());</span>
+<span class="nc" id="L255">					invokeCustomDestroyMethod(destroyMethod);</span>
+				}
+			}
+		}
+<span class="fc" id="L259">	}</span>
+
+
+	private @Nullable Method determineDestroyMethod(String destroyMethodName) {
+		try {
+<span class="fc" id="L264">			Class&lt;?&gt; beanClass = this.bean.getClass();</span>
+<span class="fc" id="L265">			MethodDescriptor descriptor = MethodDescriptor.create(this.beanName, beanClass, destroyMethodName);</span>
+<span class="fc" id="L266">			String methodName = descriptor.methodName();</span>
+
+<span class="fc" id="L268">			Method destroyMethod = findDestroyMethod(descriptor.declaringClass(), methodName);</span>
+<span class="fc bfc" id="L269" title="All 2 branches covered.">			if (destroyMethod != null) {</span>
+<span class="fc" id="L270">				return destroyMethod;</span>
+			}
+<span class="fc bfc" id="L272" title="All 2 branches covered.">			for (Class&lt;?&gt; beanInterface : ClassUtils.getAllInterfacesForClass(beanClass)) {</span>
+<span class="fc" id="L273">				destroyMethod = findDestroyMethod(beanInterface, methodName);</span>
+<span class="pc bpc" id="L274" title="1 of 2 branches missed.">				if (destroyMethod != null) {</span>
+<span class="nc" id="L275">					return destroyMethod;</span>
+				}
+			}
+<span class="fc" id="L278">			return null;</span>
+		}
+<span class="nc" id="L280">		catch (IllegalArgumentException ex) {</span>
+<span class="nc" id="L281">			throw new BeanDefinitionValidationException(&quot;Could not find unique destroy method on bean with name '&quot; +</span>
+<span class="nc" id="L282">					this.beanName + &quot;: &quot; + ex.getMessage());</span>
+		}
+	}
+
+	private @Nullable Method findDestroyMethod(Class&lt;?&gt; clazz, String name) {
+<span class="pc bpc" id="L287" title="1 of 2 branches missed.">		return (this.nonPublicAccessAllowed ?</span>
+<span class="fc" id="L288">				BeanUtils.findMethodWithMinimalParameters(clazz, name) :</span>
+<span class="nc" id="L289">				BeanUtils.findMethodWithMinimalParameters(clazz.getMethods(), name));</span>
+	}
+
+	/**
+	 * Invoke the specified custom destroy method on the given bean.
+	 * &lt;p&gt;This implementation invokes a no-arg method if found, else checking
+	 * for a method with a single boolean argument (passing in &quot;true&quot;,
+	 * assuming a &quot;force&quot; parameter), else logging an error.
+	 */
+	private void invokeCustomDestroyMethod(Method destroyMethod) {
+<span class="pc bpc" id="L299" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L300">			logger.trace(&quot;Invoking custom destroy method '&quot; + destroyMethod.getName() +</span>
+					&quot;' on bean with name '&quot; + this.beanName + &quot;': &quot; + destroyMethod);
+		}
+
+<span class="fc" id="L304">		int paramCount = destroyMethod.getParameterCount();</span>
+<span class="fc" id="L305">		Object[] args = new Object[paramCount];</span>
+<span class="pc bpc" id="L306" title="1 of 2 branches missed.">		if (paramCount == 1) {</span>
+<span class="nc" id="L307">			args[0] = Boolean.TRUE;</span>
+		}
+
+		try {
+<span class="fc" id="L311">			ReflectionUtils.makeAccessible(destroyMethod);</span>
+<span class="fc" id="L312">			Object returnValue = destroyMethod.invoke(this.bean, args);</span>
+
+<span class="fc bfc" id="L314" title="All 2 branches covered.">			if (returnValue == null) {</span>
+				// Regular case: a void method
+<span class="fc" id="L316">				logDestroyMethodCompletion(destroyMethod, false);</span>
+			}
+<span class="fc bfc" id="L318" title="All 2 branches covered.">			else if (returnValue instanceof Future&lt;?&gt; future) {</span>
+				// An async task: await its completion.
+<span class="fc" id="L320">				future.get();</span>
+<span class="fc" id="L321">				logDestroyMethodCompletion(destroyMethod, true);</span>
+			}
+<span class="pc bpc" id="L323" title="1 of 4 branches missed.">			else if (!REACTIVE_STREAMS_PRESENT || !new ReactiveDestroyMethodHandler().await(destroyMethod, returnValue)) {</span>
+<span class="pc bpc" id="L324" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L325">					logger.debug(&quot;Unknown return value type from custom destroy method '&quot; + destroyMethod.getName() +</span>
+<span class="nc" id="L326">							&quot;' on bean with name '&quot; + this.beanName + &quot;': &quot; + returnValue.getClass());</span>
+				}
+			}
+		}
+<span class="nc" id="L330">		catch (InvocationTargetException | ExecutionException ex) {</span>
+<span class="nc" id="L331">			logDestroyMethodException(destroyMethod, ex.getCause());</span>
+		}
+<span class="nc" id="L333">		catch (Throwable ex) {</span>
+<span class="nc bnc" id="L334" title="All 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L335">				logger.warn(&quot;Failed to invoke custom destroy method '&quot; + destroyMethod.getName() +</span>
+						&quot;' on bean with name '&quot; + this.beanName + &quot;'&quot;, ex);
+			}
+<span class="pc" id="L338">		}</span>
+<span class="fc" id="L339">	}</span>
+
+	void logDestroyMethodException(Method destroyMethod, @Nullable Throwable ex) {
+<span class="nc bnc" id="L342" title="All 2 branches missed.">		if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L343">			String msg = &quot;Custom destroy method '&quot; + destroyMethod.getName() + &quot;' on bean with name '&quot; +</span>
+					this.beanName + &quot;' propagated an exception&quot;;
+<span class="nc bnc" id="L345" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+				// Log at warn level like below but add the exception stacktrace only with debug level
+<span class="nc" id="L347">				logger.warn(msg, ex);</span>
+			}
+			else {
+<span class="nc" id="L350">				logger.warn(msg + &quot;: &quot; + ex);</span>
+			}
+		}
+<span class="nc" id="L353">	}</span>
+
+	void logDestroyMethodCompletion(Method destroyMethod, boolean async) {
+<span class="pc bpc" id="L356" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L357">			logger.debug(&quot;Custom destroy method '&quot; + destroyMethod.getName() +</span>
+<span class="nc bnc" id="L358" title="All 2 branches missed.">					&quot;' on bean with name '&quot; + this.beanName + &quot;' completed&quot; + (async ? &quot; asynchronously&quot; : &quot;&quot;));</span>
+		}
+<span class="fc" id="L360">	}</span>
+
+
+	/**
+	 * Serializes a copy of the state of this class,
+	 * filtering out non-serializable BeanPostProcessors.
+	 */
+	protected Object writeReplace() {
+<span class="fc" id="L368">		List&lt;DestructionAwareBeanPostProcessor&gt; serializablePostProcessors = null;</span>
+<span class="pc bpc" id="L369" title="1 of 2 branches missed.">		if (this.beanPostProcessors != null) {</span>
+<span class="fc" id="L370">			serializablePostProcessors = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L371" title="All 2 branches covered.">			for (DestructionAwareBeanPostProcessor postProcessor : this.beanPostProcessors) {</span>
+<span class="pc bpc" id="L372" title="1 of 2 branches missed.">				if (postProcessor instanceof Serializable) {</span>
+<span class="fc" id="L373">					serializablePostProcessors.add(postProcessor);</span>
+				}
+<span class="fc" id="L375">			}</span>
+		}
+<span class="fc" id="L377">		return new DisposableBeanAdapter(</span>
+				this.bean, this.beanName, this.nonPublicAccessAllowed, this.invokeDisposableBean,
+				this.invokeAutoCloseable, this.destroyMethodNames, serializablePostProcessors);
+	}
+
+
+	/**
+	 * Check whether the given bean has any kind of destroy method to call.
+	 * @param bean the bean instance
+	 * @param beanDefinition the corresponding bean definition
+	 */
+	public static boolean hasDestroyMethod(Object bean, RootBeanDefinition beanDefinition) {
+<span class="fc bfc" id="L389" title="All 2 branches covered.">		return (bean instanceof DisposableBean ||</span>
+<span class="fc bfc" id="L390" title="All 2 branches covered.">				inferDestroyMethodsIfNecessary(bean.getClass(), beanDefinition) != null);</span>
+	}
+
+
+	/**
+	 * If the current value of the given beanDefinition's &quot;destroyMethodName&quot; property is
+	 * {@link AbstractBeanDefinition#INFER_METHOD}, then attempt to infer a destroy method.
+	 * Candidate methods are currently limited to public, no-arg methods named &quot;close&quot; or
+	 * &quot;shutdown&quot; (whether declared locally or inherited). The given BeanDefinition's
+	 * &quot;destroyMethodName&quot; is updated to be null if no such method is found, otherwise set
+	 * to the name of the inferred method. This constant serves as the default for the
+	 * {@code @Bean#destroyMethod} attribute and the value of the constant may also be
+	 * used in XML within the {@code &lt;bean destroy-method=&quot;&quot;&gt;} or {@code
+	 * &lt;beans default-destroy-method=&quot;&quot;&gt;} attributes.
+	 * &lt;p&gt;Also processes the {@link java.io.Closeable} and {@link java.lang.AutoCloseable}
+	 * interfaces, reflectively calling the &quot;close&quot; method on implementing beans as well.
+	 */
+	static String @Nullable [] inferDestroyMethodsIfNecessary(Class&lt;?&gt; target, RootBeanDefinition beanDefinition) {
+<span class="fc" id="L408">		String[] destroyMethodNames = beanDefinition.getDestroyMethodNames();</span>
+<span class="fc bfc" id="L409" title="All 4 branches covered.">		if (destroyMethodNames != null &amp;&amp; destroyMethodNames.length &gt; 1) {</span>
+<span class="fc" id="L410">			return destroyMethodNames;</span>
+		}
+
+<span class="fc" id="L413">		String destroyMethodName = beanDefinition.resolvedDestroyMethodName;</span>
+<span class="fc bfc" id="L414" title="All 2 branches covered.">		if (destroyMethodName == null) {</span>
+<span class="fc" id="L415">			destroyMethodName = beanDefinition.getDestroyMethodName();</span>
+<span class="fc" id="L416">			boolean autoCloseable = AutoCloseable.class.isAssignableFrom(target);</span>
+<span class="fc" id="L417">			boolean executorService = ExecutorService.class.isAssignableFrom(target);</span>
+<span class="pc bpc" id="L418" title="1 of 8 branches missed.">			if (AbstractBeanDefinition.INFER_METHOD.equals(destroyMethodName) ||</span>
+					(destroyMethodName == null &amp;&amp; (autoCloseable || executorService))) {
+				// Only perform destroy method inference in case of the bean
+				// not explicitly implementing the DisposableBean interface
+<span class="fc" id="L422">				destroyMethodName = null;</span>
+<span class="fc bfc" id="L423" title="All 2 branches covered.">				if (!(DisposableBean.class.isAssignableFrom(target))) {</span>
+<span class="fc bfc" id="L424" title="All 2 branches covered.">					if (executorService) {</span>
+<span class="fc" id="L425">						destroyMethodName = SHUTDOWN_METHOD_NAME;</span>
+						try {
+							// On JDK 19+, avoid the ExecutorService-level AutoCloseable default implementation
+							// which awaits task termination for 1 day, even for delayed tasks such as cron jobs.
+							// Custom close() implementations in ExecutorService subclasses are still accepted.
+<span class="fc bfc" id="L430" title="All 2 branches covered.">							if (target.getMethod(CLOSE_METHOD_NAME).getDeclaringClass() != ExecutorService.class) {</span>
+<span class="fc" id="L431">								destroyMethodName = CLOSE_METHOD_NAME;</span>
+							}
+						}
+<span class="nc" id="L434">						catch (NoSuchMethodException ex) {</span>
+							// Ignore - stick with shutdown()
+<span class="pc" id="L436">						}</span>
+					}
+<span class="fc bfc" id="L438" title="All 2 branches covered.">					else if (autoCloseable) {</span>
+<span class="fc" id="L439">						destroyMethodName = CLOSE_METHOD_NAME;</span>
+					}
+					else {
+						try {
+<span class="fc" id="L443">							destroyMethodName = target.getMethod(CLOSE_METHOD_NAME).getName();</span>
+						}
+<span class="fc" id="L445">						catch (NoSuchMethodException ex) {</span>
+							try {
+<span class="fc" id="L447">								destroyMethodName = target.getMethod(SHUTDOWN_METHOD_NAME).getName();</span>
+							}
+<span class="fc" id="L449">							catch (NoSuchMethodException ex2) {</span>
+								// no candidate destroy method found
+<span class="fc" id="L451">							}</span>
+<span class="fc" id="L452">						}</span>
+					}
+				}
+			}
+<span class="fc bfc" id="L456" title="All 2 branches covered.">			beanDefinition.resolvedDestroyMethodName = (destroyMethodName != null ? destroyMethodName : &quot;&quot;);</span>
+		}
+<span class="fc bfc" id="L458" title="All 2 branches covered.">		return (StringUtils.hasLength(destroyMethodName) ? new String[] {destroyMethodName} : null);</span>
+	}
+
+	/**
+	 * Check whether the given bean has destruction-aware post-processors applying to it.
+	 * @param bean the bean instance
+	 * @param postProcessors the post-processor candidates
+	 */
+	public static boolean hasApplicableProcessors(Object bean, List&lt;DestructionAwareBeanPostProcessor&gt; postProcessors) {
+<span class="pc bpc" id="L467" title="1 of 2 branches missed.">		if (!CollectionUtils.isEmpty(postProcessors)) {</span>
+<span class="fc bfc" id="L468" title="All 2 branches covered.">			for (DestructionAwareBeanPostProcessor processor : postProcessors) {</span>
+<span class="fc bfc" id="L469" title="All 2 branches covered.">				if (processor.requiresDestruction(bean)) {</span>
+<span class="fc" id="L470">					return true;</span>
+				}
+<span class="fc" id="L472">			}</span>
+		}
+<span class="fc" id="L474">		return false;</span>
+	}
+
+	/**
+	 * Search for all DestructionAwareBeanPostProcessors in the List.
+	 * @param processors the List to search
+	 * @return the filtered List of DestructionAwareBeanPostProcessors
+	 */
+	private static @Nullable List&lt;DestructionAwareBeanPostProcessor&gt; filterPostProcessors(
+			List&lt;DestructionAwareBeanPostProcessor&gt; processors, Object bean) {
+
+<span class="fc" id="L485">		List&lt;DestructionAwareBeanPostProcessor&gt; filteredPostProcessors = null;</span>
+<span class="fc bfc" id="L486" title="All 2 branches covered.">		if (!CollectionUtils.isEmpty(processors)) {</span>
+<span class="fc" id="L487">			filteredPostProcessors = new ArrayList&lt;&gt;(processors.size());</span>
+<span class="fc bfc" id="L488" title="All 2 branches covered.">			for (DestructionAwareBeanPostProcessor processor : processors) {</span>
+<span class="fc bfc" id="L489" title="All 2 branches covered.">				if (processor.requiresDestruction(bean)) {</span>
+<span class="fc" id="L490">					filteredPostProcessors.add(processor);</span>
+				}
+<span class="fc" id="L492">			}</span>
+		}
+<span class="fc" id="L494">		return filteredPostProcessors;</span>
+	}
+
+
+	/**
+	 * Inner class to avoid a hard dependency on the Reactive Streams API at runtime.
+	 */
+<span class="fc" id="L501">	private class ReactiveDestroyMethodHandler {</span>
+
+		public boolean await(Method destroyMethod, Object returnValue) throws InterruptedException {
+<span class="fc" id="L504">			ReactiveAdapter adapter = ReactiveAdapterRegistry.getSharedInstance().getAdapter(returnValue.getClass());</span>
+<span class="fc bfc" id="L505" title="All 2 branches covered.">			if (adapter != null) {</span>
+<span class="fc" id="L506">				CountDownLatch latch = new CountDownLatch(1);</span>
+<span class="fc" id="L507">				adapter.toPublisher(returnValue).subscribe(new DestroyMethodSubscriber(destroyMethod, latch));</span>
+<span class="fc" id="L508">				latch.await();</span>
+<span class="fc" id="L509">				return true;</span>
+			}
+<span class="fc" id="L511">			return false;</span>
+		}
+	}
+
+
+	/**
+	 * Reactive Streams Subscriber for destroy method completion.
+	 */
+	private class DestroyMethodSubscriber implements Subscriber&lt;Object&gt; {
+
+		private final Method destroyMethod;
+
+		private final CountDownLatch latch;
+
+<span class="fc" id="L525">		public DestroyMethodSubscriber(Method destroyMethod, CountDownLatch latch) {</span>
+<span class="fc" id="L526">			this.destroyMethod = destroyMethod;</span>
+<span class="fc" id="L527">			this.latch = latch;</span>
+<span class="fc" id="L528">		}</span>
+
+		@Override
+		public void onSubscribe(Subscription s) {
+<span class="fc" id="L532">			s.request(Integer.MAX_VALUE);</span>
+<span class="fc" id="L533">		}</span>
+
+		@Override
+		public void onNext(Object o) {
+<span class="nc" id="L537">		}</span>
+
+		@Override
+		public void onError(Throwable t) {
+<span class="nc" id="L541">			this.latch.countDown();</span>
+<span class="nc" id="L542">			logDestroyMethodException(this.destroyMethod, t);</span>
+<span class="nc" id="L543">		}</span>
+
+		@Override
+		public void onComplete() {
+<span class="fc" id="L547">			this.latch.countDown();</span>
+<span class="fc" id="L548">			logDestroyMethodCompletion(this.destroyMethod, true);</span>
+<span class="fc" id="L549">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

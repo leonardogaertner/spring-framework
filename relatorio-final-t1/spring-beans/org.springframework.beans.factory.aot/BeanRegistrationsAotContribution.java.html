@@ -1,0 +1,296 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>BeanRegistrationsAotContribution.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.aot</a> &gt; <span class="el_source">BeanRegistrationsAotContribution.java</span></div><h1>BeanRegistrationsAotContribution.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.aot;
+
+import java.util.List;
+import java.util.function.BiConsumer;
+
+import javax.lang.model.element.Modifier;
+
+import org.springframework.aot.generate.GeneratedClass;
+import org.springframework.aot.generate.GeneratedMethod;
+import org.springframework.aot.generate.GeneratedMethods;
+import org.springframework.aot.generate.GenerationContext;
+import org.springframework.aot.generate.MethodReference;
+import org.springframework.aot.generate.MethodReference.ArgumentCodeGenerator;
+import org.springframework.aot.hint.ReflectionHints;
+import org.springframework.aot.hint.RuntimeHints;
+import org.springframework.aot.hint.TypeHint;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.beans.factory.support.RegisteredBean;
+import org.springframework.javapoet.ClassName;
+import org.springframework.javapoet.CodeBlock;
+import org.springframework.javapoet.CodeBlock.Builder;
+import org.springframework.javapoet.MethodSpec;
+
+/**
+ * AOT contribution from a {@link BeanRegistrationsAotProcessor} used to
+ * register bean definitions and aliases.
+ *
+ * @author Phillip Webb
+ * @author Sebastien Deleuze
+ * @author Stephane Nicoll
+ * @author Brian Clozel
+ * @since 6.0
+ * @see BeanRegistrationsAotProcessor
+ */
+class BeanRegistrationsAotContribution
+		implements BeanFactoryInitializationAotContribution {
+
+	private static final String BEAN_FACTORY_PARAMETER_NAME = &quot;beanFactory&quot;;
+
+	private static final int MAX_REGISTRATIONS_PER_FILE = 5000;
+
+	private static final int MAX_REGISTRATIONS_PER_METHOD = 1000;
+
+<span class="fc" id="L60">	private static final ArgumentCodeGenerator argumentCodeGenerator = ArgumentCodeGenerator</span>
+<span class="fc" id="L61">			.of(DefaultListableBeanFactory.class, BEAN_FACTORY_PARAMETER_NAME);</span>
+
+	private final List&lt;Registration&gt; registrations;
+
+
+<span class="fc" id="L66">	BeanRegistrationsAotContribution(List&lt;Registration&gt; registrations) {</span>
+<span class="fc" id="L67">		this.registrations = registrations;</span>
+<span class="fc" id="L68">	}</span>
+
+
+	@Override
+	public void applyTo(GenerationContext generationContext,
+			BeanFactoryInitializationCode beanFactoryInitializationCode) {
+
+<span class="fc" id="L75">		GeneratedClass generatedClass = createBeanFactoryRegistrationClass(generationContext);</span>
+<span class="fc" id="L76">		BeanRegistrationsCodeGenerator codeGenerator = new BeanRegistrationsCodeGenerator(generatedClass);</span>
+<span class="fc" id="L77">		GeneratedMethod generatedBeanDefinitionsMethod = generateBeanRegistrationCode(generationContext,</span>
+				generatedClass, codeGenerator);
+<span class="fc" id="L79">		beanFactoryInitializationCode.addInitializer(generatedBeanDefinitionsMethod.toMethodReference());</span>
+<span class="fc" id="L80">		GeneratedMethod generatedAliasesMethod = codeGenerator.getMethods().add(&quot;registerAliases&quot;,</span>
+				this::generateRegisterAliasesMethod);
+<span class="fc" id="L82">		beanFactoryInitializationCode.addInitializer(generatedAliasesMethod.toMethodReference());</span>
+<span class="fc" id="L83">		generateRegisterHints(generationContext.getRuntimeHints(), this.registrations);</span>
+<span class="fc" id="L84">	}</span>
+
+	private GeneratedMethod generateBeanRegistrationCode(GenerationContext generationContext, GeneratedClass mainGeneratedClass, BeanRegistrationsCodeGenerator mainCodeGenerator) {
+<span class="fc bfc" id="L87" title="All 2 branches covered.">		if (this.registrations.size() &lt; MAX_REGISTRATIONS_PER_FILE) {</span>
+<span class="fc" id="L88">			return generateBeanRegistrationClass(generationContext, mainCodeGenerator, 0, this.registrations.size());</span>
+		}
+		else {
+<span class="fc" id="L91">			return mainGeneratedClass.getMethods().add(&quot;registerBeanDefinitions&quot;, method -&gt; {</span>
+<span class="fc" id="L92">				method.addJavadoc(&quot;Register the bean definitions.&quot;);</span>
+<span class="fc" id="L93">				method.addModifiers(Modifier.PUBLIC);</span>
+<span class="fc" id="L94">				method.addParameter(DefaultListableBeanFactory.class, BEAN_FACTORY_PARAMETER_NAME);</span>
+<span class="fc" id="L95">				CodeBlock.Builder body = CodeBlock.builder();</span>
+<span class="fc" id="L96">				Registration.doWithSlice(this.registrations, MAX_REGISTRATIONS_PER_FILE, (start, end) -&gt; {</span>
+<span class="fc" id="L97">					GeneratedClass sliceGeneratedClass = createBeanFactoryRegistrationClass(generationContext);</span>
+<span class="fc" id="L98">					BeanRegistrationsCodeGenerator sliceCodeGenerator = new BeanRegistrationsCodeGenerator(sliceGeneratedClass);</span>
+<span class="fc" id="L99">					GeneratedMethod generatedMethod = generateBeanRegistrationClass(generationContext, sliceCodeGenerator, start, end);</span>
+<span class="fc" id="L100">					body.addStatement(generatedMethod.toMethodReference().toInvokeCodeBlock(argumentCodeGenerator));</span>
+<span class="fc" id="L101">				});</span>
+<span class="fc" id="L102">				method.addCode(body.build());</span>
+<span class="fc" id="L103">			});</span>
+		}
+	}
+
+	private GeneratedMethod generateBeanRegistrationClass(GenerationContext generationContext,
+			BeanRegistrationsCodeGenerator codeGenerator, int start, int end) {
+
+<span class="fc" id="L110">		return codeGenerator.getMethods().add(&quot;registerBeanDefinitions&quot;, method -&gt; {</span>
+<span class="fc" id="L111">			method.addJavadoc(&quot;Register the bean definitions.&quot;);</span>
+<span class="fc" id="L112">			method.addModifiers(Modifier.PUBLIC);</span>
+<span class="fc" id="L113">			method.addParameter(DefaultListableBeanFactory.class, BEAN_FACTORY_PARAMETER_NAME);</span>
+<span class="fc" id="L114">			List&lt;Registration&gt; sliceRegistrations = this.registrations.subList(start, end);</span>
+<span class="fc" id="L115">			new BeanDefinitionsRegistrationGenerator(</span>
+<span class="fc" id="L116">					generationContext, codeGenerator, sliceRegistrations, start).generateBeanRegistrationsCode(method);</span>
+<span class="fc" id="L117">		});</span>
+	}
+
+	private static GeneratedClass createBeanFactoryRegistrationClass(GenerationContext generationContext) {
+<span class="fc" id="L121">		return generationContext.getGeneratedClasses()</span>
+<span class="fc" id="L122">				.addForFeature(&quot;BeanFactoryRegistrations&quot;, type -&gt; {</span>
+<span class="fc" id="L123">					type.addJavadoc(&quot;Register bean definitions for the bean factory.&quot;);</span>
+<span class="fc" id="L124">					type.addModifiers(Modifier.PUBLIC);</span>
+<span class="fc" id="L125">				});</span>
+	}
+
+	private void generateRegisterAliasesMethod(MethodSpec.Builder method) {
+<span class="fc" id="L129">		method.addJavadoc(&quot;Register the aliases.&quot;);</span>
+<span class="fc" id="L130">		method.addModifiers(Modifier.PUBLIC);</span>
+<span class="fc" id="L131">		method.addParameter(DefaultListableBeanFactory.class, BEAN_FACTORY_PARAMETER_NAME);</span>
+<span class="fc" id="L132">		CodeBlock.Builder code = CodeBlock.builder();</span>
+<span class="fc" id="L133">		this.registrations.forEach(registration -&gt; {</span>
+<span class="fc bfc" id="L134" title="All 2 branches covered.">			for (String alias : registration.aliases()) {</span>
+<span class="fc" id="L135">				code.addStatement(&quot;$L.registerAlias($S, $S)&quot;, BEAN_FACTORY_PARAMETER_NAME,</span>
+<span class="fc" id="L136">						registration.beanName(), alias);</span>
+			}
+<span class="fc" id="L138">		});</span>
+<span class="fc" id="L139">		method.addCode(code.build());</span>
+<span class="fc" id="L140">	}</span>
+
+	private void generateRegisterHints(RuntimeHints runtimeHints, List&lt;Registration&gt; registrations) {
+<span class="fc" id="L143">		registrations.forEach(registration -&gt; {</span>
+<span class="fc" id="L144">			ReflectionHints hints = runtimeHints.reflection();</span>
+<span class="fc" id="L145">			Class&lt;?&gt; beanClass = registration.registeredBean.getBeanClass();</span>
+<span class="fc" id="L146">			hints.registerType(beanClass);</span>
+<span class="fc" id="L147">			hints.registerForInterfaces(beanClass, TypeHint.Builder::withMembers);</span>
+<span class="fc" id="L148">		});</span>
+<span class="fc" id="L149">	}</span>
+
+	/**
+	 * Gather the necessary information to register a particular bean.
+	 * @param registeredBean the bean to register
+	 * @param methodGenerator the {@link BeanDefinitionMethodGenerator} to use
+	 * @param aliases the bean aliases, if any
+	 */
+<span class="fc" id="L157">	record Registration(RegisteredBean registeredBean, BeanDefinitionMethodGenerator methodGenerator, String[] aliases) {</span>
+
+		String beanName() {
+<span class="fc" id="L160">			return this.registeredBean.getBeanName();</span>
+		}
+
+		/**
+		 * Invoke an action for each slice of the given {@code registrations}. The
+		 * {@code action} is invoked for each slice with the start and end index of the
+		 * given list of registrations. Elements to process can be retrieved using
+		 * {@link List#subList(int, int)}.
+		 * @param registrations the registrations to process
+		 * @param sliceSize the size of a slice
+		 * @param action the action to invoke for each slice
+		 */
+		static void doWithSlice(List&lt;Registration&gt; registrations, int sliceSize,
+				BiConsumer&lt;Integer, Integer&gt; action) {
+
+<span class="fc" id="L175">			int index = 0;</span>
+<span class="fc" id="L176">			int end = 0;</span>
+<span class="fc bfc" id="L177" title="All 2 branches covered.">			while (end &lt; registrations.size()) {</span>
+<span class="fc" id="L178">				int start = index * sliceSize;</span>
+<span class="fc" id="L179">				end = Math.min(start + sliceSize, registrations.size());</span>
+<span class="fc" id="L180">				action.accept(start, end);</span>
+<span class="fc" id="L181">				index++;</span>
+<span class="fc" id="L182">			}</span>
+<span class="fc" id="L183">		}</span>
+
+	}
+
+
+	/**
+	 * {@link BeanRegistrationsCode} with generation support.
+	 */
+	static class BeanRegistrationsCodeGenerator implements BeanRegistrationsCode {
+
+		private final GeneratedClass generatedClass;
+
+<span class="fc" id="L195">		public BeanRegistrationsCodeGenerator(GeneratedClass generatedClass) {</span>
+<span class="fc" id="L196">			this.generatedClass = generatedClass;</span>
+<span class="fc" id="L197">		}</span>
+
+
+		@Override
+		public ClassName getClassName() {
+<span class="fc" id="L202">			return this.generatedClass.getName();</span>
+		}
+
+		@Override
+		public GeneratedMethods getMethods() {
+<span class="fc" id="L207">			return this.generatedClass.getMethods();</span>
+		}
+
+	}
+
+	/**
+	 * Generate code for bean registrations. Limited to {@value #MAX_REGISTRATIONS_PER_METHOD}
+	 * beans per method to avoid hitting a limit.
+	 */
+	static final class BeanDefinitionsRegistrationGenerator {
+
+		private final GenerationContext generationContext;
+
+		private final BeanRegistrationsCodeGenerator codeGenerator;
+
+		private final List&lt;Registration&gt; registrations;
+
+		private final int globalStart;
+
+
+		BeanDefinitionsRegistrationGenerator(GenerationContext generationContext,
+<span class="fc" id="L228">				BeanRegistrationsCodeGenerator codeGenerator, List&lt;Registration&gt; registrations, int globalStart) {</span>
+
+<span class="fc" id="L230">			this.generationContext = generationContext;</span>
+<span class="fc" id="L231">			this.codeGenerator = codeGenerator;</span>
+<span class="fc" id="L232">			this.registrations = registrations;</span>
+<span class="fc" id="L233">			this.globalStart = globalStart;</span>
+<span class="fc" id="L234">		}</span>
+
+		void generateBeanRegistrationsCode(MethodSpec.Builder method) {
+<span class="fc bfc" id="L237" title="All 2 branches covered.">			if (this.registrations.size() &lt;= 1000) {</span>
+<span class="fc" id="L238">				generateRegisterBeanDefinitionMethods(method, this.registrations);</span>
+			}
+			else {
+<span class="fc" id="L241">				Builder code = CodeBlock.builder();</span>
+<span class="fc" id="L242">				code.add(&quot;// Registration is sliced to avoid exceeding size limit\n&quot;);</span>
+<span class="fc" id="L243">				Registration.doWithSlice(this.registrations, MAX_REGISTRATIONS_PER_METHOD,</span>
+						(start, end) -&gt; {
+<span class="fc" id="L245">							GeneratedMethod sliceMethod = generateSliceMethod(start, end);</span>
+<span class="fc" id="L246">							code.addStatement(sliceMethod.toMethodReference().toInvokeCodeBlock(</span>
+<span class="fc" id="L247">									argumentCodeGenerator, this.codeGenerator.getClassName()));</span>
+<span class="fc" id="L248">						});</span>
+<span class="fc" id="L249">				method.addCode(code.build());</span>
+			}
+<span class="fc" id="L251">		}</span>
+
+		private GeneratedMethod generateSliceMethod(int start, int end) {
+<span class="fc" id="L254">			String description = &quot;Register the bean definitions from %s to %s.&quot;</span>
+<span class="fc" id="L255">					.formatted(this.globalStart + start, this.globalStart + end - 1);</span>
+<span class="fc" id="L256">			List&lt;Registration&gt; slice = this.registrations.subList(start, end);</span>
+<span class="fc" id="L257">			return this.codeGenerator.getMethods().add(&quot;registerBeanDefinitions&quot;, method -&gt; {</span>
+<span class="fc" id="L258">				method.addJavadoc(description);</span>
+<span class="fc" id="L259">				method.addModifiers(Modifier.PRIVATE);</span>
+<span class="fc" id="L260">				method.addParameter(DefaultListableBeanFactory.class, BEAN_FACTORY_PARAMETER_NAME);</span>
+<span class="fc" id="L261">				generateRegisterBeanDefinitionMethods(method, slice);</span>
+<span class="fc" id="L262">			});</span>
+		}
+
+
+		private void generateRegisterBeanDefinitionMethods(MethodSpec.Builder method,
+				Iterable&lt;Registration&gt; registrations) {
+
+<span class="fc" id="L269">			CodeBlock.Builder code = CodeBlock.builder();</span>
+<span class="fc" id="L270">			registrations.forEach(registration -&gt; {</span>
+				try {
+<span class="fc" id="L272">					CodeBlock methodInvocation = generateBeanRegistration(registration);</span>
+<span class="fc" id="L273">					code.addStatement(&quot;$L.registerBeanDefinition($S, $L)&quot;,</span>
+<span class="fc" id="L274">							BEAN_FACTORY_PARAMETER_NAME, registration.beanName(), methodInvocation);</span>
+				}
+<span class="fc" id="L276">				catch (AotException ex) {</span>
+<span class="fc" id="L277">					throw ex;</span>
+				}
+<span class="fc" id="L279">				catch (Exception ex) {</span>
+<span class="fc" id="L280">					throw new AotBeanProcessingException(registration.registeredBean,</span>
+							&quot;failed to generate code for bean definition&quot;, ex);
+<span class="fc" id="L282">				}</span>
+<span class="fc" id="L283">			});</span>
+<span class="fc" id="L284">			method.addCode(code.build());</span>
+<span class="fc" id="L285">		}</span>
+
+		private CodeBlock generateBeanRegistration(Registration registration) {
+<span class="fc" id="L288">			MethodReference beanDefinitionMethod = registration.methodGenerator</span>
+<span class="fc" id="L289">					.generateBeanDefinitionMethod(this.generationContext, this.codeGenerator);</span>
+<span class="fc" id="L290">			return beanDefinitionMethod.toInvokeCodeBlock(</span>
+<span class="fc" id="L291">					ArgumentCodeGenerator.none(), this.codeGenerator.getClassName());</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

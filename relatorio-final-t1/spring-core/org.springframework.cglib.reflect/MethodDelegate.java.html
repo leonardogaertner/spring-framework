@@ -1,0 +1,289 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>MethodDelegate.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.cglib.reflect</a> &gt; <span class="el_source">MethodDelegate.java</span></div><h1>MethodDelegate.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2003,2004 The Apache Software Foundation
+ *
+ *  Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.cglib.reflect;
+
+import java.lang.reflect.Method;
+import java.security.ProtectionDomain;
+
+import org.springframework.asm.ClassVisitor;
+import org.springframework.asm.Type;
+import org.springframework.cglib.core.AbstractClassGenerator;
+import org.springframework.cglib.core.ClassEmitter;
+import org.springframework.cglib.core.CodeEmitter;
+import org.springframework.cglib.core.Constants;
+import org.springframework.cglib.core.EmitUtils;
+import org.springframework.cglib.core.KeyFactory;
+import org.springframework.cglib.core.MethodInfo;
+import org.springframework.cglib.core.ReflectUtils;
+import org.springframework.cglib.core.Signature;
+import org.springframework.cglib.core.TypeUtils;
+
+// TODO: don't require exact match for return type
+
+/**
+ * &lt;b&gt;DOCUMENTATION FROM APACHE AVALON DELEGATE CLASS&lt;/b&gt;
+ *
+ * &lt;p&gt;
+ * Delegates are a typesafe pointer to another method.  Since Java does not
+ * have language support for such a construct, this utility will construct
+ * a proxy that forwards method calls to any method with the same signature.
+ * This utility is inspired in part by the C# delegate mechanism.  We
+ * implemented it in a Java-centric manner.
+ * &lt;/p&gt;
+ *
+ * &lt;h2&gt;Delegate&lt;/h2&gt;
+ * &lt;p&gt;
+ *   Any interface with one method can become the interface for a delegate.
+ *   Consider the example below:
+ * &lt;/p&gt;
+ *
+ * &lt;pre&gt;
+ *   public interface MainDelegate {
+ *       int main(String[] args);
+ *   }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ *   The interface above is an example of an interface that can become a
+ *   delegate.  It has only one method, and the interface is public.  In
+ *   order to create a delegate for that method, all we have to do is
+ *   call &lt;code&gt;MethodDelegate.create(this, &quot;alternateMain&quot;, MainDelegate.class)&lt;/code&gt;.
+ *   The following program will show how to use it:
+ * &lt;/p&gt;
+ *
+ * &lt;pre&gt;
+ *   public class Main {
+ *       public static int main( String[] args ) {
+ *           Main newMain = new Main();
+ *           MainDelegate start = (MainDelegate)
+ *               MethodDelegate.create(newMain, &quot;alternateMain&quot;, MainDelegate.class);
+ *           return start.main( args );
+ *       }
+ *
+ *       public int alternateMain( String[] args ) {
+ *           for (int i = 0; i &amp;lt; args.length; i++) {
+ *               System.out.println( args[i] );
+ *           }
+ *           return args.length;
+ *       }
+ *   }
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;
+ *   By themselves, delegates don't do much.  Their true power lies in the fact that
+ *   they can be treated like objects, and passed to other methods.  In fact that is
+ *   one of the key building blocks of building Intelligent Agents which in tern are
+ *   the foundation of artificial intelligence.  In the above program, we could have
+ *   easily created the delegate to match the static &lt;code&gt;main&lt;/code&gt; method by
+ *   substituting the delegate creation call with this:
+ *   &lt;code&gt;MethodDelegate.createStatic(getClass(), &quot;main&quot;, MainDelegate.class)&lt;/code&gt;.
+ * &lt;/p&gt;
+ * &lt;p&gt;
+ *   Another key use for Delegates is to register event listeners.  It is much easier
+ *   to have all the code for your events separated out into methods instead of individual
+ *   classes.  One of the ways Java gets around that is to create anonymous classes.
+ *   They are particularly troublesome because many Debuggers do not know what to do
+ *   with them.  Anonymous classes tend to duplicate alot of code as well.  We can
+ *   use any interface with one declared method to forward events to any method that
+ *   matches the signature (although the method name can be different).
+ * &lt;/p&gt;
+ *
+ * &lt;h3&gt;Equality&lt;/h3&gt;
+ *  The criteria that we use to test if two delegates are equal are:
+ *   &lt;ul&gt;
+ *     &lt;li&gt;
+ *       They both refer to the same instance.  That is, the &lt;code&gt;instance&lt;/code&gt;
+ *       parameter passed to the newDelegate method was the same for both. The
+ *       instances are compared with the identity equality operator, &lt;code&gt;==&lt;/code&gt;.
+ *     &lt;/li&gt;
+ *     &lt;li&gt;They refer to the same method as resolved by &lt;code&gt;Method.equals&lt;/code&gt;.&lt;/li&gt;
+ *   &lt;/ul&gt;
+ *
+ * @version $Id: MethodDelegate.java,v 1.25 2006/03/05 02:43:19 herbyderby Exp $
+ */
+@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;})
+<span class="nc" id="L119">abstract public class MethodDelegate {</span>
+<span class="nc" id="L120">    private static final MethodDelegateKey KEY_FACTORY =</span>
+<span class="nc" id="L121">      (MethodDelegateKey)KeyFactory.create(MethodDelegateKey.class, KeyFactory.CLASS_BY_NAME);</span>
+
+    protected Object target;
+    protected String eqMethod;
+
+    interface MethodDelegateKey {
+        Object newInstance(Class delegateClass, String methodName, Class iface);
+    }
+
+    public static MethodDelegate createStatic(Class targetClass, String methodName, Class iface) {
+<span class="nc" id="L131">        Generator gen = new Generator();</span>
+<span class="nc" id="L132">        gen.setTargetClass(targetClass);</span>
+<span class="nc" id="L133">        gen.setMethodName(methodName);</span>
+<span class="nc" id="L134">        gen.setInterface(iface);</span>
+<span class="nc" id="L135">        return gen.create();</span>
+    }
+
+    public static MethodDelegate create(Object target, String methodName, Class iface) {
+<span class="nc" id="L139">        Generator gen = new Generator();</span>
+<span class="nc" id="L140">        gen.setTarget(target);</span>
+<span class="nc" id="L141">        gen.setMethodName(methodName);</span>
+<span class="nc" id="L142">        gen.setInterface(iface);</span>
+<span class="nc" id="L143">        return gen.create();</span>
+    }
+
+    @Override
+    public boolean equals(Object obj) {
+<span class="nc" id="L148">        MethodDelegate other = (MethodDelegate)obj;</span>
+<span class="nc bnc" id="L149" title="All 6 branches missed.">        return (other != null &amp;&amp; target == other.target) &amp;&amp; eqMethod.equals(other.eqMethod);</span>
+    }
+
+    @Override
+    public int hashCode() {
+<span class="nc" id="L154">        return target.hashCode() ^ eqMethod.hashCode();</span>
+    }
+
+    public Object getTarget() {
+<span class="nc" id="L158">        return target;</span>
+    }
+
+    abstract public MethodDelegate newInstance(Object target);
+
+    public static class Generator extends AbstractClassGenerator {
+<span class="nc" id="L164">        private static final Source SOURCE = new Source(MethodDelegate.class.getName());</span>
+<span class="nc" id="L165">        private static final Type METHOD_DELEGATE =</span>
+<span class="nc" id="L166">          TypeUtils.parseType(&quot;org.springframework.cglib.reflect.MethodDelegate&quot;);</span>
+<span class="nc" id="L167">        private static final Signature NEW_INSTANCE =</span>
+          new Signature(&quot;newInstance&quot;, METHOD_DELEGATE, new Type[]{ Constants.TYPE_OBJECT });
+
+        private Object target;
+        private Class targetClass;
+        private String methodName;
+        private Class iface;
+
+        public Generator() {
+<span class="nc" id="L176">            super(SOURCE);</span>
+<span class="nc" id="L177">        }</span>
+
+        public void setTarget(Object target) {
+<span class="nc" id="L180">            this.target = target;</span>
+<span class="nc" id="L181">            this.targetClass = target.getClass();</span>
+<span class="nc" id="L182">        }</span>
+
+        public void setTargetClass(Class targetClass) {
+<span class="nc" id="L185">            this.targetClass = targetClass;</span>
+<span class="nc" id="L186">        }</span>
+
+        public void setMethodName(String methodName) {
+<span class="nc" id="L189">            this.methodName = methodName;</span>
+<span class="nc" id="L190">        }</span>
+
+        public void setInterface(Class iface) {
+<span class="nc" id="L193">            this.iface = iface;</span>
+<span class="nc" id="L194">        }</span>
+
+        @Override
+        protected ClassLoader getDefaultClassLoader() {
+<span class="nc" id="L198">            return targetClass.getClassLoader();</span>
+        }
+
+        @Override
+        protected ProtectionDomain getProtectionDomain() {
+<span class="nc" id="L203">            return ReflectUtils.getProtectionDomain(targetClass);</span>
+        }
+
+        public MethodDelegate create() {
+<span class="nc" id="L207">            setNamePrefix(targetClass.getName());</span>
+<span class="nc" id="L208">            Object key = KEY_FACTORY.newInstance(targetClass, methodName, iface);</span>
+<span class="nc" id="L209">            return (MethodDelegate)super.create(key);</span>
+        }
+
+        @Override
+        protected Object firstInstance(Class type) {
+<span class="nc" id="L214">            return ((MethodDelegate)ReflectUtils.newInstance(type)).newInstance(target);</span>
+        }
+
+        @Override
+        protected Object nextInstance(Object instance) {
+<span class="nc" id="L219">            return ((MethodDelegate)instance).newInstance(target);</span>
+        }
+
+        @Override
+        public void generateClass(ClassVisitor v) throws NoSuchMethodException {
+<span class="nc" id="L224">            Method proxy = ReflectUtils.findInterfaceMethod(iface);</span>
+<span class="nc" id="L225">            final Method method = targetClass.getMethod(methodName, proxy.getParameterTypes());</span>
+<span class="nc bnc" id="L226" title="All 2 branches missed.">            if (!proxy.getReturnType().isAssignableFrom(method.getReturnType())) {</span>
+<span class="nc" id="L227">                throw new IllegalArgumentException(&quot;incompatible return types&quot;);</span>
+            }
+
+<span class="nc" id="L230">            MethodInfo methodInfo = ReflectUtils.getMethodInfo(method);</span>
+
+<span class="nc" id="L232">            boolean isStatic = TypeUtils.isStatic(methodInfo.getModifiers());</span>
+<span class="nc bnc" id="L233" title="All 4 branches missed.">            if ((target == null) ^ isStatic) {</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">                throw new IllegalArgumentException(&quot;Static method &quot; + (isStatic ? &quot;not &quot; : &quot;&quot;) + &quot;expected&quot;);</span>
+            }
+
+<span class="nc" id="L237">            ClassEmitter ce = new ClassEmitter(v);</span>
+            CodeEmitter e;
+            // Byte code level cannot be higher than 1.8 due to STATICHOOK methods
+            // which set static final fields outside the initializer method &lt;clinit&gt;.
+<span class="nc" id="L241">            ce.begin_class(Constants.V1_8,</span>
+                           Constants.ACC_PUBLIC,
+<span class="nc" id="L243">                           getClassName(),</span>
+                           METHOD_DELEGATE,
+<span class="nc" id="L245">                           new Type[]{ Type.getType(iface) },</span>
+                           Constants.SOURCE_FILE);
+<span class="nc" id="L247">            ce.declare_field(Constants.PRIVATE_FINAL_STATIC, &quot;eqMethod&quot;, Constants.TYPE_STRING, null);</span>
+<span class="nc" id="L248">            EmitUtils.null_constructor(ce);</span>
+
+            // generate proxied method
+<span class="nc" id="L251">            MethodInfo proxied = ReflectUtils.getMethodInfo(iface.getDeclaredMethods()[0]);</span>
+<span class="nc" id="L252">            int modifiers = Constants.ACC_PUBLIC;</span>
+<span class="nc bnc" id="L253" title="All 2 branches missed.">            if ((proxied.getModifiers() &amp; Constants.ACC_VARARGS) == Constants.ACC_VARARGS) {</span>
+<span class="nc" id="L254">                modifiers |= Constants.ACC_VARARGS;</span>
+            }
+<span class="nc" id="L256">            e = EmitUtils.begin_method(ce, proxied, modifiers);</span>
+<span class="nc" id="L257">            e.load_this();</span>
+<span class="nc" id="L258">            e.super_getfield(&quot;target&quot;, Constants.TYPE_OBJECT);</span>
+<span class="nc" id="L259">            e.checkcast(methodInfo.getClassInfo().getType());</span>
+<span class="nc" id="L260">            e.load_args();</span>
+<span class="nc" id="L261">            e.invoke(methodInfo);</span>
+<span class="nc" id="L262">            e.return_value();</span>
+<span class="nc" id="L263">            e.end_method();</span>
+
+            // newInstance
+<span class="nc" id="L266">            e = ce.begin_method(Constants.ACC_PUBLIC, NEW_INSTANCE, null);</span>
+<span class="nc" id="L267">            e.new_instance_this();</span>
+<span class="nc" id="L268">            e.dup();</span>
+<span class="nc" id="L269">            e.dup2();</span>
+<span class="nc" id="L270">            e.invoke_constructor_this();</span>
+<span class="nc" id="L271">            e.getfield(&quot;eqMethod&quot;);</span>
+<span class="nc" id="L272">            e.super_putfield(&quot;eqMethod&quot;, Constants.TYPE_STRING);</span>
+<span class="nc" id="L273">            e.load_arg(0);</span>
+<span class="nc" id="L274">            e.super_putfield(&quot;target&quot;, Constants.TYPE_OBJECT);</span>
+<span class="nc" id="L275">            e.return_value();</span>
+<span class="nc" id="L276">            e.end_method();</span>
+
+            // static initializer
+<span class="nc" id="L279">            e = ce.begin_static();</span>
+<span class="nc" id="L280">            e.push(methodInfo.getSignature().toString());</span>
+<span class="nc" id="L281">            e.putfield(&quot;eqMethod&quot;);</span>
+<span class="nc" id="L282">            e.return_value();</span>
+<span class="nc" id="L283">            e.end_method();</span>
+
+<span class="nc" id="L285">            ce.end_class();</span>
+<span class="nc" id="L286">        }</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

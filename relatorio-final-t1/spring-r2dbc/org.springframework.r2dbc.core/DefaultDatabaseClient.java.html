@@ -1,0 +1,610 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>DefaultDatabaseClient.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-r2dbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.r2dbc.core</a> &gt; <span class="el_source">DefaultDatabaseClient.java</span></div><h1>DefaultDatabaseClient.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.r2dbc.core;
+
+import java.beans.PropertyDescriptor;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.ListIterator;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.function.Supplier;
+import java.util.stream.Collectors;
+
+import io.r2dbc.spi.Connection;
+import io.r2dbc.spi.ConnectionFactory;
+import io.r2dbc.spi.Parameter;
+import io.r2dbc.spi.Parameters;
+import io.r2dbc.spi.R2dbcException;
+import io.r2dbc.spi.Readable;
+import io.r2dbc.spi.Result;
+import io.r2dbc.spi.Row;
+import io.r2dbc.spi.RowMetadata;
+import io.r2dbc.spi.Statement;
+import io.r2dbc.spi.Wrapped;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.dao.InvalidDataAccessApiUsageException;
+import org.springframework.r2dbc.connection.ConnectionFactoryUtils;
+import org.springframework.r2dbc.core.binding.BindMarkersFactory;
+import org.springframework.r2dbc.core.binding.BindTarget;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * The default implementation of {@link DatabaseClient},
+ * as created by the static factory method.
+ *
+ * @author Mark Paluch
+ * @author Mingyuan Wu
+ * @author Bogdan Ilchyshyn
+ * @author Simon Baslé
+ * @author Juergen Hoeller
+ * @since 5.3
+ * @see DatabaseClient#create(ConnectionFactory)
+ */
+final class DefaultDatabaseClient implements DatabaseClient {
+
+<span class="fc" id="L77">	private final Log logger = LogFactory.getLog(getClass());</span>
+
+	private final BindMarkersFactory bindMarkersFactory;
+
+	private final ConnectionFactory connectionFactory;
+
+	private final ExecuteFunction executeFunction;
+
+	private final @Nullable NamedParameterExpander namedParameterExpander;
+
+
+	DefaultDatabaseClient(BindMarkersFactory bindMarkersFactory, ConnectionFactory connectionFactory,
+<span class="fc" id="L89">			ExecuteFunction executeFunction, boolean namedParameters) {</span>
+
+<span class="fc" id="L91">		this.bindMarkersFactory = bindMarkersFactory;</span>
+<span class="fc" id="L92">		this.connectionFactory = connectionFactory;</span>
+<span class="fc" id="L93">		this.executeFunction = executeFunction;</span>
+<span class="fc bfc" id="L94" title="All 2 branches covered.">		this.namedParameterExpander = (namedParameters ? new NamedParameterExpander() : null);</span>
+<span class="fc" id="L95">	}</span>
+
+
+	@Override
+	public ConnectionFactory getConnectionFactory() {
+<span class="fc" id="L100">		return this.connectionFactory;</span>
+	}
+
+	@Override
+	public GenericExecuteSpec sql(String sql) {
+<span class="fc" id="L105">		Assert.hasText(sql, &quot;SQL must not be null or empty&quot;);</span>
+<span class="fc" id="L106">		return sql(() -&gt; sql);</span>
+	}
+
+	@Override
+	public GenericExecuteSpec sql(Supplier&lt;String&gt; sqlSupplier) {
+<span class="fc" id="L111">		Assert.notNull(sqlSupplier, &quot;SQL Supplier must not be null&quot;);</span>
+<span class="fc" id="L112">		return new DefaultGenericExecuteSpec(sqlSupplier);</span>
+	}
+
+	@Override
+	public &lt;T&gt; Mono&lt;T&gt; inConnection(Function&lt;Connection, Mono&lt;T&gt;&gt; action) {
+<span class="fc" id="L117">		Assert.notNull(action, &quot;Callback object must not be null&quot;);</span>
+<span class="fc" id="L118">		Mono&lt;ConnectionCloseHolder&gt; connectionMono = getConnection().map(</span>
+<span class="fc" id="L119">				connection -&gt; new ConnectionCloseHolder(connection, this::closeConnection));</span>
+
+<span class="fc" id="L121">		return Mono.usingWhen(connectionMono, connectionCloseHolder -&gt; {</span>
+			// Create close-suppressing Connection proxy
+<span class="fc" id="L123">			Connection connectionToUse = createConnectionProxy(connectionCloseHolder.connection);</span>
+					try {
+<span class="fc" id="L125">						return action.apply(connectionToUse);</span>
+					}
+<span class="nc" id="L127">					catch (R2dbcException ex) {</span>
+<span class="nc" id="L128">						String sql = getSql(action);</span>
+<span class="nc" id="L129">						return Mono.error(ConnectionFactoryUtils.convertR2dbcException(&quot;doInConnection&quot;, sql, ex));</span>
+					}
+<span class="fc" id="L131">				}, ConnectionCloseHolder::close, (it, err) -&gt; it.close(),</span>
+				ConnectionCloseHolder::close)
+<span class="fc" id="L133">				.onErrorMap(R2dbcException.class,</span>
+<span class="fc" id="L134">						ex -&gt; ConnectionFactoryUtils.convertR2dbcException(&quot;execute&quot;, getSql(action), ex));</span>
+	}
+
+	@Override
+	public &lt;T&gt; Flux&lt;T&gt; inConnectionMany(Function&lt;Connection, Flux&lt;T&gt;&gt; action) {
+<span class="fc" id="L139">		Assert.notNull(action, &quot;Callback object must not be null&quot;);</span>
+<span class="fc" id="L140">		Mono&lt;ConnectionCloseHolder&gt; connectionMono = getConnection().map(</span>
+<span class="fc" id="L141">				connection -&gt; new ConnectionCloseHolder(connection, this::closeConnection));</span>
+
+<span class="fc" id="L143">		return Flux.usingWhen(connectionMono, connectionCloseHolder -&gt; {</span>
+			// Create close-suppressing Connection proxy, also preparing returned Statements.
+<span class="fc" id="L145">			Connection connectionToUse = createConnectionProxy(connectionCloseHolder.connection);</span>
+					try {
+<span class="fc" id="L147">						return action.apply(connectionToUse);</span>
+					}
+<span class="nc" id="L149">					catch (R2dbcException ex) {</span>
+<span class="nc" id="L150">						String sql = getSql(action);</span>
+<span class="nc" id="L151">						return Flux.error(ConnectionFactoryUtils.convertR2dbcException(&quot;doInConnectionMany&quot;, sql, ex));</span>
+					}
+<span class="nc" id="L153">				}, ConnectionCloseHolder::close, (it, err) -&gt; it.close(),</span>
+				ConnectionCloseHolder::close)
+<span class="fc" id="L155">				.onErrorMap(R2dbcException.class,</span>
+<span class="nc" id="L156">						ex -&gt; ConnectionFactoryUtils.convertR2dbcException(&quot;executeMany&quot;, getSql(action), ex));</span>
+	}
+
+	/**
+	 * Obtain a {@link Connection}.
+	 * @return a {@link Mono} able to emit a {@link Connection}
+	 */
+	private Mono&lt;Connection&gt; getConnection() {
+<span class="fc" id="L164">		return ConnectionFactoryUtils.getConnection(obtainConnectionFactory());</span>
+	}
+
+	/**
+	 * Release the {@link Connection}.
+	 * @param connection to close.
+	 * @return a {@link Publisher} that completes successfully when the connection is closed
+	 */
+	private Publisher&lt;Void&gt; closeConnection(Connection connection) {
+<span class="fc" id="L173">		return ConnectionFactoryUtils.currentConnectionFactory(obtainConnectionFactory()).then()</span>
+<span class="fc" id="L174">				.onErrorResume(Exception.class, ex -&gt; Mono.from(connection.close()));</span>
+	}
+
+	/**
+	 * Obtain the {@link ConnectionFactory} for actual use.
+	 * @return the ConnectionFactory (never {@code null})
+	 */
+	private ConnectionFactory obtainConnectionFactory() {
+<span class="fc" id="L182">		return this.connectionFactory;</span>
+	}
+
+	/**
+	 * Create a close-suppressing proxy for the given R2DBC
+	 * Connection. Called by the {@code execute} method.
+	 * @param con the R2DBC Connection to create a proxy for
+	 * @return the Connection proxy
+	 */
+	private static Connection createConnectionProxy(Connection con) {
+<span class="fc" id="L192">		return (Connection) Proxy.newProxyInstance(DatabaseClient.class.getClassLoader(),</span>
+				new Class&lt;?&gt;[] {Connection.class, Wrapped.class},
+				new CloseSuppressingInvocationHandler(con));
+	}
+
+	private static Mono&lt;Long&gt; sumRowsUpdated(Function&lt;Connection, Flux&lt;Result&gt;&gt; resultFunction, Connection it) {
+<span class="fc" id="L198">		return resultFunction.apply(it)</span>
+<span class="fc" id="L199">				.flatMap(Result::getRowsUpdated)</span>
+<span class="fc" id="L200">				.cast(Number.class)</span>
+<span class="fc" id="L201">				.collect(Collectors.summingLong(Number::longValue));</span>
+	}
+
+	/**
+	 * Get SQL from a potential provider object.
+	 * @param object an object that is potentially an SqlProvider
+	 * @return the SQL string, or {@code null}
+	 * @see SqlProvider
+	 */
+	private static @Nullable String getSql(Object object) {
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">		if (object instanceof SqlProvider sqlProvider) {</span>
+<span class="fc" id="L212">			return sqlProvider.getSql();</span>
+		}
+		else {
+<span class="nc" id="L215">			return null;</span>
+		}
+	}
+
+
+	/**
+	 * Default {@link DatabaseClient.GenericExecuteSpec} implementation.
+	 */
+	class DefaultGenericExecuteSpec implements GenericExecuteSpec {
+
+		final Map&lt;Integer, Parameter&gt; byIndex;
+
+		final Map&lt;String, Parameter&gt; byName;
+
+		final Supplier&lt;String&gt; sqlSupplier;
+
+		final StatementFilterFunction filterFunction;
+
+<span class="fc" id="L233">		DefaultGenericExecuteSpec(Supplier&lt;String&gt; sqlSupplier) {</span>
+<span class="fc" id="L234">			this.byIndex = Collections.emptyMap();</span>
+<span class="fc" id="L235">			this.byName = Collections.emptyMap();</span>
+<span class="fc" id="L236">			this.sqlSupplier = sqlSupplier;</span>
+<span class="fc" id="L237">			this.filterFunction = StatementFilterFunction.EMPTY_FILTER;</span>
+<span class="fc" id="L238">		}</span>
+
+		DefaultGenericExecuteSpec(Map&lt;Integer, Parameter&gt; byIndex, Map&lt;String, Parameter&gt; byName,
+<span class="fc" id="L241">				Supplier&lt;String&gt; sqlSupplier, StatementFilterFunction filterFunction) {</span>
+
+<span class="fc" id="L243">			this.byIndex = byIndex;</span>
+<span class="fc" id="L244">			this.byName = byName;</span>
+<span class="fc" id="L245">			this.sqlSupplier = sqlSupplier;</span>
+<span class="fc" id="L246">			this.filterFunction = filterFunction;</span>
+<span class="fc" id="L247">		}</span>
+
+		@SuppressWarnings(&quot;deprecation&quot;)
+		private Parameter resolveParameter(Object value) {
+<span class="fc bfc" id="L251" title="All 2 branches covered.">			if (value instanceof Parameter param) {</span>
+<span class="fc" id="L252">				return param;</span>
+			}
+<span class="fc bfc" id="L254" title="All 2 branches covered.">			else if (value instanceof org.springframework.r2dbc.core.Parameter param) {</span>
+<span class="fc" id="L255">				Object paramValue = param.getValue();</span>
+<span class="fc bfc" id="L256" title="All 2 branches covered.">				return (paramValue != null ? Parameters.in(paramValue) : Parameters.in(param.getType()));</span>
+			}
+			else {
+<span class="fc" id="L259">				return Parameters.in(value);</span>
+			}
+		}
+
+		@Override
+		public DefaultGenericExecuteSpec bind(int index, Object value) {
+<span class="fc" id="L265">			assertNotPreparedOperation();</span>
+<span class="pc" id="L266">			Assert.notNull(value, () -&gt; String.format(</span>
+<span class="nc" id="L267">					&quot;Value at index %d must not be null. Use bindNull(…) instead.&quot;, index));</span>
+
+<span class="fc" id="L269">			Map&lt;Integer, Parameter&gt; byIndex = new LinkedHashMap&lt;&gt;(this.byIndex);</span>
+<span class="fc" id="L270">			byIndex.put(index, resolveParameter(value));</span>
+
+<span class="fc" id="L272">			return new DefaultGenericExecuteSpec(byIndex, this.byName, this.sqlSupplier, this.filterFunction);</span>
+		}
+
+		@Override
+		public DefaultGenericExecuteSpec bindNull(int index, Class&lt;?&gt; type) {
+<span class="fc" id="L277">			assertNotPreparedOperation();</span>
+
+<span class="fc" id="L279">			Map&lt;Integer, Parameter&gt; byIndex = new LinkedHashMap&lt;&gt;(this.byIndex);</span>
+<span class="fc" id="L280">			byIndex.put(index, Parameters.in(type));</span>
+
+<span class="fc" id="L282">			return new DefaultGenericExecuteSpec(byIndex, this.byName, this.sqlSupplier, this.filterFunction);</span>
+		}
+
+		@Override
+		public DefaultGenericExecuteSpec bind(String name, Object value) {
+<span class="fc" id="L287">			assertNotPreparedOperation();</span>
+
+<span class="fc" id="L289">			Assert.hasText(name, &quot;Parameter name must not be null or empty&quot;);</span>
+<span class="pc" id="L290">			Assert.notNull(value, () -&gt; String.format(</span>
+					&quot;Value for parameter %s must not be null. Use bindNull(…) instead.&quot;, name));
+
+<span class="fc" id="L293">			Map&lt;String, Parameter&gt; byName = new LinkedHashMap&lt;&gt;(this.byName);</span>
+<span class="fc" id="L294">			byName.put(name, resolveParameter(value));</span>
+
+<span class="fc" id="L296">			return new DefaultGenericExecuteSpec(this.byIndex, byName, this.sqlSupplier, this.filterFunction);</span>
+		}
+
+		@Override
+		public DefaultGenericExecuteSpec bindNull(String name, Class&lt;?&gt; type) {
+<span class="fc" id="L301">			assertNotPreparedOperation();</span>
+<span class="fc" id="L302">			Assert.hasText(name, &quot;Parameter name must not be null or empty&quot;);</span>
+
+<span class="fc" id="L304">			Map&lt;String, Parameter&gt; byName = new LinkedHashMap&lt;&gt;(this.byName);</span>
+<span class="fc" id="L305">			byName.put(name, Parameters.in(type));</span>
+
+<span class="fc" id="L307">			return new DefaultGenericExecuteSpec(this.byIndex, byName, this.sqlSupplier, this.filterFunction);</span>
+		}
+
+		@Override
+		public GenericExecuteSpec bindValues(List&lt;?&gt; source) {
+<span class="fc" id="L312">			assertNotPreparedOperation();</span>
+<span class="fc" id="L313">			Assert.notNull(source, &quot;Source list must not be null&quot;);</span>
+<span class="fc" id="L314">			Map&lt;Integer, Parameter&gt; byIndex = new LinkedHashMap&lt;&gt;(this.byIndex);</span>
+<span class="fc" id="L315">			ListIterator&lt;?&gt; listIterator = source.listIterator();</span>
+<span class="fc bfc" id="L316" title="All 2 branches covered.">			while (listIterator.hasNext()) {</span>
+<span class="fc" id="L317">				byIndex.put(listIterator.nextIndex(), resolveParameter(listIterator.next()));</span>
+			}
+<span class="fc" id="L319">			return new DefaultGenericExecuteSpec(byIndex, this.byName, this.sqlSupplier, this.filterFunction);</span>
+		}
+
+		@Override
+		public GenericExecuteSpec bindValues(Map&lt;String, ?&gt; source) {
+<span class="fc" id="L324">			assertNotPreparedOperation();</span>
+<span class="fc" id="L325">			Assert.notNull(source, &quot;Parameter source must not be null&quot;);</span>
+
+<span class="fc" id="L327">			Map&lt;String, Parameter&gt; target = new LinkedHashMap&lt;&gt;(this.byName);</span>
+<span class="fc" id="L328">			source.forEach((name, value) -&gt; target.put(name, resolveParameter(value)));</span>
+
+<span class="fc" id="L330">			return new DefaultGenericExecuteSpec(this.byIndex, target, this.sqlSupplier, this.filterFunction);</span>
+		}
+
+		@Override
+		public DefaultGenericExecuteSpec bindProperties(Object source) {
+<span class="fc" id="L335">			assertNotPreparedOperation();</span>
+<span class="fc" id="L336">			Assert.notNull(source, &quot;Parameter source must not be null&quot;);</span>
+
+<span class="fc" id="L338">			Map&lt;String, Parameter&gt; byName = new LinkedHashMap&lt;&gt;(this.byName);</span>
+<span class="fc bfc" id="L339" title="All 2 branches covered.">			for (PropertyDescriptor pd : BeanUtils.getPropertyDescriptors(source.getClass())) {</span>
+<span class="pc bpc" id="L340" title="1 of 4 branches missed.">				if (pd.getReadMethod() != null &amp;&amp; pd.getReadMethod().getDeclaringClass() != Object.class) {</span>
+<span class="fc" id="L341">					ReflectionUtils.makeAccessible(pd.getReadMethod());</span>
+<span class="fc" id="L342">					Object value = ReflectionUtils.invokeMethod(pd.getReadMethod(), source);</span>
+<span class="fc bfc" id="L343" title="All 2 branches covered.">					byName.put(pd.getName(), (value != null ? Parameters.in(value) : Parameters.in(pd.getPropertyType())));</span>
+				}
+			}
+
+<span class="fc" id="L347">			return new DefaultGenericExecuteSpec(this.byIndex, byName, this.sqlSupplier, this.filterFunction);</span>
+		}
+
+		@Override
+		public DefaultGenericExecuteSpec filter(StatementFilterFunction filter) {
+<span class="fc" id="L352">			Assert.notNull(filter, &quot;StatementFilterFunction must not be null&quot;);</span>
+<span class="fc" id="L353">			return new DefaultGenericExecuteSpec(</span>
+<span class="fc" id="L354">					this.byIndex, this.byName, this.sqlSupplier, this.filterFunction.andThen(filter));</span>
+		}
+
+		@Override
+		public &lt;R&gt; FetchSpec&lt;R&gt; map(Function&lt;? super Readable, R&gt; mappingFunction) {
+<span class="fc" id="L359">			Assert.notNull(mappingFunction, &quot;Mapping function must not be null&quot;);</span>
+<span class="fc" id="L360">			return execute(this.sqlSupplier, result -&gt; result.map(mappingFunction));</span>
+		}
+
+		@Override
+		public &lt;R&gt; FetchSpec&lt;R&gt; map(BiFunction&lt;Row, RowMetadata, R&gt; mappingFunction) {
+<span class="fc" id="L365">			Assert.notNull(mappingFunction, &quot;Mapping function must not be null&quot;);</span>
+<span class="fc" id="L366">			return execute(this.sqlSupplier, result -&gt; result.map(mappingFunction));</span>
+		}
+
+		@Override
+		public &lt;R&gt; RowsFetchSpec&lt;R&gt; mapValue(Class&lt;R&gt; mappedClass) {
+<span class="fc" id="L371">			Assert.notNull(mappedClass, &quot;Mapped class must not be null&quot;);</span>
+<span class="fc" id="L372">			return execute(this.sqlSupplier, result -&gt; result.map(row -&gt; row.get(0, mappedClass)));</span>
+		}
+
+		@Override
+		public &lt;R&gt; FetchSpec&lt;R&gt; mapProperties(Class&lt;R&gt; mappedClass) {
+<span class="fc" id="L377">			Assert.notNull(mappedClass, &quot;Mapped class must not be null&quot;);</span>
+<span class="fc" id="L378">			return execute(this.sqlSupplier, result -&gt; result.map(new DataClassRowMapper&lt;&gt;(mappedClass)));</span>
+		}
+
+		@Override
+		public &lt;R&gt; Flux&lt;R&gt; flatMap(Function&lt;Result, Publisher&lt;R&gt;&gt; mappingFunction) {
+<span class="nc" id="L383">			Assert.notNull(mappingFunction, &quot;Mapping function must not be null&quot;);</span>
+<span class="nc" id="L384">			return flatMap(this.sqlSupplier, mappingFunction);</span>
+		}
+
+		@Override
+		public FetchSpec&lt;Map&lt;String, Object&gt;&gt; fetch() {
+<span class="fc" id="L389">			return execute(this.sqlSupplier, result -&gt; result.map(ColumnMapRowMapper.INSTANCE));</span>
+		}
+
+		@Override
+		public Mono&lt;Void&gt; then() {
+<span class="fc" id="L394">			return fetch().rowsUpdated().then();</span>
+		}
+
+		private ResultFunction getResultFunction(Supplier&lt;String&gt; sqlSupplier) {
+<span class="fc" id="L398">			BiFunction&lt;Connection, String, Statement&gt; statementFunction = (connection, sql) -&gt; {</span>
+<span class="pc bpc" id="L399" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L400">					logger.debug(&quot;Executing SQL statement [&quot; + sql + &quot;]&quot;);</span>
+				}
+<span class="fc bfc" id="L402" title="All 2 branches covered.">				if (sqlSupplier instanceof PreparedOperation&lt;?&gt; preparedOperation) {</span>
+<span class="fc" id="L403">					Statement statement = connection.createStatement(sql);</span>
+<span class="fc" id="L404">					BindTarget bindTarget = new StatementWrapper(statement);</span>
+<span class="fc" id="L405">					preparedOperation.bindTo(bindTarget);</span>
+<span class="fc" id="L406">					return statement;</span>
+				}
+
+<span class="fc bfc" id="L409" title="All 2 branches covered.">				if (DefaultDatabaseClient.this.namedParameterExpander != null) {</span>
+<span class="fc" id="L410">					Map&lt;String, Parameter&gt; remainderByName = new LinkedHashMap&lt;&gt;(this.byName);</span>
+<span class="fc" id="L411">					Map&lt;Integer, Parameter&gt; remainderByIndex = new LinkedHashMap&lt;&gt;(this.byIndex);</span>
+
+<span class="fc" id="L413">					List&lt;String&gt; parameterNames = DefaultDatabaseClient.this.namedParameterExpander.getParameterNames(sql);</span>
+<span class="fc" id="L414">					MapBindParameterSource namedBindings = retrieveParameters(</span>
+							sql, parameterNames, remainderByName, remainderByIndex);
+
+<span class="fc" id="L417">					PreparedOperation&lt;String&gt; operation = DefaultDatabaseClient.this.namedParameterExpander.expand(</span>
+							sql, DefaultDatabaseClient.this.bindMarkersFactory, namedBindings);
+
+<span class="fc" id="L420">					String expanded = getRequiredSql(operation);</span>
+<span class="pc bpc" id="L421" title="1 of 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L422">						logger.trace(&quot;Expanded SQL [&quot; + expanded + &quot;]&quot;);</span>
+					}
+
+<span class="fc" id="L425">					Statement statement = connection.createStatement(expanded);</span>
+<span class="fc" id="L426">					BindTarget bindTarget = new StatementWrapper(statement);</span>
+
+<span class="fc" id="L428">					operation.bindTo(bindTarget);</span>
+
+<span class="fc" id="L430">					bindByName(statement, remainderByName);</span>
+<span class="fc" id="L431">					bindByIndex(statement, remainderByIndex);</span>
+
+<span class="fc" id="L433">					return statement;</span>
+				}
+
+<span class="fc" id="L436">				Statement statement = connection.createStatement(sql);</span>
+
+<span class="fc" id="L438">				bindByIndex(statement, this.byIndex);</span>
+<span class="fc" id="L439">				bindByName(statement, this.byName);</span>
+
+<span class="fc" id="L441">				return statement;</span>
+			};
+
+<span class="fc" id="L444">			return new ResultFunction(sqlSupplier, statementFunction, this.filterFunction,</span>
+					DefaultDatabaseClient.this.executeFunction);
+		}
+
+		private &lt;T&gt; FetchSpec&lt;T&gt; execute(Supplier&lt;String&gt; sqlSupplier, Function&lt;Result, Publisher&lt;T&gt;&gt; resultAdapter) {
+<span class="fc" id="L449">			ResultFunction resultHandler = getResultFunction(sqlSupplier);</span>
+<span class="fc" id="L450">			return new DefaultFetchSpec&lt;&gt;(DefaultDatabaseClient.this, resultHandler,</span>
+<span class="fc" id="L451">					connection -&gt; sumRowsUpdated(resultHandler, connection), resultAdapter);</span>
+		}
+
+		private &lt;T&gt; Flux&lt;T&gt; flatMap(Supplier&lt;String&gt; sqlSupplier, Function&lt;Result, Publisher&lt;T&gt;&gt; mappingFunction) {
+<span class="nc" id="L455">			ResultFunction resultHandler = getResultFunction(sqlSupplier);</span>
+<span class="nc" id="L456">			ConnectionFunction&lt;Flux&lt;T&gt;&gt; connectionFunction = new DelegateConnectionFunction&lt;&gt;(resultHandler,</span>
+<span class="nc" id="L457">					cx -&gt; resultHandler.apply(cx).flatMap(mappingFunction));</span>
+<span class="nc" id="L458">			return inConnectionMany(connectionFunction);</span>
+		}
+
+		private MapBindParameterSource retrieveParameters(String sql, List&lt;String&gt; parameterNames,
+				Map&lt;String, Parameter&gt; remainderByName, Map&lt;Integer, Parameter&gt; remainderByIndex) {
+
+<span class="fc" id="L464">			Map&lt;String, Parameter&gt; namedBindings = CollectionUtils.newLinkedHashMap(parameterNames.size());</span>
+<span class="fc bfc" id="L465" title="All 2 branches covered.">			for (String parameterName : parameterNames) {</span>
+<span class="fc" id="L466">				Parameter parameter = getParameter(remainderByName, remainderByIndex, parameterNames, parameterName);</span>
+<span class="pc bpc" id="L467" title="1 of 2 branches missed.">				if (parameter == null) {</span>
+<span class="nc" id="L468">					throw new InvalidDataAccessApiUsageException(</span>
+<span class="nc" id="L469">							String.format(&quot;No parameter specified for [%s] in query [%s]&quot;, parameterName, sql));</span>
+				}
+<span class="fc" id="L471">				namedBindings.put(parameterName, parameter);</span>
+<span class="fc" id="L472">			}</span>
+<span class="fc" id="L473">			return new MapBindParameterSource(namedBindings);</span>
+		}
+
+		private @Nullable Parameter getParameter(Map&lt;String, Parameter&gt; remainderByName,
+				Map&lt;Integer, Parameter&gt; remainderByIndex, List&lt;String&gt; parameterNames, String parameterName) {
+
+<span class="fc bfc" id="L479" title="All 2 branches covered.">			if (this.byName.containsKey(parameterName)) {</span>
+<span class="fc" id="L480">				remainderByName.remove(parameterName);</span>
+<span class="fc" id="L481">				return this.byName.get(parameterName);</span>
+			}
+
+<span class="fc" id="L484">			int index = parameterNames.indexOf(parameterName);</span>
+<span class="pc bpc" id="L485" title="1 of 2 branches missed.">			if (this.byIndex.containsKey(index)) {</span>
+<span class="fc" id="L486">				remainderByIndex.remove(index);</span>
+<span class="fc" id="L487">				return this.byIndex.get(index);</span>
+			}
+
+<span class="nc" id="L490">			return null;</span>
+		}
+
+		private void assertNotPreparedOperation() {
+<span class="pc bpc" id="L494" title="1 of 2 branches missed.">			if (this.sqlSupplier instanceof PreparedOperation&lt;?&gt;) {</span>
+<span class="nc" id="L495">				throw new InvalidDataAccessApiUsageException(&quot;Cannot add bindings to a PreparedOperation&quot;);</span>
+			}
+<span class="fc" id="L497">		}</span>
+
+		private void bindByName(Statement statement, Map&lt;String, Parameter&gt; byName) {
+<span class="fc" id="L500">			byName.forEach(statement::bind);</span>
+<span class="fc" id="L501">		}</span>
+
+		private void bindByIndex(Statement statement, Map&lt;Integer, Parameter&gt; byIndex) {
+<span class="fc" id="L504">			byIndex.forEach(statement::bind);</span>
+<span class="fc" id="L505">		}</span>
+
+		private String getRequiredSql(Supplier&lt;String&gt; sqlSupplier) {
+<span class="fc" id="L508">			String sql = sqlSupplier.get();</span>
+<span class="fc" id="L509">			Assert.state(StringUtils.hasText(sql), &quot;SQL returned by supplier must not be empty&quot;);</span>
+<span class="fc" id="L510">			return sql;</span>
+		}
+	}
+
+
+	/**
+	 * Invocation handler that suppresses close calls on R2DBC Connections. Also prepares
+	 * returned Statement (Prepared/CallbackStatement) objects.
+	 *
+	 * @see Connection#close()
+	 */
+	private static class CloseSuppressingInvocationHandler implements InvocationHandler {
+
+		private final Connection target;
+
+<span class="fc" id="L525">		CloseSuppressingInvocationHandler(Connection target) {</span>
+<span class="fc" id="L526">			this.target = target;</span>
+<span class="fc" id="L527">		}</span>
+
+		@Override
+		public @Nullable Object invoke(Object proxy, Method method, Object[] args) throws Throwable {
+<span class="pc bpc" id="L531" title="4 of 5 branches missed.">			return switch (method.getName()) {</span>
+				// Only consider equal when proxies are identical.
+<span class="nc bnc" id="L533" title="All 2 branches missed.">				case &quot;equals&quot; -&gt; proxy == args[0];</span>
+				// Use hashCode of Connection proxy.
+<span class="nc" id="L535">				case &quot;hashCode&quot; -&gt; System.identityHashCode(proxy);</span>
+<span class="nc" id="L536">				case &quot;unwrap&quot; -&gt; this.target;</span>
+				// Handle close method: suppress, not valid.
+<span class="nc" id="L538">				case &quot;close&quot; -&gt; Mono.error(new UnsupportedOperationException(&quot;Close is not supported!&quot;));</span>
+				default -&gt; {
+					try {
+						// Invoke method on target Connection.
+<span class="fc" id="L542">						yield method.invoke(this.target, args);</span>
+					}
+<span class="nc" id="L544">					catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L545">						throw ex.getTargetException();</span>
+					}
+				}
+			};
+		}
+	}
+
+
+	/**
+	 * Holder for a connection that makes sure the close action is invoked atomically only once.
+	 */
+	static class ConnectionCloseHolder extends AtomicBoolean {
+
+		private static final long serialVersionUID = -8994138383301201380L;
+
+		final transient Connection connection;
+
+		final transient Function&lt;Connection, Publisher&lt;Void&gt;&gt; closeFunction;
+
+<span class="fc" id="L564">		ConnectionCloseHolder(Connection connection, Function&lt;Connection, Publisher&lt;Void&gt;&gt; closeFunction) {</span>
+<span class="fc" id="L565">			this.connection = connection;</span>
+<span class="fc" id="L566">			this.closeFunction = closeFunction;</span>
+<span class="fc" id="L567">		}</span>
+
+		Mono&lt;Void&gt; close() {
+<span class="fc" id="L570">			return Mono.defer(() -&gt; {</span>
+<span class="pc bpc" id="L571" title="1 of 2 branches missed.">				if (compareAndSet(false, true)) {</span>
+<span class="fc" id="L572">					return Mono.from(this.closeFunction.apply(this.connection));</span>
+				}
+<span class="nc" id="L574">				return Mono.empty();</span>
+			});
+		}
+	}
+
+
+	static class StatementWrapper implements BindTarget {
+
+		final Statement statement;
+
+<span class="fc" id="L584">		StatementWrapper(Statement statement) {</span>
+<span class="fc" id="L585">			this.statement = statement;</span>
+<span class="fc" id="L586">		}</span>
+
+		@Override
+		public void bind(String identifier, Object value) {
+<span class="fc" id="L590">			this.statement.bind(identifier, value);</span>
+<span class="fc" id="L591">		}</span>
+
+		@Override
+		public void bind(int index, Object value) {
+<span class="fc" id="L595">			this.statement.bind(index, value);</span>
+<span class="fc" id="L596">		}</span>
+
+		@Override
+		public void bindNull(String identifier, Class&lt;?&gt; type) {
+<span class="nc" id="L600">			this.statement.bindNull(identifier, type);</span>
+<span class="nc" id="L601">		}</span>
+
+		@Override
+		public void bindNull(int index, Class&lt;?&gt; type) {
+<span class="nc" id="L605">			this.statement.bindNull(index, type);</span>
+<span class="nc" id="L606">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

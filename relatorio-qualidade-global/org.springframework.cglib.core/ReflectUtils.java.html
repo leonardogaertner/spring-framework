@@ -1,0 +1,684 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReflectUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.cglib.core</a> &gt; <span class="el_source">ReflectUtils.java</span></div><h1>ReflectUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2003,2004 The Apache Software Foundation
+ *
+ *  Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.cglib.core;
+
+import java.beans.BeanInfo;
+import java.beans.IntrospectionException;
+import java.beans.Introspector;
+import java.beans.PropertyDescriptor;
+import java.lang.invoke.MethodHandles;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InaccessibleObjectException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.security.ProtectionDomain;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
+
+import org.springframework.asm.Type;
+
+/**
+ * @version $Id: ReflectUtils.java,v 1.30 2009/01/11 19:47:49 herbyderby Exp $
+ */
+@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;})
+public class ReflectUtils {
+
+	private ReflectUtils() {
+	}
+
+<span class="fc" id="L52">	private static final Map primitives = new HashMap(8);</span>
+
+<span class="fc" id="L54">	private static final Map transforms = new HashMap(8);</span>
+
+<span class="fc" id="L56">	private static final ClassLoader defaultLoader = ReflectUtils.class.getClassLoader();</span>
+
+	private static final Method classLoaderDefineClassMethod;
+
+	private static final Throwable THROWABLE;
+
+	private static final ProtectionDomain PROTECTION_DOMAIN;
+
+<span class="fc" id="L64">	private static final List&lt;Method&gt; OBJECT_METHODS = new ArrayList&lt;&gt;();</span>
+
+	private static BiConsumer&lt;String, byte[]&gt; generatedClassHandler;
+
+	private static Consumer&lt;Class&lt;?&gt;&gt; loadedClassHandler;
+
+	// SPRING PATCH BEGIN
+	static {
+		// Resolve protected ClassLoader.defineClass method for fallback use
+		// (even if JDK 9+ Lookup.defineClass is preferably used below)
+		Method classLoaderDefineClass;
+<span class="fc" id="L75">		Throwable throwable = null;</span>
+		try {
+<span class="fc" id="L77">			classLoaderDefineClass = ClassLoader.class.getDeclaredMethod(&quot;defineClass&quot;,</span>
+					String.class, byte[].class, Integer.TYPE, Integer.TYPE, ProtectionDomain.class);
+		}
+<span class="nc" id="L80">		catch (Throwable t) {</span>
+<span class="nc" id="L81">			classLoaderDefineClass = null;</span>
+<span class="nc" id="L82">			throwable = t;</span>
+<span class="fc" id="L83">		}</span>
+
+<span class="fc" id="L85">		classLoaderDefineClassMethod = classLoaderDefineClass;</span>
+<span class="fc" id="L86">		THROWABLE = throwable;</span>
+<span class="fc" id="L87">		PROTECTION_DOMAIN = getProtectionDomain(ReflectUtils.class);</span>
+
+<span class="fc bfc" id="L89" title="All 2 branches covered.">		for (Method method : Object.class.getDeclaredMethods()) {</span>
+<span class="fc bfc" id="L90" title="All 2 branches covered.">			if (&quot;finalize&quot;.equals(method.getName())</span>
+<span class="fc bfc" id="L91" title="All 2 branches covered.">					|| (method.getModifiers() &amp; (Modifier.FINAL | Modifier.STATIC)) &gt; 0) {</span>
+<span class="fc" id="L92">				continue;</span>
+			}
+<span class="fc" id="L94">			OBJECT_METHODS.add(method);</span>
+		}
+	}
+	// SPRING PATCH END
+
+<span class="fc" id="L99">	private static final String[] CGLIB_PACKAGES = {&quot;java.lang&quot;};</span>
+
+	static {
+<span class="fc" id="L102">		primitives.put(&quot;byte&quot;, Byte.TYPE);</span>
+<span class="fc" id="L103">		primitives.put(&quot;char&quot;, Character.TYPE);</span>
+<span class="fc" id="L104">		primitives.put(&quot;double&quot;, Double.TYPE);</span>
+<span class="fc" id="L105">		primitives.put(&quot;float&quot;, Float.TYPE);</span>
+<span class="fc" id="L106">		primitives.put(&quot;int&quot;, Integer.TYPE);</span>
+<span class="fc" id="L107">		primitives.put(&quot;long&quot;, Long.TYPE);</span>
+<span class="fc" id="L108">		primitives.put(&quot;short&quot;, Short.TYPE);</span>
+<span class="fc" id="L109">		primitives.put(&quot;boolean&quot;, Boolean.TYPE);</span>
+
+<span class="fc" id="L111">		transforms.put(&quot;byte&quot;, &quot;B&quot;);</span>
+<span class="fc" id="L112">		transforms.put(&quot;char&quot;, &quot;C&quot;);</span>
+<span class="fc" id="L113">		transforms.put(&quot;double&quot;, &quot;D&quot;);</span>
+<span class="fc" id="L114">		transforms.put(&quot;float&quot;, &quot;F&quot;);</span>
+<span class="fc" id="L115">		transforms.put(&quot;int&quot;, &quot;I&quot;);</span>
+<span class="fc" id="L116">		transforms.put(&quot;long&quot;, &quot;J&quot;);</span>
+<span class="fc" id="L117">		transforms.put(&quot;short&quot;, &quot;S&quot;);</span>
+<span class="fc" id="L118">		transforms.put(&quot;boolean&quot;, &quot;Z&quot;);</span>
+<span class="fc" id="L119">	}</span>
+
+	public static ProtectionDomain getProtectionDomain(final Class source) {
+<span class="pc bpc" id="L122" title="1 of 2 branches missed.">		if (source == null) {</span>
+<span class="nc" id="L123">			return null;</span>
+		}
+<span class="fc" id="L125">		return source.getProtectionDomain();</span>
+	}
+
+	public static Type[] getExceptionTypes(Member member) {
+<span class="fc bfc" id="L129" title="All 2 branches covered.">		if (member instanceof Method method) {</span>
+<span class="fc" id="L130">			return TypeUtils.getTypes(method.getExceptionTypes());</span>
+		}
+<span class="pc bpc" id="L132" title="1 of 2 branches missed.">		else if (member instanceof Constructor&lt;?&gt; constructor) {</span>
+<span class="fc" id="L133">			return TypeUtils.getTypes(constructor.getExceptionTypes());</span>
+		}
+		else {
+<span class="nc" id="L136">			throw new IllegalArgumentException(&quot;Cannot get exception types of a field&quot;);</span>
+		}
+	}
+
+	public static Signature getSignature(Member member) {
+<span class="fc bfc" id="L141" title="All 2 branches covered.">		if (member instanceof Method method) {</span>
+<span class="fc" id="L142">			return new Signature(member.getName(), Type.getMethodDescriptor(method));</span>
+		}
+<span class="pc bpc" id="L144" title="1 of 2 branches missed.">		else if (member instanceof Constructor&lt;?&gt; constructor) {</span>
+<span class="fc" id="L145">			Type[] types = TypeUtils.getTypes(constructor.getParameterTypes());</span>
+<span class="fc" id="L146">			return new Signature(Constants.CONSTRUCTOR_NAME,</span>
+<span class="fc" id="L147">					Type.getMethodDescriptor(Type.VOID_TYPE, types));</span>
+		}
+		else {
+<span class="nc" id="L150">			throw new IllegalArgumentException(&quot;Cannot get signature of a field&quot;);</span>
+		}
+	}
+
+	public static Constructor findConstructor(String desc) {
+<span class="nc" id="L155">		return findConstructor(desc, defaultLoader);</span>
+	}
+
+	public static Constructor findConstructor(String desc, ClassLoader loader) {
+		try {
+<span class="nc" id="L160">			int lparen = desc.indexOf('(');</span>
+<span class="nc" id="L161">			String className = desc.substring(0, lparen).trim();</span>
+<span class="nc" id="L162">			return getClass(className, loader).getConstructor(parseTypes(desc, loader));</span>
+		}
+<span class="nc" id="L164">		catch (ClassNotFoundException | NoSuchMethodException ex) {</span>
+<span class="nc" id="L165">			throw new CodeGenerationException(ex);</span>
+		}
+	}
+
+	public static Method findMethod(String desc) {
+<span class="nc" id="L170">		return findMethod(desc, defaultLoader);</span>
+	}
+
+	public static Method findMethod(String desc, ClassLoader loader) {
+		try {
+<span class="nc" id="L175">			int lparen = desc.indexOf('(');</span>
+<span class="nc" id="L176">			int dot = desc.lastIndexOf('.', lparen);</span>
+<span class="nc" id="L177">			String className = desc.substring(0, dot).trim();</span>
+<span class="nc" id="L178">			String methodName = desc.substring(dot + 1, lparen).trim();</span>
+<span class="nc" id="L179">			return getClass(className, loader).getDeclaredMethod(methodName, parseTypes(desc, loader));</span>
+		}
+<span class="nc" id="L181">		catch (ClassNotFoundException | NoSuchMethodException ex) {</span>
+<span class="nc" id="L182">			throw new CodeGenerationException(ex);</span>
+		}
+	}
+
+	private static Class[] parseTypes(String desc, ClassLoader loader) throws ClassNotFoundException {
+<span class="nc" id="L187">		int lparen = desc.indexOf('(');</span>
+<span class="nc" id="L188">		int rparen = desc.indexOf(')', lparen);</span>
+<span class="nc" id="L189">		List params = new ArrayList();</span>
+<span class="nc" id="L190">		int start = lparen + 1;</span>
+		for (; ; ) {
+<span class="nc" id="L192">			int comma = desc.indexOf(',', start);</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">			if (comma &lt; 0) {</span>
+<span class="nc" id="L194">				break;</span>
+			}
+<span class="nc" id="L196">			params.add(desc.substring(start, comma).trim());</span>
+<span class="nc" id="L197">			start = comma + 1;</span>
+<span class="nc" id="L198">		}</span>
+<span class="nc bnc" id="L199" title="All 2 branches missed.">		if (start &lt; rparen) {</span>
+<span class="nc" id="L200">			params.add(desc.substring(start, rparen).trim());</span>
+		}
+<span class="nc" id="L202">		Class[] types = new Class[params.size()];</span>
+<span class="nc bnc" id="L203" title="All 2 branches missed.">		for (int i = 0; i &lt; types.length; i++) {</span>
+<span class="nc" id="L204">			types[i] = getClass((String) params.get(i), loader);</span>
+		}
+<span class="nc" id="L206">		return types;</span>
+	}
+
+	private static Class getClass(String className, ClassLoader loader) throws ClassNotFoundException {
+<span class="nc" id="L210">		return getClass(className, loader, CGLIB_PACKAGES);</span>
+	}
+
+	private static Class getClass(String className, ClassLoader loader, String[] packages) throws ClassNotFoundException {
+<span class="nc" id="L214">		String save = className;</span>
+<span class="nc" id="L215">		int dimensions = 0;</span>
+<span class="nc" id="L216">		int index = 0;</span>
+<span class="nc bnc" id="L217" title="All 2 branches missed.">		while ((index = className.indexOf(&quot;[]&quot;, index) + 1) &gt; 0) {</span>
+<span class="nc" id="L218">			dimensions++;</span>
+		}
+<span class="nc" id="L220">		StringBuilder brackets = new StringBuilder(className.length() - dimensions);</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">		for (int i = 0; i &lt; dimensions; i++) {</span>
+<span class="nc" id="L222">			brackets.append('[');</span>
+		}
+<span class="nc" id="L224">		className = className.substring(0, className.length() - 2 * dimensions);</span>
+
+<span class="nc bnc" id="L226" title="All 2 branches missed.">		String prefix = (dimensions &gt; 0) ? brackets + &quot;L&quot; : &quot;&quot;;</span>
+<span class="nc bnc" id="L227" title="All 2 branches missed.">		String suffix = (dimensions &gt; 0) ? &quot;;&quot; : &quot;&quot;;</span>
+		try {
+<span class="nc" id="L229">			return Class.forName(prefix + className + suffix, false, loader);</span>
+		}
+<span class="nc" id="L231">		catch (ClassNotFoundException ignore) {</span>
+		}
+<span class="nc bnc" id="L233" title="All 2 branches missed.">		for (String pkg : packages) {</span>
+			try {
+<span class="nc" id="L235">				return Class.forName(prefix + pkg + '.' + className + suffix, false, loader);</span>
+			}
+<span class="nc" id="L237">			catch (ClassNotFoundException ignore) {</span>
+			}
+		}
+<span class="nc bnc" id="L240" title="All 2 branches missed.">		if (dimensions == 0) {</span>
+<span class="nc" id="L241">			Class c = (Class) primitives.get(className);</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">			if (c != null) {</span>
+<span class="nc" id="L243">				return c;</span>
+			}
+<span class="nc" id="L245">		}</span>
+		else {
+<span class="nc" id="L247">			String transform = (String) transforms.get(className);</span>
+<span class="nc bnc" id="L248" title="All 2 branches missed.">			if (transform != null) {</span>
+				try {
+<span class="nc" id="L250">					return Class.forName(brackets + transform, false, loader);</span>
+				}
+<span class="nc" id="L252">				catch (ClassNotFoundException ignore) {</span>
+				}
+			}
+		}
+<span class="nc" id="L256">		throw new ClassNotFoundException(save);</span>
+	}
+
+	public static Object newInstance(Class type) {
+<span class="nc" id="L260">		return newInstance(type, Constants.EMPTY_CLASS_ARRAY, null);</span>
+	}
+
+	public static Object newInstance(Class type, Class[] parameterTypes, Object[] args) {
+<span class="fc" id="L264">		return newInstance(getConstructor(type, parameterTypes), args);</span>
+	}
+
+	@SuppressWarnings(&quot;deprecation&quot;)
+	public static Object newInstance(final Constructor cstruct, final Object[] args) {
+<span class="fc" id="L269">		boolean flag = cstruct.isAccessible();</span>
+		try {
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">			if (!flag) {</span>
+<span class="nc" id="L272">				cstruct.setAccessible(true);</span>
+			}
+<span class="fc" id="L274">			Object result = cstruct.newInstance(args);</span>
+<span class="fc" id="L275">			return result;</span>
+		}
+<span class="nc" id="L277">		catch (InstantiationException | IllegalAccessException e) {</span>
+<span class="nc" id="L278">			throw new CodeGenerationException(e);</span>
+		}
+<span class="nc" id="L280">		catch (InvocationTargetException e) {</span>
+<span class="nc" id="L281">			throw new CodeGenerationException(e.getTargetException());</span>
+		}
+		finally {
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">			if (!flag) {</span>
+<span class="nc" id="L285">				cstruct.setAccessible(flag);</span>
+			}
+		}
+	}
+
+	public static Constructor getConstructor(Class type, Class[] parameterTypes) {
+		try {
+<span class="fc" id="L292">			Constructor constructor = type.getDeclaredConstructor(parameterTypes);</span>
+<span class="fc" id="L293">			constructor.setAccessible(true);</span>
+<span class="fc" id="L294">			return constructor;</span>
+		}
+<span class="nc" id="L296">		catch (NoSuchMethodException e) {</span>
+<span class="nc" id="L297">			throw new CodeGenerationException(e);</span>
+		}
+	}
+
+	public static String[] getNames(Class[] classes) {
+<span class="pc bpc" id="L302" title="1 of 2 branches missed.">		if (classes == null) {</span>
+<span class="nc" id="L303">			return null;</span>
+		}
+<span class="fc" id="L305">		String[] names = new String[classes.length];</span>
+<span class="fc bfc" id="L306" title="All 2 branches covered.">		for (int i = 0; i &lt; names.length; i++) {</span>
+<span class="fc" id="L307">			names[i] = classes[i].getName();</span>
+		}
+<span class="fc" id="L309">		return names;</span>
+	}
+
+	public static Class[] getClasses(Object[] objects) {
+<span class="nc" id="L313">		Class[] classes = new Class[objects.length];</span>
+<span class="nc bnc" id="L314" title="All 2 branches missed.">		for (int i = 0; i &lt; objects.length; i++) {</span>
+<span class="nc" id="L315">			classes[i] = objects[i].getClass();</span>
+		}
+<span class="nc" id="L317">		return classes;</span>
+	}
+
+	public static Method findNewInstance(Class iface) {
+<span class="nc" id="L321">		Method m = findInterfaceMethod(iface);</span>
+<span class="nc bnc" id="L322" title="All 2 branches missed.">		if (!m.getName().equals(&quot;newInstance&quot;)) {</span>
+<span class="nc" id="L323">			throw new IllegalArgumentException(iface + &quot; missing newInstance method&quot;);</span>
+		}
+<span class="nc" id="L325">		return m;</span>
+	}
+
+	public static Method[] getPropertyMethods(PropertyDescriptor[] properties, boolean read, boolean write) {
+<span class="nc" id="L329">		Set methods = new HashSet();</span>
+<span class="nc bnc" id="L330" title="All 2 branches missed.">		for (PropertyDescriptor pd : properties) {</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">			if (read) {</span>
+<span class="nc" id="L332">				methods.add(pd.getReadMethod());</span>
+			}
+<span class="nc bnc" id="L334" title="All 2 branches missed.">			if (write) {</span>
+<span class="nc" id="L335">				methods.add(pd.getWriteMethod());</span>
+			}
+		}
+<span class="nc" id="L338">		methods.remove(null);</span>
+<span class="nc" id="L339">		return (Method[]) methods.toArray(new Method[methods.size()]);</span>
+	}
+
+	public static PropertyDescriptor[] getBeanProperties(Class type) {
+<span class="nc" id="L343">		return getPropertiesHelper(type, true, true);</span>
+	}
+
+	public static PropertyDescriptor[] getBeanGetters(Class type) {
+<span class="nc" id="L347">		return getPropertiesHelper(type, true, false);</span>
+	}
+
+	public static PropertyDescriptor[] getBeanSetters(Class type) {
+<span class="nc" id="L351">		return getPropertiesHelper(type, false, true);</span>
+	}
+
+	private static PropertyDescriptor[] getPropertiesHelper(Class type, boolean read, boolean write) {
+		try {
+<span class="nc" id="L356">			BeanInfo info = Introspector.getBeanInfo(type, Object.class);</span>
+<span class="nc" id="L357">			PropertyDescriptor[] all = info.getPropertyDescriptors();</span>
+<span class="nc bnc" id="L358" title="All 4 branches missed.">			if (read &amp;&amp; write) {</span>
+<span class="nc" id="L359">				return all;</span>
+			}
+<span class="nc" id="L361">			List properties = new ArrayList(all.length);</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">			for (PropertyDescriptor pd : all) {</span>
+<span class="nc bnc" id="L363" title="All 6 branches missed.">				if ((read &amp;&amp; pd.getReadMethod() != null) ||</span>
+<span class="nc bnc" id="L364" title="All 2 branches missed.">						(write &amp;&amp; pd.getWriteMethod() != null)) {</span>
+<span class="nc" id="L365">					properties.add(pd);</span>
+				}
+			}
+<span class="nc" id="L368">			return (PropertyDescriptor[]) properties.toArray(new PropertyDescriptor[properties.size()]);</span>
+		}
+<span class="nc" id="L370">		catch (IntrospectionException e) {</span>
+<span class="nc" id="L371">			throw new CodeGenerationException(e);</span>
+		}
+	}
+
+	public static Method findDeclaredMethod(final Class type,
+			final String methodName, final Class[] parameterTypes)
+			throws NoSuchMethodException {
+
+<span class="nc" id="L379">		Class cl = type;</span>
+<span class="nc bnc" id="L380" title="All 2 branches missed.">		while (cl != null) {</span>
+			try {
+<span class="nc" id="L382">				return cl.getDeclaredMethod(methodName, parameterTypes);</span>
+			}
+<span class="nc" id="L384">			catch (NoSuchMethodException e) {</span>
+<span class="nc" id="L385">				cl = cl.getSuperclass();</span>
+<span class="nc" id="L386">			}</span>
+		}
+<span class="nc" id="L388">		throw new NoSuchMethodException(methodName);</span>
+	}
+
+	public static List addAllMethods(final Class type, final List list) {
+<span class="fc bfc" id="L392" title="All 2 branches covered.">		if (type == Object.class) {</span>
+<span class="fc" id="L393">			list.addAll(OBJECT_METHODS);</span>
+		}
+		else {
+<span class="fc" id="L396">			list.addAll(java.util.Arrays.asList(type.getDeclaredMethods()));</span>
+		}
+
+<span class="fc" id="L399">		Class superclass = type.getSuperclass();</span>
+<span class="fc bfc" id="L400" title="All 2 branches covered.">		if (superclass != null) {</span>
+<span class="fc" id="L401">			addAllMethods(superclass, list);</span>
+		}
+<span class="fc" id="L403">		Class[] interfaces = type.getInterfaces();</span>
+<span class="fc bfc" id="L404" title="All 2 branches covered.">		for (Class element : interfaces) {</span>
+<span class="fc" id="L405">			addAllMethods(element, list);</span>
+		}
+
+<span class="fc" id="L408">		return list;</span>
+	}
+
+	public static List addAllInterfaces(Class type, List list) {
+<span class="nc" id="L412">		Class superclass = type.getSuperclass();</span>
+<span class="nc bnc" id="L413" title="All 2 branches missed.">		if (superclass != null) {</span>
+<span class="nc" id="L414">			list.addAll(Arrays.asList(type.getInterfaces()));</span>
+<span class="nc" id="L415">			addAllInterfaces(superclass, list);</span>
+		}
+<span class="nc" id="L417">		return list;</span>
+	}
+
+
+	public static Method findInterfaceMethod(Class iface) {
+<span class="nc bnc" id="L422" title="All 2 branches missed.">		if (!iface.isInterface()) {</span>
+<span class="nc" id="L423">			throw new IllegalArgumentException(iface + &quot; is not an interface&quot;);</span>
+		}
+<span class="nc" id="L425">		Method[] methods = iface.getDeclaredMethods();</span>
+<span class="nc bnc" id="L426" title="All 2 branches missed.">		if (methods.length != 1) {</span>
+<span class="nc" id="L427">			throw new IllegalArgumentException(&quot;expecting exactly 1 method in &quot; + iface);</span>
+		}
+<span class="nc" id="L429">		return methods[0];</span>
+	}
+
+	// SPRING PATCH BEGIN
+	public static void setGeneratedClassHandler(BiConsumer&lt;String, byte[]&gt; handler) {
+<span class="fc" id="L434">		generatedClassHandler = handler;</span>
+<span class="fc" id="L435">	}</span>
+
+	public static Class defineClass(String className, byte[] b, ClassLoader loader) throws Exception {
+<span class="nc" id="L438">		return defineClass(className, b, loader, null, null);</span>
+	}
+
+	public static Class defineClass(String className, byte[] b, ClassLoader loader,
+			ProtectionDomain protectionDomain) throws Exception {
+
+<span class="nc" id="L444">		return defineClass(className, b, loader, protectionDomain, null);</span>
+	}
+
+	@SuppressWarnings({&quot;deprecation&quot;, &quot;serial&quot;})
+	public static Class defineClass(String className, byte[] b, ClassLoader loader,
+			ProtectionDomain protectionDomain, Class&lt;?&gt; contextClass) throws Exception {
+
+<span class="fc" id="L451">		Class c = null;</span>
+<span class="fc" id="L452">		Throwable t = THROWABLE;</span>
+
+<span class="fc" id="L454">		BiConsumer&lt;String, byte[]&gt; handlerToUse = generatedClassHandler;</span>
+<span class="fc bfc" id="L455" title="All 2 branches covered.">		if (handlerToUse != null) {</span>
+<span class="fc" id="L456">			handlerToUse.accept(className, b);</span>
+		}
+
+		// Preferred option: JDK 9+ Lookup.defineClass API if ClassLoader matches
+<span class="fc bfc" id="L460" title="All 4 branches covered.">		if (contextClass != null &amp;&amp; contextClass.getClassLoader() == loader) {</span>
+			try {
+<span class="fc" id="L462">				MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(contextClass, MethodHandles.lookup());</span>
+<span class="fc" id="L463">				c = lookup.defineClass(b);</span>
+			}
+<span class="nc" id="L465">			catch (LinkageError | IllegalArgumentException ex) {</span>
+<span class="nc bnc" id="L466" title="All 2 branches missed.">				if (ex instanceof LinkageError) {</span>
+					// Could be a ClassLoader mismatch with the class pre-existing in a
+					// parent ClassLoader -&gt; try loadClass before giving up completely.
+					try {
+<span class="nc" id="L470">						c = contextClass.getClassLoader().loadClass(className);</span>
+					}
+<span class="nc" id="L472">					catch (ClassNotFoundException cnfe) {</span>
+<span class="nc" id="L473">					}</span>
+				}
+<span class="nc bnc" id="L475" title="All 2 branches missed.">				if (c == null) {</span>
+					// in case of plain LinkageError (class already defined)
+					// or IllegalArgumentException (class in different package):
+					// fall through to traditional ClassLoader.defineClass below
+<span class="nc" id="L479">					t = ex;</span>
+				}
+			}
+<span class="nc" id="L482">			catch (Throwable ex) {</span>
+<span class="nc" id="L483">				throw new CodeGenerationException(ex);</span>
+<span class="pc" id="L484">			}</span>
+		}
+
+		// Direct defineClass attempt on the target Classloader
+<span class="fc bfc" id="L488" title="All 2 branches covered.">		if (c == null) {</span>
+<span class="fc bfc" id="L489" title="All 2 branches covered.">			if (protectionDomain == null) {</span>
+<span class="fc" id="L490">				protectionDomain = PROTECTION_DOMAIN;</span>
+			}
+
+			// Look for publicDefineClass(String name, byte[] b, ProtectionDomain protectionDomain)
+			try {
+<span class="fc" id="L495">				Method publicDefineClass = loader.getClass().getMethod(</span>
+						&quot;publicDefineClass&quot;, String.class, byte[].class, ProtectionDomain.class);
+<span class="nc" id="L497">				c = (Class) publicDefineClass.invoke(loader, className, b, protectionDomain);</span>
+			}
+<span class="nc" id="L499">			catch (InvocationTargetException ex) {</span>
+<span class="nc bnc" id="L500" title="All 2 branches missed.">				if (!(ex.getTargetException() instanceof UnsupportedOperationException)) {</span>
+<span class="nc" id="L501">					throw new CodeGenerationException(ex.getTargetException());</span>
+				}
+				// in case of UnsupportedOperationException, fall through
+<span class="nc" id="L504">				t = ex.getTargetException();</span>
+			}
+<span class="fc" id="L506">			catch (Throwable ex) {</span>
+				// publicDefineClass method not available -&gt; fall through
+<span class="fc" id="L508">				t = ex;</span>
+<span class="nc" id="L509">			}</span>
+
+			// Classic option: protected ClassLoader.defineClass method
+<span class="pc bpc" id="L512" title="2 of 4 branches missed.">			if (c == null &amp;&amp; classLoaderDefineClassMethod != null) {</span>
+<span class="fc" id="L513">				Object[] args = new Object[]{className, b, 0, b.length, protectionDomain};</span>
+				try {
+<span class="fc bfc" id="L515" title="All 2 branches covered.">					if (!classLoaderDefineClassMethod.isAccessible()) {</span>
+<span class="fc" id="L516">						classLoaderDefineClassMethod.setAccessible(true);</span>
+					}
+<span class="fc" id="L518">					c = (Class) classLoaderDefineClassMethod.invoke(loader, args);</span>
+				}
+<span class="nc" id="L520">				catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L521">					throw new CodeGenerationException(ex.getTargetException());</span>
+				}
+<span class="nc" id="L523">				catch (InaccessibleObjectException ex) {</span>
+					// setAccessible failed with JDK 9+ InaccessibleObjectException -&gt; fall through
+					// Avoid through JVM startup with --add-opens=java.base/java.lang=ALL-UNNAMED
+<span class="nc" id="L526">					t = ex;</span>
+				}
+<span class="nc" id="L528">				catch (Throwable ex) {</span>
+<span class="nc" id="L529">					throw new CodeGenerationException(ex);</span>
+<span class="pc" id="L530">				}</span>
+			}
+		}
+
+		// Fallback option: JDK 9+ Lookup.defineClass API even if ClassLoader does not match
+<span class="pc bpc" id="L535" title="5 of 6 branches missed.">		if (c == null &amp;&amp; contextClass != null &amp;&amp; contextClass.getClassLoader() != loader) {</span>
+			try {
+<span class="nc" id="L537">				MethodHandles.Lookup lookup = MethodHandles.privateLookupIn(contextClass, MethodHandles.lookup());</span>
+<span class="nc" id="L538">				c = lookup.defineClass(b);</span>
+			}
+<span class="nc" id="L540">			catch (LinkageError | IllegalAccessException ex) {</span>
+<span class="nc bnc" id="L541" title="All 2 branches missed.">				if (ex instanceof LinkageError) {</span>
+					// Could be a ClassLoader mismatch with the class pre-existing in a
+					// parent ClassLoader -&gt; try loadClass before giving up completely.
+					try {
+<span class="nc" id="L545">						c = contextClass.getClassLoader().loadClass(className);</span>
+					}
+<span class="nc" id="L547">					catch (ClassNotFoundException cnfe) {</span>
+<span class="nc" id="L548">					}</span>
+				}
+<span class="nc bnc" id="L550" title="All 2 branches missed.">				if (c == null) {</span>
+<span class="nc" id="L551">					throw new CodeGenerationException(ex) {</span>
+						@Override
+						public String getMessage() {
+<span class="nc" id="L554">							return &quot;ClassLoader mismatch for [&quot; + contextClass.getName() +</span>
+									&quot;]: JVM should be started with --add-opens=java.base/java.lang=ALL-UNNAMED &quot; +
+<span class="nc" id="L556">									&quot;for ClassLoader.defineClass to be accessible on &quot; + loader.getClass().getName() +</span>
+									&quot;; consider co-locating the affected class in that target ClassLoader instead.&quot;;
+						}
+					};
+				}
+			}
+<span class="nc" id="L562">			catch (Throwable ex) {</span>
+<span class="nc" id="L563">				throw new CodeGenerationException(ex);</span>
+<span class="nc" id="L564">			}</span>
+		}
+
+		// No defineClass variant available at all?
+<span class="pc bpc" id="L568" title="1 of 2 branches missed.">		if (c == null) {</span>
+<span class="nc" id="L569">			throw new CodeGenerationException(t) {</span>
+				@Override
+				public String getMessage() {
+<span class="nc" id="L572">					return &quot;No compatible defineClass mechanism detected: &quot; +</span>
+							&quot;JVM should be started with --add-opens=java.base/java.lang=ALL-UNNAMED &quot; +
+							&quot;for ClassLoader.defineClass to be accessible. On the module path, &quot; +
+							&quot;you may not be able to define this CGLIB-generated class at all.&quot;;
+				}
+			};
+		}
+
+		// Force static initializers to run.
+<span class="fc" id="L581">		Class.forName(className, true, loader);</span>
+<span class="fc" id="L582">		return c;</span>
+	}
+
+	public static void setLoadedClassHandler(Consumer&lt;Class&lt;?&gt;&gt; loadedClassHandler) {
+<span class="fc" id="L586">		ReflectUtils.loadedClassHandler = loadedClassHandler;</span>
+<span class="fc" id="L587">	}</span>
+
+	public static Class&lt;?&gt; loadClass(String className, ClassLoader classLoader) throws ClassNotFoundException {
+		// Force static initializers to run.
+<span class="nc" id="L591">		Class&lt;?&gt; clazz = Class.forName(className, true, classLoader);</span>
+<span class="nc" id="L592">		Consumer&lt;Class&lt;?&gt;&gt; handlerToUse = loadedClassHandler;</span>
+<span class="nc bnc" id="L593" title="All 2 branches missed.">		if (handlerToUse != null) {</span>
+<span class="nc" id="L594">			handlerToUse.accept(clazz);</span>
+		}
+<span class="nc" id="L596">		return clazz;</span>
+	}
+
+	// SPRING PATCH END
+
+	public static int findPackageProtected(Class[] classes) {
+<span class="fc bfc" id="L602" title="All 2 branches covered.">		for (int i = 0; i &lt; classes.length; i++) {</span>
+<span class="fc bfc" id="L603" title="All 2 branches covered.">			if (!Modifier.isPublic(classes[i].getModifiers())) {</span>
+<span class="fc" id="L604">				return i;</span>
+			}
+		}
+<span class="fc" id="L607">		return 0;</span>
+	}
+
+	public static MethodInfo getMethodInfo(final Member member, final int modifiers) {
+<span class="fc" id="L611">		final Signature sig = getSignature(member);</span>
+<span class="fc" id="L612">		return new MethodInfo() {</span>
+			private ClassInfo ci;
+
+			@Override
+			public ClassInfo getClassInfo() {
+<span class="fc bfc" id="L617" title="All 2 branches covered.">				if (ci == null) {</span>
+<span class="fc" id="L618">					ci = ReflectUtils.getClassInfo(member.getDeclaringClass());</span>
+				}
+<span class="fc" id="L620">				return ci;</span>
+			}
+
+			@Override
+			public int getModifiers() {
+<span class="fc" id="L625">				return modifiers;</span>
+			}
+
+			@Override
+			public Signature getSignature() {
+<span class="fc" id="L630">				return sig;</span>
+			}
+
+			@Override
+			public Type[] getExceptionTypes() {
+<span class="fc" id="L635">				return ReflectUtils.getExceptionTypes(member);</span>
+			}
+		};
+	}
+
+	public static MethodInfo getMethodInfo(Member member) {
+<span class="fc" id="L641">		return getMethodInfo(member, member.getModifiers());</span>
+	}
+
+	public static ClassInfo getClassInfo(final Class clazz) {
+<span class="fc" id="L645">		final Type type = Type.getType(clazz);</span>
+<span class="fc bfc" id="L646" title="All 2 branches covered.">		final Type sc = (clazz.getSuperclass() == null) ? null : Type.getType(clazz.getSuperclass());</span>
+<span class="fc" id="L647">		return new ClassInfo() {</span>
+			@Override
+			public Type getType() {
+<span class="fc" id="L650">				return type;</span>
+			}
+			@Override
+			public Type getSuperType() {
+<span class="nc" id="L654">				return sc;</span>
+			}
+			@Override
+			public Type[] getInterfaces() {
+<span class="nc" id="L658">				return TypeUtils.getTypes(clazz.getInterfaces());</span>
+			}
+			@Override
+			public int getModifiers() {
+<span class="fc" id="L662">				return clazz.getModifiers();</span>
+			}
+		};
+	}
+
+	// used by MethodInterceptorGenerated generated code
+	public static Method[] findMethods(String[] namesAndDescriptors, Method[] methods) {
+<span class="fc" id="L669">		Map map = new HashMap();</span>
+<span class="fc bfc" id="L670" title="All 2 branches covered.">		for (Method method : methods) {</span>
+<span class="fc" id="L671">			map.put(method.getName() + Type.getMethodDescriptor(method), method);</span>
+		}
+<span class="fc" id="L673">		Method[] result = new Method[namesAndDescriptors.length / 2];</span>
+<span class="fc bfc" id="L674" title="All 2 branches covered.">		for (int i = 0; i &lt; result.length; i++) {</span>
+<span class="fc" id="L675">			result[i] = (Method) map.get(namesAndDescriptors[i * 2] + namesAndDescriptors[i * 2 + 1]);</span>
+<span class="pc bpc" id="L676" title="1 of 2 branches missed.">			if (result[i] == null) {</span>
+				// TODO: error?
+			}
+		}
+<span class="fc" id="L680">		return result;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

@@ -1,0 +1,287 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CronExpression.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.scheduling.support</a> &gt; <span class="el_source">CronExpression.java</span></div><h1>CronExpression.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.scheduling.support;
+
+import java.time.temporal.ChronoUnit;
+import java.time.temporal.Temporal;
+import java.util.Arrays;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+
+/**
+ * Representation of a
+ * &lt;a href=&quot;https://www.manpagez.com/man/5/crontab/&quot;&gt;crontab expression&lt;/a&gt;
+ * that can calculate the next time it matches.
+ *
+ * &lt;p&gt;{@code CronExpression} instances are created through {@link #parse(String)};
+ * the next match is determined with {@link #next(Temporal)}.
+ *
+ * &lt;p&gt;Supports a Quartz day-of-month/week field with an L/# expression. Follows
+ * common cron conventions in every other respect, including 0-6 for SUN-SAT
+ * (plus 7 for SUN as well). Note that Quartz deviates from the day-of-week
+ * convention in cron through 1-7 for SUN-SAT whereas Spring strictly follows
+ * cron even in combination with the optional Quartz-specific L/# expressions.
+ *
+ * @author Arjen Poutsma
+ * @since 5.3
+ * @see CronTrigger
+ */
+public final class CronExpression {
+
+	static final int MAX_ATTEMPTS = 366;
+
+<span class="fc" id="L50">	private static final String[] MACROS = new String[] {</span>
+			&quot;@yearly&quot;, &quot;0 0 0 1 1 *&quot;,
+			&quot;@annually&quot;, &quot;0 0 0 1 1 *&quot;,
+			&quot;@monthly&quot;, &quot;0 0 0 1 * *&quot;,
+			&quot;@weekly&quot;, &quot;0 0 0 * * 0&quot;,
+			&quot;@daily&quot;, &quot;0 0 0 * * *&quot;,
+			&quot;@midnight&quot;, &quot;0 0 0 * * *&quot;,
+			&quot;@hourly&quot;, &quot;0 0 * * * *&quot;
+	};
+
+
+	private final CronField[] fields;
+
+	private final String expression;
+
+
+	private CronExpression(CronField seconds, CronField minutes, CronField hours,
+<span class="fc" id="L67">			CronField daysOfMonth, CronField months, CronField daysOfWeek, String expression) {</span>
+
+		// Reverse order, to make big changes first.
+		// To make sure we end up at 0 nanos, we add an extra field.
+<span class="fc" id="L71">		this.fields = new CronField[] {daysOfWeek, months, daysOfMonth, hours, minutes, seconds, CronField.zeroNanos()};</span>
+<span class="fc" id="L72">		this.expression = expression;</span>
+<span class="fc" id="L73">	}</span>
+
+
+	/**
+	 * Parse the given
+	 * &lt;a href=&quot;https://www.manpagez.com/man/5/crontab/&quot;&gt;crontab expression&lt;/a&gt;
+	 * string into a {@code CronExpression}.
+	 * The string has six single space-separated time and date fields:
+	 * &lt;pre&gt;
+	 * &amp;#9484;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472; second (0-59)
+	 * &amp;#9474; &amp;#9484;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472; minute (0 - 59)
+	 * &amp;#9474; &amp;#9474; &amp;#9484;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472; hour (0 - 23)
+	 * &amp;#9474; &amp;#9474; &amp;#9474; &amp;#9484;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472; day of the month (1 - 31)
+	 * &amp;#9474; &amp;#9474; &amp;#9474; &amp;#9474; &amp;#9484;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472; month (1 - 12) (or JAN-DEC)
+	 * &amp;#9474; &amp;#9474; &amp;#9474; &amp;#9474; &amp;#9474; &amp;#9484;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472;&amp;#9472; day of the week (0 - 7)
+	 * &amp;#9474; &amp;#9474; &amp;#9474; &amp;#9474; &amp;#9474; &amp;#9474;          (0 or 7 is Sunday, or MON-SUN)
+	 * &amp;#9474; &amp;#9474; &amp;#9474; &amp;#9474; &amp;#9474; &amp;#9474;
+	 * &amp;#42; &amp;#42; &amp;#42; &amp;#42; &amp;#42; &amp;#42;
+	 * &lt;/pre&gt;
+	 *
+	 * &lt;p&gt;The following rules apply:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;
+	 * A field may be an asterisk ({@code *}), which always stands for
+	 * &quot;first-last&quot;. For the &quot;day of the month&quot; or &quot;day of the week&quot; fields, a
+	 * question mark ({@code ?}) may be used instead of an asterisk.
+	 * &lt;/li&gt;
+	 * &lt;li&gt;
+	 * Ranges of numbers are expressed by two numbers separated with a hyphen
+	 * ({@code -}). The specified range is inclusive.
+	 * &lt;/li&gt;
+	 * &lt;li&gt;Following a range (or {@code *}) with {@code /n} specifies
+	 * the interval of the number's value through the range.
+	 * &lt;/li&gt;
+	 * &lt;li&gt;
+	 * English names can also be used for the &quot;month&quot; and &quot;day of week&quot; fields.
+	 * Use the first three letters of the particular day or month (case does not
+	 * matter).
+	 * &lt;/li&gt;
+	 * &lt;li&gt;
+	 * The &quot;day of month&quot; and &quot;day of week&quot; fields can contain a
+	 * {@code L}-character, which stands for &quot;last&quot;, and has a different meaning
+	 * in each field:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;
+	 * In the &quot;day of month&quot; field, {@code L} stands for &quot;the last day of the
+	 * month&quot;. If followed by an negative offset (i.e. {@code L-n}), it means
+	 * &quot;{@code n}th-to-last day of the month&quot;. If followed by {@code W} (i.e.
+	 * {@code LW}), it means &quot;the last weekday of the month&quot;.
+	 * &lt;/li&gt;
+	 * &lt;li&gt;
+	 * In the &quot;day of week&quot; field, {@code dL} or {@code DDDL} stands for
+	 * &quot;the last day of week {@code d} (or {@code DDD}) in the month&quot;.
+	 * &lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * &lt;/li&gt;
+	 * &lt;li&gt;
+	 * The &quot;day of month&quot; field can be {@code nW}, which stands for &quot;the nearest
+	 * weekday to day of the month {@code n}&quot;.
+	 * If {@code n} falls on Saturday, this yields the Friday before it.
+	 * If {@code n} falls on Sunday, this yields the Monday after,
+	 * which also happens if {@code n} is {@code 1} and falls on a Saturday
+	 * (i.e. {@code 1W} stands for &quot;the first weekday of the month&quot;).
+	 * &lt;/li&gt;
+	 * &lt;li&gt;
+	 * The &quot;day of week&quot; field can be {@code d#n} (or {@code DDD#n}), which
+	 * stands for &quot;the {@code n}-th day of week {@code d} (or {@code DDD}) in
+	 * the month&quot;.
+	 * &lt;/li&gt;
+	 * &lt;/ul&gt;
+	 *
+	 * &lt;p&gt;Example expressions:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;{@code &quot;0 0 * * * *&quot;} = the top of every hour of every day&lt;/li&gt;
+	 * &lt;li&gt;&lt;code&gt;&quot;*&amp;#47;10 * * * * *&quot;&lt;/code&gt; = every ten seconds&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0 8-10 * * *&quot;} = 8, 9 and 10 o'clock of every day&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0 6,19 * * *&quot;} = 6:00 AM and 7:00 PM every day&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0/30 8-10 * * *&quot;} = 8:00, 8:30, 9:00, 9:30, 10:00 and 10:30 every day&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0 9-17 * * MON-FRI&quot;} = on the hour nine-to-five weekdays&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0 0 25 12 ?&quot;} = every Christmas Day at midnight&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0 0 L * *&quot;} = last day of the month at midnight&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0 0 L-3 * *&quot;} = third-to-last day of the month at midnight&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0 0 1W * *&quot;} = first weekday of the month at midnight&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0 0 LW * *&quot;} = last weekday of the month at midnight&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0 0 * * 5L&quot;} = last Friday of the month at midnight&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0 0 * * THUL&quot;} = last Thursday of the month at midnight&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0 0 ? * 5#2&quot;} = the second Friday in the month at midnight&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;0 0 0 ? * MON#1&quot;} = the first Monday in the month at midnight&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 *
+	 * &lt;p&gt;The following macros are also supported.
+	 * &lt;ul&gt;
+	 * &lt;li&gt;{@code &quot;@yearly&quot;} (or {@code &quot;@annually&quot;}) to run un once a year, i.e. {@code &quot;0 0 0 1 1 *&quot;}&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;@monthly&quot;} to run once a month, i.e. {@code &quot;0 0 0 1 * *&quot;}&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;@weekly&quot;} to run once a week, i.e. {@code &quot;0 0 0 * * 0&quot;}&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;@daily&quot;} (or {@code &quot;@midnight&quot;}) to run once a day, i.e. {@code &quot;0 0 0 * * *&quot;}&lt;/li&gt;
+	 * &lt;li&gt;{@code &quot;@hourly&quot;} to run once an hour, i.e. {@code &quot;0 0 * * * *&quot;}&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * @param expression the expression string to parse
+	 * @return the parsed {@code CronExpression} object
+	 * @throws IllegalArgumentException in the expression does not conform to
+	 * the cron format
+	 */
+	public static CronExpression parse(String expression) {
+<span class="fc" id="L177">		Assert.hasLength(expression, &quot;Expression must not be empty&quot;);</span>
+
+<span class="fc" id="L179">		expression = resolveMacros(expression);</span>
+
+<span class="fc" id="L181">		String[] fields = StringUtils.tokenizeToStringArray(expression, &quot; &quot;);</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">		if (fields.length != 6) {</span>
+<span class="fc" id="L183">			throw new IllegalArgumentException(String.format(</span>
+<span class="fc" id="L184">					&quot;Cron expression must consist of 6 fields (found %d in \&quot;%s\&quot;)&quot;, fields.length, expression));</span>
+		}
+		try {
+<span class="fc" id="L187">			CronField seconds = CronField.parseSeconds(fields[0]);</span>
+<span class="fc" id="L188">			CronField minutes = CronField.parseMinutes(fields[1]);</span>
+<span class="fc" id="L189">			CronField hours = CronField.parseHours(fields[2]);</span>
+<span class="fc" id="L190">			CronField daysOfMonth = CronField.parseDaysOfMonth(fields[3]);</span>
+<span class="fc" id="L191">			CronField months = CronField.parseMonth(fields[4]);</span>
+<span class="fc" id="L192">			CronField daysOfWeek = CronField.parseDaysOfWeek(fields[5]);</span>
+
+<span class="fc" id="L194">			return new CronExpression(seconds, minutes, hours, daysOfMonth, months, daysOfWeek, expression);</span>
+		}
+<span class="fc" id="L196">		catch (IllegalArgumentException ex) {</span>
+<span class="fc" id="L197">			String msg = ex.getMessage() + &quot; in cron expression \&quot;&quot; + expression + &quot;\&quot;&quot;;</span>
+<span class="fc" id="L198">			throw new IllegalArgumentException(msg, ex);</span>
+		}
+	}
+
+	/**
+	 * Determine whether the given string represents a valid cron expression.
+	 * @param expression the expression to evaluate
+	 * @return {@code true} if the given expression is a valid cron expression
+	 * @since 5.3.8
+	 */
+	public static boolean isValidExpression(@Nullable String expression) {
+<span class="fc bfc" id="L209" title="All 2 branches covered.">		if (expression == null) {</span>
+<span class="fc" id="L210">			return false;</span>
+		}
+		try {
+<span class="fc" id="L213">			parse(expression);</span>
+<span class="fc" id="L214">			return true;</span>
+		}
+<span class="fc" id="L216">		catch (IllegalArgumentException ex) {</span>
+<span class="fc" id="L217">			return false;</span>
+		}
+	}
+
+
+	private static String resolveMacros(String expression) {
+<span class="fc" id="L223">		expression = expression.trim();</span>
+<span class="fc bfc" id="L224" title="All 2 branches covered.">		for (int i = 0; i &lt; MACROS.length; i = i + 2) {</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">			if (MACROS[i].equalsIgnoreCase(expression)) {</span>
+<span class="fc" id="L226">				return MACROS[i + 1];</span>
+			}
+		}
+<span class="fc" id="L229">		return expression;</span>
+	}
+
+
+	/**
+	 * Calculate the next {@link Temporal} that matches this expression.
+	 * @param temporal the seed value
+	 * @param &lt;T&gt; the type of temporal
+	 * @return the next temporal that matches this expression, or {@code null}
+	 * if no such temporal can be found
+	 */
+	public &lt;T extends Temporal &amp; Comparable&lt;? super T&gt;&gt; @Nullable T next(T temporal) {
+<span class="fc" id="L241">		return nextOrSame(ChronoUnit.NANOS.addTo(temporal, 1));</span>
+	}
+
+
+	private &lt;T extends Temporal &amp; Comparable&lt;? super T&gt;&gt; @Nullable T nextOrSame(T temporal) {
+<span class="fc bfc" id="L246" title="All 2 branches covered.">		for (int i = 0; i &lt; MAX_ATTEMPTS; i++) {</span>
+<span class="fc" id="L247">			T result = nextOrSameInternal(temporal);</span>
+<span class="pc bpc" id="L248" title="1 of 4 branches missed.">			if (result == null || result.equals(temporal)) {</span>
+<span class="fc" id="L249">				return result;</span>
+			}
+<span class="fc" id="L251">			temporal = result;</span>
+		}
+<span class="fc" id="L253">		return null;</span>
+	}
+
+	private &lt;T extends Temporal &amp; Comparable&lt;? super T&gt;&gt; @Nullable T nextOrSameInternal(T temporal) {
+<span class="fc bfc" id="L257" title="All 2 branches covered.">		for (CronField field : this.fields) {</span>
+<span class="fc" id="L258">			temporal = field.nextOrSame(temporal);</span>
+<span class="pc bpc" id="L259" title="1 of 2 branches missed.">			if (temporal == null) {</span>
+<span class="nc" id="L260">				return null;</span>
+			}
+		}
+<span class="fc" id="L263">		return temporal;</span>
+	}
+
+
+	@Override
+	public boolean equals(@Nullable Object other) {
+<span class="pc bpc" id="L269" title="2 of 4 branches missed.">		return (this == other || (other instanceof CronExpression that &amp;&amp;</span>
+<span class="pc bpc" id="L270" title="1 of 2 branches missed.">				Arrays.equals(this.fields, that.fields)));</span>
+	}
+
+	@Override
+	public int hashCode() {
+<span class="nc" id="L275">		return Arrays.hashCode(this.fields);</span>
+	}
+
+	/**
+	 * Return the expression string used to create this {@code CronExpression}.
+	 */
+	@Override
+	public String toString() {
+<span class="fc" id="L283">		return this.expression;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

@@ -1,0 +1,572 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractMessageConverterMethodProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.mvc.method.annotation</a> &gt; <span class="el_source">AbstractMessageConverterMethodProcessor.java</span></div><h1>AbstractMessageConverterMethodProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.mvc.method.annotation;
+
+import java.io.IOException;
+import java.lang.reflect.Type;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.GenericTypeResolver;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.ResourceRegion;
+import org.springframework.core.log.LogFormatUtils;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpOutputMessage;
+import org.springframework.http.HttpRange;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.MediaType;
+import org.springframework.http.MediaTypeFactory;
+import org.springframework.http.ProblemDetail;
+import org.springframework.http.converter.GenericHttpMessageConverter;
+import org.springframework.http.converter.HttpMessageConverter;
+import org.springframework.http.converter.HttpMessageNotWritableException;
+import org.springframework.http.converter.SmartHttpMessageConverter;
+import org.springframework.http.server.ServletServerHttpRequest;
+import org.springframework.http.server.ServletServerHttpResponse;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.MimeTypeUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.ErrorResponse;
+import org.springframework.web.HttpMediaTypeNotAcceptableException;
+import org.springframework.web.accept.ContentNegotiationManager;
+import org.springframework.web.context.request.NativeWebRequest;
+import org.springframework.web.context.request.ServletWebRequest;
+import org.springframework.web.method.support.HandlerMethodReturnValueHandler;
+import org.springframework.web.servlet.HandlerMapping;
+import org.springframework.web.util.UrlPathHelper;
+
+/**
+ * Extends {@link AbstractMessageConverterMethodArgumentResolver} with the ability to handle method
+ * return values by writing to the response with {@link HttpMessageConverter HttpMessageConverters}.
+ *
+ * @author Arjen Poutsma
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @author Juergen Hoeller
+ * @author Sebastien Deleuze
+ * @since 3.1
+ */
+public abstract class AbstractMessageConverterMethodProcessor extends AbstractMessageConverterMethodArgumentResolver
+		implements HandlerMethodReturnValueHandler {
+
+	/* Extensions associated with the built-in message converters */
+<span class="fc" id="L84">	private static final Set&lt;String&gt; SAFE_EXTENSIONS = Set.of(</span>
+			&quot;txt&quot;, &quot;text&quot;, &quot;yml&quot;, &quot;properties&quot;, &quot;csv&quot;,
+			&quot;json&quot;, &quot;xml&quot;, &quot;atom&quot;, &quot;rss&quot;,
+			&quot;png&quot;, &quot;jpe&quot;, &quot;jpeg&quot;, &quot;jpg&quot;, &quot;gif&quot;, &quot;wbmp&quot;, &quot;bmp&quot;);
+
+<span class="fc" id="L89">	private static final Set&lt;String&gt; SAFE_MEDIA_BASE_TYPES =</span>
+<span class="fc" id="L90">			Set.of(&quot;audio&quot;, &quot;image&quot;, &quot;video&quot;);</span>
+
+<span class="fc" id="L92">	private static final List&lt;MediaType&gt; ALL_APPLICATION_MEDIA_TYPES =</span>
+<span class="fc" id="L93">			List.of(MediaType.ALL, new MediaType(&quot;application&quot;));</span>
+
+<span class="fc" id="L95">	private static final List&lt;MediaType&gt; PROBLEM_MEDIA_TYPES =</span>
+<span class="fc" id="L96">			List.of(MediaType.APPLICATION_PROBLEM_JSON, MediaType.APPLICATION_PROBLEM_XML);</span>
+
+<span class="fc" id="L98">	private static final Type RESOURCE_REGION_LIST_TYPE =</span>
+<span class="fc" id="L99">			new ParameterizedTypeReference&lt;List&lt;ResourceRegion&gt;&gt;() {}.getType();</span>
+
+
+	private final ContentNegotiationManager contentNegotiationManager;
+
+<span class="fc" id="L104">	private final List&lt;ErrorResponse.Interceptor&gt; errorResponseInterceptors = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L106">	private final Set&lt;String&gt; safeExtensions = new HashSet&lt;&gt;();</span>
+
+
+	/**
+	 * Construct with the provided list of converters only.
+	 */
+	protected AbstractMessageConverterMethodProcessor(List&lt;HttpMessageConverter&lt;?&gt;&gt; converters) {
+<span class="fc" id="L113">		this(converters, null, null);</span>
+<span class="fc" id="L114">	}</span>
+
+	/**
+	 * Construct with the provided list of converters and {@link ContentNegotiationManager}.
+	 */
+	protected AbstractMessageConverterMethodProcessor(List&lt;HttpMessageConverter&lt;?&gt;&gt; converters,
+			@Nullable ContentNegotiationManager contentNegotiationManager) {
+
+<span class="fc" id="L122">		this(converters, contentNegotiationManager, null);</span>
+<span class="fc" id="L123">	}</span>
+
+	/**
+	 * Variant of {@link #AbstractMessageConverterMethodProcessor(List, ContentNegotiationManager)}
+	 * with an additional {@code requestResponseBodyAdvice} list for return value handling.
+	 */
+	protected AbstractMessageConverterMethodProcessor(List&lt;HttpMessageConverter&lt;?&gt;&gt; converters,
+			@Nullable ContentNegotiationManager manager, @Nullable List&lt;Object&gt; requestResponseBodyAdvice) {
+
+<span class="fc" id="L132">		this(converters, manager, requestResponseBodyAdvice, Collections.emptyList());</span>
+<span class="fc" id="L133">	}</span>
+
+	/**
+	 * Variant of {@link #AbstractMessageConverterMethodProcessor(List, ContentNegotiationManager, List)}
+	 * with additional list of {@link ErrorResponse.Interceptor}s for return value handling.
+	 * @since 6.2
+	 */
+	protected AbstractMessageConverterMethodProcessor(List&lt;HttpMessageConverter&lt;?&gt;&gt; converters,
+			@Nullable ContentNegotiationManager manager, @Nullable List&lt;Object&gt; requestResponseBodyAdvice,
+			List&lt;ErrorResponse.Interceptor&gt; interceptors) {
+
+<span class="fc" id="L144">		super(converters, requestResponseBodyAdvice);</span>
+
+<span class="fc bfc" id="L146" title="All 2 branches covered.">		this.contentNegotiationManager = (manager != null ? manager : new ContentNegotiationManager());</span>
+<span class="fc" id="L147">		this.safeExtensions.addAll(this.contentNegotiationManager.getAllFileExtensions());</span>
+<span class="fc" id="L148">		this.safeExtensions.addAll(SAFE_EXTENSIONS);</span>
+<span class="fc" id="L149">		this.errorResponseInterceptors.addAll(interceptors);</span>
+<span class="fc" id="L150">	}</span>
+
+
+	/**
+	 * Create a new {@link HttpOutputMessage} from the given {@link NativeWebRequest}.
+	 * @param webRequest the web request to create an output message from
+	 * @return the output message
+	 */
+	protected ServletServerHttpResponse createOutputMessage(NativeWebRequest webRequest) {
+<span class="fc" id="L159">		HttpServletResponse response = webRequest.getNativeResponse(HttpServletResponse.class);</span>
+<span class="pc bpc" id="L160" title="1 of 2 branches missed.">		Assert.state(response != null, &quot;No HttpServletResponse&quot;);</span>
+<span class="fc" id="L161">		return new ServletServerHttpResponse(response);</span>
+	}
+
+	/**
+	 * Invoke the configured {@link ErrorResponse.Interceptor}'s.
+	 * @since 6.2
+	 */
+	protected void invokeErrorResponseInterceptors(ProblemDetail detail, @Nullable ErrorResponse errorResponse) {
+		try {
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">			for (ErrorResponse.Interceptor handler : this.errorResponseInterceptors) {</span>
+<span class="nc" id="L171">				handler.handleError(detail, errorResponse);</span>
+<span class="nc" id="L172">			}</span>
+		}
+<span class="nc" id="L174">		catch (Throwable ex) {</span>
+			// ignore
+<span class="fc" id="L176">		}</span>
+<span class="fc" id="L177">	}</span>
+
+	/**
+	 * Writes the given return value to the given web request. Delegates to
+	 * {@link #writeWithMessageConverters(Object, MethodParameter, ServletServerHttpRequest, ServletServerHttpResponse)}
+	 */
+	protected &lt;T&gt; void writeWithMessageConverters(T value, MethodParameter returnType, NativeWebRequest webRequest)
+			throws IOException, HttpMediaTypeNotAcceptableException, HttpMessageNotWritableException {
+
+<span class="fc" id="L186">		ServletServerHttpRequest inputMessage = createInputMessage(webRequest);</span>
+<span class="fc" id="L187">		ServletServerHttpResponse outputMessage = createOutputMessage(webRequest);</span>
+<span class="fc" id="L188">		writeWithMessageConverters(value, returnType, inputMessage, outputMessage);</span>
+<span class="fc" id="L189">	}</span>
+
+	/**
+	 * Write the given return type to the given output message.
+	 * @param value the value to write to the output message
+	 * @param returnType the type of the value
+	 * @param inputMessage the input messages, used to inspect the {@code Accept} header
+	 * @param outputMessage the output message to write to
+	 * @throws IOException thrown in case of I/O errors
+	 * @throws HttpMediaTypeNotAcceptableException thrown when the conditions indicated
+	 * by the {@code Accept} header on the request cannot be met by the message converters
+	 * @throws HttpMessageNotWritableException thrown if a given message cannot
+	 * be written by a converter, or if the content-type chosen by the server
+	 * has no compatible converter.
+	 */
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;, &quot;NullAway&quot;})
+	protected &lt;T&gt; void writeWithMessageConverters(@Nullable T value, MethodParameter returnType,
+			ServletServerHttpRequest inputMessage, ServletServerHttpResponse outputMessage)
+			throws IOException, HttpMediaTypeNotAcceptableException, HttpMessageNotWritableException {
+
+		Object body;
+		Class&lt;?&gt; valueType;
+		Type targetType;
+
+<span class="fc bfc" id="L213" title="All 2 branches covered.">		if (value instanceof CharSequence) {</span>
+<span class="fc" id="L214">			body = value.toString();</span>
+<span class="fc" id="L215">			valueType = String.class;</span>
+<span class="fc" id="L216">			targetType = String.class;</span>
+		}
+		else {
+<span class="fc" id="L219">			body = value;</span>
+<span class="fc" id="L220">			valueType = getReturnValueType(body, returnType);</span>
+<span class="fc" id="L221">			targetType = GenericTypeResolver.resolveType(getGenericType(returnType), returnType.getContainingClass());</span>
+		}
+
+<span class="fc bfc" id="L224" title="All 2 branches covered.">		if (isResourceType(value, returnType)) {</span>
+<span class="fc" id="L225">			outputMessage.getHeaders().set(HttpHeaders.ACCEPT_RANGES, &quot;bytes&quot;);</span>
+<span class="pc bpc" id="L226" title="1 of 4 branches missed.">			if (value != null &amp;&amp; inputMessage.getHeaders().getFirst(HttpHeaders.RANGE) != null &amp;&amp;</span>
+<span class="pc bpc" id="L227" title="1 of 2 branches missed.">					outputMessage.getServletResponse().getStatus() == 200) {</span>
+<span class="fc" id="L228">				Resource resource = (Resource) value;</span>
+				try {
+<span class="fc" id="L230">					List&lt;HttpRange&gt; httpRanges = inputMessage.getHeaders().getRange();</span>
+<span class="fc" id="L231">					outputMessage.getServletResponse().setStatus(HttpStatus.PARTIAL_CONTENT.value());</span>
+<span class="fc" id="L232">					body = HttpRange.toResourceRegions(httpRanges, resource);</span>
+<span class="fc" id="L233">					valueType = body.getClass();</span>
+<span class="fc" id="L234">					targetType = RESOURCE_REGION_LIST_TYPE;</span>
+				}
+<span class="fc" id="L236">				catch (IllegalArgumentException ex) {</span>
+<span class="fc" id="L237">					outputMessage.getHeaders().set(HttpHeaders.CONTENT_RANGE, &quot;bytes */&quot; + resource.contentLength());</span>
+<span class="fc" id="L238">					outputMessage.getServletResponse().setStatus(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE.value());</span>
+<span class="fc" id="L239">				}</span>
+			}
+		}
+
+<span class="fc" id="L243">		MediaType selectedMediaType = null;</span>
+<span class="fc" id="L244">		MediaType contentType = outputMessage.getHeaders().getContentType();</span>
+<span class="pc bpc" id="L245" title="1 of 4 branches missed.">		boolean isContentTypePreset = contentType != null &amp;&amp; contentType.isConcrete();</span>
+<span class="fc bfc" id="L246" title="All 2 branches covered.">		if (isContentTypePreset) {</span>
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L248">				logger.debug(&quot;Found 'Content-Type:&quot; + contentType + &quot;' in response&quot;);</span>
+			}
+<span class="fc" id="L250">			selectedMediaType = contentType;</span>
+		}
+		else {
+<span class="fc" id="L253">			HttpServletRequest request = inputMessage.getServletRequest();</span>
+			List&lt;MediaType&gt; acceptableTypes;
+			try {
+<span class="fc" id="L256">				acceptableTypes = getAcceptableMediaTypes(request);</span>
+			}
+<span class="fc" id="L258">			catch (HttpMediaTypeNotAcceptableException ex) {</span>
+<span class="fc" id="L259">				int series = outputMessage.getServletResponse().getStatus() / 100;</span>
+<span class="pc bpc" id="L260" title="2 of 6 branches missed.">				if (body == null || series == 4 || series == 5) {</span>
+<span class="pc bpc" id="L261" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L262">						logger.debug(&quot;Ignoring error response content (if any). &quot; + ex);</span>
+					}
+<span class="fc" id="L264">					return;</span>
+				}
+<span class="fc" id="L266">				throw ex;</span>
+<span class="fc" id="L267">			}</span>
+
+<span class="fc" id="L269">			List&lt;MediaType&gt; producibleTypes = getProducibleMediaTypes(request, valueType, targetType);</span>
+<span class="pc bpc" id="L270" title="1 of 4 branches missed.">			if (body != null &amp;&amp; producibleTypes.isEmpty()) {</span>
+<span class="nc" id="L271">				throw new HttpMessageNotWritableException(</span>
+						&quot;No converter found for return value of type: &quot; + valueType);
+			}
+
+<span class="fc" id="L275">			List&lt;MediaType&gt; compatibleMediaTypes = determineCompatibleMediaTypes(acceptableTypes, producibleTypes);</span>
+
+			// For ProblemDetail, fall back on RFC 9457 format
+<span class="fc bfc" id="L278" title="All 4 branches covered.">			if (compatibleMediaTypes.isEmpty() &amp;&amp; ProblemDetail.class.isAssignableFrom(valueType)) {</span>
+<span class="fc" id="L279">				compatibleMediaTypes = determineCompatibleMediaTypes(PROBLEM_MEDIA_TYPES, producibleTypes);</span>
+			}
+
+<span class="fc bfc" id="L282" title="All 2 branches covered.">			if (compatibleMediaTypes.isEmpty()) {</span>
+<span class="pc bpc" id="L283" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L284">					logger.debug(&quot;No match for &quot; + acceptableTypes + &quot;, supported: &quot; + producibleTypes);</span>
+				}
+<span class="pc bpc" id="L286" title="1 of 2 branches missed.">				if (body != null) {</span>
+<span class="fc" id="L287">					throw new HttpMediaTypeNotAcceptableException(producibleTypes);</span>
+				}
+<span class="nc" id="L289">				return;</span>
+			}
+
+<span class="fc" id="L292">			MimeTypeUtils.sortBySpecificity(compatibleMediaTypes);</span>
+
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">			for (MediaType mediaType : compatibleMediaTypes) {</span>
+<span class="fc bfc" id="L295" title="All 2 branches covered.">				if (mediaType.isConcrete()) {</span>
+<span class="fc" id="L296">					selectedMediaType = mediaType;</span>
+<span class="fc" id="L297">					break;</span>
+				}
+<span class="fc bfc" id="L299" title="All 2 branches covered.">				else if (mediaType.isPresentIn(ALL_APPLICATION_MEDIA_TYPES)) {</span>
+<span class="fc" id="L300">					selectedMediaType = MediaType.APPLICATION_OCTET_STREAM;</span>
+<span class="fc" id="L301">					break;</span>
+				}
+<span class="fc" id="L303">			}</span>
+
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L306">				logger.debug(&quot;Using '&quot; + selectedMediaType + &quot;', given &quot; +</span>
+						acceptableTypes + &quot; and supported &quot; + producibleTypes);
+			}
+		}
+
+<span class="pc bpc" id="L311" title="1 of 2 branches missed.">		if (selectedMediaType != null) {</span>
+<span class="fc" id="L312">			selectedMediaType = selectedMediaType.removeQualityValue();</span>
+
+<span class="fc" id="L314">			ResolvableType targetResolvableType = null;</span>
+<span class="fc bfc" id="L315" title="All 2 branches covered.">			for (HttpMessageConverter converter : this.messageConverters) {</span>
+<span class="fc" id="L316">				ConverterType converterTypeToUse = null;</span>
+<span class="fc bfc" id="L317" title="All 2 branches covered.">				if (converter instanceof GenericHttpMessageConverter genericConverter) {</span>
+<span class="fc bfc" id="L318" title="All 2 branches covered.">					if (genericConverter.canWrite(targetType, valueType, selectedMediaType)) {</span>
+<span class="fc" id="L319">						converterTypeToUse = ConverterType.GENERIC;</span>
+					}
+				}
+<span class="fc bfc" id="L322" title="All 2 branches covered.">				else if (converter instanceof SmartHttpMessageConverter smartConverter) {</span>
+<span class="fc" id="L323">					targetResolvableType = getNestedTypeIfNeeded(ResolvableType.forType(targetType));</span>
+<span class="fc bfc" id="L324" title="All 2 branches covered.">					if (smartConverter.canWrite(targetResolvableType, valueType, selectedMediaType)) {</span>
+<span class="fc" id="L325">						converterTypeToUse = ConverterType.SMART;</span>
+					}
+				}
+<span class="fc bfc" id="L328" title="All 2 branches covered.">				else if (converter.canWrite(valueType, selectedMediaType)){</span>
+<span class="fc" id="L329">					converterTypeToUse = ConverterType.BASE;</span>
+				}
+<span class="fc bfc" id="L331" title="All 2 branches covered.">				if (converterTypeToUse != null) {</span>
+<span class="fc" id="L332">					body = getAdvice().beforeBodyWrite(body, returnType, selectedMediaType,</span>
+<span class="fc" id="L333">							(Class&lt;? extends HttpMessageConverter&lt;?&gt;&gt;) converter.getClass(), inputMessage, outputMessage);</span>
+<span class="fc bfc" id="L334" title="All 2 branches covered.">					if (body != null) {</span>
+<span class="fc" id="L335">						Object theBody = body;</span>
+<span class="fc" id="L336">						LogFormatUtils.traceDebug(logger, traceOn -&gt;</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">								&quot;Writing [&quot; + LogFormatUtils.formatValue(theBody, !traceOn) + &quot;]&quot;);</span>
+<span class="fc" id="L338">						addContentDispositionHeader(inputMessage, outputMessage);</span>
+<span class="pc bpc" id="L339" title="1 of 4 branches missed.">						switch (converterTypeToUse) {</span>
+<span class="fc" id="L340">							case BASE -&gt; converter.write(body, selectedMediaType, outputMessage);</span>
+<span class="fc" id="L341">							case GENERIC -&gt; ((GenericHttpMessageConverter) converter).write(body, targetType, selectedMediaType, outputMessage);</span>
+<span class="fc" id="L342">							case SMART -&gt; ((SmartHttpMessageConverter) converter).write(body, targetResolvableType,</span>
+<span class="fc" id="L343">									selectedMediaType, outputMessage, getAdvice().determineWriteHints(body, returnType,</span>
+<span class="fc" id="L344">											selectedMediaType, (Class&lt;? extends HttpMessageConverter&lt;?&gt;&gt;) converter.getClass()));</span>
+						}
+<span class="fc" id="L346">					}</span>
+					else {
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">						if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L349">							logger.debug(&quot;Nothing to write: null body&quot;);</span>
+						}
+					}
+<span class="fc" id="L352">					return;</span>
+				}
+<span class="fc" id="L354">			}</span>
+		}
+
+<span class="fc bfc" id="L357" title="All 2 branches covered.">		if (body != null) {</span>
+<span class="fc" id="L358">			Set&lt;MediaType&gt; producibleMediaTypes =</span>
+<span class="fc" id="L359">					(Set&lt;MediaType&gt;) inputMessage.getServletRequest()</span>
+<span class="fc" id="L360">							.getAttribute(HandlerMapping.PRODUCIBLE_MEDIA_TYPES_ATTRIBUTE);</span>
+
+<span class="fc bfc" id="L362" title="All 4 branches covered.">			if (isContentTypePreset || !CollectionUtils.isEmpty(producibleMediaTypes)) {</span>
+<span class="fc" id="L363">				throw new HttpMessageNotWritableException(</span>
+						&quot;No converter for [&quot; + valueType + &quot;] with preset Content-Type '&quot; + contentType + &quot;'&quot;);
+			}
+<span class="fc" id="L366">			throw new HttpMediaTypeNotAcceptableException(getSupportedMediaTypes(body.getClass()));</span>
+		}
+<span class="fc" id="L368">	}</span>
+
+	/**
+	 * Return the type of the value to be written to the response. Typically this is
+	 * a simple check via getClass on the value but if the value is null, then the
+	 * return type needs to be examined possibly including generic type determination
+	 * (for example, {@code ResponseEntity&lt;T&gt;}).
+	 */
+	protected Class&lt;?&gt; getReturnValueType(@Nullable Object value, MethodParameter returnType) {
+<span class="fc bfc" id="L377" title="All 2 branches covered.">		return (value != null ? value.getClass() : returnType.getParameterType());</span>
+	}
+
+	/**
+	 * Return whether the returned value or the declared return type extends {@link Resource}.
+	 */
+	protected boolean isResourceType(@Nullable Object value, MethodParameter returnType) {
+<span class="fc" id="L384">		Class&lt;?&gt; clazz = getReturnValueType(value, returnType);</span>
+<span class="fc bfc" id="L385" title="All 4 branches covered.">		return clazz != InputStreamResource.class &amp;&amp; Resource.class.isAssignableFrom(clazz);</span>
+	}
+
+	/**
+	 * Return the generic type of the {@code returnType} (or of the nested type
+	 * if it is an {@link HttpEntity}).
+	 */
+	private Type getGenericType(MethodParameter returnType) {
+<span class="fc bfc" id="L393" title="All 2 branches covered.">		if (HttpEntity.class.isAssignableFrom(returnType.getParameterType())) {</span>
+<span class="fc" id="L394">			return ResolvableType.forType(returnType.getGenericParameterType()).getGeneric().getType();</span>
+		}
+		else {
+<span class="fc" id="L397">			return returnType.getGenericParameterType();</span>
+		}
+	}
+
+	/**
+	 * Returns the media types that can be produced.
+	 * @see #getProducibleMediaTypes(HttpServletRequest, Class, Type)
+	 */
+	@SuppressWarnings(&quot;unused&quot;)
+	protected List&lt;MediaType&gt; getProducibleMediaTypes(HttpServletRequest request, Class&lt;?&gt; valueClass) {
+<span class="nc" id="L407">		return getProducibleMediaTypes(request, valueClass, null);</span>
+	}
+
+	/**
+	 * Returns the media types that can be produced. The resulting media types are:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;The producible media types specified in the request mappings, or
+	 * &lt;li&gt;Media types of configured converters that can write the specific return value, or
+	 * &lt;li&gt;{@link MediaType#ALL}
+	 * &lt;/ul&gt;
+	 * @since 4.2
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	protected List&lt;MediaType&gt; getProducibleMediaTypes(
+			HttpServletRequest request, Class&lt;?&gt; valueClass, @Nullable Type targetType) {
+
+<span class="fc" id="L423">		Set&lt;MediaType&gt; mediaTypes =</span>
+<span class="fc" id="L424">				(Set&lt;MediaType&gt;) request.getAttribute(HandlerMapping.PRODUCIBLE_MEDIA_TYPES_ATTRIBUTE);</span>
+<span class="fc bfc" id="L425" title="All 2 branches covered.">		if (!CollectionUtils.isEmpty(mediaTypes)) {</span>
+<span class="fc" id="L426">			return new ArrayList&lt;&gt;(mediaTypes);</span>
+		}
+<span class="fc" id="L428">		Set&lt;MediaType&gt; result = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L429" title="All 2 branches covered.">		for (HttpMessageConverter&lt;?&gt; converter : this.messageConverters) {</span>
+<span class="pc bpc" id="L430" title="1 of 4 branches missed.">			if (converter instanceof GenericHttpMessageConverter&lt;?&gt; genericConverter &amp;&amp; targetType != null) {</span>
+<span class="fc bfc" id="L431" title="All 2 branches covered.">				if (genericConverter.canWrite(targetType, valueClass, null)) {</span>
+<span class="fc" id="L432">					result.addAll(converter.getSupportedMediaTypes(valueClass));</span>
+				}
+			}
+<span class="pc bpc" id="L435" title="1 of 4 branches missed.">			else if (converter instanceof SmartHttpMessageConverter&lt;?&gt; smartConverter &amp;&amp; targetType != null) {</span>
+<span class="fc" id="L436">				ResolvableType resolvableType = ResolvableType.forType(targetType);</span>
+<span class="fc bfc" id="L437" title="All 2 branches covered.">				if (smartConverter.canWrite(resolvableType, valueClass, null)) {</span>
+<span class="fc" id="L438">					result.addAll(converter.getSupportedMediaTypes(valueClass));</span>
+				}
+<span class="fc" id="L440">			}</span>
+<span class="fc bfc" id="L441" title="All 2 branches covered.">			else if (converter.canWrite(valueClass, null)) {</span>
+<span class="fc" id="L442">				result.addAll(converter.getSupportedMediaTypes(valueClass));</span>
+			}
+<span class="fc" id="L444">		}</span>
+<span class="fc bfc" id="L445" title="All 2 branches covered.">		return (result.isEmpty() ? Collections.singletonList(MediaType.ALL) : new ArrayList&lt;&gt;(result));</span>
+	}
+
+	private List&lt;MediaType&gt; getAcceptableMediaTypes(HttpServletRequest request)
+			throws HttpMediaTypeNotAcceptableException {
+
+<span class="fc" id="L451">		return this.contentNegotiationManager.resolveMediaTypes(new ServletWebRequest(request));</span>
+	}
+
+	private List&lt;MediaType&gt; determineCompatibleMediaTypes(
+			List&lt;MediaType&gt; acceptableTypes, List&lt;MediaType&gt; producibleTypes) {
+
+<span class="fc" id="L457">		Set&lt;MediaType&gt; compatibleTypes = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L458" title="All 2 branches covered.">		for (MediaType requestedType : acceptableTypes) {</span>
+<span class="fc bfc" id="L459" title="All 2 branches covered.">			for (MediaType producibleType : producibleTypes) {</span>
+<span class="fc bfc" id="L460" title="All 2 branches covered.">				if (requestedType.isCompatibleWith(producibleType)) {</span>
+<span class="fc" id="L461">					compatibleTypes.add(getMostSpecificMediaType(requestedType, producibleType));</span>
+				}
+<span class="fc" id="L463">			}</span>
+<span class="fc" id="L464">		}</span>
+<span class="fc" id="L465">		return new ArrayList&lt;&gt;(compatibleTypes);</span>
+	}
+
+	/**
+	 * Return the more specific of the acceptable and the producible media types
+	 * with the q-value of the former.
+	 */
+	private MediaType getMostSpecificMediaType(MediaType acceptType, MediaType produceType) {
+<span class="fc" id="L473">		MediaType produceTypeToUse = produceType.copyQualityValue(acceptType);</span>
+<span class="fc bfc" id="L474" title="All 2 branches covered.">		if (acceptType.isLessSpecific(produceTypeToUse)) {</span>
+<span class="fc" id="L475">			return produceTypeToUse;</span>
+		}
+		else {
+<span class="fc" id="L478">			return acceptType;</span>
+		}
+	}
+
+	/**
+	 * Check if the path has a file extension and whether the extension is either
+	 * on the list of {@link #SAFE_EXTENSIONS safe extensions} or explicitly
+	 * {@link ContentNegotiationManager#getAllFileExtensions() registered}.
+	 * If not, and the status is in the 2xx range, a 'Content-Disposition'
+	 * header with a safe attachment file name (&quot;f.txt&quot;) is added to prevent
+	 * RFD exploits.
+	 */
+	private void addContentDispositionHeader(ServletServerHttpRequest request, ServletServerHttpResponse response) {
+<span class="fc" id="L491">		HttpHeaders headers = response.getHeaders();</span>
+<span class="pc bpc" id="L492" title="1 of 2 branches missed.">		if (headers.containsHeader(HttpHeaders.CONTENT_DISPOSITION)) {</span>
+<span class="nc" id="L493">			return;</span>
+		}
+
+		try {
+<span class="fc" id="L497">			int status = response.getServletResponse().getStatus();</span>
+<span class="fc bfc" id="L498" title="All 6 branches covered.">			if (status &lt; 200 || (status &gt; 299 &amp;&amp; status &lt; 400)) {</span>
+<span class="fc" id="L499">				return;</span>
+			}
+		}
+<span class="nc" id="L502">		catch (Throwable ex) {</span>
+			// ignore
+<span class="fc" id="L504">		}</span>
+
+<span class="fc" id="L506">		HttpServletRequest servletRequest = request.getServletRequest();</span>
+<span class="fc" id="L507">		String requestUri = UrlPathHelper.rawPathInstance.getOriginatingRequestUri(servletRequest);</span>
+
+<span class="fc" id="L509">		int index = requestUri.lastIndexOf('/') + 1;</span>
+<span class="fc" id="L510">		String filename = requestUri.substring(index);</span>
+<span class="fc" id="L511">		String pathParams = &quot;&quot;;</span>
+
+<span class="fc" id="L513">		index = filename.indexOf(';');</span>
+<span class="fc bfc" id="L514" title="All 2 branches covered.">		if (index != -1) {</span>
+<span class="fc" id="L515">			pathParams = filename.substring(index);</span>
+<span class="fc" id="L516">			filename = filename.substring(0, index);</span>
+		}
+
+<span class="fc" id="L519">		filename = UrlPathHelper.defaultInstance.decodeRequestString(servletRequest, filename);</span>
+<span class="fc" id="L520">		String ext = StringUtils.getFilenameExtension(filename);</span>
+
+<span class="fc" id="L522">		pathParams = UrlPathHelper.defaultInstance.decodeRequestString(servletRequest, pathParams);</span>
+<span class="fc" id="L523">		String extInPathParams = StringUtils.getFilenameExtension(pathParams);</span>
+
+<span class="fc bfc" id="L525" title="All 4 branches covered.">		if (!safeExtension(servletRequest, ext) || !safeExtension(servletRequest, extInPathParams)) {</span>
+<span class="fc" id="L526">			headers.add(HttpHeaders.CONTENT_DISPOSITION, &quot;inline;filename=f.txt&quot;);</span>
+		}
+<span class="fc" id="L528">	}</span>
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private boolean safeExtension(HttpServletRequest request, @Nullable String extension) {
+<span class="fc bfc" id="L532" title="All 2 branches covered.">		if (!StringUtils.hasText(extension)) {</span>
+<span class="fc" id="L533">			return true;</span>
+		}
+<span class="fc" id="L535">		extension = extension.toLowerCase(Locale.ROOT);</span>
+<span class="fc bfc" id="L536" title="All 2 branches covered.">		if (this.safeExtensions.contains(extension)) {</span>
+<span class="fc" id="L537">			return true;</span>
+		}
+<span class="fc" id="L539">		String pattern = (String) request.getAttribute(HandlerMapping.BEST_MATCHING_PATTERN_ATTRIBUTE);</span>
+<span class="pc bpc" id="L540" title="3 of 4 branches missed.">		if (pattern != null &amp;&amp; pattern.endsWith(&quot;.&quot; + extension)) {</span>
+<span class="nc" id="L541">			return true;</span>
+		}
+<span class="pc bpc" id="L543" title="1 of 2 branches missed.">		if (extension.equals(&quot;html&quot;)) {</span>
+<span class="nc" id="L544">			String name = HandlerMapping.PRODUCIBLE_MEDIA_TYPES_ATTRIBUTE;</span>
+<span class="nc" id="L545">			Set&lt;MediaType&gt; mediaTypes = (Set&lt;MediaType&gt;) request.getAttribute(name);</span>
+<span class="nc bnc" id="L546" title="All 4 branches missed.">			if (!CollectionUtils.isEmpty(mediaTypes) &amp;&amp; mediaTypes.contains(MediaType.TEXT_HTML)) {</span>
+<span class="nc" id="L547">				return true;</span>
+			}
+		}
+<span class="fc" id="L550">		MediaType mediaType = resolveMediaType(request, extension);</span>
+<span class="pc bpc" id="L551" title="1 of 4 branches missed.">		return (mediaType != null &amp;&amp; (safeMediaType(mediaType)));</span>
+	}
+
+	private @Nullable MediaType resolveMediaType(ServletRequest request, String extension) {
+<span class="fc" id="L555">		MediaType result = null;</span>
+<span class="fc" id="L556">		String rawMimeType = request.getServletContext().getMimeType(&quot;file.&quot; + extension);</span>
+<span class="fc bfc" id="L557" title="All 2 branches covered.">		if (StringUtils.hasText(rawMimeType)) {</span>
+<span class="fc" id="L558">			result = MediaType.parseMediaType(rawMimeType);</span>
+		}
+<span class="pc bpc" id="L560" title="1 of 4 branches missed.">		if (result == null || MediaType.APPLICATION_OCTET_STREAM.equals(result)) {</span>
+<span class="fc" id="L561">			result = MediaTypeFactory.getMediaType(&quot;file.&quot; + extension).orElse(null);</span>
+		}
+<span class="fc" id="L563">		return result;</span>
+	}
+
+	private boolean safeMediaType(MediaType mediaType) {
+<span class="pc bpc" id="L567" title="1 of 2 branches missed.">		return (SAFE_MEDIA_BASE_TYPES.contains(mediaType.getType()) ||</span>
+<span class="pc bpc" id="L568" title="1 of 2 branches missed.">				mediaType.getSubtype().endsWith(&quot;+xml&quot;));</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

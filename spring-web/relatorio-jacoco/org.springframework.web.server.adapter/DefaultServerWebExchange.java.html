@@ -1,0 +1,448 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DefaultServerWebExchange.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.server.adapter</a> &gt; <span class="el_source">DefaultServerWebExchange.java</span></div><h1>DefaultServerWebExchange.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.server.adapter;
+
+import java.security.Principal;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.i18n.LocaleContext;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.codec.Hints;
+import org.springframework.http.ETag;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.InvalidMediaTypeException;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.HttpMessageReader;
+import org.springframework.http.codec.ServerCodecConfigurer;
+import org.springframework.http.codec.multipart.Part;
+import org.springframework.http.server.reactive.AbstractServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.StringUtils;
+import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.server.WebSession;
+import org.springframework.web.server.i18n.LocaleContextResolver;
+import org.springframework.web.server.session.WebSessionManager;
+
+/**
+ * Default implementation of {@link ServerWebExchange}.
+ *
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @since 5.0
+ */
+public class DefaultServerWebExchange implements ServerWebExchange {
+
+<span class="nc" id="L69">	private static final Set&lt;HttpMethod&gt; SAFE_METHODS = Set.of(HttpMethod.GET, HttpMethod.HEAD);</span>
+
+<span class="nc" id="L71">	private static final ResolvableType FORM_DATA_TYPE =</span>
+<span class="nc" id="L72">			ResolvableType.forClassWithGenerics(MultiValueMap.class, String.class, String.class);</span>
+
+<span class="nc" id="L74">	private static final ResolvableType MULTIPART_DATA_TYPE = ResolvableType.forClassWithGenerics(</span>
+			MultiValueMap.class, String.class, Part.class);
+
+<span class="nc" id="L77">	private static final Mono&lt;MultiValueMap&lt;String, String&gt;&gt; EMPTY_FORM_DATA =</span>
+<span class="nc" id="L78">			Mono.just(CollectionUtils.unmodifiableMultiValueMap(new LinkedMultiValueMap&lt;String, String&gt;(0)))</span>
+<span class="nc" id="L79">					.cache();</span>
+
+<span class="nc" id="L81">	private static final Mono&lt;MultiValueMap&lt;String, Part&gt;&gt; EMPTY_MULTIPART_DATA =</span>
+<span class="nc" id="L82">			Mono.just(CollectionUtils.unmodifiableMultiValueMap(new LinkedMultiValueMap&lt;String, Part&gt;(0)))</span>
+<span class="nc" id="L83">					.cache();</span>
+
+
+	private final ServerHttpRequest request;
+
+	private final ServerHttpResponse response;
+
+<span class="nc" id="L90">	private final Map&lt;String, Object&gt; attributes = new ConcurrentHashMap&lt;&gt;();</span>
+
+	private final Mono&lt;WebSession&gt; sessionMono;
+
+	private final LocaleContextResolver localeContextResolver;
+
+	private final Mono&lt;MultiValueMap&lt;String, String&gt;&gt; formDataMono;
+
+	private final Mono&lt;MultiValueMap&lt;String, Part&gt;&gt; multipartDataMono;
+
+<span class="nc" id="L100">	private volatile boolean multipartRead = false;</span>
+
+	private final @Nullable ApplicationContext applicationContext;
+
+	private volatile boolean notModified;
+
+<span class="nc" id="L106">	private Function&lt;String, String&gt; urlTransformer = url -&gt; url;</span>
+
+	private @Nullable Object logId;
+
+<span class="nc" id="L110">	private String logPrefix = &quot;&quot;;</span>
+
+
+	public DefaultServerWebExchange(ServerHttpRequest request, ServerHttpResponse response,
+			WebSessionManager sessionManager, ServerCodecConfigurer codecConfigurer,
+			LocaleContextResolver localeContextResolver) {
+
+<span class="nc" id="L117">		this(request, response, sessionManager, codecConfigurer, localeContextResolver, null);</span>
+<span class="nc" id="L118">	}</span>
+
+	public DefaultServerWebExchange(ServerHttpRequest request, ServerHttpResponse response,
+			WebSessionManager sessionManager, ServerCodecConfigurer codecConfigurer,
+<span class="nc" id="L122">			LocaleContextResolver localeContextResolver, @Nullable ApplicationContext applicationContext) {</span>
+
+<span class="nc" id="L124">		Assert.notNull(request, &quot;'request' is required&quot;);</span>
+<span class="nc" id="L125">		Assert.notNull(response, &quot;'response' is required&quot;);</span>
+<span class="nc" id="L126">		Assert.notNull(sessionManager, &quot;'sessionManager' is required&quot;);</span>
+<span class="nc" id="L127">		Assert.notNull(codecConfigurer, &quot;'codecConfigurer' is required&quot;);</span>
+<span class="nc" id="L128">		Assert.notNull(localeContextResolver, &quot;'localeContextResolver' is required&quot;);</span>
+
+		// Initialize before first call to getLogPrefix()
+<span class="nc" id="L131">		this.attributes.put(ServerWebExchange.LOG_ID_ATTRIBUTE, request.getId());</span>
+
+<span class="nc" id="L133">		this.request = request;</span>
+<span class="nc" id="L134">		this.response = response;</span>
+<span class="nc" id="L135">		this.sessionMono = sessionManager.getSession(this).cache();</span>
+<span class="nc" id="L136">		this.localeContextResolver = localeContextResolver;</span>
+<span class="nc" id="L137">		this.formDataMono = initFormData(request, codecConfigurer, getLogPrefix());</span>
+<span class="nc" id="L138">		this.multipartDataMono = initMultipartData(codecConfigurer, getLogPrefix());</span>
+<span class="nc" id="L139">		this.applicationContext = applicationContext;</span>
+
+<span class="nc bnc" id="L141" title="All 2 branches missed.">		if (request instanceof AbstractServerHttpRequest abstractServerHttpRequest) {</span>
+<span class="nc" id="L142">			abstractServerHttpRequest.setAttributesSupplier(() -&gt; this.attributes);</span>
+		}
+<span class="nc" id="L144">	}</span>
+
+	private static Mono&lt;MultiValueMap&lt;String, String&gt;&gt; initFormData(ServerHttpRequest request,
+			ServerCodecConfigurer configurer, String logPrefix) {
+
+<span class="nc" id="L149">		MediaType contentType = getContentType(request);</span>
+<span class="nc bnc" id="L150" title="All 6 branches missed.">		if (contentType == null || !contentType.isConcrete() || !contentType.isCompatibleWith(MediaType.APPLICATION_FORM_URLENCODED)) {</span>
+<span class="nc" id="L151">			return EMPTY_FORM_DATA;</span>
+		}
+
+<span class="nc" id="L154">		HttpMessageReader&lt;MultiValueMap&lt;String, String&gt;&gt; reader = getReader(configurer, contentType, FORM_DATA_TYPE);</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">		if (reader == null) {</span>
+<span class="nc" id="L156">			return Mono.error(new IllegalStateException(&quot;No HttpMessageReader for &quot; + contentType));</span>
+		}
+
+<span class="nc" id="L159">		return reader</span>
+<span class="nc" id="L160">				.readMono(FORM_DATA_TYPE, request, Hints.from(Hints.LOG_PREFIX_HINT, logPrefix))</span>
+<span class="nc" id="L161">				.switchIfEmpty(EMPTY_FORM_DATA)</span>
+<span class="nc" id="L162">				.cache();</span>
+	}
+
+	private Mono&lt;MultiValueMap&lt;String, Part&gt;&gt; initMultipartData(ServerCodecConfigurer configurer, String logPrefix) {
+
+<span class="nc" id="L167">		MediaType contentType = getContentType(this.request);</span>
+<span class="nc bnc" id="L168" title="All 6 branches missed.">		if (contentType == null || !contentType.isConcrete() || !contentType.getType().equalsIgnoreCase(&quot;multipart&quot;)) {</span>
+<span class="nc" id="L169">			return EMPTY_MULTIPART_DATA;</span>
+		}
+
+<span class="nc" id="L172">		HttpMessageReader&lt;MultiValueMap&lt;String, Part&gt;&gt; reader = getReader(configurer, contentType, MULTIPART_DATA_TYPE);</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">		if (reader == null) {</span>
+<span class="nc" id="L174">			return Mono.error(new IllegalStateException(&quot;No HttpMessageReader for &quot; + contentType));</span>
+		}
+
+<span class="nc" id="L177">		return reader</span>
+<span class="nc" id="L178">				.readMono(MULTIPART_DATA_TYPE, this.request, Hints.from(Hints.LOG_PREFIX_HINT, logPrefix))</span>
+<span class="nc" id="L179">				.doOnNext(ignored -&gt; this.multipartRead = true)</span>
+<span class="nc" id="L180">				.switchIfEmpty(EMPTY_MULTIPART_DATA)</span>
+<span class="nc" id="L181">				.cache();</span>
+	}
+
+	private static @Nullable MediaType getContentType(ServerHttpRequest request) {
+<span class="nc" id="L185">		MediaType contentType = null;</span>
+		try {
+<span class="nc" id="L187">			contentType = request.getHeaders().getContentType();</span>
+		}
+<span class="nc" id="L189">		catch (InvalidMediaTypeException ex) {</span>
+			// ignore
+<span class="nc" id="L191">		}</span>
+<span class="nc" id="L192">		return contentType;</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private static &lt;E&gt; @Nullable HttpMessageReader&lt;E&gt; getReader(
+			ServerCodecConfigurer configurer, MediaType contentType, ResolvableType targetType) {
+
+<span class="nc" id="L199">		HttpMessageReader&lt;E&gt; result = null;</span>
+<span class="nc bnc" id="L200" title="All 2 branches missed.">		for (HttpMessageReader&lt;?&gt; reader : configurer.getReaders()) {</span>
+<span class="nc bnc" id="L201" title="All 2 branches missed.">			if (reader.canRead(targetType, contentType)) {</span>
+<span class="nc" id="L202">				result = (HttpMessageReader&lt;E&gt;) reader;</span>
+			}
+<span class="nc" id="L204">		}</span>
+<span class="nc" id="L205">		return result;</span>
+	}
+
+
+	@Override
+	public ServerHttpRequest getRequest() {
+<span class="nc" id="L211">		return this.request;</span>
+	}
+
+	private HttpHeaders getRequestHeaders() {
+<span class="nc" id="L215">		return getRequest().getHeaders();</span>
+	}
+
+	@Override
+	public ServerHttpResponse getResponse() {
+<span class="nc" id="L220">		return this.response;</span>
+	}
+
+	private HttpHeaders getResponseHeaders() {
+<span class="nc" id="L224">		return getResponse().getHeaders();</span>
+	}
+
+	@Override
+	public Map&lt;String, Object&gt; getAttributes() {
+<span class="nc" id="L229">		return this.attributes;</span>
+	}
+
+	@Override
+	public Mono&lt;WebSession&gt; getSession() {
+<span class="nc" id="L234">		return this.sessionMono;</span>
+	}
+
+	@Override
+	public &lt;T extends Principal&gt; Mono&lt;T&gt; getPrincipal() {
+<span class="nc" id="L239">		return Mono.empty();</span>
+	}
+
+	@Override
+	public Mono&lt;MultiValueMap&lt;String, String&gt;&gt; getFormData() {
+<span class="nc" id="L244">		return this.formDataMono;</span>
+	}
+
+	@Override
+	public Mono&lt;MultiValueMap&lt;String, Part&gt;&gt; getMultipartData() {
+<span class="nc" id="L249">		return this.multipartDataMono;</span>
+	}
+
+	@Override
+	public Mono&lt;Void&gt; cleanupMultipart() {
+<span class="nc" id="L254">		return Mono.defer(() -&gt; {</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">			if (this.multipartRead) {</span>
+<span class="nc" id="L256">				return Mono.usingWhen(getMultipartData().onErrorComplete().map(this::collectParts),</span>
+<span class="nc" id="L257">						parts -&gt; Mono.empty(),</span>
+<span class="nc" id="L258">						parts -&gt; Flux.fromIterable(parts).flatMap(part -&gt; part.delete().onErrorComplete())</span>
+				);
+			}
+			else {
+<span class="nc" id="L262">				return Mono.empty();</span>
+			}
+		});
+	}
+
+	private List&lt;Part&gt; collectParts(MultiValueMap&lt;String, Part&gt; multipartData) {
+<span class="nc" id="L268">		return multipartData.values().stream().flatMap(List::stream).collect(Collectors.toList());</span>
+	}
+
+	@Override
+	public LocaleContext getLocaleContext() {
+<span class="nc" id="L273">		return this.localeContextResolver.resolveLocaleContext(this);</span>
+	}
+
+	@Override
+	public @Nullable ApplicationContext getApplicationContext() {
+<span class="nc" id="L278">		return this.applicationContext;</span>
+	}
+
+	@Override
+	public boolean isNotModified() {
+<span class="nc" id="L283">		return this.notModified;</span>
+	}
+
+	@Override
+	public boolean checkNotModified(Instant lastModified) {
+<span class="nc" id="L288">		return checkNotModified(null, lastModified);</span>
+	}
+
+	@Override
+	public boolean checkNotModified(String etag) {
+<span class="nc" id="L293">		return checkNotModified(etag, Instant.MIN);</span>
+	}
+
+	@Override
+	public boolean checkNotModified(@Nullable String eTag, Instant lastModified) {
+<span class="nc" id="L298">		HttpStatusCode status = getResponse().getStatusCode();</span>
+<span class="nc bnc" id="L299" title="All 6 branches missed.">		if (this.notModified || (status != null &amp;&amp; !HttpStatus.OK.equals(status))) {</span>
+<span class="nc" id="L300">			return this.notModified;</span>
+		}
+		// Evaluate conditions in order of precedence.
+		// See https://datatracker.ietf.org/doc/html/rfc9110#section-13.2.2
+		// 1) If-Match
+<span class="nc bnc" id="L305" title="All 2 branches missed.">		if (validateIfMatch(eTag)) {</span>
+<span class="nc" id="L306">			updateResponseStateChanging(eTag, lastModified);</span>
+<span class="nc" id="L307">			return this.notModified;</span>
+		}
+		// 2) If-Unmodified-Since
+<span class="nc bnc" id="L310" title="All 2 branches missed.">		else if (validateIfUnmodifiedSince(lastModified)) {</span>
+<span class="nc" id="L311">			updateResponseStateChanging(eTag, lastModified);</span>
+<span class="nc" id="L312">			return this.notModified;</span>
+		}
+		// 3) If-None-Match
+<span class="nc bnc" id="L315" title="All 2 branches missed.">		if (!validateIfNoneMatch(eTag)) {</span>
+			// 4) If-Modified-Since
+<span class="nc" id="L317">			validateIfModifiedSince(lastModified);</span>
+		}
+<span class="nc" id="L319">		updateResponseIdempotent(eTag, lastModified);</span>
+<span class="nc" id="L320">		return this.notModified;</span>
+	}
+
+	private boolean validateIfMatch(@Nullable String eTag) {
+		try {
+<span class="nc bnc" id="L325" title="All 2 branches missed.">			if (SAFE_METHODS.contains(getRequest().getMethod())) {</span>
+<span class="nc" id="L326">				return false;</span>
+			}
+<span class="nc" id="L328">			List&lt;String&gt; values = getRequestHeaders().getOrEmpty(HttpHeaders.IF_MATCH);</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">			if (CollectionUtils.isEmpty(values)) {</span>
+<span class="nc" id="L330">				return false;</span>
+			}
+<span class="nc" id="L332">			this.notModified = matchRequestedETags(values, eTag, false);</span>
+		}
+<span class="nc" id="L334">		catch (IllegalArgumentException ex) {</span>
+<span class="nc" id="L335">			return false;</span>
+<span class="nc" id="L336">		}</span>
+<span class="nc" id="L337">		return true;</span>
+	}
+
+	private boolean matchRequestedETags(List&lt;String&gt; requestedETagValues, @Nullable String tag, boolean weakCompare) {
+<span class="nc bnc" id="L341" title="All 2 branches missed.">		if (StringUtils.hasLength(tag)) {</span>
+<span class="nc" id="L342">			ETag eTag = ETag.create(tag);</span>
+<span class="nc bnc" id="L343" title="All 2 branches missed.">			boolean isNotSafeMethod = !SAFE_METHODS.contains(getRequest().getMethod());</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">			for (String eTagValue : requestedETagValues) {</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">				for (ETag requestedETag : ETag.parse(eTagValue)) {</span>
+					// only consider &quot;lost updates&quot; checks for unsafe HTTP methods
+<span class="nc bnc" id="L347" title="All 4 branches missed.">					if (requestedETag.isWildcard() &amp;&amp; isNotSafeMethod) {</span>
+<span class="nc" id="L348">						return false;</span>
+					}
+<span class="nc bnc" id="L350" title="All 4 branches missed.">					if (requestedETag.compare(eTag, !weakCompare)) {</span>
+<span class="nc" id="L351">						return false;</span>
+					}
+<span class="nc" id="L353">				}</span>
+<span class="nc" id="L354">			}</span>
+		}
+<span class="nc" id="L356">		return true;</span>
+	}
+
+	private void updateResponseStateChanging(@Nullable String eTag, Instant lastModified) {
+<span class="nc bnc" id="L360" title="All 2 branches missed.">		if (this.notModified) {</span>
+<span class="nc" id="L361">			getResponse().setStatusCode(HttpStatus.PRECONDITION_FAILED);</span>
+		}
+		else {
+<span class="nc" id="L364">			addCachingResponseHeaders(eTag, lastModified);</span>
+		}
+<span class="nc" id="L366">	}</span>
+
+	private boolean validateIfNoneMatch(@Nullable String eTag) {
+		try {
+<span class="nc bnc" id="L370" title="All 2 branches missed.">			if (CollectionUtils.isEmpty(getRequestHeaders().get(HttpHeaders.IF_NONE_MATCH))) {</span>
+<span class="nc" id="L371">				return false;</span>
+			}
+<span class="nc" id="L373">			List&lt;String&gt; values = getRequestHeaders().getOrEmpty(HttpHeaders.IF_NONE_MATCH);</span>
+<span class="nc bnc" id="L374" title="All 2 branches missed.">			this.notModified = !matchRequestedETags(values, eTag, true);</span>
+		}
+<span class="nc" id="L376">		catch (IllegalArgumentException ex) {</span>
+<span class="nc" id="L377">			return false;</span>
+<span class="nc" id="L378">		}</span>
+<span class="nc" id="L379">		return true;</span>
+	}
+
+	private void updateResponseIdempotent(@Nullable String eTag, Instant lastModified) {
+<span class="nc" id="L383">		boolean isSafeMethod = SAFE_METHODS.contains(getRequest().getMethod());</span>
+<span class="nc bnc" id="L384" title="All 2 branches missed.">		if (this.notModified) {</span>
+<span class="nc bnc" id="L385" title="All 2 branches missed.">			getResponse().setStatusCode(isSafeMethod ?</span>
+<span class="nc" id="L386">					HttpStatus.NOT_MODIFIED : HttpStatus.PRECONDITION_FAILED);</span>
+		}
+<span class="nc" id="L388">		addCachingResponseHeaders(eTag, lastModified);</span>
+<span class="nc" id="L389">	}</span>
+
+	private void addCachingResponseHeaders(@Nullable String tag, Instant lastModified) {
+<span class="nc bnc" id="L392" title="All 2 branches missed.">		if (SAFE_METHODS.contains(getRequest().getMethod())) {</span>
+<span class="nc bnc" id="L393" title="All 4 branches missed.">			if (lastModified.isAfter(Instant.EPOCH) &amp;&amp; getResponseHeaders().getLastModified() == -1) {</span>
+<span class="nc" id="L394">				getResponseHeaders().setLastModified(lastModified.toEpochMilli());</span>
+			}
+<span class="nc bnc" id="L396" title="All 4 branches missed.">			if (StringUtils.hasLength(tag) &amp;&amp; getResponseHeaders().getETag() == null) {</span>
+<span class="nc" id="L397">				getResponseHeaders().setETag(tag);</span>
+			}
+		}
+<span class="nc" id="L400">	}</span>
+
+	private boolean validateIfUnmodifiedSince(Instant lastModified) {
+<span class="nc bnc" id="L403" title="All 2 branches missed.">		if (lastModified.isBefore(Instant.EPOCH)) {</span>
+<span class="nc" id="L404">			return false;</span>
+		}
+<span class="nc" id="L406">		long ifUnmodifiedSince = getRequestHeaders().getIfUnmodifiedSince();</span>
+<span class="nc bnc" id="L407" title="All 2 branches missed.">		if (ifUnmodifiedSince == -1) {</span>
+<span class="nc" id="L408">			return false;</span>
+		}
+<span class="nc" id="L410">		Instant sinceInstant = Instant.ofEpochMilli(ifUnmodifiedSince);</span>
+<span class="nc" id="L411">		this.notModified = sinceInstant.isBefore(lastModified.truncatedTo(ChronoUnit.SECONDS));</span>
+<span class="nc" id="L412">		return true;</span>
+	}
+
+	private void validateIfModifiedSince(Instant lastModified) {
+<span class="nc bnc" id="L416" title="All 2 branches missed.">		if (lastModified.isBefore(Instant.EPOCH)) {</span>
+<span class="nc" id="L417">			return;</span>
+		}
+<span class="nc" id="L419">		long ifModifiedSince = getRequestHeaders().getIfModifiedSince();</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">		if (ifModifiedSince != -1) {</span>
+			// We will perform this validation...
+<span class="nc bnc" id="L422" title="All 2 branches missed.">			this.notModified = ChronoUnit.SECONDS.between(lastModified, Instant.ofEpochMilli(ifModifiedSince)) &gt;= 0;</span>
+		}
+<span class="nc" id="L424">	}</span>
+
+	@Override
+	public String transformUrl(String url) {
+<span class="nc" id="L428">		return this.urlTransformer.apply(url);</span>
+	}
+
+	@Override
+	public void addUrlTransformer(Function&lt;String, String&gt; transformer) {
+<span class="nc" id="L433">		Assert.notNull(transformer, &quot;'encoder' must not be null&quot;);</span>
+<span class="nc" id="L434">		this.urlTransformer = this.urlTransformer.andThen(transformer);</span>
+<span class="nc" id="L435">	}</span>
+
+	@Override
+	public String getLogPrefix() {
+<span class="nc" id="L439">		Object value = getAttribute(LOG_ID_ATTRIBUTE);</span>
+<span class="nc bnc" id="L440" title="All 2 branches missed.">		if (this.logId != value) {</span>
+<span class="nc" id="L441">			this.logId = value;</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">			this.logPrefix = value != null ? &quot;[&quot; + value + &quot;] &quot; : &quot;&quot;;</span>
+		}
+<span class="nc" id="L444">		return this.logPrefix;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

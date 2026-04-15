@@ -1,0 +1,261 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>RSocketServiceMethod.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-messaging</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.rsocket.service</a> &gt; <span class="el_source">RSocketServiceMethod.java</span></div><h1>RSocketServiceMethod.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.rsocket.service;
+
+import java.lang.reflect.Method;
+import java.time.Duration;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.function.Function;
+
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.KotlinDetector;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.annotation.SynthesizingMethodParameter;
+import org.springframework.messaging.rsocket.RSocketRequester;
+import org.springframework.messaging.rsocket.RSocketStrategies;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.MimeType;
+import org.springframework.util.StringUtils;
+import org.springframework.util.StringValueResolver;
+
+/**
+ * Implements the invocation of an {@link RSocketExchange @RSocketExchange}-annotated,
+ * {@link RSocketServiceProxyFactory#createClient(Class) RSocket service proxy} method
+ * by delegating to an {@link RSocketRequester} to perform actual requests.
+ *
+ * @author Rossen Stoyanchev
+ * @since 6.0
+ */
+final class RSocketServiceMethod {
+
+	private static final String COROUTINES_FLOW_CLASS_NAME = &quot;kotlinx.coroutines.flow.Flow&quot;;
+
+	private final Method method;
+
+	private final MethodParameter[] parameters;
+
+	private final List&lt;RSocketServiceArgumentResolver&gt; argumentResolvers;
+
+	private final @Nullable String route;
+
+	private final Function&lt;RSocketRequestValues, Object&gt; responseFunction;
+
+
+	RSocketServiceMethod(
+			Method method, Class&lt;?&gt; containingClass, List&lt;RSocketServiceArgumentResolver&gt; argumentResolvers,
+			RSocketRequester rsocketRequester, @Nullable StringValueResolver embeddedValueResolver,
+<span class="fc" id="L74">			ReactiveAdapterRegistry reactiveRegistry, @Nullable Duration blockTimeout) {</span>
+
+<span class="fc" id="L76">		this.method = method;</span>
+<span class="fc" id="L77">		this.parameters = initMethodParameters(method);</span>
+<span class="fc" id="L78">		this.argumentResolvers = argumentResolvers;</span>
+<span class="fc" id="L79">		this.route = initRoute(method, containingClass, rsocketRequester.strategies(), embeddedValueResolver);</span>
+<span class="fc" id="L80">		this.responseFunction = initResponseFunction(rsocketRequester, method, reactiveRegistry, blockTimeout);</span>
+<span class="fc" id="L81">	}</span>
+
+	private static MethodParameter[] initMethodParameters(Method method) {
+<span class="fc" id="L84">		int count = method.getParameterCount();</span>
+<span class="pc bpc" id="L85" title="1 of 2 branches missed.">		if (count == 0) {</span>
+<span class="nc" id="L86">			return new MethodParameter[0];</span>
+		}
+<span class="fc bfc" id="L88" title="All 2 branches covered.">		if (KotlinDetector.isSuspendingFunction(method)) {</span>
+<span class="fc" id="L89">			count -= 1;</span>
+		}
+
+<span class="fc" id="L92">		MethodParameter[] parameters = new MethodParameter[count];</span>
+<span class="fc bfc" id="L93" title="All 2 branches covered.">		for (int i = 0; i &lt; count; i++) {</span>
+<span class="fc" id="L94">			parameters[i] = new SynthesizingMethodParameter(method, i);</span>
+		}
+<span class="fc" id="L96">		return parameters;</span>
+	}
+
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	private static @Nullable String initRoute(
+			Method method, Class&lt;?&gt; containingClass, RSocketStrategies strategies,
+			@Nullable StringValueResolver embeddedValueResolver) {
+
+<span class="fc" id="L104">		RSocketExchange annot1 = AnnotatedElementUtils.findMergedAnnotation(containingClass, RSocketExchange.class);</span>
+<span class="fc" id="L105">		RSocketExchange annot2 = AnnotatedElementUtils.findMergedAnnotation(method, RSocketExchange.class);</span>
+
+<span class="fc" id="L107">		Assert.notNull(annot2, &quot;Expected RSocketExchange annotation&quot;);</span>
+
+<span class="fc bfc" id="L109" title="All 2 branches covered.">		String route1 = (annot1 != null ? annot1.value() : null);</span>
+<span class="fc" id="L110">		String route2 = annot2.value();</span>
+
+<span class="pc bpc" id="L112" title="1 of 2 branches missed.">		if (embeddedValueResolver != null) {</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">			route1 = (route1 != null ? embeddedValueResolver.resolveStringValue(route1) : null);</span>
+<span class="nc" id="L114">			route2 = embeddedValueResolver.resolveStringValue(route2);</span>
+		}
+
+<span class="fc" id="L117">		boolean hasRoute1 = StringUtils.hasText(route1);</span>
+<span class="fc" id="L118">		boolean hasRoute2 = StringUtils.hasText(route2);</span>
+
+<span class="pc bpc" id="L120" title="1 of 4 branches missed.">		if (hasRoute1 &amp;&amp; hasRoute2) {</span>
+<span class="fc" id="L121">			return strategies.routeMatcher().combine(route1, route2);</span>
+		}
+
+<span class="pc bpc" id="L124" title="2 of 4 branches missed.">		if (!hasRoute1 &amp;&amp; !hasRoute2) {</span>
+<span class="nc" id="L125">			return null;</span>
+		}
+
+<span class="pc bpc" id="L128" title="1 of 2 branches missed.">		return (hasRoute2 ? route2 : route1);</span>
+	}
+
+	private static Function&lt;RSocketRequestValues, Object&gt; initResponseFunction(
+			RSocketRequester requester, Method method,
+			ReactiveAdapterRegistry reactiveRegistry, @Nullable Duration blockTimeout) {
+
+<span class="fc" id="L135">		MethodParameter returnParam = new MethodParameter(method, -1);</span>
+<span class="fc" id="L136">		Class&lt;?&gt; returnType = returnParam.getParameterType();</span>
+<span class="fc" id="L137">		boolean isSuspending = KotlinDetector.isSuspendingFunction(method);</span>
+<span class="fc" id="L138">		boolean hasFlowReturnType = COROUTINES_FLOW_CLASS_NAME.equals(returnType.getName());</span>
+<span class="fc bfc" id="L139" title="All 4 branches covered.">		boolean isUnwrapped = isSuspending &amp;&amp; !hasFlowReturnType;</span>
+<span class="fc bfc" id="L140" title="All 2 branches covered.">		if (isSuspending) {</span>
+<span class="fc bfc" id="L141" title="All 2 branches covered.">			returnType = (hasFlowReturnType ? Flux.class : Mono.class);</span>
+		}
+
+<span class="fc" id="L144">		ReactiveAdapter reactiveAdapter = reactiveRegistry.getAdapter(returnType);</span>
+
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">		MethodParameter actualParam = (reactiveAdapter != null ? returnParam.nested() : returnParam.nestedIfOptional());</span>
+<span class="fc bfc" id="L147" title="All 2 branches covered.">		Class&lt;?&gt; actualType = isUnwrapped ? actualParam.getParameterType() : actualParam.getNestedParameterType();</span>
+
+		Function&lt;RSocketRequestValues, Publisher&lt;?&gt;&gt; responseFunction;
+<span class="pc bpc" id="L150" title="2 of 6 branches missed.">		if (ClassUtils.isVoidType(actualType) || (reactiveAdapter != null &amp;&amp; reactiveAdapter.isNoValue())) {</span>
+<span class="fc" id="L151">			responseFunction = values -&gt; {</span>
+<span class="fc" id="L152">				RSocketRequester.RetrieveSpec retrieveSpec = initRequest(requester, values);</span>
+<span class="pc bpc" id="L153" title="1 of 4 branches missed.">				return (values.getPayload() == null &amp;&amp; values.getPayloadValue() == null ?</span>
+<span class="pc" id="L154">						((RSocketRequester.RequestSpec) retrieveSpec).sendMetadata() : retrieveSpec.send());</span>
+			};
+		}
+<span class="pc bpc" id="L157" title="1 of 2 branches missed.">		else if (reactiveAdapter == null) {</span>
+<span class="nc" id="L158">			responseFunction = values -&gt; initRequest(requester, values).retrieveMono(actualType);</span>
+		}
+		else {
+			ParameterizedTypeReference&lt;?&gt; payloadType =
+<span class="fc bfc" id="L162" title="All 2 branches covered.">					ParameterizedTypeReference.forType(isUnwrapped ? actualParam.getGenericParameterType() :</span>
+<span class="fc" id="L163">							actualParam.getNestedGenericParameterType());</span>
+
+<span class="fc" id="L165">			responseFunction = values -&gt; (</span>
+<span class="fc bfc" id="L166" title="All 2 branches covered.">					reactiveAdapter.isMultiValue() ?</span>
+<span class="fc" id="L167">							initRequest(requester, values).retrieveFlux(payloadType) :</span>
+<span class="fc" id="L168">							initRequest(requester, values).retrieveMono(payloadType));</span>
+		}
+
+<span class="fc" id="L171">		boolean blockForOptional = returnType.equals(Optional.class);</span>
+
+<span class="fc" id="L173">		return responseFunction.andThen(responsePublisher -&gt; {</span>
+<span class="pc bpc" id="L174" title="1 of 2 branches missed.">			if (reactiveAdapter != null) {</span>
+<span class="fc" id="L175">				return reactiveAdapter.fromPublisher(responsePublisher);</span>
+			}
+<span class="nc bnc" id="L177" title="All 2 branches missed.">			if (blockForOptional) {</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">				return (blockTimeout != null ?</span>
+<span class="nc" id="L179">						((Mono&lt;?&gt;) responsePublisher).blockOptional(blockTimeout) :</span>
+<span class="nc" id="L180">						((Mono&lt;?&gt;) responsePublisher).blockOptional());</span>
+			}
+			else {
+<span class="nc bnc" id="L183" title="All 2 branches missed.">				return Objects.requireNonNull(blockTimeout != null ?</span>
+<span class="nc" id="L184">						((Mono&lt;?&gt;) responsePublisher).block(blockTimeout) :</span>
+<span class="nc" id="L185">						((Mono&lt;?&gt;) responsePublisher).block());</span>
+			}
+		});
+	}
+
+	@SuppressWarnings(&quot;ReactiveStreamsUnusedPublisher&quot;)
+	private static RSocketRequester.RetrieveSpec initRequest(
+			RSocketRequester requester, RSocketRequestValues requestValues) {
+
+		RSocketRequester.RequestSpec spec;
+<span class="fc" id="L195">		String route = requestValues.getRoute();</span>
+<span class="fc" id="L196">		Map&lt;Object, MimeType&gt; metadata = requestValues.getMetadata();</span>
+
+<span class="pc bpc" id="L198" title="1 of 2 branches missed.">		if (StringUtils.hasText(route)) {</span>
+<span class="fc" id="L199">			spec = requester.route(route, requestValues.getRouteVariables());</span>
+<span class="pc bpc" id="L200" title="1 of 2 branches missed.">			for (Map.Entry&lt;Object, MimeType&gt; entry : metadata.entrySet()) {</span>
+<span class="nc" id="L201">				spec.metadata(entry.getKey(), entry.getValue());</span>
+<span class="pc" id="L202">			}</span>
+		}
+		else {
+<span class="nc" id="L205">			Iterator&lt;Map.Entry&lt;Object, MimeType&gt;&gt; iterator = metadata.entrySet().iterator();</span>
+<span class="nc" id="L206">			Assert.isTrue(iterator.hasNext(), &quot;Neither route nor metadata provided&quot;);</span>
+
+<span class="nc" id="L208">			Map.Entry&lt;Object, MimeType&gt; entry = iterator.next();</span>
+<span class="nc" id="L209">			spec = requester.metadata(entry.getKey(), entry.getValue());</span>
+
+<span class="nc bnc" id="L211" title="All 2 branches missed.">			while (iterator.hasNext()) {</span>
+<span class="nc" id="L212">				spec.metadata(entry.getKey(), entry.getValue());</span>
+			}
+		}
+
+<span class="fc bfc" id="L216" title="All 2 branches covered.">		if (requestValues.getPayloadValue() != null) {</span>
+<span class="fc" id="L217">			spec.data(requestValues.getPayloadValue());</span>
+		}
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">		else if (requestValues.getPayload() != null) {</span>
+<span class="fc" id="L220">			Assert.notNull(requestValues.getPayloadElementType(), &quot;Publisher body element type is required&quot;);</span>
+<span class="fc" id="L221">			spec.data(requestValues.getPayload(), requestValues.getPayloadElementType());</span>
+		}
+
+<span class="fc" id="L224">		return spec;</span>
+	}
+
+
+	public Method getMethod() {
+<span class="fc" id="L229">		return this.method;</span>
+	}
+
+	public @Nullable Object invoke(@Nullable Object[] arguments) {
+<span class="fc" id="L233">		RSocketRequestValues.Builder requestValues = RSocketRequestValues.builder(this.route);</span>
+<span class="fc" id="L234">		applyArguments(requestValues, arguments);</span>
+<span class="fc" id="L235">		return this.responseFunction.apply(requestValues.build());</span>
+	}
+
+	private void applyArguments(RSocketRequestValues.Builder requestValues, @Nullable Object[] arguments) {
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">		Assert.isTrue(arguments.length == this.parameters.length, &quot;Method argument mismatch&quot;);</span>
+<span class="fc bfc" id="L240" title="All 2 branches covered.">		for (int i = 0; i &lt; arguments.length; i++) {</span>
+<span class="fc" id="L241">			Object value = arguments[i];</span>
+<span class="fc" id="L242">			boolean resolved = false;</span>
+<span class="pc bpc" id="L243" title="1 of 2 branches missed.">			for (RSocketServiceArgumentResolver resolver : this.argumentResolvers) {</span>
+<span class="fc bfc" id="L244" title="All 2 branches covered.">				if (resolver.resolve(value, this.parameters[i], requestValues)) {</span>
+<span class="fc" id="L245">					resolved = true;</span>
+<span class="fc" id="L246">					break;</span>
+				}
+<span class="fc" id="L248">			}</span>
+<span class="fc" id="L249">			int index = i;</span>
+<span class="pc" id="L250">			Assert.state(resolved, () -&gt; formatArgumentError(this.parameters[index], &quot;No suitable resolver&quot;));</span>
+		}
+<span class="fc" id="L252">	}</span>
+
+	@SuppressWarnings(&quot;SameParameterValue&quot;)
+	private static String formatArgumentError(MethodParameter param, String message) {
+<span class="nc" id="L256">		return &quot;Could not resolve parameter [&quot; + param.getParameterIndex() + &quot;] in &quot; +</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">				param.getExecutable().toGenericString() + (StringUtils.hasText(message) ? &quot;: &quot; + message : &quot;&quot;);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

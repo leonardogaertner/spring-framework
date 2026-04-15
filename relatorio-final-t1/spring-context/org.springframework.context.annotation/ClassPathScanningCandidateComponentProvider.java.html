@@ -1,0 +1,590 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ClassPathScanningCandidateComponentProvider.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.context.annotation</a> &gt; <span class="el_source">ClassPathScanningCandidateComponentProvider.java</span></div><h1>ClassPathScanningCandidateComponentProvider.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.context.annotation;
+
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.lang.annotation.Annotation;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.factory.BeanDefinitionStoreException;
+import org.springframework.beans.factory.annotation.AnnotatedBeanDefinition;
+import org.springframework.beans.factory.annotation.Lookup;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.support.BeanDefinitionRegistry;
+import org.springframework.context.ResourceLoaderAware;
+import org.springframework.context.index.CandidateComponentsIndex;
+import org.springframework.context.index.CandidateComponentsIndexLoader;
+import org.springframework.core.SpringProperties;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.core.env.Environment;
+import org.springframework.core.env.EnvironmentCapable;
+import org.springframework.core.env.StandardEnvironment;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.ResourceLoader;
+import org.springframework.core.io.support.PathMatchingResourcePatternResolver;
+import org.springframework.core.io.support.ResourcePatternResolver;
+import org.springframework.core.io.support.ResourcePatternUtils;
+import org.springframework.core.type.AnnotationMetadata;
+import org.springframework.core.type.classreading.CachingMetadataReaderFactory;
+import org.springframework.core.type.classreading.ClassFormatException;
+import org.springframework.core.type.classreading.MetadataReader;
+import org.springframework.core.type.classreading.MetadataReaderFactory;
+import org.springframework.core.type.filter.AnnotationTypeFilter;
+import org.springframework.core.type.filter.AssignableTypeFilter;
+import org.springframework.core.type.filter.TypeFilter;
+import org.springframework.stereotype.Component;
+import org.springframework.stereotype.Controller;
+import org.springframework.stereotype.Indexed;
+import org.springframework.stereotype.Repository;
+import org.springframework.stereotype.Service;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+
+/**
+ * A component provider that scans for candidate components starting from a
+ * specified base package. Can use the {@linkplain CandidateComponentsIndex component
+ * index}, if it is available, and scans the classpath otherwise.
+ *
+ * &lt;p&gt;Candidate components are identified by applying exclude and include filters.
+ * {@link AnnotationTypeFilter} and {@link AssignableTypeFilter} include filters
+ * for an annotation/target-type that is annotated with {@link Indexed} are
+ * supported: if any other include filter is specified, the index is ignored and
+ * classpath scanning is used instead.
+ *
+ * &lt;p&gt;This implementation is based on Spring's
+ * {@link org.springframework.core.type.classreading.MetadataReader MetadataReader}
+ * facility, backed by an ASM {@link org.springframework.asm.ClassReader ClassReader}.
+ *
+ * @author Mark Fisher
+ * @author Juergen Hoeller
+ * @author Ramnivas Laddad
+ * @author Chris Beams
+ * @author Stephane Nicoll
+ * @author Sam Brannen
+ * @since 2.5
+ * @see org.springframework.core.type.classreading.MetadataReaderFactory
+ * @see org.springframework.core.type.AnnotationMetadata
+ * @see ScannedGenericBeanDefinition
+ * @see CandidateComponentsIndex
+ */
+public class ClassPathScanningCandidateComponentProvider implements EnvironmentCapable, ResourceLoaderAware {
+
+	static final String DEFAULT_RESOURCE_PATTERN = &quot;**/*.class&quot;;
+
+	/**
+	 * System property that instructs Spring to ignore class format exceptions during
+	 * classpath scanning, in particular for unsupported class file versions.
+	 * By default, such a class format mismatch leads to a classpath scanning failure.
+	 * @since 6.1.2
+	 * @see ClassFormatException
+	 */
+	public static final String IGNORE_CLASSFORMAT_PROPERTY_NAME = &quot;spring.classformat.ignore&quot;;
+
+<span class="fc" id="L106">	private static final boolean shouldIgnoreClassFormatException =</span>
+<span class="fc" id="L107">			SpringProperties.getFlag(IGNORE_CLASSFORMAT_PROPERTY_NAME);</span>
+
+
+<span class="fc" id="L110">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+<span class="fc" id="L112">	private String resourcePattern = DEFAULT_RESOURCE_PATTERN;</span>
+
+<span class="fc" id="L114">	private final List&lt;TypeFilter&gt; includeFilters = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L116">	private final List&lt;TypeFilter&gt; excludeFilters = new ArrayList&lt;&gt;();</span>
+
+	private @Nullable Environment environment;
+
+	private @Nullable ConditionEvaluator conditionEvaluator;
+
+	private @Nullable ResourcePatternResolver resourcePatternResolver;
+
+	private @Nullable MetadataReaderFactory metadataReaderFactory;
+
+	private @Nullable CandidateComponentsIndex componentsIndex;
+
+
+	/**
+	 * Protected constructor for flexible subclass initialization.
+	 * @since 4.3.6
+	 */
+<span class="fc" id="L133">	protected ClassPathScanningCandidateComponentProvider() {</span>
+<span class="fc" id="L134">	}</span>
+
+	/**
+	 * Create a ClassPathScanningCandidateComponentProvider with a {@link StandardEnvironment}.
+	 * @param useDefaultFilters whether to register the default filters for the
+	 * {@link Component @Component}, {@link Repository @Repository},
+	 * {@link Service @Service}, and {@link Controller @Controller}
+	 * stereotype annotations
+	 * @see #registerDefaultFilters()
+	 */
+	public ClassPathScanningCandidateComponentProvider(boolean useDefaultFilters) {
+<span class="fc" id="L145">		this(useDefaultFilters, new StandardEnvironment());</span>
+<span class="fc" id="L146">	}</span>
+
+	/**
+	 * Create a ClassPathScanningCandidateComponentProvider with the given {@link Environment}.
+	 * @param useDefaultFilters whether to register the default filters for the
+	 * {@link Component @Component}, {@link Repository @Repository},
+	 * {@link Service @Service}, and {@link Controller @Controller}
+	 * stereotype annotations
+	 * @param environment the Environment to use
+	 * @see #registerDefaultFilters()
+	 */
+<span class="fc" id="L157">	public ClassPathScanningCandidateComponentProvider(boolean useDefaultFilters, Environment environment) {</span>
+<span class="fc bfc" id="L158" title="All 2 branches covered.">		if (useDefaultFilters) {</span>
+<span class="fc" id="L159">			registerDefaultFilters();</span>
+		}
+<span class="fc" id="L161">		setEnvironment(environment);</span>
+<span class="fc" id="L162">		setResourceLoader(null);</span>
+<span class="fc" id="L163">	}</span>
+
+
+	/**
+	 * Set the resource pattern to use when scanning the classpath.
+	 * This value will be appended to each base package name.
+	 * @see #findCandidateComponents(String)
+	 * @see #DEFAULT_RESOURCE_PATTERN
+	 */
+	public void setResourcePattern(String resourcePattern) {
+<span class="fc" id="L173">		Assert.notNull(resourcePattern, &quot;'resourcePattern' must not be null&quot;);</span>
+<span class="fc" id="L174">		this.resourcePattern = resourcePattern;</span>
+<span class="fc" id="L175">	}</span>
+
+	/**
+	 * Add an include type filter to the &lt;i&gt;end&lt;/i&gt; of the inclusion list.
+	 */
+	public void addIncludeFilter(TypeFilter includeFilter) {
+<span class="fc" id="L181">		this.includeFilters.add(includeFilter);</span>
+<span class="fc" id="L182">	}</span>
+
+	/**
+	 * Add an exclude type filter to the &lt;i&gt;front&lt;/i&gt; of the exclusion list.
+	 */
+	public void addExcludeFilter(TypeFilter excludeFilter) {
+<span class="fc" id="L188">		this.excludeFilters.add(0, excludeFilter);</span>
+<span class="fc" id="L189">	}</span>
+
+	/**
+	 * Reset the configured type filters.
+	 * @param useDefaultFilters whether to re-register the default filters for
+	 * the {@link Component @Component}, {@link Repository @Repository},
+	 * {@link Service @Service}, and {@link Controller @Controller}
+	 * stereotype annotations
+	 * @see #registerDefaultFilters()
+	 */
+	public void resetFilters(boolean useDefaultFilters) {
+<span class="fc" id="L200">		this.includeFilters.clear();</span>
+<span class="fc" id="L201">		this.excludeFilters.clear();</span>
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">		if (useDefaultFilters) {</span>
+<span class="fc" id="L203">			registerDefaultFilters();</span>
+		}
+<span class="fc" id="L205">	}</span>
+
+	/**
+	 * Register the default filter for {@link Component @Component}.
+	 * &lt;p&gt;This will implicitly register all annotations that have the
+	 * {@link Component @Component} meta-annotation including the
+	 * {@link Repository @Repository}, {@link Service @Service}, and
+	 * {@link Controller @Controller} stereotype annotations.
+	 * &lt;p&gt;Also supports JSR-330's {@link jakarta.inject.Named} annotation if available.
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	protected void registerDefaultFilters() {
+<span class="fc" id="L217">		this.includeFilters.add(new AnnotationTypeFilter(Component.class));</span>
+<span class="fc" id="L218">		ClassLoader cl = ClassPathScanningCandidateComponentProvider.class.getClassLoader();</span>
+		try {
+<span class="fc" id="L220">			this.includeFilters.add(new AnnotationTypeFilter(</span>
+<span class="fc" id="L221">					((Class&lt;? extends Annotation&gt;) ClassUtils.forName(&quot;jakarta.inject.Named&quot;, cl)), false));</span>
+<span class="fc" id="L222">			logger.trace(&quot;JSR-330 'jakarta.inject.Named' annotation found and supported for component scanning&quot;);</span>
+		}
+<span class="fc" id="L224">		catch (ClassNotFoundException ex) {</span>
+			// JSR-330 API (as included in Jakarta EE) not available - simply skip.
+<span class="fc" id="L226">		}</span>
+<span class="fc" id="L227">	}</span>
+
+	/**
+	 * Set the Environment to use when resolving placeholders and evaluating
+	 * {@link Conditional @Conditional}-annotated component classes.
+	 * &lt;p&gt;The default is a {@link StandardEnvironment}.
+	 * @param environment the Environment to use
+	 */
+	public void setEnvironment(Environment environment) {
+<span class="fc" id="L236">		Assert.notNull(environment, &quot;Environment must not be null&quot;);</span>
+<span class="fc" id="L237">		this.environment = environment;</span>
+<span class="fc" id="L238">		this.conditionEvaluator = null;</span>
+<span class="fc" id="L239">	}</span>
+
+	@Override
+	public final Environment getEnvironment() {
+<span class="pc bpc" id="L243" title="1 of 2 branches missed.">		if (this.environment == null) {</span>
+<span class="nc" id="L244">			this.environment = new StandardEnvironment();</span>
+		}
+<span class="fc" id="L246">		return this.environment;</span>
+	}
+
+	/**
+	 * Return the {@link BeanDefinitionRegistry} used by this scanner, if any.
+	 */
+	protected @Nullable BeanDefinitionRegistry getRegistry() {
+<span class="fc" id="L253">		return null;</span>
+	}
+
+	/**
+	 * Set the {@link ResourceLoader} to use for resource locations.
+	 * This will typically be a {@link ResourcePatternResolver} implementation.
+	 * &lt;p&gt;Default is a {@code PathMatchingResourcePatternResolver}, also capable of
+	 * resource pattern resolving through the {@code ResourcePatternResolver} interface.
+	 * @see org.springframework.core.io.support.ResourcePatternResolver
+	 * @see org.springframework.core.io.support.PathMatchingResourcePatternResolver
+	 */
+	@Override
+	public void setResourceLoader(@Nullable ResourceLoader resourceLoader) {
+<span class="fc" id="L266">		this.resourcePatternResolver = ResourcePatternUtils.getResourcePatternResolver(resourceLoader);</span>
+<span class="fc" id="L267">		this.metadataReaderFactory = new CachingMetadataReaderFactory(resourceLoader);</span>
+<span class="fc" id="L268">		this.componentsIndex = CandidateComponentsIndexLoader.loadIndex(this.resourcePatternResolver.getClassLoader());</span>
+<span class="fc" id="L269">	}</span>
+
+	/**
+	 * Return the ResourceLoader that this component provider uses.
+	 */
+	public final ResourceLoader getResourceLoader() {
+<span class="fc" id="L275">		return getResourcePatternResolver();</span>
+	}
+
+	private ResourcePatternResolver getResourcePatternResolver() {
+<span class="pc bpc" id="L279" title="1 of 2 branches missed.">		if (this.resourcePatternResolver == null) {</span>
+<span class="nc" id="L280">			this.resourcePatternResolver = new PathMatchingResourcePatternResolver();</span>
+		}
+<span class="fc" id="L282">		return this.resourcePatternResolver;</span>
+	}
+
+	/**
+	 * Set the {@link MetadataReaderFactory} to use.
+	 * &lt;p&gt;Default is a {@link CachingMetadataReaderFactory} for the specified
+	 * {@linkplain #setResourceLoader resource loader}.
+	 * &lt;p&gt;Call this setter method &lt;i&gt;after&lt;/i&gt; {@link #setResourceLoader} in order
+	 * for the given MetadataReaderFactory to override the default factory.
+	 */
+	public void setMetadataReaderFactory(MetadataReaderFactory metadataReaderFactory) {
+<span class="nc" id="L293">		this.metadataReaderFactory = metadataReaderFactory;</span>
+<span class="nc" id="L294">	}</span>
+
+	/**
+	 * Return the MetadataReaderFactory used by this component provider.
+	 */
+	public final MetadataReaderFactory getMetadataReaderFactory() {
+<span class="pc bpc" id="L300" title="1 of 2 branches missed.">		if (this.metadataReaderFactory == null) {</span>
+<span class="nc" id="L301">			this.metadataReaderFactory = new CachingMetadataReaderFactory();</span>
+		}
+<span class="fc" id="L303">		return this.metadataReaderFactory;</span>
+	}
+
+
+	/**
+	 * Scan the component index or class path for candidate components.
+	 * @param basePackage the package to check for annotated classes
+	 * @return a corresponding Set of autodetected bean definitions
+	 */
+	public Set&lt;BeanDefinition&gt; findCandidateComponents(String basePackage) {
+<span class="fc bfc" id="L313" title="All 4 branches covered.">		if (this.componentsIndex != null &amp;&amp; indexSupportsIncludeFilters()) {</span>
+<span class="fc bfc" id="L314" title="All 2 branches covered.">			if (this.componentsIndex.hasScannedPackage(basePackage)) {</span>
+<span class="fc" id="L315">				return addCandidateComponentsFromIndex(this.componentsIndex, basePackage);</span>
+			}
+			else {
+<span class="fc" id="L318">				this.componentsIndex.registerScan(basePackage);</span>
+			}
+		}
+<span class="fc" id="L321">		return scanCandidateComponents(basePackage);</span>
+	}
+
+	/**
+	 * Determine if the component index can be used by this instance.
+	 * @return {@code true} if the index is available and the configuration of this
+	 * instance is supported by it, {@code false} otherwise
+	 * @since 5.0
+	 */
+	private boolean indexSupportsIncludeFilters() {
+<span class="fc bfc" id="L331" title="All 2 branches covered.">		for (TypeFilter includeFilter : this.includeFilters) {</span>
+<span class="fc bfc" id="L332" title="All 2 branches covered.">			if (!indexSupportsIncludeFilter(includeFilter)) {</span>
+<span class="fc" id="L333">				return false;</span>
+			}
+<span class="fc" id="L335">		}</span>
+<span class="fc" id="L336">		return true;</span>
+	}
+
+	/**
+	 * Determine if the specified include {@link TypeFilter} is supported by the index.
+	 * @param filter the filter to check
+	 * @return whether the index supports this include filter
+	 * @since 5.0
+	 * @see #registerCandidateTypeForIncludeFilter(String, TypeFilter)
+	 * @see #extractStereotype(TypeFilter)
+	 */
+	private boolean indexSupportsIncludeFilter(TypeFilter filter) {
+<span class="fc bfc" id="L348" title="All 2 branches covered.">		if (filter instanceof AnnotationTypeFilter annotationTypeFilter) {</span>
+<span class="fc" id="L349">			Class&lt;? extends Annotation&gt; annotationType = annotationTypeFilter.getAnnotationType();</span>
+<span class="fc" id="L350">			return isStereotypeAnnotationForIndex(annotationType);</span>
+		}
+<span class="pc bpc" id="L352" title="1 of 2 branches missed.">		if (filter instanceof AssignableTypeFilter assignableTypeFilter) {</span>
+<span class="fc" id="L353">			Class&lt;?&gt; target = assignableTypeFilter.getTargetType();</span>
+<span class="fc" id="L354">			return AnnotationUtils.isAnnotationDeclaredLocally(Indexed.class, target);</span>
+		}
+<span class="nc" id="L356">		return false;</span>
+	}
+
+	/**
+	 * Register the given class as a candidate type with the runtime-populated index, if any.
+	 * @param className the fully-qualified class name of the candidate type
+	 * @param filter the include filter to introspect for the associated stereotype
+	 */
+	private void registerCandidateTypeForIncludeFilter(String className, TypeFilter filter) {
+<span class="fc bfc" id="L365" title="All 2 branches covered.">		if (this.componentsIndex != null) {</span>
+<span class="fc bfc" id="L366" title="All 2 branches covered.">			if (filter instanceof AnnotationTypeFilter annotationTypeFilter) {</span>
+<span class="fc" id="L367">				Class&lt;? extends Annotation&gt; annotationType = annotationTypeFilter.getAnnotationType();</span>
+<span class="fc bfc" id="L368" title="All 2 branches covered.">				if (isStereotypeAnnotationForIndex(annotationType)) {</span>
+<span class="fc" id="L369">					this.componentsIndex.registerCandidateType(className, annotationType.getName());</span>
+				}
+<span class="fc" id="L371">			}</span>
+<span class="pc bpc" id="L372" title="1 of 2 branches missed.">			else if (filter instanceof AssignableTypeFilter assignableTypeFilter) {</span>
+<span class="fc" id="L373">				Class&lt;?&gt; target = assignableTypeFilter.getTargetType();</span>
+<span class="fc bfc" id="L374" title="All 2 branches covered.">				if (AnnotationUtils.isAnnotationDeclaredLocally(Indexed.class, target)) {</span>
+<span class="fc" id="L375">					this.componentsIndex.registerCandidateType(className, target.getName());</span>
+				}
+			}
+		}
+<span class="fc" id="L379">	}</span>
+
+	/**
+	 * Extract the stereotype to use for the specified compatible filter.
+	 * @param filter the filter to handle
+	 * @return the stereotype in the index matching this filter
+	 * @since 5.0
+	 * @see #indexSupportsIncludeFilter(TypeFilter)
+	 */
+	private @Nullable String extractStereotype(TypeFilter filter) {
+<span class="fc bfc" id="L389" title="All 2 branches covered.">		if (filter instanceof AnnotationTypeFilter annotationTypeFilter) {</span>
+<span class="fc" id="L390">			return annotationTypeFilter.getAnnotationType().getName();</span>
+		}
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">		if (filter instanceof AssignableTypeFilter assignableTypeFilter) {</span>
+<span class="fc" id="L393">			return assignableTypeFilter.getTargetType().getName();</span>
+		}
+<span class="nc" id="L395">		return null;</span>
+	}
+
+	private boolean isStereotypeAnnotationForIndex(Class&lt;? extends Annotation&gt; annotationType) {
+<span class="fc bfc" id="L399" title="All 2 branches covered.">		return (AnnotationUtils.isAnnotationDeclaredLocally(Indexed.class, annotationType) ||</span>
+<span class="fc bfc" id="L400" title="All 2 branches covered.">				annotationType.getName().startsWith(&quot;jakarta.&quot;));</span>
+	}
+
+	private Set&lt;BeanDefinition&gt; addCandidateComponentsFromIndex(CandidateComponentsIndex index, String basePackage) {
+<span class="fc" id="L404">		Set&lt;BeanDefinition&gt; candidates = new LinkedHashSet&lt;&gt;();</span>
+		try {
+<span class="fc" id="L406">			Set&lt;String&gt; types = new HashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L407" title="All 2 branches covered.">			for (TypeFilter filter : this.includeFilters) {</span>
+<span class="fc" id="L408">				String stereotype = extractStereotype(filter);</span>
+<span class="pc bpc" id="L409" title="1 of 2 branches missed.">				if (stereotype == null) {</span>
+<span class="nc" id="L410">					throw new IllegalArgumentException(&quot;Failed to extract stereotype from &quot; + filter);</span>
+				}
+<span class="fc" id="L412">				types.addAll(index.getCandidateTypes(basePackage, stereotype));</span>
+<span class="fc" id="L413">			}</span>
+<span class="fc" id="L414">			boolean traceEnabled = logger.isTraceEnabled();</span>
+<span class="fc" id="L415">			boolean debugEnabled = logger.isDebugEnabled();</span>
+<span class="fc bfc" id="L416" title="All 2 branches covered.">			for (String type : types) {</span>
+<span class="fc" id="L417">				MetadataReader metadataReader = getMetadataReaderFactory().getMetadataReader(type);</span>
+<span class="fc bfc" id="L418" title="All 2 branches covered.">				if (isCandidateComponent(metadataReader)) {</span>
+<span class="fc" id="L419">					ScannedGenericBeanDefinition sbd = new ScannedGenericBeanDefinition(metadataReader);</span>
+<span class="fc" id="L420">					sbd.setSource(metadataReader.getResource());</span>
+<span class="fc bfc" id="L421" title="All 2 branches covered.">					if (isCandidateComponent(sbd)) {</span>
+<span class="pc bpc" id="L422" title="1 of 2 branches missed.">						if (debugEnabled) {</span>
+<span class="nc" id="L423">							logger.debug(&quot;Using candidate component class from index: &quot; + type);</span>
+						}
+<span class="fc" id="L425">						candidates.add(sbd);</span>
+					}
+					else {
+<span class="pc bpc" id="L428" title="1 of 2 branches missed.">						if (debugEnabled) {</span>
+<span class="nc" id="L429">							logger.debug(&quot;Ignored because not a concrete top-level class: &quot; + type);</span>
+						}
+					}
+<span class="fc" id="L432">				}</span>
+				else {
+<span class="pc bpc" id="L434" title="1 of 2 branches missed.">					if (traceEnabled) {</span>
+<span class="nc" id="L435">						logger.trace(&quot;Ignored because matching an exclude filter: &quot; + type);</span>
+					}
+				}
+<span class="fc" id="L438">			}</span>
+		}
+<span class="nc" id="L440">		catch (IOException ex) {</span>
+<span class="nc" id="L441">			throw new BeanDefinitionStoreException(&quot;I/O failure during classpath scanning&quot;, ex);</span>
+<span class="fc" id="L442">		}</span>
+<span class="fc" id="L443">		return candidates;</span>
+	}
+
+	private Set&lt;BeanDefinition&gt; scanCandidateComponents(String basePackage) {
+<span class="fc" id="L447">		Set&lt;BeanDefinition&gt; candidates = new LinkedHashSet&lt;&gt;();</span>
+		try {
+<span class="fc" id="L449">			String packageSearchPattern = ResourcePatternResolver.CLASSPATH_ALL_URL_PREFIX +</span>
+<span class="fc" id="L450">					resolveBasePackage(basePackage) + '/' + this.resourcePattern;</span>
+<span class="fc" id="L451">			Resource[] resources = getResourcePatternResolver().getResources(packageSearchPattern);</span>
+<span class="fc" id="L452">			boolean traceEnabled = logger.isTraceEnabled();</span>
+<span class="fc" id="L453">			boolean debugEnabled = logger.isDebugEnabled();</span>
+<span class="fc bfc" id="L454" title="All 2 branches covered.">			for (Resource resource : resources) {</span>
+<span class="fc" id="L455">				String filename = resource.getFilename();</span>
+<span class="pc bpc" id="L456" title="1 of 4 branches missed.">				if (filename != null &amp;&amp; filename.contains(ClassUtils.CGLIB_CLASS_SEPARATOR)) {</span>
+					// Ignore CGLIB-generated classes in the classpath
+<span class="fc" id="L458">					continue;</span>
+				}
+<span class="pc bpc" id="L460" title="1 of 2 branches missed.">				if (traceEnabled) {</span>
+<span class="nc" id="L461">					logger.trace(&quot;Scanning &quot; + resource);</span>
+				}
+				try {
+<span class="fc" id="L464">					MetadataReader metadataReader = getMetadataReaderFactory().getMetadataReader(resource);</span>
+<span class="fc bfc" id="L465" title="All 2 branches covered.">					if (isCandidateComponent(metadataReader)) {</span>
+<span class="fc" id="L466">						ScannedGenericBeanDefinition sbd = new ScannedGenericBeanDefinition(metadataReader);</span>
+<span class="fc" id="L467">						sbd.setSource(resource);</span>
+<span class="fc bfc" id="L468" title="All 2 branches covered.">						if (isCandidateComponent(sbd)) {</span>
+<span class="fc bfc" id="L469" title="All 2 branches covered.">							if (debugEnabled) {</span>
+<span class="fc" id="L470">								logger.debug(&quot;Identified candidate component class: &quot; + resource);</span>
+							}
+<span class="fc" id="L472">							candidates.add(sbd);</span>
+						}
+						else {
+<span class="pc bpc" id="L475" title="1 of 2 branches missed.">							if (debugEnabled) {</span>
+<span class="nc" id="L476">								logger.debug(&quot;Ignored because not a concrete top-level class: &quot; + resource);</span>
+							}
+						}
+<span class="fc" id="L479">					}</span>
+					else {
+<span class="pc bpc" id="L481" title="1 of 2 branches missed.">						if (traceEnabled) {</span>
+<span class="nc" id="L482">							logger.trace(&quot;Ignored because not matching any filter: &quot; + resource);</span>
+						}
+					}
+				}
+<span class="nc" id="L486">				catch (FileNotFoundException ex) {</span>
+<span class="nc bnc" id="L487" title="All 2 branches missed.">					if (traceEnabled) {</span>
+<span class="nc" id="L488">						logger.trace(&quot;Ignored non-readable &quot; + resource + &quot;: &quot; + ex.getMessage());</span>
+					}
+				}
+<span class="nc" id="L491">				catch (ClassFormatException ex) {</span>
+<span class="nc bnc" id="L492" title="All 2 branches missed.">					if (shouldIgnoreClassFormatException) {</span>
+<span class="nc bnc" id="L493" title="All 2 branches missed.">						if (debugEnabled) {</span>
+<span class="nc" id="L494">							logger.debug(&quot;Ignored incompatible class format in &quot; + resource + &quot;: &quot; + ex.getMessage());</span>
+						}
+					}
+					else {
+<span class="nc" id="L498">						throw new BeanDefinitionStoreException(&quot;Incompatible class format in &quot; + resource +</span>
+								&quot;: set system property 'spring.classformat.ignore' to 'true' &quot; +
+								&quot;if you mean to ignore such files during classpath scanning&quot;, ex);
+					}
+				}
+<span class="nc" id="L503">				catch (Throwable ex) {</span>
+<span class="nc" id="L504">					throw new BeanDefinitionStoreException(&quot;Failed to read candidate component class: &quot; + resource, ex);</span>
+<span class="pc" id="L505">				}</span>
+			}
+		}
+<span class="nc" id="L508">		catch (IOException ex) {</span>
+<span class="nc" id="L509">			throw new BeanDefinitionStoreException(&quot;I/O failure during classpath scanning&quot;, ex);</span>
+<span class="fc" id="L510">		}</span>
+<span class="fc" id="L511">		return candidates;</span>
+	}
+
+
+	/**
+	 * Resolve the specified base package into a pattern specification for
+	 * the package search path.
+	 * &lt;p&gt;The default implementation resolves placeholders against system properties,
+	 * and converts a &quot;.&quot;-based package path to a &quot;/&quot;-based resource path.
+	 * @param basePackage the base package as specified by the user
+	 * @return the pattern specification to be used for package searching
+	 */
+	protected String resolveBasePackage(String basePackage) {
+<span class="fc" id="L524">		return ClassUtils.convertClassNameToResourcePath(getEnvironment().resolveRequiredPlaceholders(basePackage));</span>
+	}
+
+	/**
+	 * Determine whether the given class does not match any exclude filter
+	 * and does match at least one include filter.
+	 * @param metadataReader the ASM ClassReader for the class
+	 * @return whether the class qualifies as a candidate component
+	 */
+	protected boolean isCandidateComponent(MetadataReader metadataReader) throws IOException {
+<span class="fc bfc" id="L534" title="All 2 branches covered.">		for (TypeFilter filter : this.excludeFilters) {</span>
+<span class="fc bfc" id="L535" title="All 2 branches covered.">			if (filter.match(metadataReader, getMetadataReaderFactory())) {</span>
+<span class="fc" id="L536">				return false;</span>
+			}
+<span class="fc" id="L538">		}</span>
+<span class="fc bfc" id="L539" title="All 2 branches covered.">		for (TypeFilter filter : this.includeFilters) {</span>
+<span class="fc bfc" id="L540" title="All 2 branches covered.">			if (filter.match(metadataReader, getMetadataReaderFactory())) {</span>
+<span class="fc" id="L541">				registerCandidateTypeForIncludeFilter(metadataReader.getClassMetadata().getClassName(), filter);</span>
+<span class="fc" id="L542">				return isConditionMatch(metadataReader);</span>
+			}
+<span class="fc" id="L544">		}</span>
+<span class="fc" id="L545">		return false;</span>
+	}
+
+	/**
+	 * Determine whether the given class is a candidate component based on any
+	 * {@code @Conditional} annotations.
+	 * @param metadataReader the ASM ClassReader for the class
+	 * @return whether the class qualifies as a candidate component
+	 */
+	private boolean isConditionMatch(MetadataReader metadataReader) {
+<span class="fc bfc" id="L555" title="All 2 branches covered.">		if (this.conditionEvaluator == null) {</span>
+<span class="fc" id="L556">			this.conditionEvaluator =</span>
+<span class="fc" id="L557">					new ConditionEvaluator(getRegistry(), this.environment, this.resourcePatternResolver);</span>
+		}
+<span class="fc bfc" id="L559" title="All 2 branches covered.">		return !this.conditionEvaluator.shouldSkip(metadataReader.getAnnotationMetadata());</span>
+	}
+
+	/**
+	 * Determine whether the given bean definition qualifies as a candidate component.
+	 * &lt;p&gt;The default implementation checks whether the class is not dependent on an
+	 * enclosing class as well as whether the class is either concrete (and therefore
+	 * not an interface) or has {@link Lookup @Lookup} methods.
+	 * &lt;p&gt;Can be overridden in subclasses.
+	 * @param beanDefinition the bean definition to check
+	 * @return whether the bean definition qualifies as a candidate component
+	 */
+	protected boolean isCandidateComponent(AnnotatedBeanDefinition beanDefinition) {
+<span class="fc" id="L572">		AnnotationMetadata metadata = beanDefinition.getMetadata();</span>
+<span class="pc bpc" id="L573" title="1 of 4 branches missed.">		return (metadata.isIndependent() &amp;&amp; (metadata.isConcrete() ||</span>
+<span class="pc bpc" id="L574" title="1 of 4 branches missed.">				(metadata.isAbstract() &amp;&amp; metadata.hasAnnotatedMethods(Lookup.class.getName()))));</span>
+	}
+
+
+	/**
+	 * Clear the local metadata cache, if any, removing all cached class metadata.
+	 */
+	public void clearCache() {
+<span class="nc bnc" id="L582" title="All 2 branches missed.">		if (this.metadataReaderFactory instanceof CachingMetadataReaderFactory cmrf) {</span>
+			// Clear cache in externally provided MetadataReaderFactory; this is a no-op
+			// for a shared cache since it'll be cleared by the ApplicationContext.
+<span class="nc" id="L585">			cmrf.clearCache();</span>
+		}
+<span class="nc" id="L587">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

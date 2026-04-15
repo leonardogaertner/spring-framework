@@ -1,0 +1,635 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ScheduledTaskRegistrar.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.scheduling.config</a> &gt; <span class="el_source">ScheduledTaskRegistrar.java</span></div><h1>ScheduledTaskRegistrar.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.scheduling.config;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+
+import io.micrometer.observation.ObservationRegistry;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.Trigger;
+import org.springframework.scheduling.concurrent.ConcurrentTaskScheduler;
+import org.springframework.scheduling.support.CronTrigger;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+
+/**
+ * Helper bean for registering tasks with a {@link TaskScheduler}, typically using cron
+ * expressions.
+ *
+ * &lt;p&gt;{@code ScheduledTaskRegistrar} has a more prominent user-facing role when used in
+ * conjunction with the {@link
+ * org.springframework.scheduling.annotation.EnableAsync @EnableAsync} annotation and its
+ * {@link org.springframework.scheduling.annotation.SchedulingConfigurer
+ * SchedulingConfigurer} callback interface.
+ *
+ * @author Juergen Hoeller
+ * @author Chris Beams
+ * @author Tobias Montagna-Hay
+ * @author Sam Brannen
+ * @author Arjen Poutsma
+ * @author Brian Clozel
+ * @since 3.0
+ * @see org.springframework.scheduling.annotation.EnableAsync
+ * @see org.springframework.scheduling.annotation.SchedulingConfigurer
+ */
+<span class="fc" id="L63">public class ScheduledTaskRegistrar implements ScheduledTaskHolder, InitializingBean, DisposableBean {</span>
+
+	/**
+	 * A special cron expression value that indicates a disabled trigger: {@value}.
+	 * &lt;p&gt;This is primarily meant for use with {@link #addCronTask(Runnable, String)}
+	 * when the value for the supplied {@code expression} is retrieved from an
+	 * external source &amp;mdash; for example, from a property in the
+	 * {@link org.springframework.core.env.Environment Environment}.
+	 * @since 5.2
+	 * @see org.springframework.scheduling.annotation.Scheduled#CRON_DISABLED
+	 */
+	public static final String CRON_DISABLED = &quot;-&quot;;
+
+
+	private @Nullable TaskScheduler taskScheduler;
+
+	private @Nullable ScheduledExecutorService localExecutor;
+
+	private @Nullable ObservationRegistry observationRegistry;
+
+	private @Nullable List&lt;TriggerTask&gt; triggerTasks;
+
+	private @Nullable List&lt;CronTask&gt; cronTasks;
+
+	private @Nullable List&lt;IntervalTask&gt; fixedRateTasks;
+
+	private @Nullable List&lt;IntervalTask&gt; fixedDelayTasks;
+
+	private @Nullable List&lt;DelayedTask&gt; oneTimeTasks;
+
+<span class="fc" id="L93">	private final Map&lt;Task, ScheduledTask&gt; unresolvedTasks = new HashMap&lt;&gt;(16);</span>
+
+<span class="fc" id="L95">	private final Set&lt;ScheduledTask&gt; scheduledTasks = new LinkedHashSet&lt;&gt;(16);</span>
+
+
+	/**
+	 * Set the {@link TaskScheduler} to register scheduled tasks with.
+	 */
+	public void setTaskScheduler(TaskScheduler taskScheduler) {
+<span class="fc" id="L102">		Assert.notNull(taskScheduler, &quot;TaskScheduler must not be null&quot;);</span>
+<span class="fc" id="L103">		this.taskScheduler = taskScheduler;</span>
+<span class="fc" id="L104">	}</span>
+
+	/**
+	 * Set the {@link TaskScheduler} to register scheduled tasks with, or a
+	 * {@link java.util.concurrent.ScheduledExecutorService} to be wrapped as a
+	 * {@code TaskScheduler}.
+	 */
+	public void setScheduler(@Nullable Object scheduler) {
+<span class="pc bpc" id="L112" title="1 of 2 branches missed.">		if (scheduler == null) {</span>
+<span class="nc" id="L113">			this.taskScheduler = null;</span>
+		}
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">		else if (scheduler instanceof TaskScheduler ts) {</span>
+<span class="fc" id="L116">			this.taskScheduler = ts;</span>
+		}
+<span class="nc bnc" id="L118" title="All 2 branches missed.">		else if (scheduler instanceof ScheduledExecutorService ses) {</span>
+<span class="nc" id="L119">			this.taskScheduler = new ConcurrentTaskScheduler(ses);</span>
+		}
+		else {
+<span class="nc" id="L122">			throw new IllegalArgumentException(&quot;Unsupported scheduler type: &quot; + scheduler.getClass());</span>
+		}
+<span class="fc" id="L124">	}</span>
+
+	/**
+	 * Return the {@link TaskScheduler} instance for this registrar (may be {@code null}).
+	 */
+	public @Nullable TaskScheduler getScheduler() {
+<span class="nc" id="L130">		return this.taskScheduler;</span>
+	}
+
+	/**
+	 * Configure an {@link ObservationRegistry} to record observations for scheduled tasks.
+	 * @since 6.1
+	 */
+	public void setObservationRegistry(@Nullable ObservationRegistry observationRegistry) {
+<span class="fc" id="L138">		this.observationRegistry = observationRegistry;</span>
+<span class="fc" id="L139">	}</span>
+
+	/**
+	 * Return the {@link ObservationRegistry} for this registrar.
+	 * @since 6.1
+	 */
+	public @Nullable ObservationRegistry getObservationRegistry() {
+<span class="fc" id="L146">		return this.observationRegistry;</span>
+	}
+
+	/**
+	 * Specify triggered tasks as a Map of Runnables (the tasks) and Trigger objects
+	 * (typically custom implementations of the {@link Trigger} interface).
+	 */
+	public void setTriggerTasks(Map&lt;Runnable, Trigger&gt; triggerTasks) {
+<span class="nc" id="L154">		this.triggerTasks = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L155">		triggerTasks.forEach((task, trigger) -&gt; addTriggerTask(new TriggerTask(task, trigger)));</span>
+<span class="nc" id="L156">	}</span>
+
+	/**
+	 * Specify triggered tasks as a list of {@link TriggerTask} objects. Primarily used
+	 * by {@code &lt;task:*&gt;} namespace parsing.
+	 * @since 3.2
+	 * @see ScheduledTasksBeanDefinitionParser
+	 */
+	public void setTriggerTasksList(List&lt;TriggerTask&gt; triggerTasks) {
+<span class="fc" id="L165">		this.triggerTasks = triggerTasks;</span>
+<span class="fc" id="L166">	}</span>
+
+	/**
+	 * Get the trigger tasks as an unmodifiable list of {@link TriggerTask} objects.
+	 * @return the list of tasks (never {@code null})
+	 * @since 4.2
+	 */
+	public List&lt;TriggerTask&gt; getTriggerTaskList() {
+<span class="fc bfc" id="L174" title="All 2 branches covered.">		return (this.triggerTasks != null? Collections.unmodifiableList(this.triggerTasks) :</span>
+<span class="fc" id="L175">				Collections.emptyList());</span>
+	}
+
+	/**
+	 * Specify triggered tasks as a Map of Runnables (the tasks) and cron expressions.
+	 * @see CronTrigger
+	 */
+	public void setCronTasks(Map&lt;Runnable, String&gt; cronTasks) {
+<span class="nc" id="L183">		this.cronTasks = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L184">		cronTasks.forEach(this::addCronTask);</span>
+<span class="nc" id="L185">	}</span>
+
+	/**
+	 * Specify triggered tasks as a list of {@link CronTask} objects. Primarily used by
+	 * {@code &lt;task:*&gt;} namespace parsing.
+	 * @since 3.2
+	 * @see ScheduledTasksBeanDefinitionParser
+	 */
+	public void setCronTasksList(List&lt;CronTask&gt; cronTasks) {
+<span class="fc" id="L194">		this.cronTasks = cronTasks;</span>
+<span class="fc" id="L195">	}</span>
+
+	/**
+	 * Get the cron tasks as an unmodifiable list of {@link CronTask} objects.
+	 * @return the list of tasks (never {@code null})
+	 * @since 4.2
+	 */
+	public List&lt;CronTask&gt; getCronTaskList() {
+<span class="fc bfc" id="L203" title="All 2 branches covered.">		return (this.cronTasks != null ? Collections.unmodifiableList(this.cronTasks) :</span>
+<span class="fc" id="L204">				Collections.emptyList());</span>
+	}
+
+	/**
+	 * Specify triggered tasks as a Map of Runnables (the tasks) and fixed-rate values.
+	 * @see TaskScheduler#scheduleAtFixedRate(Runnable, Duration)
+	 */
+	public void setFixedRateTasks(Map&lt;Runnable, Long&gt; fixedRateTasks) {
+<span class="nc" id="L212">		this.fixedRateTasks = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L213">		fixedRateTasks.forEach((task, interval) -&gt; addFixedRateTask(task, Duration.ofMillis(interval)));</span>
+<span class="nc" id="L214">	}</span>
+
+	/**
+	 * Specify fixed-rate tasks as a list of {@link IntervalTask} objects. Primarily used
+	 * by {@code &lt;task:*&gt;} namespace parsing.
+	 * @since 3.2
+	 * @see ScheduledTasksBeanDefinitionParser
+	 */
+	public void setFixedRateTasksList(List&lt;IntervalTask&gt; fixedRateTasks) {
+<span class="fc" id="L223">		this.fixedRateTasks = fixedRateTasks;</span>
+<span class="fc" id="L224">	}</span>
+
+	/**
+	 * Get the fixed-rate tasks as an unmodifiable list of {@link IntervalTask} objects.
+	 * @return the list of tasks (never {@code null})
+	 * @since 4.2
+	 */
+	public List&lt;IntervalTask&gt; getFixedRateTaskList() {
+<span class="fc bfc" id="L232" title="All 2 branches covered.">		return (this.fixedRateTasks != null ? Collections.unmodifiableList(this.fixedRateTasks) :</span>
+<span class="fc" id="L233">				Collections.emptyList());</span>
+	}
+
+	/**
+	 * Specify triggered tasks as a Map of Runnables (the tasks) and fixed-delay values.
+	 * @see TaskScheduler#scheduleWithFixedDelay(Runnable, Duration)
+	 */
+	public void setFixedDelayTasks(Map&lt;Runnable, Long&gt; fixedDelayTasks) {
+<span class="nc" id="L241">		this.fixedDelayTasks = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L242">		fixedDelayTasks.forEach((task, delay) -&gt; addFixedDelayTask(task, Duration.ofMillis(delay)));</span>
+<span class="nc" id="L243">	}</span>
+
+	/**
+	 * Specify fixed-delay tasks as a list of {@link IntervalTask} objects. Primarily used
+	 * by {@code &lt;task:*&gt;} namespace parsing.
+	 * @since 3.2
+	 * @see ScheduledTasksBeanDefinitionParser
+	 */
+	public void setFixedDelayTasksList(List&lt;IntervalTask&gt; fixedDelayTasks) {
+<span class="fc" id="L252">		this.fixedDelayTasks = fixedDelayTasks;</span>
+<span class="fc" id="L253">	}</span>
+
+	/**
+	 * Get the fixed-delay tasks as an unmodifiable list of {@link IntervalTask} objects.
+	 * @return the list of tasks (never {@code null})
+	 * @since 4.2
+	 */
+	public List&lt;IntervalTask&gt; getFixedDelayTaskList() {
+<span class="fc bfc" id="L261" title="All 2 branches covered.">		return (this.fixedDelayTasks != null ? Collections.unmodifiableList(this.fixedDelayTasks) :</span>
+<span class="fc" id="L262">				Collections.emptyList());</span>
+	}
+
+
+	/**
+	 * Add a Runnable task to be triggered per the given {@link Trigger}.
+	 * @see TaskScheduler#scheduleAtFixedRate(Runnable, Duration)
+	 */
+	public void addTriggerTask(Runnable task, Trigger trigger) {
+<span class="nc" id="L271">		addTriggerTask(new TriggerTask(task, trigger));</span>
+<span class="nc" id="L272">	}</span>
+
+	/**
+	 * Add a {@code TriggerTask}.
+	 * @since 3.2
+	 * @see TaskScheduler#scheduleAtFixedRate(Runnable, Duration)
+	 */
+	public void addTriggerTask(TriggerTask task) {
+<span class="nc bnc" id="L280" title="All 2 branches missed.">		if (this.triggerTasks == null) {</span>
+<span class="nc" id="L281">			this.triggerTasks = new ArrayList&lt;&gt;();</span>
+		}
+<span class="nc" id="L283">		this.triggerTasks.add(task);</span>
+<span class="nc" id="L284">	}</span>
+
+	/**
+	 * Add a {@link Runnable} task to be triggered per the given cron {@code expression}.
+	 * &lt;p&gt;This method will not register the task if the {@code expression} is
+	 * equal to {@link #CRON_DISABLED}.
+	 */
+	public void addCronTask(Runnable task, String expression) {
+<span class="fc bfc" id="L292" title="All 2 branches covered.">		if (!CRON_DISABLED.equals(expression)) {</span>
+<span class="fc" id="L293">			addCronTask(new CronTask(task, expression));</span>
+		}
+<span class="fc" id="L295">	}</span>
+
+	/**
+	 * Add a {@link CronTask}.
+	 * @since 3.2
+	 */
+	public void addCronTask(CronTask task) {
+<span class="pc bpc" id="L302" title="1 of 2 branches missed.">		if (this.cronTasks == null) {</span>
+<span class="fc" id="L303">			this.cronTasks = new ArrayList&lt;&gt;();</span>
+		}
+<span class="fc" id="L305">		this.cronTasks.add(task);</span>
+<span class="fc" id="L306">	}</span>
+
+	/**
+	 * Add a {@code Runnable} task to be triggered at the given fixed-rate interval.
+	 * @deprecated as of 6.0, in favor of {@link #addFixedRateTask(Runnable, Duration)}
+	 */
+	@Deprecated(since = &quot;6.0&quot;)
+	public void addFixedRateTask(Runnable task, long interval) {
+<span class="nc" id="L314">		addFixedRateTask(new IntervalTask(task, interval));</span>
+<span class="nc" id="L315">	}</span>
+
+	/**
+	 * Add a {@code Runnable} task to be triggered at the given fixed-rate interval.
+	 * @since 6.0
+	 * @see TaskScheduler#scheduleAtFixedRate(Runnable, Duration)
+	 */
+	public void addFixedRateTask(Runnable task, Duration interval) {
+<span class="nc" id="L323">		addFixedRateTask(new IntervalTask(task, interval));</span>
+<span class="nc" id="L324">	}</span>
+
+	/**
+	 * Add a fixed-rate {@link IntervalTask}.
+	 * @since 3.2
+	 * @see TaskScheduler#scheduleAtFixedRate(Runnable, Duration)
+	 * @see FixedRateTask
+	 */
+	public void addFixedRateTask(IntervalTask task) {
+<span class="fc bfc" id="L333" title="All 2 branches covered.">		if (this.fixedRateTasks == null) {</span>
+<span class="fc" id="L334">			this.fixedRateTasks = new ArrayList&lt;&gt;();</span>
+		}
+<span class="fc" id="L336">		this.fixedRateTasks.add(task);</span>
+<span class="fc" id="L337">	}</span>
+
+	/**
+	 * Add a Runnable task to be triggered with the given fixed delay.
+	 * @deprecated as of 6.0, in favor of {@link #addFixedDelayTask(Runnable, Duration)}
+	 */
+	@Deprecated(since = &quot;6.0&quot;)
+	public void addFixedDelayTask(Runnable task, long interval) {
+<span class="nc" id="L345">		addFixedDelayTask(new IntervalTask(task, interval));</span>
+<span class="nc" id="L346">	}</span>
+
+	/**
+	 * Add a Runnable task to be triggered with the given fixed delay.
+	 * @since 6.0
+	 * @see TaskScheduler#scheduleWithFixedDelay(Runnable, Duration)
+	 */
+	public void addFixedDelayTask(Runnable task, Duration interval) {
+<span class="nc" id="L354">		addFixedDelayTask(new IntervalTask(task, interval));</span>
+<span class="nc" id="L355">	}</span>
+
+	/**
+	 * Add a fixed-delay {@link IntervalTask}.
+	 * @since 3.2
+	 * @see TaskScheduler#scheduleWithFixedDelay(Runnable, Duration)
+	 * @see FixedDelayTask
+	 */
+	public void addFixedDelayTask(IntervalTask task) {
+<span class="pc bpc" id="L364" title="1 of 2 branches missed.">		if (this.fixedDelayTasks == null) {</span>
+<span class="fc" id="L365">			this.fixedDelayTasks = new ArrayList&lt;&gt;();</span>
+		}
+<span class="fc" id="L367">		this.fixedDelayTasks.add(task);</span>
+<span class="fc" id="L368">	}</span>
+
+	/**
+	 * Add a Runnable task to be triggered once after the given initial delay.
+	 * @since 6.1
+	 * @see TaskScheduler#schedule(Runnable, Instant)
+	 */
+	public void addOneTimeTask(Runnable task, Duration initialDelay) {
+<span class="nc" id="L376">		addOneTimeTask(new OneTimeTask(task, initialDelay));</span>
+<span class="nc" id="L377">	}</span>
+
+	/**
+	 * Add a one-time {@link DelayedTask}.
+	 * @since 6.1
+	 * @see TaskScheduler#schedule(Runnable, Instant)
+	 * @see OneTimeTask
+	 */
+	public void addOneTimeTask(DelayedTask task) {
+<span class="pc bpc" id="L386" title="1 of 2 branches missed.">		if (this.oneTimeTasks == null) {</span>
+<span class="fc" id="L387">			this.oneTimeTasks = new ArrayList&lt;&gt;();</span>
+		}
+<span class="fc" id="L389">		this.oneTimeTasks.add(task);</span>
+<span class="fc" id="L390">	}</span>
+
+
+	/**
+	 * Return whether this {@code ScheduledTaskRegistrar} has any tasks registered.
+	 * @since 3.2
+	 */
+	public boolean hasTasks() {
+<span class="nc bnc" id="L398" title="All 2 branches missed.">		return (!CollectionUtils.isEmpty(this.triggerTasks) ||</span>
+<span class="nc bnc" id="L399" title="All 2 branches missed.">				!CollectionUtils.isEmpty(this.cronTasks) ||</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">				!CollectionUtils.isEmpty(this.fixedRateTasks) ||</span>
+<span class="nc bnc" id="L401" title="All 2 branches missed.">				!CollectionUtils.isEmpty(this.fixedDelayTasks) ||</span>
+<span class="nc bnc" id="L402" title="All 2 branches missed.">				!CollectionUtils.isEmpty(this.oneTimeTasks));</span>
+	}
+
+
+	/**
+	 * Calls {@link #scheduleTasks()} at bean construction time.
+	 */
+	@Override
+	public void afterPropertiesSet() {
+<span class="fc" id="L411">		scheduleTasks();</span>
+<span class="fc" id="L412">	}</span>
+
+	/**
+	 * Schedule all registered tasks against the underlying
+	 * {@linkplain #setTaskScheduler(TaskScheduler) task scheduler}.
+	 */
+	protected void scheduleTasks() {
+<span class="fc bfc" id="L419" title="All 2 branches covered.">		if (this.taskScheduler == null) {</span>
+<span class="fc" id="L420">			this.localExecutor = Executors.newSingleThreadScheduledExecutor();</span>
+<span class="fc" id="L421">			this.taskScheduler = new ConcurrentTaskScheduler(this.localExecutor);</span>
+		}
+<span class="fc bfc" id="L423" title="All 2 branches covered.">		if (this.triggerTasks != null) {</span>
+<span class="fc bfc" id="L424" title="All 2 branches covered.">			for (TriggerTask task : this.triggerTasks) {</span>
+<span class="fc" id="L425">				addScheduledTask(scheduleTriggerTask(task));</span>
+<span class="fc" id="L426">			}</span>
+		}
+<span class="fc bfc" id="L428" title="All 2 branches covered.">		if (this.cronTasks != null) {</span>
+<span class="fc bfc" id="L429" title="All 2 branches covered.">			for (CronTask task : this.cronTasks) {</span>
+<span class="fc" id="L430">				addScheduledTask(scheduleCronTask(task));</span>
+<span class="fc" id="L431">			}</span>
+		}
+<span class="fc bfc" id="L433" title="All 2 branches covered.">		if (this.fixedRateTasks != null) {</span>
+<span class="fc bfc" id="L434" title="All 2 branches covered.">			for (IntervalTask task : this.fixedRateTasks) {</span>
+<span class="fc bfc" id="L435" title="All 2 branches covered.">				if (task instanceof FixedRateTask fixedRateTask) {</span>
+<span class="fc" id="L436">					addScheduledTask(scheduleFixedRateTask(fixedRateTask));</span>
+				}
+				else {
+<span class="fc" id="L439">					addScheduledTask(scheduleFixedRateTask(new FixedRateTask(task)));</span>
+				}
+<span class="fc" id="L441">			}</span>
+		}
+<span class="fc bfc" id="L443" title="All 2 branches covered.">		if (this.fixedDelayTasks != null) {</span>
+<span class="fc bfc" id="L444" title="All 2 branches covered.">			for (IntervalTask task : this.fixedDelayTasks) {</span>
+<span class="fc bfc" id="L445" title="All 2 branches covered.">				if (task instanceof FixedDelayTask fixedDelayTask) {</span>
+<span class="fc" id="L446">					addScheduledTask(scheduleFixedDelayTask(fixedDelayTask));</span>
+				}
+				else {
+<span class="fc" id="L449">					addScheduledTask(scheduleFixedDelayTask(new FixedDelayTask(task)));</span>
+				}
+<span class="fc" id="L451">			}</span>
+		}
+<span class="fc bfc" id="L453" title="All 2 branches covered.">		if (this.oneTimeTasks != null) {</span>
+<span class="fc bfc" id="L454" title="All 2 branches covered.">			for (DelayedTask task : this.oneTimeTasks) {</span>
+<span class="pc bpc" id="L455" title="1 of 2 branches missed.">				if (task instanceof OneTimeTask oneTimeTask) {</span>
+<span class="fc" id="L456">					addScheduledTask(scheduleOneTimeTask(oneTimeTask));</span>
+				}
+				else {
+<span class="nc" id="L459">					addScheduledTask(scheduleOneTimeTask(new OneTimeTask(task)));</span>
+				}
+<span class="fc" id="L461">			}</span>
+		}
+<span class="fc" id="L463">	}</span>
+
+	private void addScheduledTask(@Nullable ScheduledTask task) {
+<span class="fc bfc" id="L466" title="All 2 branches covered.">		if (task != null) {</span>
+<span class="fc" id="L467">			this.scheduledTasks.add(task);</span>
+		}
+<span class="fc" id="L469">	}</span>
+
+
+	/**
+	 * Schedule the specified trigger task, either right away if possible
+	 * or on initialization of the scheduler.
+	 * @return a handle to the scheduled task, allowing to cancel it
+	 * @since 4.3
+	 */
+	public @Nullable ScheduledTask scheduleTriggerTask(TriggerTask task) {
+<span class="fc" id="L479">		ScheduledTask scheduledTask = this.unresolvedTasks.remove(task);</span>
+<span class="fc" id="L480">		boolean newTask = false;</span>
+<span class="pc bpc" id="L481" title="1 of 2 branches missed.">		if (scheduledTask == null) {</span>
+<span class="fc" id="L482">			scheduledTask = new ScheduledTask(task);</span>
+<span class="fc" id="L483">			newTask = true;</span>
+		}
+<span class="pc bpc" id="L485" title="1 of 2 branches missed.">		if (this.taskScheduler != null) {</span>
+<span class="fc" id="L486">			scheduledTask.future = this.taskScheduler.schedule(task.getRunnable(), task.getTrigger());</span>
+		}
+		else {
+<span class="nc" id="L489">			addTriggerTask(task);</span>
+<span class="nc" id="L490">			this.unresolvedTasks.put(task, scheduledTask);</span>
+		}
+<span class="pc bpc" id="L492" title="1 of 2 branches missed.">		return (newTask ? scheduledTask : null);</span>
+	}
+
+	/**
+	 * Schedule the specified cron task, either right away if possible
+	 * or on initialization of the scheduler.
+	 * @return a handle to the scheduled task, allowing to cancel it
+	 * (or {@code null} if processing a previously registered task)
+	 * @since 4.3
+	 */
+	public @Nullable ScheduledTask scheduleCronTask(CronTask task) {
+<span class="fc" id="L503">		ScheduledTask scheduledTask = this.unresolvedTasks.remove(task);</span>
+<span class="fc" id="L504">		boolean newTask = false;</span>
+<span class="fc bfc" id="L505" title="All 2 branches covered.">		if (scheduledTask == null) {</span>
+<span class="fc" id="L506">			scheduledTask = new ScheduledTask(task);</span>
+<span class="fc" id="L507">			newTask = true;</span>
+		}
+<span class="fc bfc" id="L509" title="All 2 branches covered.">		if (this.taskScheduler != null) {</span>
+<span class="fc" id="L510">			scheduledTask.future = this.taskScheduler.schedule(task.getRunnable(), task.getTrigger());</span>
+		}
+		else {
+<span class="fc" id="L513">			addCronTask(task);</span>
+<span class="fc" id="L514">			this.unresolvedTasks.put(task, scheduledTask);</span>
+		}
+<span class="fc bfc" id="L516" title="All 2 branches covered.">		return (newTask ? scheduledTask : null);</span>
+	}
+
+	/**
+	 * Schedule the specified fixed-rate task, either right away if possible
+	 * or on initialization of the scheduler.
+	 * @return a handle to the scheduled task, allowing to cancel it
+	 * (or {@code null} if processing a previously registered task)
+	 * @since 5.0.2
+	 */
+	public @Nullable ScheduledTask scheduleFixedRateTask(FixedRateTask task) {
+<span class="fc" id="L527">		ScheduledTask scheduledTask = this.unresolvedTasks.remove(task);</span>
+<span class="fc" id="L528">		boolean newTask = false;</span>
+<span class="fc bfc" id="L529" title="All 2 branches covered.">		if (scheduledTask == null) {</span>
+<span class="fc" id="L530">			scheduledTask = new ScheduledTask(task);</span>
+<span class="fc" id="L531">			newTask = true;</span>
+		}
+<span class="fc bfc" id="L533" title="All 2 branches covered.">		if (this.taskScheduler != null) {</span>
+<span class="fc" id="L534">			Duration initialDelay = task.getInitialDelayDuration();</span>
+<span class="fc bfc" id="L535" title="All 2 branches covered.">			if (initialDelay.toNanos() &gt; 0) {</span>
+<span class="fc" id="L536">				Instant startTime = this.taskScheduler.getClock().instant().plus(initialDelay);</span>
+<span class="fc" id="L537">				scheduledTask.future =</span>
+<span class="fc" id="L538">						this.taskScheduler.scheduleAtFixedRate(task.getRunnable(), startTime, task.getIntervalDuration());</span>
+<span class="fc" id="L539">			}</span>
+			else {
+<span class="fc" id="L541">				scheduledTask.future =</span>
+<span class="fc" id="L542">						this.taskScheduler.scheduleAtFixedRate(task.getRunnable(), task.getIntervalDuration());</span>
+			}
+<span class="fc" id="L544">		}</span>
+		else {
+<span class="fc" id="L546">			addFixedRateTask(task);</span>
+<span class="fc" id="L547">			this.unresolvedTasks.put(task, scheduledTask);</span>
+		}
+<span class="fc bfc" id="L549" title="All 2 branches covered.">		return (newTask ? scheduledTask : null);</span>
+	}
+
+	/**
+	 * Schedule the specified fixed-delay task, either right away if possible
+	 * or on initialization of the scheduler.
+	 * @return a handle to the scheduled task, allowing to cancel it
+	 * (or {@code null} if processing a previously registered task)
+	 * @since 5.0.2
+	 */
+	public @Nullable ScheduledTask scheduleFixedDelayTask(FixedDelayTask task) {
+<span class="fc" id="L560">		ScheduledTask scheduledTask = this.unresolvedTasks.remove(task);</span>
+<span class="fc" id="L561">		boolean newTask = false;</span>
+<span class="fc bfc" id="L562" title="All 2 branches covered.">		if (scheduledTask == null) {</span>
+<span class="fc" id="L563">			scheduledTask = new ScheduledTask(task);</span>
+<span class="fc" id="L564">			newTask = true;</span>
+		}
+<span class="fc bfc" id="L566" title="All 2 branches covered.">		if (this.taskScheduler != null) {</span>
+<span class="fc" id="L567">			Duration initialDelay = task.getInitialDelayDuration();</span>
+<span class="pc bpc" id="L568" title="1 of 2 branches missed.">			if (!initialDelay.isNegative()) {</span>
+<span class="fc" id="L569">				Instant startTime = this.taskScheduler.getClock().instant().plus(task.getInitialDelayDuration());</span>
+<span class="fc" id="L570">				scheduledTask.future =</span>
+<span class="fc" id="L571">						this.taskScheduler.scheduleWithFixedDelay(task.getRunnable(), startTime, task.getIntervalDuration());</span>
+<span class="fc" id="L572">			}</span>
+			else {
+<span class="nc" id="L574">				scheduledTask.future =</span>
+<span class="nc" id="L575">						this.taskScheduler.scheduleWithFixedDelay(task.getRunnable(), task.getIntervalDuration());</span>
+			}
+<span class="fc" id="L577">		}</span>
+		else {
+<span class="fc" id="L579">			addFixedDelayTask(task);</span>
+<span class="fc" id="L580">			this.unresolvedTasks.put(task, scheduledTask);</span>
+		}
+<span class="fc bfc" id="L582" title="All 2 branches covered.">		return (newTask ? scheduledTask : null);</span>
+	}
+
+	/**
+	 * Schedule the specified one-time task, either right away if possible
+	 * or on initialization of the scheduler.
+	 * @return a handle to the scheduled task, allowing to cancel it
+	 * (or {@code null} if processing a previously registered task)
+	 * @since 6.1
+	 */
+	public @Nullable ScheduledTask scheduleOneTimeTask(OneTimeTask task) {
+<span class="fc" id="L593">		ScheduledTask scheduledTask = this.unresolvedTasks.remove(task);</span>
+<span class="fc" id="L594">		boolean newTask = false;</span>
+<span class="fc bfc" id="L595" title="All 2 branches covered.">		if (scheduledTask == null) {</span>
+<span class="fc" id="L596">			scheduledTask = new ScheduledTask(task);</span>
+<span class="fc" id="L597">			newTask = true;</span>
+		}
+<span class="fc bfc" id="L599" title="All 2 branches covered.">		if (this.taskScheduler != null) {</span>
+<span class="fc" id="L600">			Instant startTime = this.taskScheduler.getClock().instant().plus(task.getInitialDelayDuration());</span>
+<span class="fc" id="L601">			scheduledTask.future = this.taskScheduler.schedule(task.getRunnable(), startTime);</span>
+<span class="fc" id="L602">		}</span>
+		else {
+<span class="fc" id="L604">			addOneTimeTask(task);</span>
+<span class="fc" id="L605">			this.unresolvedTasks.put(task, scheduledTask);</span>
+		}
+<span class="fc bfc" id="L607" title="All 2 branches covered.">		return (newTask ? scheduledTask : null);</span>
+	}
+
+
+	/**
+	 * Return all locally registered tasks that have been scheduled by this registrar.
+	 * @since 5.0.2
+	 * @see #addTriggerTask
+	 * @see #addCronTask
+	 * @see #addFixedRateTask
+	 * @see #addFixedDelayTask
+	 */
+	@Override
+	public Set&lt;ScheduledTask&gt; getScheduledTasks() {
+<span class="fc" id="L621">		return Collections.unmodifiableSet(this.scheduledTasks);</span>
+	}
+
+	@Override
+	public void destroy() {
+<span class="fc bfc" id="L626" title="All 2 branches covered.">		for (ScheduledTask task : this.scheduledTasks) {</span>
+<span class="fc" id="L627">			task.cancel(false);</span>
+<span class="fc" id="L628">		}</span>
+<span class="fc bfc" id="L629" title="All 2 branches covered.">		if (this.localExecutor != null) {</span>
+<span class="fc" id="L630">			this.localExecutor.shutdownNow();</span>
+		}
+<span class="fc" id="L632">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

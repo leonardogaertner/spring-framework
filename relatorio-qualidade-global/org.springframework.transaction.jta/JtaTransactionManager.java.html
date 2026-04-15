@@ -1,0 +1,1213 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>JtaTransactionManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.transaction.jta</a> &gt; <span class="el_source">JtaTransactionManager.java</span></div><h1>JtaTransactionManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.transaction.jta;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.Serializable;
+import java.util.List;
+import java.util.Properties;
+
+import javax.naming.NamingException;
+
+import jakarta.transaction.HeuristicMixedException;
+import jakarta.transaction.HeuristicRollbackException;
+import jakarta.transaction.InvalidTransactionException;
+import jakarta.transaction.NotSupportedException;
+import jakarta.transaction.RollbackException;
+import jakarta.transaction.Status;
+import jakarta.transaction.SystemException;
+import jakarta.transaction.Transaction;
+import jakarta.transaction.TransactionManager;
+import jakarta.transaction.TransactionSynchronizationRegistry;
+import jakarta.transaction.UserTransaction;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.jndi.JndiTemplate;
+import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.HeuristicCompletionException;
+import org.springframework.transaction.IllegalTransactionStateException;
+import org.springframework.transaction.InvalidIsolationLevelException;
+import org.springframework.transaction.NestedTransactionNotSupportedException;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionSuspensionNotSupportedException;
+import org.springframework.transaction.TransactionSystemException;
+import org.springframework.transaction.UnexpectedRollbackException;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@link org.springframework.transaction.PlatformTransactionManager} implementation
+ * for JTA, delegating to a backend JTA provider. This is typically used to delegate
+ * to a Jakarta EE server's transaction coordinator, but may also be configured with a
+ * local JTA provider which is embedded within the application.
+ *
+ * &lt;p&gt;This transaction manager is appropriate for handling distributed transactions,
+ * i.e. transactions that span multiple resources, and for controlling transactions on
+ * application server resources (for example, JDBC DataSources available in JNDI) in general.
+ * For a single JDBC DataSource, DataSourceTransactionManager is perfectly sufficient,
+ * and for accessing a single resource with Hibernate (including transactional cache),
+ * HibernateTransactionManager is appropriate, for example.
+ *
+ * &lt;p&gt;&lt;b&gt;For typical JTA transactions (REQUIRED, SUPPORTS, MANDATORY, NEVER), a plain
+ * JtaTransactionManager definition is all you need, portable across all Jakarta EE servers.&lt;/b&gt;
+ * This corresponds to the functionality of the JTA UserTransaction, for which Jakarta EE
+ * specifies a standard JNDI name (&quot;java:comp/UserTransaction&quot;). There is no need to
+ * configure a server-specific TransactionManager lookup for this kind of JTA usage.
+ *
+ * &lt;p&gt;&lt;b&gt;Transaction suspension (REQUIRES_NEW, NOT_SUPPORTED) is just available with a
+ * JTA TransactionManager being registered.&lt;/b&gt; Common TransactionManager locations are
+ * autodetected by JtaTransactionManager, provided that the &quot;autodetectTransactionManager&quot;
+ * flag is set to &quot;true&quot; (which it is by default).
+ *
+ * &lt;p&gt;Note: Support for the JTA TransactionManager interface is not required by Jakarta EE.
+ * Almost all Jakarta EE servers expose it, but do so as extension to EE. There might be some
+ * issues with compatibility, despite the TransactionManager interface being part of JTA.
+ *
+ * &lt;p&gt;This pure JtaTransactionManager class supports timeouts but not per-transaction
+ * isolation levels. Custom subclasses may override the {@link #doJtaBegin} method for
+ * specific JTA extensions in order to provide this functionality. Such adapters for
+ * specific Jakarta EE transaction coordinators may also expose transaction names for
+ * monitoring; with standard JTA, transaction names will simply be ignored.
+ *
+ * &lt;p&gt;JTA 1.1 adds the TransactionSynchronizationRegistry facility, as public Jakarta EE
+ * API in addition to the standard JTA UserTransaction handle. As of Spring 2.5, this
+ * JtaTransactionManager autodetects the TransactionSynchronizationRegistry and uses
+ * it for registering Spring-managed synchronizations when participating in an existing
+ * JTA transaction (for example, controlled by EJB CMT). If no TransactionSynchronizationRegistry
+ * is available, then such synchronizations will be registered via the (non-EE) JTA
+ * TransactionManager handle.
+ *
+ * &lt;p&gt;This class is serializable. However, active synchronizations do not survive serialization.
+ *
+ * @author Juergen Hoeller
+ * @since 24.03.2003
+ * @see jakarta.transaction.UserTransaction
+ * @see jakarta.transaction.TransactionManager
+ * @see jakarta.transaction.TransactionSynchronizationRegistry
+ * @see #setUserTransactionName
+ * @see #setUserTransaction
+ * @see #setTransactionManagerName
+ * @see #setTransactionManager
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class JtaTransactionManager extends AbstractPlatformTransactionManager
+		implements TransactionFactory, InitializingBean, Serializable {
+
+	/**
+	 * Default JNDI location for the JTA UserTransaction. Many Jakarta EE servers
+	 * also provide support for the JTA TransactionManager interface there.
+	 * @see #setUserTransactionName
+	 * @see #setAutodetectTransactionManager
+	 */
+	public static final String DEFAULT_USER_TRANSACTION_NAME = &quot;java:comp/UserTransaction&quot;;
+
+	/**
+	 * Fallback JNDI locations for the JTA TransactionManager. Applied if
+	 * the JTA UserTransaction does not implement the JTA TransactionManager
+	 * interface, provided that the &quot;autodetectTransactionManager&quot; flag is &quot;true&quot;.
+	 * @see #setTransactionManagerName
+	 * @see #setAutodetectTransactionManager
+	 */
+<span class="fc" id="L130">	public static final String[] FALLBACK_TRANSACTION_MANAGER_NAMES =</span>
+			new String[] {&quot;java:comp/TransactionManager&quot;, &quot;java:appserver/TransactionManager&quot;,
+					&quot;java:pm/TransactionManager&quot;, &quot;java:/TransactionManager&quot;};
+
+	/**
+	 * Standard Jakarta EE JNDI location for the JTA TransactionSynchronizationRegistry.
+	 * Autodetected when available.
+	 */
+	public static final String DEFAULT_TRANSACTION_SYNCHRONIZATION_REGISTRY_NAME =
+			&quot;java:comp/TransactionSynchronizationRegistry&quot;;
+
+
+<span class="fc" id="L142">	private transient JndiTemplate jndiTemplate = new JndiTemplate();</span>
+
+	private transient @Nullable UserTransaction userTransaction;
+
+	private @Nullable String userTransactionName;
+
+<span class="fc" id="L148">	private boolean autodetectUserTransaction = true;</span>
+
+<span class="fc" id="L150">	private boolean cacheUserTransaction = true;</span>
+
+<span class="fc" id="L152">	private boolean userTransactionObtainedFromJndi = false;</span>
+
+	private transient @Nullable TransactionManager transactionManager;
+
+	private @Nullable String transactionManagerName;
+
+<span class="fc" id="L158">	private boolean autodetectTransactionManager = true;</span>
+
+	private transient @Nullable TransactionSynchronizationRegistry transactionSynchronizationRegistry;
+
+	private @Nullable String transactionSynchronizationRegistryName;
+
+<span class="fc" id="L164">	private boolean autodetectTransactionSynchronizationRegistry = true;</span>
+
+<span class="fc" id="L166">	private boolean allowCustomIsolationLevels = false;</span>
+
+
+	/**
+	 * Create a new JtaTransactionManager instance, to be configured as bean.
+	 * Invoke {@code afterPropertiesSet} to activate the configuration.
+	 * @see #setUserTransactionName
+	 * @see #setUserTransaction
+	 * @see #setTransactionManagerName
+	 * @see #setTransactionManager
+	 * @see #afterPropertiesSet()
+	 */
+<span class="fc" id="L178">	public JtaTransactionManager() {</span>
+<span class="fc" id="L179">		setNestedTransactionAllowed(true);</span>
+<span class="fc" id="L180">	}</span>
+
+	/**
+	 * Create a new JtaTransactionManager instance.
+	 * @param userTransaction the JTA UserTransaction to use as direct reference
+	 */
+	public JtaTransactionManager(UserTransaction userTransaction) {
+<span class="fc" id="L187">		this();</span>
+<span class="fc" id="L188">		Assert.notNull(userTransaction, &quot;UserTransaction must not be null&quot;);</span>
+<span class="fc" id="L189">		this.userTransaction = userTransaction;</span>
+<span class="fc" id="L190">	}</span>
+
+	/**
+	 * Create a new JtaTransactionManager instance.
+	 * @param userTransaction the JTA UserTransaction to use as direct reference
+	 * @param transactionManager the JTA TransactionManager to use as direct reference
+	 */
+	public JtaTransactionManager(UserTransaction userTransaction, TransactionManager transactionManager) {
+<span class="fc" id="L198">		this();</span>
+<span class="fc" id="L199">		Assert.notNull(userTransaction, &quot;UserTransaction must not be null&quot;);</span>
+<span class="fc" id="L200">		Assert.notNull(transactionManager, &quot;TransactionManager must not be null&quot;);</span>
+<span class="fc" id="L201">		this.userTransaction = userTransaction;</span>
+<span class="fc" id="L202">		this.transactionManager = transactionManager;</span>
+<span class="fc" id="L203">	}</span>
+
+	/**
+	 * Create a new JtaTransactionManager instance.
+	 * @param transactionManager the JTA TransactionManager to use as direct reference
+	 */
+	public JtaTransactionManager(TransactionManager transactionManager) {
+<span class="fc" id="L210">		this();</span>
+<span class="fc" id="L211">		Assert.notNull(transactionManager, &quot;TransactionManager must not be null&quot;);</span>
+<span class="fc" id="L212">		this.transactionManager = transactionManager;</span>
+<span class="fc" id="L213">		this.userTransaction = buildUserTransaction(transactionManager);</span>
+<span class="fc" id="L214">	}</span>
+
+
+	/**
+	 * Set the JndiTemplate to use for JNDI lookups.
+	 * A default one is used if not set.
+	 */
+	public void setJndiTemplate(JndiTemplate jndiTemplate) {
+<span class="fc" id="L222">		Assert.notNull(jndiTemplate, &quot;JndiTemplate must not be null&quot;);</span>
+<span class="fc" id="L223">		this.jndiTemplate = jndiTemplate;</span>
+<span class="fc" id="L224">	}</span>
+
+	/**
+	 * Return the JndiTemplate used for JNDI lookups.
+	 */
+	public JndiTemplate getJndiTemplate() {
+<span class="fc" id="L230">		return this.jndiTemplate;</span>
+	}
+
+	/**
+	 * Set the JNDI environment to use for JNDI lookups.
+	 * Creates a JndiTemplate with the given environment settings.
+	 * @see #setJndiTemplate
+	 */
+	public void setJndiEnvironment(@Nullable Properties jndiEnvironment) {
+<span class="nc" id="L239">		this.jndiTemplate = new JndiTemplate(jndiEnvironment);</span>
+<span class="nc" id="L240">	}</span>
+
+	/**
+	 * Return the JNDI environment to use for JNDI lookups.
+	 */
+	public @Nullable Properties getJndiEnvironment() {
+<span class="nc" id="L246">		return this.jndiTemplate.getEnvironment();</span>
+	}
+
+
+	/**
+	 * Set the JTA UserTransaction to use as direct reference.
+	 * &lt;p&gt;Typically just used for local JTA setups; in a Jakarta EE environment,
+	 * the UserTransaction will always be fetched from JNDI.
+	 * @see #setUserTransactionName
+	 * @see #setAutodetectUserTransaction
+	 */
+	public void setUserTransaction(@Nullable UserTransaction userTransaction) {
+<span class="fc" id="L258">		this.userTransaction = userTransaction;</span>
+<span class="fc" id="L259">	}</span>
+
+	/**
+	 * Return the JTA UserTransaction that this transaction manager uses.
+	 */
+	public @Nullable UserTransaction getUserTransaction() {
+<span class="fc" id="L265">		return this.userTransaction;</span>
+	}
+
+	/**
+	 * Set the JNDI name of the JTA UserTransaction.
+	 * &lt;p&gt;Note that the UserTransaction will be autodetected at the Jakarta EE
+	 * default location &quot;java:comp/UserTransaction&quot; if not specified explicitly.
+	 * @see #DEFAULT_USER_TRANSACTION_NAME
+	 * @see #setUserTransaction
+	 * @see #setAutodetectUserTransaction
+	 */
+	public void setUserTransactionName(String userTransactionName) {
+<span class="fc" id="L277">		this.userTransactionName = userTransactionName;</span>
+<span class="fc" id="L278">	}</span>
+
+	/**
+	 * Set whether to autodetect the JTA UserTransaction at its default
+	 * JNDI location &quot;java:comp/UserTransaction&quot;, as specified by Jakarta EE.
+	 * Will proceed without UserTransaction if none found.
+	 * &lt;p&gt;Default is &quot;true&quot;, autodetecting the UserTransaction unless
+	 * it has been specified explicitly. Turn this flag off to allow for
+	 * JtaTransactionManager operating against the TransactionManager only,
+	 * despite a default UserTransaction being available.
+	 * @see #DEFAULT_USER_TRANSACTION_NAME
+	 */
+	public void setAutodetectUserTransaction(boolean autodetectUserTransaction) {
+<span class="nc" id="L291">		this.autodetectUserTransaction = autodetectUserTransaction;</span>
+<span class="nc" id="L292">	}</span>
+
+	/**
+	 * Set whether to cache the JTA UserTransaction object fetched from JNDI.
+	 * &lt;p&gt;Default is &quot;true&quot;: UserTransaction lookup will only happen at startup,
+	 * reusing the same UserTransaction handle for all transactions of all threads.
+	 * This is the most efficient choice for all application servers that provide
+	 * a shared UserTransaction object (the typical case).
+	 * &lt;p&gt;Turn this flag off to enforce a fresh lookup of the UserTransaction
+	 * for every transaction. This is only necessary for application servers
+	 * that return a new UserTransaction for every transaction, keeping state
+	 * tied to the UserTransaction object itself rather than the current thread.
+	 * @see #setUserTransactionName
+	 */
+	public void setCacheUserTransaction(boolean cacheUserTransaction) {
+<span class="fc" id="L307">		this.cacheUserTransaction = cacheUserTransaction;</span>
+<span class="fc" id="L308">	}</span>
+
+	/**
+	 * Set the JTA TransactionManager to use as direct reference.
+	 * &lt;p&gt;A TransactionManager is necessary for suspending and resuming transactions,
+	 * as this not supported by the UserTransaction interface.
+	 * &lt;p&gt;Note that the TransactionManager will be autodetected if the JTA
+	 * UserTransaction object implements the JTA TransactionManager interface too,
+	 * as well as autodetected at various well-known fallback JNDI locations.
+	 * @see #setTransactionManagerName
+	 * @see #setAutodetectTransactionManager
+	 */
+	public void setTransactionManager(@Nullable TransactionManager transactionManager) {
+<span class="fc" id="L321">		this.transactionManager = transactionManager;</span>
+<span class="fc" id="L322">	}</span>
+
+	/**
+	 * Return the JTA TransactionManager that this transaction manager uses, if any.
+	 */
+	public @Nullable TransactionManager getTransactionManager() {
+<span class="fc" id="L328">		return this.transactionManager;</span>
+	}
+
+	/**
+	 * Set the JNDI name of the JTA TransactionManager.
+	 * &lt;p&gt;A TransactionManager is necessary for suspending and resuming transactions,
+	 * as this not supported by the UserTransaction interface.
+	 * &lt;p&gt;Note that the TransactionManager will be autodetected if the JTA
+	 * UserTransaction object implements the JTA TransactionManager interface too,
+	 * as well as autodetected at various well-known fallback JNDI locations.
+	 * @see #setTransactionManager
+	 * @see #setAutodetectTransactionManager
+	 */
+	public void setTransactionManagerName(String transactionManagerName) {
+<span class="fc" id="L342">		this.transactionManagerName = transactionManagerName;</span>
+<span class="fc" id="L343">	}</span>
+
+	/**
+	 * Set whether to autodetect a JTA UserTransaction object that implements
+	 * the JTA TransactionManager interface too (i.e. the JNDI location for the
+	 * TransactionManager is &quot;java:comp/UserTransaction&quot;, same as for the UserTransaction).
+	 * Also checks the fallback JNDI locations &quot;java:comp/TransactionManager&quot; and
+	 * &quot;java:/TransactionManager&quot;. Will proceed without TransactionManager if none found.
+	 * &lt;p&gt;Default is &quot;true&quot;, autodetecting the TransactionManager unless it has been
+	 * specified explicitly. Can be turned off to deliberately ignore an available
+	 * TransactionManager, for example when there are known issues with suspend/resume
+	 * and any attempt to use REQUIRES_NEW or NOT_SUPPORTED should fail fast.
+	 * @see #FALLBACK_TRANSACTION_MANAGER_NAMES
+	 */
+	public void setAutodetectTransactionManager(boolean autodetectTransactionManager) {
+<span class="nc" id="L358">		this.autodetectTransactionManager = autodetectTransactionManager;</span>
+<span class="nc" id="L359">	}</span>
+
+	/**
+	 * Set the JTA 1.1 TransactionSynchronizationRegistry to use as direct reference.
+	 * &lt;p&gt;A TransactionSynchronizationRegistry allows for interposed registration
+	 * of transaction synchronizations, as an alternative to the regular registration
+	 * methods on the JTA TransactionManager API. Also, it is an official part of the
+	 * Jakarta EE platform, in contrast to the JTA TransactionManager itself.
+	 * &lt;p&gt;Note that the TransactionSynchronizationRegistry will be autodetected in JNDI and
+	 * also from the UserTransaction/TransactionManager object if implemented there as well.
+	 * @see #setTransactionSynchronizationRegistryName
+	 * @see #setAutodetectTransactionSynchronizationRegistry
+	 */
+	public void setTransactionSynchronizationRegistry(@Nullable TransactionSynchronizationRegistry transactionSynchronizationRegistry) {
+<span class="nc" id="L373">		this.transactionSynchronizationRegistry = transactionSynchronizationRegistry;</span>
+<span class="nc" id="L374">	}</span>
+
+	/**
+	 * Return the JTA 1.1 TransactionSynchronizationRegistry that this transaction manager uses, if any.
+	 */
+	public @Nullable TransactionSynchronizationRegistry getTransactionSynchronizationRegistry() {
+<span class="nc" id="L380">		return this.transactionSynchronizationRegistry;</span>
+	}
+
+	/**
+	 * Set the JNDI name of the JTA 1.1 TransactionSynchronizationRegistry.
+	 * &lt;p&gt;Note that the TransactionSynchronizationRegistry will be autodetected
+	 * at the Jakarta EE default location &quot;java:comp/TransactionSynchronizationRegistry&quot;
+	 * if not specified explicitly.
+	 * @see #DEFAULT_TRANSACTION_SYNCHRONIZATION_REGISTRY_NAME
+	 */
+	public void setTransactionSynchronizationRegistryName(String transactionSynchronizationRegistryName) {
+<span class="nc" id="L391">		this.transactionSynchronizationRegistryName = transactionSynchronizationRegistryName;</span>
+<span class="nc" id="L392">	}</span>
+
+	/**
+	 * Set whether to autodetect a JTA 1.1 TransactionSynchronizationRegistry object
+	 * at its default JDNI location (&quot;java:comp/TransactionSynchronizationRegistry&quot;)
+	 * if the UserTransaction has also been obtained from JNDI, and also whether
+	 * to fall back to checking whether the JTA UserTransaction/TransactionManager
+	 * object implements the JTA TransactionSynchronizationRegistry interface too.
+	 * &lt;p&gt;Default is &quot;true&quot;, autodetecting the TransactionSynchronizationRegistry
+	 * unless it has been specified explicitly. Can be turned off to delegate
+	 * synchronization registration to the regular JTA TransactionManager API.
+	 */
+	public void setAutodetectTransactionSynchronizationRegistry(boolean autodetectTransactionSynchronizationRegistry) {
+<span class="nc" id="L405">		this.autodetectTransactionSynchronizationRegistry = autodetectTransactionSynchronizationRegistry;</span>
+<span class="nc" id="L406">	}</span>
+
+	/**
+	 * Set whether to allow custom isolation levels to be specified.
+	 * &lt;p&gt;Default is &quot;false&quot;, throwing an exception if a non-default isolation level
+	 * is specified for a transaction. Turn this flag on if affected resource adapters
+	 * check the thread-bound transaction context and apply the specified isolation
+	 * levels individually (for example, through an IsolationLevelDataSourceAdapter).
+	 * @see org.springframework.jdbc.datasource.IsolationLevelDataSourceAdapter
+	 * @see org.springframework.jdbc.datasource.lookup.IsolationLevelDataSourceRouter
+	 */
+	public void setAllowCustomIsolationLevels(boolean allowCustomIsolationLevels) {
+<span class="fc" id="L418">		this.allowCustomIsolationLevels = allowCustomIsolationLevels;</span>
+<span class="fc" id="L419">	}</span>
+
+
+	/**
+	 * Initialize the UserTransaction as well as the TransactionManager handle.
+	 * @see #initUserTransactionAndTransactionManager()
+	 */
+	@Override
+	public void afterPropertiesSet() throws TransactionSystemException {
+<span class="fc" id="L428">		initUserTransactionAndTransactionManager();</span>
+<span class="fc" id="L429">		checkUserTransactionAndTransactionManager();</span>
+<span class="fc" id="L430">		initTransactionSynchronizationRegistry();</span>
+<span class="fc" id="L431">	}</span>
+
+	/**
+	 * Initialize the UserTransaction as well as the TransactionManager handle.
+	 * @throws TransactionSystemException if initialization failed
+	 */
+	protected void initUserTransactionAndTransactionManager() throws TransactionSystemException {
+<span class="fc bfc" id="L438" title="All 2 branches covered.">		if (this.userTransaction == null) {</span>
+			// Fetch JTA UserTransaction from JNDI, if necessary.
+<span class="fc bfc" id="L440" title="All 2 branches covered.">			if (StringUtils.hasLength(this.userTransactionName)) {</span>
+<span class="fc" id="L441">				this.userTransaction = lookupUserTransaction(this.userTransactionName);</span>
+<span class="fc" id="L442">				this.userTransactionObtainedFromJndi = true;</span>
+			}
+			else {
+<span class="fc" id="L445">				this.userTransaction = retrieveUserTransaction();</span>
+<span class="pc bpc" id="L446" title="2 of 4 branches missed.">				if (this.userTransaction == null &amp;&amp; this.autodetectUserTransaction) {</span>
+					// Autodetect UserTransaction at its default JNDI location.
+<span class="fc" id="L448">					this.userTransaction = findUserTransaction();</span>
+				}
+			}
+		}
+
+<span class="fc bfc" id="L453" title="All 2 branches covered.">		if (this.transactionManager == null) {</span>
+			// Fetch JTA TransactionManager from JNDI, if necessary.
+<span class="fc bfc" id="L455" title="All 2 branches covered.">			if (StringUtils.hasLength(this.transactionManagerName)) {</span>
+<span class="fc" id="L456">				this.transactionManager = lookupTransactionManager(this.transactionManagerName);</span>
+			}
+			else {
+<span class="fc" id="L459">				this.transactionManager = retrieveTransactionManager();</span>
+<span class="pc bpc" id="L460" title="2 of 4 branches missed.">				if (this.transactionManager == null &amp;&amp; this.autodetectTransactionManager) {</span>
+					// Autodetect UserTransaction object that implements TransactionManager,
+					// and check fallback JNDI locations otherwise.
+<span class="fc" id="L463">					this.transactionManager = findTransactionManager(this.userTransaction);</span>
+				}
+			}
+		}
+
+		// If only JTA TransactionManager specified, create UserTransaction handle for it.
+<span class="pc bpc" id="L469" title="1 of 4 branches missed.">		if (this.userTransaction == null &amp;&amp; this.transactionManager != null) {</span>
+<span class="fc" id="L470">			this.userTransaction = buildUserTransaction(this.transactionManager);</span>
+		}
+<span class="fc" id="L472">	}</span>
+
+	/**
+	 * Check the UserTransaction as well as the TransactionManager handle,
+	 * assuming standard JTA requirements.
+	 * @throws IllegalStateException if no sufficient handles are available
+	 */
+	protected void checkUserTransactionAndTransactionManager() throws IllegalStateException {
+		// We at least need the JTA UserTransaction.
+<span class="pc bpc" id="L481" title="1 of 2 branches missed.">		if (this.userTransaction != null) {</span>
+<span class="pc bpc" id="L482" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L483">				logger.debug(&quot;Using JTA UserTransaction: &quot; + this.userTransaction);</span>
+			}
+		}
+		else {
+<span class="nc" id="L487">			throw new IllegalStateException(&quot;No JTA UserTransaction available - specify either &quot; +</span>
+					&quot;'userTransaction' or 'userTransactionName' or 'transactionManager' or 'transactionManagerName'&quot;);
+		}
+
+		// For transaction suspension, the JTA TransactionManager is necessary too.
+<span class="fc bfc" id="L492" title="All 2 branches covered.">		if (this.transactionManager != null) {</span>
+<span class="pc bpc" id="L493" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L494">				logger.debug(&quot;Using JTA TransactionManager: &quot; + this.transactionManager);</span>
+			}
+		}
+		else {
+<span class="fc" id="L498">			logger.warn(&quot;No JTA TransactionManager found: transaction suspension not available&quot;);</span>
+		}
+<span class="fc" id="L500">	}</span>
+
+	/**
+	 * Initialize the JTA 1.1 TransactionSynchronizationRegistry, if available.
+	 * &lt;p&gt;To be called after {@link #initUserTransactionAndTransactionManager()},
+	 * since it may check the UserTransaction and TransactionManager handles.
+	 * @throws TransactionSystemException if initialization failed
+	 */
+	protected void initTransactionSynchronizationRegistry() {
+<span class="pc bpc" id="L509" title="1 of 2 branches missed.">		if (this.transactionSynchronizationRegistry == null) {</span>
+			// Fetch JTA TransactionSynchronizationRegistry from JNDI, if necessary.
+<span class="pc bpc" id="L511" title="1 of 2 branches missed.">			if (StringUtils.hasLength(this.transactionSynchronizationRegistryName)) {</span>
+<span class="nc" id="L512">				this.transactionSynchronizationRegistry =</span>
+<span class="nc" id="L513">						lookupTransactionSynchronizationRegistry(this.transactionSynchronizationRegistryName);</span>
+			}
+			else {
+<span class="fc" id="L516">				this.transactionSynchronizationRegistry = retrieveTransactionSynchronizationRegistry();</span>
+<span class="pc bpc" id="L517" title="2 of 4 branches missed.">				if (this.transactionSynchronizationRegistry == null &amp;&amp; this.autodetectTransactionSynchronizationRegistry) {</span>
+					// Autodetect in JNDI if applicable, and check UserTransaction/TransactionManager
+					// object that implements TransactionSynchronizationRegistry otherwise.
+<span class="fc" id="L520">					this.transactionSynchronizationRegistry =</span>
+<span class="fc" id="L521">							findTransactionSynchronizationRegistry(this.userTransaction, this.transactionManager);</span>
+				}
+			}
+		}
+
+<span class="pc bpc" id="L526" title="1 of 2 branches missed.">		if (this.transactionSynchronizationRegistry != null) {</span>
+<span class="nc bnc" id="L527" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L528">				logger.debug(&quot;Using JTA TransactionSynchronizationRegistry: &quot; + this.transactionSynchronizationRegistry);</span>
+			}
+		}
+<span class="fc" id="L531">	}</span>
+
+
+	/**
+	 * Build a UserTransaction handle based on the given TransactionManager.
+	 * @param transactionManager the TransactionManager
+	 * @return a corresponding UserTransaction handle
+	 */
+	protected UserTransaction buildUserTransaction(TransactionManager transactionManager) {
+<span class="pc bpc" id="L540" title="1 of 2 branches missed.">		if (transactionManager instanceof UserTransaction ut) {</span>
+<span class="nc" id="L541">			return ut;</span>
+		}
+		else {
+<span class="fc" id="L544">			return new UserTransactionAdapter(transactionManager);</span>
+		}
+	}
+
+	/**
+	 * Look up the JTA UserTransaction in JNDI via the configured name.
+	 * &lt;p&gt;Called by {@code afterPropertiesSet} if no direct UserTransaction reference was set.
+	 * Can be overridden in subclasses to provide a different UserTransaction object.
+	 * @param userTransactionName the JNDI name of the UserTransaction
+	 * @return the UserTransaction object
+	 * @throws TransactionSystemException if the JNDI lookup failed
+	 * @see #setJndiTemplate
+	 * @see #setUserTransactionName
+	 */
+	protected UserTransaction lookupUserTransaction(String userTransactionName)
+			throws TransactionSystemException {
+		try {
+<span class="pc bpc" id="L561" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L562">				logger.debug(&quot;Retrieving JTA UserTransaction from JNDI location [&quot; + userTransactionName + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L564">			return getJndiTemplate().lookup(userTransactionName, UserTransaction.class);</span>
+		}
+<span class="nc" id="L566">		catch (NamingException ex) {</span>
+<span class="nc" id="L567">			throw new TransactionSystemException(</span>
+					&quot;JTA UserTransaction is not available at JNDI location [&quot; + userTransactionName + &quot;]&quot;, ex);
+		}
+	}
+
+	/**
+	 * Look up the JTA TransactionManager in JNDI via the configured name.
+	 * &lt;p&gt;Called by {@code afterPropertiesSet} if no direct TransactionManager reference was set.
+	 * Can be overridden in subclasses to provide a different TransactionManager object.
+	 * @param transactionManagerName the JNDI name of the TransactionManager
+	 * @return the UserTransaction object
+	 * @throws TransactionSystemException if the JNDI lookup failed
+	 * @see #setJndiTemplate
+	 * @see #setTransactionManagerName
+	 */
+	protected TransactionManager lookupTransactionManager(String transactionManagerName)
+			throws TransactionSystemException {
+		try {
+<span class="pc bpc" id="L585" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L586">				logger.debug(&quot;Retrieving JTA TransactionManager from JNDI location [&quot; + transactionManagerName + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L588">			return getJndiTemplate().lookup(transactionManagerName, TransactionManager.class);</span>
+		}
+<span class="nc" id="L590">		catch (NamingException ex) {</span>
+<span class="nc" id="L591">			throw new TransactionSystemException(</span>
+					&quot;JTA TransactionManager is not available at JNDI location [&quot; + transactionManagerName + &quot;]&quot;, ex);
+		}
+	}
+
+	/**
+	 * Look up the JTA 1.1 TransactionSynchronizationRegistry in JNDI via the configured name.
+	 * &lt;p&gt;Can be overridden in subclasses to provide a different TransactionManager object.
+	 * @param registryName the JNDI name of the
+	 * TransactionSynchronizationRegistry
+	 * @return the TransactionSynchronizationRegistry object
+	 * @throws TransactionSystemException if the JNDI lookup failed
+	 * @see #setJndiTemplate
+	 * @see #setTransactionSynchronizationRegistryName
+	 */
+	protected TransactionSynchronizationRegistry lookupTransactionSynchronizationRegistry(String registryName) throws TransactionSystemException {
+		try {
+<span class="nc bnc" id="L608" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L609">				logger.debug(&quot;Retrieving JTA TransactionSynchronizationRegistry from JNDI location [&quot; + registryName + &quot;]&quot;);</span>
+			}
+<span class="nc" id="L611">			return getJndiTemplate().lookup(registryName, TransactionSynchronizationRegistry.class);</span>
+		}
+<span class="nc" id="L613">		catch (NamingException ex) {</span>
+<span class="nc" id="L614">			throw new TransactionSystemException(</span>
+					&quot;JTA TransactionSynchronizationRegistry is not available at JNDI location [&quot; + registryName + &quot;]&quot;, ex);
+		}
+	}
+
+	/**
+	 * Allows subclasses to retrieve the JTA UserTransaction in a vendor-specific manner.
+	 * Only called if no &quot;userTransaction&quot; or &quot;userTransactionName&quot; specified.
+	 * &lt;p&gt;The default implementation simply returns {@code null}.
+	 * @return the JTA UserTransaction handle to use, or {@code null} if none found
+	 * @throws TransactionSystemException in case of errors
+	 * @see #setUserTransaction
+	 * @see #setUserTransactionName
+	 */
+	protected @Nullable UserTransaction retrieveUserTransaction() throws TransactionSystemException {
+<span class="fc" id="L629">		return null;</span>
+	}
+
+	/**
+	 * Allows subclasses to retrieve the JTA TransactionManager in a vendor-specific manner.
+	 * Only called if no &quot;transactionManager&quot; or &quot;transactionManagerName&quot; specified.
+	 * &lt;p&gt;The default implementation simply returns {@code null}.
+	 * @return the JTA TransactionManager handle to use, or {@code null} if none found
+	 * @throws TransactionSystemException in case of errors
+	 * @see #setTransactionManager
+	 * @see #setTransactionManagerName
+	 */
+	protected @Nullable TransactionManager retrieveTransactionManager() throws TransactionSystemException {
+<span class="fc" id="L642">		return null;</span>
+	}
+
+	/**
+	 * Allows subclasses to retrieve the JTA 1.1 TransactionSynchronizationRegistry
+	 * in a vendor-specific manner.
+	 * &lt;p&gt;The default implementation simply returns {@code null}.
+	 * @return the JTA TransactionSynchronizationRegistry handle to use,
+	 * or {@code null} if none found
+	 * @throws TransactionSystemException in case of errors
+	 */
+	protected @Nullable TransactionSynchronizationRegistry retrieveTransactionSynchronizationRegistry() throws TransactionSystemException {
+<span class="fc" id="L654">		return null;</span>
+	}
+
+	/**
+	 * Find the JTA UserTransaction through a default JNDI lookup:
+	 * &quot;java:comp/UserTransaction&quot;.
+	 * @return the JTA UserTransaction reference, or {@code null} if not found
+	 * @see #DEFAULT_USER_TRANSACTION_NAME
+	 */
+	protected @Nullable UserTransaction findUserTransaction() {
+<span class="fc" id="L664">		String jndiName = DEFAULT_USER_TRANSACTION_NAME;</span>
+		try {
+<span class="fc" id="L666">			UserTransaction ut = getJndiTemplate().lookup(jndiName, UserTransaction.class);</span>
+<span class="pc bpc" id="L667" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L668">				logger.debug(&quot;JTA UserTransaction found at default JNDI location [&quot; + jndiName + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L670">			this.userTransactionObtainedFromJndi = true;</span>
+<span class="fc" id="L671">			return ut;</span>
+		}
+<span class="fc" id="L673">		catch (NamingException ex) {</span>
+<span class="pc bpc" id="L674" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L675">				logger.debug(&quot;No JTA UserTransaction found at default JNDI location [&quot; + jndiName + &quot;]&quot;, ex);</span>
+			}
+<span class="fc" id="L677">			return null;</span>
+		}
+	}
+
+	/**
+	 * Find the JTA TransactionManager through autodetection: checking whether the
+	 * UserTransaction object implements the TransactionManager, and checking the
+	 * fallback JNDI locations.
+	 * @param ut the JTA UserTransaction object
+	 * @return the JTA TransactionManager reference, or {@code null} if not found
+	 * @see #FALLBACK_TRANSACTION_MANAGER_NAMES
+	 */
+	protected @Nullable TransactionManager findTransactionManager(@Nullable UserTransaction ut) {
+<span class="pc bpc" id="L690" title="1 of 2 branches missed.">		if (ut instanceof TransactionManager tm) {</span>
+<span class="nc bnc" id="L691" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L692">				logger.debug(&quot;JTA UserTransaction object [&quot; + ut + &quot;] implements TransactionManager&quot;);</span>
+			}
+<span class="nc" id="L694">			return tm;</span>
+		}
+
+		// Check fallback JNDI locations.
+<span class="fc bfc" id="L698" title="All 2 branches covered.">		for (String jndiName : FALLBACK_TRANSACTION_MANAGER_NAMES) {</span>
+			try {
+<span class="fc" id="L700">				TransactionManager tm = getJndiTemplate().lookup(jndiName, TransactionManager.class);</span>
+<span class="pc bpc" id="L701" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L702">					logger.debug(&quot;JTA TransactionManager found at fallback JNDI location [&quot; + jndiName + &quot;]&quot;);</span>
+				}
+<span class="fc" id="L704">				return tm;</span>
+			}
+<span class="fc" id="L706">			catch (NamingException ex) {</span>
+<span class="pc bpc" id="L707" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L708">					logger.debug(&quot;No JTA TransactionManager found at fallback JNDI location [&quot; + jndiName + &quot;]&quot;, ex);</span>
+				}
+			}
+		}
+
+		// OK, so no JTA TransactionManager is available...
+<span class="fc" id="L714">		return null;</span>
+	}
+
+	/**
+	 * Find the JTA 1.1 TransactionSynchronizationRegistry through autodetection:
+	 * checking whether the UserTransaction object or TransactionManager object
+	 * implements it, and checking Jakarta EE's standard JNDI location.
+	 * &lt;p&gt;The default implementation simply returns {@code null}.
+	 * @param ut the JTA UserTransaction object
+	 * @param tm the JTA TransactionManager object
+	 * @return the JTA TransactionSynchronizationRegistry handle to use,
+	 * or {@code null} if none found
+	 * @throws TransactionSystemException in case of errors
+	 */
+	protected @Nullable TransactionSynchronizationRegistry findTransactionSynchronizationRegistry(
+			@Nullable UserTransaction ut, @Nullable TransactionManager tm) throws TransactionSystemException {
+
+<span class="fc bfc" id="L731" title="All 2 branches covered.">		if (this.userTransactionObtainedFromJndi) {</span>
+			// UserTransaction has already been obtained from JNDI, so the
+			// TransactionSynchronizationRegistry probably sits there as well.
+<span class="fc" id="L734">			String jndiName = DEFAULT_TRANSACTION_SYNCHRONIZATION_REGISTRY_NAME;</span>
+			try {
+<span class="nc" id="L736">				TransactionSynchronizationRegistry tsr = getJndiTemplate().lookup(jndiName, TransactionSynchronizationRegistry.class);</span>
+<span class="nc bnc" id="L737" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L738">					logger.debug(&quot;JTA TransactionSynchronizationRegistry found at default JNDI location [&quot; + jndiName + &quot;]&quot;);</span>
+				}
+<span class="nc" id="L740">				return tsr;</span>
+			}
+<span class="fc" id="L742">			catch (NamingException ex) {</span>
+<span class="pc bpc" id="L743" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L744">					logger.debug(&quot;No JTA TransactionSynchronizationRegistry found at default JNDI location [&quot; + jndiName + &quot;]&quot;, ex);</span>
+				}
+			}
+		}
+		// Check whether the UserTransaction or TransactionManager implements it...
+<span class="pc bpc" id="L749" title="1 of 2 branches missed.">		if (ut instanceof TransactionSynchronizationRegistry tsr) {</span>
+<span class="nc" id="L750">			return tsr;</span>
+		}
+<span class="pc bpc" id="L752" title="1 of 2 branches missed.">		if (tm instanceof TransactionSynchronizationRegistry tsr) {</span>
+<span class="nc" id="L753">			return tsr;</span>
+		}
+		// OK, so no JTA 1.1 TransactionSynchronizationRegistry is available...
+<span class="fc" id="L756">		return null;</span>
+	}
+
+
+	/**
+	 * This implementation returns a JtaTransactionObject instance for the
+	 * JTA UserTransaction.
+	 * &lt;p&gt;The UserTransaction object will either be looked up freshly for the
+	 * current transaction, or the cached one looked up at startup will be used.
+	 * The latter is the default: Most application servers use a shared singleton
+	 * UserTransaction that can be cached. Turn off the &quot;cacheUserTransaction&quot;
+	 * flag to enforce a fresh lookup for every transaction.
+	 * @see #setCacheUserTransaction
+	 */
+	@Override
+	protected Object doGetTransaction() {
+<span class="fc" id="L772">		UserTransaction ut = getUserTransaction();</span>
+<span class="pc bpc" id="L773" title="1 of 2 branches missed.">		if (ut == null) {</span>
+<span class="nc" id="L774">			throw new CannotCreateTransactionException(&quot;No JTA UserTransaction available - &quot; +</span>
+					&quot;programmatic PlatformTransactionManager.getTransaction usage not supported&quot;);
+		}
+<span class="fc bfc" id="L777" title="All 2 branches covered.">		if (!this.cacheUserTransaction) {</span>
+<span class="fc" id="L778">			ut = lookupUserTransaction(</span>
+<span class="pc bpc" id="L779" title="1 of 2 branches missed.">					this.userTransactionName != null ? this.userTransactionName : DEFAULT_USER_TRANSACTION_NAME);</span>
+		}
+<span class="fc" id="L781">		return doGetJtaTransaction(ut);</span>
+	}
+
+	/**
+	 * Get a JTA transaction object for the given current UserTransaction.
+	 * &lt;p&gt;Subclasses can override this to provide a JtaTransactionObject
+	 * subclass, for example holding some additional JTA handle needed.
+	 * @param ut the UserTransaction handle to use for the current transaction
+	 * @return the JtaTransactionObject holding the UserTransaction
+	 */
+	protected JtaTransactionObject doGetJtaTransaction(UserTransaction ut) {
+<span class="fc" id="L792">		return new JtaTransactionObject(ut);</span>
+	}
+
+	@Override
+	protected boolean isExistingTransaction(Object transaction) {
+<span class="fc" id="L797">		JtaTransactionObject txObject = (JtaTransactionObject) transaction;</span>
+		try {
+<span class="fc bfc" id="L799" title="All 2 branches covered.">			return (txObject.getUserTransaction().getStatus() != Status.STATUS_NO_TRANSACTION);</span>
+		}
+<span class="fc" id="L801">		catch (SystemException ex) {</span>
+<span class="fc" id="L802">			throw new TransactionSystemException(&quot;JTA failure on getStatus&quot;, ex);</span>
+		}
+	}
+
+	/**
+	 * This implementation returns false to cause a further invocation
+	 * of doBegin despite an already existing transaction.
+	 * &lt;p&gt;JTA implementations might support nested transactions via further
+	 * {@code UserTransaction.begin()} invocations, but never support savepoints.
+	 * @see #doBegin
+	 * @see jakarta.transaction.UserTransaction#begin()
+	 */
+	@Override
+	protected boolean useSavepointForNestedTransaction() {
+<span class="fc" id="L816">		return false;</span>
+	}
+
+
+	@Override
+	protected void doBegin(Object transaction, TransactionDefinition definition) {
+<span class="fc" id="L822">		JtaTransactionObject txObject = (JtaTransactionObject) transaction;</span>
+		try {
+<span class="fc" id="L824">			doJtaBegin(txObject, definition);</span>
+		}
+<span class="fc" id="L826">		catch (NotSupportedException | UnsupportedOperationException ex) {</span>
+<span class="fc" id="L827">			throw new NestedTransactionNotSupportedException(</span>
+					&quot;JTA implementation does not support nested transactions&quot;, ex);
+		}
+<span class="fc" id="L830">		catch (SystemException ex) {</span>
+<span class="fc" id="L831">			throw new CannotCreateTransactionException(&quot;JTA failure on begin&quot;, ex);</span>
+<span class="fc" id="L832">		}</span>
+<span class="fc" id="L833">	}</span>
+
+	/**
+	 * Perform a JTA begin on the JTA UserTransaction or TransactionManager.
+	 * &lt;p&gt;This implementation only supports standard JTA functionality:
+	 * that is, no per-transaction isolation levels and no transaction names.
+	 * Can be overridden in subclasses, for specific JTA implementations.
+	 * &lt;p&gt;Calls {@code applyIsolationLevel} and {@code applyTimeout}
+	 * before invoking the UserTransaction's {@code begin} method.
+	 * @param txObject the JtaTransactionObject containing the UserTransaction
+	 * @param definition the TransactionDefinition instance, describing propagation
+	 * behavior, isolation level, read-only flag, timeout, and transaction name
+	 * @throws NotSupportedException if thrown by JTA methods
+	 * @throws SystemException if thrown by JTA methods
+	 * @see #getUserTransaction
+	 * @see #getTransactionManager
+	 * @see #applyIsolationLevel
+	 * @see #applyTimeout
+	 * @see JtaTransactionObject#getUserTransaction()
+	 * @see jakarta.transaction.UserTransaction#setTransactionTimeout
+	 * @see jakarta.transaction.UserTransaction#begin
+	 */
+	protected void doJtaBegin(JtaTransactionObject txObject, TransactionDefinition definition)
+			throws NotSupportedException, SystemException {
+
+<span class="fc" id="L858">		applyIsolationLevel(txObject, definition.getIsolationLevel());</span>
+<span class="fc" id="L859">		int timeout = determineTimeout(definition);</span>
+<span class="fc" id="L860">		applyTimeout(txObject, timeout);</span>
+<span class="fc" id="L861">		txObject.getUserTransaction().begin();</span>
+<span class="fc" id="L862">	}</span>
+
+	/**
+	 * Apply the given transaction isolation level. The default implementation
+	 * will throw an exception for any level other than ISOLATION_DEFAULT.
+	 * &lt;p&gt;To be overridden in subclasses for specific JTA implementations,
+	 * as alternative to overriding the full {@link #doJtaBegin} method.
+	 * @param txObject the JtaTransactionObject containing the UserTransaction
+	 * @param isolationLevel isolation level taken from transaction definition
+	 * @throws InvalidIsolationLevelException if the given isolation level
+	 * cannot be applied
+	 * @throws SystemException if thrown by the JTA implementation
+	 * @see #doJtaBegin
+	 * @see JtaTransactionObject#getUserTransaction()
+	 * @see #getTransactionManager()
+	 */
+	protected void applyIsolationLevel(JtaTransactionObject txObject, int isolationLevel)
+			throws InvalidIsolationLevelException, SystemException {
+
+<span class="fc bfc" id="L881" title="All 4 branches covered.">		if (!this.allowCustomIsolationLevels &amp;&amp; isolationLevel != TransactionDefinition.ISOLATION_DEFAULT) {</span>
+<span class="fc" id="L882">			throw new InvalidIsolationLevelException(</span>
+					&quot;JtaTransactionManager does not support custom isolation levels by default - &quot; +
+					&quot;switch 'allowCustomIsolationLevels' to 'true'&quot;);
+		}
+<span class="fc" id="L886">	}</span>
+
+	/**
+	 * Apply the given transaction timeout. The default implementation will call
+	 * {@code UserTransaction.setTransactionTimeout} for a non-default timeout value.
+	 * @param txObject the JtaTransactionObject containing the UserTransaction
+	 * @param timeout the timeout value taken from transaction definition
+	 * @throws SystemException if thrown by the JTA implementation
+	 * @see #doJtaBegin
+	 * @see JtaTransactionObject#getUserTransaction()
+	 * @see jakarta.transaction.UserTransaction#setTransactionTimeout(int)
+	 */
+	protected void applyTimeout(JtaTransactionObject txObject, int timeout) throws SystemException {
+<span class="fc bfc" id="L899" title="All 2 branches covered.">		if (timeout &gt; TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+<span class="fc" id="L900">			txObject.getUserTransaction().setTransactionTimeout(timeout);</span>
+<span class="pc bpc" id="L901" title="1 of 2 branches missed.">			if (timeout &gt; 0) {</span>
+<span class="fc" id="L902">				txObject.resetTransactionTimeout = true;</span>
+			}
+		}
+<span class="fc" id="L905">	}</span>
+
+
+	@Override
+	protected Object doSuspend(Object transaction) {
+<span class="fc" id="L910">		JtaTransactionObject txObject = (JtaTransactionObject) transaction;</span>
+		try {
+<span class="fc" id="L912">			return doJtaSuspend(txObject);</span>
+		}
+<span class="fc" id="L914">		catch (SystemException ex) {</span>
+<span class="fc" id="L915">			throw new TransactionSystemException(&quot;JTA failure on suspend&quot;, ex);</span>
+		}
+	}
+
+	/**
+	 * Perform a JTA suspend on the JTA TransactionManager.
+	 * &lt;p&gt;Can be overridden in subclasses, for specific JTA implementations.
+	 * @param txObject the JtaTransactionObject containing the UserTransaction
+	 * @return the suspended JTA Transaction object
+	 * @throws SystemException if thrown by JTA methods
+	 * @see #getTransactionManager()
+	 * @see jakarta.transaction.TransactionManager#suspend()
+	 */
+	protected Object doJtaSuspend(JtaTransactionObject txObject) throws SystemException {
+<span class="fc bfc" id="L929" title="All 2 branches covered.">		if (getTransactionManager() == null) {</span>
+<span class="fc" id="L930">			throw new TransactionSuspensionNotSupportedException(</span>
+					&quot;JtaTransactionManager needs a JTA TransactionManager for suspending a transaction: &quot; +
+					&quot;specify the 'transactionManager' or 'transactionManagerName' property&quot;);
+		}
+<span class="fc" id="L934">		return getTransactionManager().suspend();</span>
+	}
+
+	@Override
+	protected void doResume(@Nullable Object transaction, Object suspendedResources) {
+<span class="fc" id="L939">		JtaTransactionObject txObject = (JtaTransactionObject) transaction;</span>
+		try {
+<span class="fc" id="L941">			doJtaResume(txObject, suspendedResources);</span>
+		}
+<span class="nc" id="L943">		catch (InvalidTransactionException ex) {</span>
+<span class="nc" id="L944">			throw new IllegalTransactionStateException(&quot;Tried to resume invalid JTA transaction&quot;, ex);</span>
+		}
+<span class="nc" id="L946">		catch (IllegalStateException ex) {</span>
+<span class="nc" id="L947">			throw new TransactionSystemException(&quot;Unexpected internal transaction state&quot;, ex);</span>
+		}
+<span class="nc" id="L949">		catch (SystemException ex) {</span>
+<span class="nc" id="L950">			throw new TransactionSystemException(&quot;JTA failure on resume&quot;, ex);</span>
+<span class="fc" id="L951">		}</span>
+<span class="fc" id="L952">	}</span>
+
+	/**
+	 * Perform a JTA resume on the JTA TransactionManager.
+	 * &lt;p&gt;Can be overridden in subclasses, for specific JTA implementations.
+	 * @param txObject the JtaTransactionObject containing the UserTransaction
+	 * @param suspendedTransaction the suspended JTA Transaction object
+	 * @throws InvalidTransactionException if thrown by JTA methods
+	 * @throws SystemException if thrown by JTA methods
+	 * @see #getTransactionManager()
+	 * @see jakarta.transaction.TransactionManager#resume(jakarta.transaction.Transaction)
+	 */
+	protected void doJtaResume(@Nullable JtaTransactionObject txObject, Object suspendedTransaction)
+		throws InvalidTransactionException, SystemException {
+
+<span class="pc bpc" id="L967" title="1 of 2 branches missed.">		if (getTransactionManager() == null) {</span>
+<span class="nc" id="L968">			throw new TransactionSuspensionNotSupportedException(</span>
+					&quot;JtaTransactionManager needs a JTA TransactionManager for suspending a transaction: &quot; +
+					&quot;specify the 'transactionManager' or 'transactionManagerName' property&quot;);
+		}
+<span class="fc" id="L972">		getTransactionManager().resume((Transaction) suspendedTransaction);</span>
+<span class="fc" id="L973">	}</span>
+
+
+	/**
+	 * This implementation returns &quot;true&quot;: a JTA commit will properly handle
+	 * transactions that have been marked rollback-only at a global level.
+	 */
+	@Override
+	protected boolean shouldCommitOnGlobalRollbackOnly() {
+<span class="fc" id="L982">		return true;</span>
+	}
+
+	@Override
+	protected void doCommit(DefaultTransactionStatus status) {
+<span class="fc" id="L987">		JtaTransactionObject txObject = (JtaTransactionObject) status.getTransaction();</span>
+		try {
+<span class="fc" id="L989">			int jtaStatus = txObject.getUserTransaction().getStatus();</span>
+<span class="pc bpc" id="L990" title="1 of 2 branches missed.">			if (jtaStatus == Status.STATUS_NO_TRANSACTION) {</span>
+				// Should never happen... would have thrown an exception before
+				// and as a consequence led to a rollback, not to a commit call.
+				// In any case, the transaction is already fully cleaned up.
+<span class="nc" id="L994">				throw new UnexpectedRollbackException(&quot;JTA transaction already completed - probably rolled back&quot;);</span>
+			}
+<span class="pc bpc" id="L996" title="1 of 2 branches missed.">			if (jtaStatus == Status.STATUS_ROLLEDBACK) {</span>
+				// Only really happens on JBoss 4.2 in case of an early timeout...
+				// Explicit rollback call necessary to clean up the transaction.
+				// IllegalStateException expected on JBoss; call still necessary.
+				try {
+<span class="nc" id="L1001">					txObject.getUserTransaction().rollback();</span>
+				}
+<span class="nc" id="L1003">				catch (IllegalStateException ex) {</span>
+<span class="nc bnc" id="L1004" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1005">						logger.debug(&quot;Rollback failure with transaction already marked as rolled back: &quot; + ex);</span>
+					}
+<span class="nc" id="L1007">				}</span>
+<span class="nc" id="L1008">				throw new UnexpectedRollbackException(&quot;JTA transaction already rolled back (probably due to a timeout)&quot;);</span>
+			}
+<span class="fc" id="L1010">			txObject.getUserTransaction().commit();</span>
+		}
+<span class="fc" id="L1012">		catch (RollbackException ex) {</span>
+<span class="fc" id="L1013">			throw new UnexpectedRollbackException(</span>
+					&quot;JTA transaction unexpectedly rolled back (maybe due to a timeout)&quot;, ex);
+		}
+<span class="fc" id="L1016">		catch (HeuristicMixedException ex) {</span>
+<span class="fc" id="L1017">			throw new HeuristicCompletionException(HeuristicCompletionException.STATE_MIXED, ex);</span>
+		}
+<span class="fc" id="L1019">		catch (HeuristicRollbackException ex) {</span>
+<span class="fc" id="L1020">			throw new HeuristicCompletionException(HeuristicCompletionException.STATE_ROLLED_BACK, ex);</span>
+		}
+<span class="nc" id="L1022">		catch (IllegalStateException ex) {</span>
+<span class="nc" id="L1023">			throw new TransactionSystemException(&quot;Unexpected internal transaction state&quot;, ex);</span>
+		}
+<span class="fc" id="L1025">		catch (SystemException ex) {</span>
+<span class="fc" id="L1026">			throw new TransactionSystemException(&quot;JTA failure on commit&quot;, ex);</span>
+<span class="fc" id="L1027">		}</span>
+<span class="fc" id="L1028">	}</span>
+
+	@Override
+	protected void doRollback(DefaultTransactionStatus status) {
+<span class="fc" id="L1032">		JtaTransactionObject txObject = (JtaTransactionObject) status.getTransaction();</span>
+		try {
+<span class="fc" id="L1034">			int jtaStatus = txObject.getUserTransaction().getStatus();</span>
+<span class="pc bpc" id="L1035" title="1 of 2 branches missed.">			if (jtaStatus != Status.STATUS_NO_TRANSACTION) {</span>
+				try {
+<span class="fc" id="L1037">					txObject.getUserTransaction().rollback();</span>
+				}
+<span class="nc" id="L1039">				catch (IllegalStateException ex) {</span>
+<span class="nc bnc" id="L1040" title="All 2 branches missed.">					if (jtaStatus == Status.STATUS_ROLLEDBACK) {</span>
+						// Only really happens on JBoss 4.2 in case of an early timeout...
+<span class="nc bnc" id="L1042" title="All 2 branches missed.">						if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1043">							logger.debug(&quot;Rollback failure with transaction already marked as rolled back: &quot; + ex);</span>
+						}
+					}
+					else {
+<span class="nc" id="L1047">						throw new TransactionSystemException(&quot;Unexpected internal transaction state&quot;, ex);</span>
+					}
+<span class="fc" id="L1049">				}</span>
+			}
+		}
+<span class="fc" id="L1052">		catch (SystemException ex) {</span>
+<span class="fc" id="L1053">			throw new TransactionSystemException(&quot;JTA failure on rollback&quot;, ex);</span>
+<span class="fc" id="L1054">		}</span>
+<span class="fc" id="L1055">	}</span>
+
+	@Override
+	protected void doSetRollbackOnly(DefaultTransactionStatus status) {
+<span class="fc" id="L1059">		JtaTransactionObject txObject = (JtaTransactionObject) status.getTransaction();</span>
+<span class="pc bpc" id="L1060" title="1 of 2 branches missed.">		if (status.isDebug()) {</span>
+<span class="nc" id="L1061">			logger.debug(&quot;Setting JTA transaction rollback-only&quot;);</span>
+		}
+		try {
+<span class="fc" id="L1064">			int jtaStatus = txObject.getUserTransaction().getStatus();</span>
+<span class="pc bpc" id="L1065" title="2 of 4 branches missed.">			if (jtaStatus != Status.STATUS_NO_TRANSACTION &amp;&amp; jtaStatus != Status.STATUS_ROLLEDBACK) {</span>
+<span class="fc" id="L1066">				txObject.getUserTransaction().setRollbackOnly();</span>
+			}
+		}
+<span class="fc" id="L1069">		catch (IllegalStateException ex) {</span>
+<span class="fc" id="L1070">			throw new TransactionSystemException(&quot;Unexpected internal transaction state&quot;, ex);</span>
+		}
+<span class="fc" id="L1072">		catch (SystemException ex) {</span>
+<span class="fc" id="L1073">			throw new TransactionSystemException(&quot;JTA failure on setRollbackOnly&quot;, ex);</span>
+<span class="fc" id="L1074">		}</span>
+<span class="fc" id="L1075">	}</span>
+
+
+	@Override
+	protected void registerAfterCompletionWithExistingTransaction(
+			Object transaction, List&lt;TransactionSynchronization&gt; synchronizations) {
+
+<span class="fc" id="L1082">		JtaTransactionObject txObject = (JtaTransactionObject) transaction;</span>
+<span class="fc" id="L1083">		logger.debug(&quot;Registering after-completion synchronization with existing JTA transaction&quot;);</span>
+		try {
+<span class="fc" id="L1085">			doRegisterAfterCompletionWithJtaTransaction(txObject, synchronizations);</span>
+		}
+<span class="nc" id="L1087">		catch (SystemException ex) {</span>
+<span class="nc" id="L1088">			throw new TransactionSystemException(&quot;JTA failure on registerSynchronization&quot;, ex);</span>
+		}
+<span class="nc" id="L1090">		catch (Exception ex) {</span>
+			// Note: JBoss throws plain RuntimeException with RollbackException as cause.
+<span class="nc bnc" id="L1092" title="All 4 branches missed.">			if (ex instanceof RollbackException || ex.getCause() instanceof RollbackException) {</span>
+<span class="nc" id="L1093">				logger.debug(&quot;Participating in existing JTA transaction that has been marked for rollback: &quot; +</span>
+						&quot;cannot register Spring after-completion callbacks with outer JTA transaction - &quot; +
+						&quot;immediately performing Spring after-completion callbacks with outcome status 'rollback'. &quot; +
+						&quot;Original exception: &quot; + ex);
+<span class="nc" id="L1097">				invokeAfterCompletion(synchronizations, TransactionSynchronization.STATUS_ROLLED_BACK);</span>
+			}
+			else {
+<span class="nc" id="L1100">				logger.debug(&quot;Participating in existing JTA transaction, but unexpected internal transaction &quot; +</span>
+						&quot;state encountered: cannot register Spring after-completion callbacks with outer JTA &quot; +
+						&quot;transaction - processing Spring after-completion callbacks with outcome status 'unknown'&quot; +
+						&quot;Original exception: &quot; + ex);
+<span class="nc" id="L1104">				invokeAfterCompletion(synchronizations, TransactionSynchronization.STATUS_UNKNOWN);</span>
+			}
+<span class="fc" id="L1106">		}</span>
+<span class="fc" id="L1107">	}</span>
+
+	/**
+	 * Register a JTA synchronization on the JTA TransactionManager, for calling
+	 * {@code afterCompletion} on the given Spring TransactionSynchronizations.
+	 * &lt;p&gt;The default implementation registers the synchronizations on the
+	 * JTA 1.1 TransactionSynchronizationRegistry, if available, or on the
+	 * JTA TransactionManager's current Transaction - again, if available.
+	 * If none of the two is available, a warning will be logged.
+	 * &lt;p&gt;Can be overridden in subclasses, for specific JTA implementations.
+	 * @param txObject the current transaction object
+	 * @param synchronizations a List of TransactionSynchronization objects
+	 * @throws RollbackException if thrown by JTA methods
+	 * @throws SystemException if thrown by JTA methods
+	 * @see #getTransactionManager()
+	 * @see jakarta.transaction.Transaction#registerSynchronization
+	 * @see jakarta.transaction.TransactionSynchronizationRegistry#registerInterposedSynchronization
+	 */
+	protected void doRegisterAfterCompletionWithJtaTransaction(
+			JtaTransactionObject txObject, List&lt;TransactionSynchronization&gt; synchronizations)
+			throws RollbackException, SystemException {
+
+<span class="fc" id="L1129">		int jtaStatus = txObject.getUserTransaction().getStatus();</span>
+<span class="pc bpc" id="L1130" title="1 of 2 branches missed.">		if (jtaStatus == Status.STATUS_NO_TRANSACTION) {</span>
+<span class="nc" id="L1131">			throw new RollbackException(&quot;JTA transaction already completed - probably rolled back&quot;);</span>
+		}
+<span class="pc bpc" id="L1133" title="1 of 2 branches missed.">		if (jtaStatus == Status.STATUS_ROLLEDBACK) {</span>
+<span class="nc" id="L1134">			throw new RollbackException(&quot;JTA transaction already rolled back (probably due to a timeout)&quot;);</span>
+		}
+
+<span class="pc bpc" id="L1137" title="1 of 2 branches missed.">		if (this.transactionSynchronizationRegistry != null) {</span>
+			// JTA 1.1 TransactionSynchronizationRegistry available - use it.
+<span class="nc" id="L1139">			this.transactionSynchronizationRegistry.registerInterposedSynchronization(</span>
+					new JtaAfterCompletionSynchronization(synchronizations));
+		}
+
+<span class="fc bfc" id="L1143" title="All 2 branches covered.">		else if (getTransactionManager() != null) {</span>
+			// At least the JTA TransactionManager available - use that one.
+<span class="fc" id="L1145">			Transaction transaction = getTransactionManager().getTransaction();</span>
+<span class="pc bpc" id="L1146" title="1 of 2 branches missed.">			if (transaction == null) {</span>
+<span class="nc" id="L1147">				throw new IllegalStateException(&quot;No JTA Transaction available&quot;);</span>
+			}
+<span class="fc" id="L1149">			transaction.registerSynchronization(new JtaAfterCompletionSynchronization(synchronizations));</span>
+<span class="fc" id="L1150">		}</span>
+
+		else {
+			// No JTA TransactionManager available - log a warning.
+<span class="fc" id="L1154">			logger.warn(&quot;Participating in existing JTA transaction, but no JTA TransactionManager available: &quot; +</span>
+					&quot;cannot register Spring after-completion callbacks with outer JTA transaction - &quot; +
+					&quot;processing Spring after-completion callbacks with outcome status 'unknown'&quot;);
+<span class="fc" id="L1157">			invokeAfterCompletion(synchronizations, TransactionSynchronization.STATUS_UNKNOWN);</span>
+		}
+<span class="fc" id="L1159">	}</span>
+
+	@Override
+	protected void doCleanupAfterCompletion(Object transaction) {
+<span class="fc" id="L1163">		JtaTransactionObject txObject = (JtaTransactionObject) transaction;</span>
+<span class="fc bfc" id="L1164" title="All 2 branches covered.">		if (txObject.resetTransactionTimeout) {</span>
+			try {
+<span class="fc" id="L1166">				txObject.getUserTransaction().setTransactionTimeout(0);</span>
+			}
+<span class="nc" id="L1168">			catch (SystemException ex) {</span>
+<span class="nc" id="L1169">				logger.debug(&quot;Failed to reset transaction timeout after JTA completion&quot;, ex);</span>
+<span class="fc" id="L1170">			}</span>
+		}
+<span class="fc" id="L1172">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Implementation of TransactionFactory interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public Transaction createTransaction(@Nullable String name, int timeout) throws NotSupportedException, SystemException {
+<span class="nc" id="L1181">		TransactionManager tm = getTransactionManager();</span>
+<span class="nc bnc" id="L1182" title="All 2 branches missed.">		Assert.state(tm != null, &quot;No JTA TransactionManager available&quot;);</span>
+<span class="nc bnc" id="L1183" title="All 2 branches missed.">		if (timeout &gt;= 0) {</span>
+<span class="nc" id="L1184">			tm.setTransactionTimeout(timeout);</span>
+		}
+<span class="nc" id="L1186">		tm.begin();</span>
+<span class="nc" id="L1187">		return new ManagedTransactionAdapter(tm);</span>
+	}
+
+	@Override
+	public boolean supportsResourceAdapterManagedTransactions() {
+<span class="nc" id="L1192">		return false;</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Serialization support
+	//---------------------------------------------------------------------
+
+	private void readObject(ObjectInputStream ois) throws IOException, ClassNotFoundException {
+		// Rely on default serialization; just initialize state after deserialization.
+<span class="fc" id="L1202">		ois.defaultReadObject();</span>
+
+		// Create template for client-side JNDI lookup.
+<span class="fc" id="L1205">		this.jndiTemplate = new JndiTemplate();</span>
+
+		// Perform a fresh lookup for JTA handles.
+<span class="fc" id="L1208">		initUserTransactionAndTransactionManager();</span>
+<span class="fc" id="L1209">		initTransactionSynchronizationRegistry();</span>
+<span class="fc" id="L1210">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

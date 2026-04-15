@@ -1,0 +1,447 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ChannelSendOperator.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.server.reactive</a> &gt; <span class="el_source">ChannelSendOperator.java</span></div><h1>ChannelSendOperator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.server.reactive;
+
+import java.util.function.Function;
+
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+import reactor.core.CoreSubscriber;
+import reactor.core.Scannable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.Operators;
+import reactor.util.context.Context;
+
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.util.Assert;
+
+/**
+ * Given a write function that accepts a source {@code Publisher&lt;T&gt;} to write
+ * with and returns {@code Publisher&lt;Void&gt;} for the result, this operator helps
+ * to defer the invocation of the write function, until we know if the source
+ * publisher will begin publishing without an error. If the first emission is
+ * an error, the write function is bypassed, and the error is sent directly
+ * through the result publisher. Otherwise, the write function is invoked.
+ *
+ * @author Rossen Stoyanchev
+ * @author Stephane Maldini
+ * @since 5.0
+ * @param &lt;T&gt; the type of element signaled
+ */
+public class ChannelSendOperator&lt;T&gt; extends Mono&lt;Void&gt; implements Scannable {
+
+	private final Function&lt;Publisher&lt;T&gt;, Publisher&lt;Void&gt;&gt; writeFunction;
+
+	private final Flux&lt;T&gt; source;
+
+
+<span class="fc" id="L56">	public ChannelSendOperator(Publisher&lt;? extends T&gt; source, Function&lt;Publisher&lt;T&gt;, Publisher&lt;Void&gt;&gt; writeFunction) {</span>
+<span class="fc" id="L57">		this.source = Flux.from(source);</span>
+<span class="fc" id="L58">		this.writeFunction = writeFunction;</span>
+<span class="fc" id="L59">	}</span>
+
+
+	@Override
+	@SuppressWarnings(&quot;rawtypes&quot;)
+	public @Nullable Object scanUnsafe(Attr key) {
+<span class="pc bpc" id="L65" title="1 of 2 branches missed.">		if (key == Attr.PREFETCH) {</span>
+<span class="nc" id="L66">			return Integer.MAX_VALUE;</span>
+		}
+<span class="pc bpc" id="L68" title="1 of 2 branches missed.">		if (key == Attr.PARENT) {</span>
+<span class="fc" id="L69">			return this.source;</span>
+		}
+<span class="nc" id="L71">		return null;</span>
+	}
+
+	@Override
+	public void subscribe(CoreSubscriber&lt;? super Void&gt; actual) {
+<span class="fc" id="L76">		this.source.subscribe(new WriteBarrier(actual));</span>
+<span class="fc" id="L77">	}</span>
+
+
+<span class="fc" id="L80">	private enum State {</span>
+
+		/** No emissions from the upstream source yet. */
+<span class="fc" id="L83">		NEW,</span>
+
+		/**
+		 * At least one signal of any kind has been received; we're ready to
+		 * call the write function and proceed with actual writing.
+		 */
+<span class="fc" id="L89">		FIRST_SIGNAL_RECEIVED,</span>
+
+		/**
+		 * The write subscriber has subscribed and requested; we're going to
+		 * emit the cached signals.
+		 */
+<span class="fc" id="L95">		EMITTING_CACHED_SIGNALS,</span>
+
+		/**
+		 * The write subscriber has subscribed, and cached signals have been
+		 * emitted to it; we're ready to switch to a simple pass-through mode
+		 * for all remaining signals.
+		 */
+<span class="fc" id="L102">		READY_TO_WRITE</span>
+
+	}
+
+
+	/**
+	 * A barrier inserted between the write source and the write subscriber
+	 * (i.e. the HTTP server adapter) that pre-fetches and waits for the first
+	 * signal before deciding whether to hook in to the write subscriber.
+	 *
+	 * &lt;p&gt;Acts as:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;Subscriber to the write source.
+	 * &lt;li&gt;Subscription to the write subscriber.
+	 * &lt;li&gt;Publisher to the write subscriber.
+	 * &lt;/ul&gt;
+	 *
+	 * &lt;p&gt;Also uses {@link WriteCompletionBarrier} to communicate completion
+	 * and detect cancel signals from the completion subscriber.
+	 */
+	private class WriteBarrier implements CoreSubscriber&lt;T&gt;, Subscription, Publisher&lt;T&gt; {
+
+		/* Bridges signals to and from the completionSubscriber */
+		private final WriteCompletionBarrier writeCompletionBarrier;
+
+		/* Upstream write source subscription */
+		private @Nullable Subscription subscription;
+
+		/** Cached data item before readyToWrite. */
+		private @Nullable T item;
+
+		/** Cached error signal before readyToWrite. */
+		private @Nullable Throwable error;
+
+		/** Cached onComplete signal before readyToWrite. */
+<span class="fc" id="L137">		private boolean completed = false;</span>
+
+		/** Recursive demand while emitting cached signals. */
+		private long demandBeforeReadyToWrite;
+
+		/** Current state. */
+<span class="fc" id="L143">		private State state = State.NEW;</span>
+
+		/** The actual writeSubscriber from the HTTP server adapter. */
+		private @Nullable Subscriber&lt;? super T&gt; writeSubscriber;
+
+
+<span class="fc" id="L149">		WriteBarrier(CoreSubscriber&lt;? super Void&gt; completionSubscriber) {</span>
+<span class="fc" id="L150">			this.writeCompletionBarrier = new WriteCompletionBarrier(completionSubscriber, this);</span>
+<span class="fc" id="L151">		}</span>
+
+
+		// Subscriber&lt;T&gt; methods (we're the subscriber to the write source)..
+
+		@Override
+		public final void onSubscribe(Subscription s) {
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">			if (Operators.validate(this.subscription, s)) {</span>
+<span class="fc" id="L159">				this.subscription = s;</span>
+<span class="fc" id="L160">				this.writeCompletionBarrier.connect();</span>
+<span class="fc" id="L161">				s.request(1);</span>
+			}
+<span class="fc" id="L163">		}</span>
+
+		@Override
+		public final void onNext(T item) {
+<span class="fc bfc" id="L167" title="All 2 branches covered.">			if (this.state == State.READY_TO_WRITE) {</span>
+<span class="fc" id="L168">				requiredWriteSubscriber().onNext(item);</span>
+<span class="fc" id="L169">				return;</span>
+			}
+			// FIXME revisit in case of reentrant sync deadlock
+<span class="fc" id="L172">			synchronized (this) {</span>
+<span class="pc bpc" id="L173" title="1 of 2 branches missed.">				if (this.state == State.READY_TO_WRITE) {</span>
+<span class="nc" id="L174">					requiredWriteSubscriber().onNext(item);</span>
+				}
+<span class="pc bpc" id="L176" title="1 of 2 branches missed.">				else if (this.state == State.NEW) {</span>
+<span class="fc" id="L177">					this.item = item;</span>
+<span class="fc" id="L178">					this.state = State.FIRST_SIGNAL_RECEIVED;</span>
+					Publisher&lt;Void&gt; result;
+					try {
+<span class="fc" id="L181">						result = writeFunction.apply(this);</span>
+					}
+<span class="nc" id="L183">					catch (Throwable ex) {</span>
+<span class="nc" id="L184">						this.writeCompletionBarrier.onError(ex);</span>
+<span class="nc" id="L185">						return;</span>
+<span class="fc" id="L186">					}</span>
+<span class="fc" id="L187">					result.subscribe(this.writeCompletionBarrier);</span>
+<span class="fc" id="L188">				}</span>
+				else {
+<span class="nc bnc" id="L190" title="All 2 branches missed.">					if (this.subscription != null) {</span>
+<span class="nc" id="L191">						this.subscription.cancel();</span>
+					}
+<span class="nc" id="L193">					this.writeCompletionBarrier.onError(new IllegalStateException(&quot;Unexpected item.&quot;));</span>
+				}
+<span class="fc" id="L195">			}</span>
+<span class="fc" id="L196">		}</span>
+
+		private Subscriber&lt;? super T&gt; requiredWriteSubscriber() {
+<span class="pc bpc" id="L199" title="1 of 2 branches missed.">			Assert.state(this.writeSubscriber != null, &quot;No write subscriber&quot;);</span>
+<span class="fc" id="L200">			return this.writeSubscriber;</span>
+		}
+
+		@Override
+		public final void onError(Throwable ex) {
+<span class="fc bfc" id="L205" title="All 2 branches covered.">			if (this.state == State.READY_TO_WRITE) {</span>
+<span class="fc" id="L206">				requiredWriteSubscriber().onError(ex);</span>
+<span class="fc" id="L207">				return;</span>
+			}
+<span class="fc" id="L209">			synchronized (this) {</span>
+<span class="pc bpc" id="L210" title="1 of 2 branches missed.">				if (this.state == State.READY_TO_WRITE) {</span>
+<span class="nc" id="L211">					requiredWriteSubscriber().onError(ex);</span>
+				}
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">				else if (this.state == State.NEW) {</span>
+<span class="fc" id="L214">					this.state = State.FIRST_SIGNAL_RECEIVED;</span>
+<span class="fc" id="L215">					this.writeCompletionBarrier.onError(ex);</span>
+				}
+				else {
+<span class="nc" id="L218">					this.error = ex;</span>
+				}
+<span class="fc" id="L220">			}</span>
+<span class="fc" id="L221">		}</span>
+
+		@Override
+		public final void onComplete() {
+<span class="fc bfc" id="L225" title="All 2 branches covered.">			if (this.state == State.READY_TO_WRITE) {</span>
+<span class="fc" id="L226">				requiredWriteSubscriber().onComplete();</span>
+<span class="fc" id="L227">				return;</span>
+			}
+<span class="fc" id="L229">			synchronized (this) {</span>
+<span class="pc bpc" id="L230" title="1 of 2 branches missed.">				if (this.state == State.READY_TO_WRITE) {</span>
+<span class="nc" id="L231">					requiredWriteSubscriber().onComplete();</span>
+				}
+<span class="fc bfc" id="L233" title="All 2 branches covered.">				else if (this.state == State.NEW) {</span>
+<span class="fc" id="L234">					this.completed = true;</span>
+<span class="fc" id="L235">					this.state = State.FIRST_SIGNAL_RECEIVED;</span>
+					Publisher&lt;Void&gt; result;
+					try {
+<span class="fc" id="L238">						result = writeFunction.apply(this);</span>
+					}
+<span class="nc" id="L240">					catch (Throwable ex) {</span>
+<span class="nc" id="L241">						this.writeCompletionBarrier.onError(ex);</span>
+<span class="nc" id="L242">						return;</span>
+<span class="fc" id="L243">					}</span>
+<span class="fc" id="L244">					result.subscribe(this.writeCompletionBarrier);</span>
+<span class="fc" id="L245">				}</span>
+				else {
+<span class="fc" id="L247">					this.completed = true;</span>
+				}
+<span class="fc" id="L249">			}</span>
+<span class="fc" id="L250">		}</span>
+
+		@Override
+		public Context currentContext() {
+<span class="fc" id="L254">			return this.writeCompletionBarrier.currentContext();</span>
+		}
+
+
+		// Subscription methods (we're the Subscription to the writeSubscriber)..
+
+		@Override
+		public void request(long n) {
+<span class="fc" id="L262">			Subscription s = this.subscription;</span>
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">			if (s == null) {</span>
+<span class="nc" id="L264">				return;</span>
+			}
+<span class="fc bfc" id="L266" title="All 2 branches covered.">			if (this.state == State.READY_TO_WRITE) {</span>
+<span class="fc" id="L267">				s.request(n);</span>
+<span class="fc" id="L268">				return;</span>
+			}
+<span class="fc" id="L270">			synchronized (this) {</span>
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">				if (this.state == State.READY_TO_WRITE) {</span>
+<span class="nc" id="L272">					s.request(n);</span>
+<span class="nc" id="L273">					return;</span>
+				}
+<span class="pc bpc" id="L275" title="1 of 2 branches missed.">				if (this.writeSubscriber != null) {</span>
+<span class="fc bfc" id="L276" title="All 2 branches covered.">					if (this.state == State.EMITTING_CACHED_SIGNALS) {</span>
+<span class="fc" id="L277">						this.demandBeforeReadyToWrite = n;</span>
+<span class="fc" id="L278">						return;</span>
+					}
+					try {
+<span class="fc" id="L281">						this.state = State.EMITTING_CACHED_SIGNALS;</span>
+<span class="pc bpc" id="L282" title="1 of 2 branches missed.">						if (emitCachedSignals()) {</span>
+<span class="nc" id="L283">							return;</span>
+						}
+<span class="fc" id="L285">						n = n + this.demandBeforeReadyToWrite - 1;</span>
+<span class="fc bfc" id="L286" title="All 2 branches covered.">						if (n == 0) {</span>
+<span class="fc" id="L287">							return;</span>
+						}
+					}
+					finally {
+<span class="pc" id="L291">						this.state = State.READY_TO_WRITE;</span>
+					}
+				}
+<span class="fc" id="L294">			}</span>
+<span class="fc" id="L295">			s.request(n);</span>
+<span class="fc" id="L296">		}</span>
+
+		private boolean emitCachedSignals() {
+<span class="fc" id="L299">			Throwable error = this.error;</span>
+<span class="pc bpc" id="L300" title="1 of 2 branches missed.">			if (error != null) {</span>
+				try {
+<span class="nc" id="L302">					requiredWriteSubscriber().onError(error);</span>
+				}
+				finally {
+<span class="nc" id="L305">					releaseCachedItem();</span>
+				}
+<span class="nc" id="L307">				return true;</span>
+			}
+<span class="fc" id="L309">			T item = this.item;</span>
+<span class="fc" id="L310">			this.item = null;</span>
+<span class="fc bfc" id="L311" title="All 2 branches covered.">			if (item != null) {</span>
+<span class="fc" id="L312">				requiredWriteSubscriber().onNext(item);</span>
+			}
+<span class="fc bfc" id="L314" title="All 2 branches covered.">			if (this.completed) {</span>
+<span class="fc" id="L315">				requiredWriteSubscriber().onComplete();</span>
+<span class="fc" id="L316">				return true;</span>
+			}
+<span class="fc" id="L318">			return false;</span>
+		}
+
+		@Override
+		public void cancel() {
+<span class="fc" id="L323">			Subscription s = this.subscription;</span>
+<span class="fc bfc" id="L324" title="All 2 branches covered.">			if (s != null) {</span>
+<span class="fc" id="L325">				this.subscription = null;</span>
+				try {
+<span class="fc" id="L327">					s.cancel();</span>
+				}
+				finally {
+<span class="fc" id="L330">					releaseCachedItem();</span>
+				}
+			}
+<span class="fc" id="L333">		}</span>
+
+		private void releaseCachedItem() {
+<span class="fc" id="L336">			synchronized (this) {</span>
+<span class="fc" id="L337">				Object item = this.item;</span>
+<span class="pc bpc" id="L338" title="1 of 2 branches missed.">				if (item instanceof DataBuffer dataBuffer) {</span>
+<span class="nc" id="L339">					DataBufferUtils.release(dataBuffer);</span>
+				}
+<span class="fc" id="L341">				this.item = null;</span>
+<span class="fc" id="L342">			}</span>
+<span class="fc" id="L343">		}</span>
+
+
+		// Publisher&lt;T&gt; methods (we're the Publisher to the writeSubscriber)..
+
+		@Override
+		public void subscribe(Subscriber&lt;? super T&gt; writeSubscriber) {
+<span class="fc" id="L350">			synchronized (this) {</span>
+<span class="pc bpc" id="L351" title="1 of 2 branches missed.">				Assert.state(this.writeSubscriber == null, &quot;Only one write subscriber supported&quot;);</span>
+<span class="fc" id="L352">				this.writeSubscriber = writeSubscriber;</span>
+<span class="pc bpc" id="L353" title="1 of 4 branches missed.">				if (this.error != null || this.completed) {</span>
+<span class="fc" id="L354">					this.writeSubscriber.onSubscribe(Operators.emptySubscription());</span>
+<span class="fc" id="L355">					emitCachedSignals();</span>
+				}
+				else {
+<span class="fc" id="L358">					this.writeSubscriber.onSubscribe(this);</span>
+				}
+<span class="fc" id="L360">			}</span>
+<span class="fc" id="L361">		}</span>
+	}
+
+
+	/**
+	 * We need an extra barrier between the WriteBarrier itself and the actual
+	 * completion subscriber.
+	 *
+	 * &lt;p&gt;The completionSubscriber is subscribed initially to the WriteBarrier.
+	 * Later after the first signal is received, we need one more subscriber
+	 * instance (per spec can only subscribe once) to subscribe to the write
+	 * function and switch to delegating completion signals from it.
+	 */
+	private class WriteCompletionBarrier implements CoreSubscriber&lt;Void&gt;, Subscription {
+
+		/* Downstream write completion subscriber */
+		private final CoreSubscriber&lt;? super Void&gt; completionSubscriber;
+
+		private final WriteBarrier writeBarrier;
+
+		private @Nullable Subscription subscription;
+
+
+<span class="fc" id="L384">		public WriteCompletionBarrier(CoreSubscriber&lt;? super Void&gt; subscriber, WriteBarrier writeBarrier) {</span>
+<span class="fc" id="L385">			this.completionSubscriber = subscriber;</span>
+<span class="fc" id="L386">			this.writeBarrier = writeBarrier;</span>
+<span class="fc" id="L387">		}</span>
+
+
+		/**
+		 * Connect the underlying completion subscriber to this barrier in order
+		 * to track cancel signals and pass them on to the write barrier.
+		 */
+		public void connect() {
+<span class="fc" id="L395">			this.completionSubscriber.onSubscribe(this);</span>
+<span class="fc" id="L396">		}</span>
+
+		// Subscriber methods (we're the subscriber to the write function)..
+
+		@Override
+		public void onSubscribe(Subscription subscription) {
+<span class="fc" id="L402">			this.subscription = subscription;</span>
+<span class="fc" id="L403">			subscription.request(Long.MAX_VALUE);</span>
+<span class="fc" id="L404">		}</span>
+
+		@Override
+		public void onNext(Void aVoid) {
+<span class="nc" id="L408">		}</span>
+
+		@Override
+		public void onError(Throwable ex) {
+			try {
+<span class="fc" id="L413">				this.completionSubscriber.onError(ex);</span>
+			}
+			finally {
+<span class="fc" id="L416">				this.writeBarrier.releaseCachedItem();</span>
+			}
+<span class="fc" id="L418">		}</span>
+
+		@Override
+		public void onComplete() {
+<span class="fc" id="L422">			this.completionSubscriber.onComplete();</span>
+<span class="fc" id="L423">		}</span>
+
+		@Override
+		public Context currentContext() {
+<span class="fc" id="L427">			return this.completionSubscriber.currentContext();</span>
+		}
+
+
+		@Override
+		public void request(long n) {
+			// Ignore: we don't produce data
+<span class="fc" id="L434">		}</span>
+
+		@Override
+		public void cancel() {
+<span class="fc" id="L438">			this.writeBarrier.cancel();</span>
+<span class="fc" id="L439">			Subscription subscription = this.subscription;</span>
+<span class="pc bpc" id="L440" title="1 of 2 branches missed.">			if (subscription != null) {</span>
+<span class="fc" id="L441">				subscription.cancel();</span>
+			}
+<span class="fc" id="L443">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

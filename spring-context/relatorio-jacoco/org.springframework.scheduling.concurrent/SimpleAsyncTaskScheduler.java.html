@@ -1,0 +1,390 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SimpleAsyncTaskScheduler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.scheduling.concurrent</a> &gt; <span class="el_source">SimpleAsyncTaskScheduler.java</span></div><h1>SimpleAsyncTaskScheduler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.scheduling.concurrent;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.ScheduledThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.context.ApplicationListener;
+import org.springframework.context.SmartLifecycle;
+import org.springframework.context.event.ContextClosedEvent;
+import org.springframework.core.task.SimpleAsyncTaskExecutor;
+import org.springframework.core.task.TaskRejectedException;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.Trigger;
+import org.springframework.scheduling.support.DelegatingErrorHandlingRunnable;
+import org.springframework.scheduling.support.TaskUtils;
+import org.springframework.util.Assert;
+import org.springframework.util.ErrorHandler;
+
+/**
+ * A simple implementation of Spring's {@link TaskScheduler} interface, using
+ * a single scheduler thread and executing every scheduled task in an individual
+ * separate thread. This is an attractive choice with virtual threads on JDK 21,
+ * expecting common usage with {@link #setVirtualThreads setVirtualThreads(true)}.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE: Scheduling with a fixed delay enforces execution on a single
+ * scheduler thread, in order to provide traditional fixed-delay semantics!&lt;/b&gt;
+ * Prefer the use of fixed rates or cron triggers instead which are a better fit
+ * with this thread-per-task scheduler variant.
+ *
+ * &lt;p&gt;Supports a graceful shutdown through {@link #setTaskTerminationTimeout},
+ * at the expense of task tracking overhead per execution thread at runtime.
+ * Supports limiting concurrent threads through {@link #setConcurrencyLimit}.
+ * By default, the number of concurrent task executions is unlimited.
+ * This allows for dynamic concurrency of scheduled task executions, in contrast
+ * to {@link ThreadPoolTaskScheduler} which requires a fixed pool size.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE: This implementation does not reuse threads!&lt;/b&gt; Consider a
+ * thread-pooling TaskScheduler implementation instead, in particular for
+ * scheduling a large number of short-lived tasks. Alternatively, on JDK 21,
+ * consider setting {@link #setVirtualThreads} to {@code true}.
+ *
+ * &lt;p&gt;Extends {@link SimpleAsyncTaskExecutor} and can serve as a fully capable
+ * replacement for it, for example, as a single shared instance serving as a
+ * {@link org.springframework.core.task.TaskExecutor} as well as a {@link TaskScheduler}.
+ * This is generally not the case with other executor/scheduler implementations
+ * which tend to have specific constraints for the scheduler thread pool,
+ * requiring a separate thread pool for general executor purposes in practice.
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE: This scheduler variant does not track the actual completion of tasks
+ * but rather just the hand-off to an execution thread.&lt;/b&gt; As a consequence,
+ * a {@link ScheduledFuture} handle (for example, from {@link #schedule(Runnable, Instant)})
+ * represents that hand-off rather than the actual completion of the provided task
+ * (or series of repeated tasks). Also, this scheduler participates in lifecycle
+ * management to a limited degree only, stopping trigger firing and fixed-delay
+ * task execution but not stopping the execution of handed-off tasks.
+ *
+ * &lt;p&gt;As an alternative to the built-in thread-per-task capability, this scheduler
+ * can also be configured with a separate target executor for scheduled task
+ * execution through {@link #setTargetTaskExecutor}: for example, pointing to a shared
+ * {@link ThreadPoolTaskExecutor} bean. This is still rather different from a
+ * {@link ThreadPoolTaskScheduler} setup since it always uses a single scheduler
+ * thread while dynamically dispatching to the target thread pool which may have
+ * a dynamic core/max pool size range, participating in a shared concurrency limit.
+ *
+ * @author Juergen Hoeller
+ * @since 6.1
+ * @see #setVirtualThreads
+ * @see #setTaskTerminationTimeout
+ * @see #setConcurrencyLimit
+ * @see SimpleAsyncTaskExecutor
+ * @see ThreadPoolTaskScheduler
+ */
+@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L103">public class SimpleAsyncTaskScheduler extends SimpleAsyncTaskExecutor implements TaskScheduler,</span>
+		ApplicationContextAware, SmartLifecycle, ApplicationListener&lt;ContextClosedEvent&gt; {
+
+	/**
+	 * The default phase for an executor {@link SmartLifecycle}: {@code Integer.MAX_VALUE / 2}.
+	 * @since 6.2
+	 * @see #getPhase()
+	 * @see ExecutorConfigurationSupport#DEFAULT_PHASE
+	 */
+	public static final int DEFAULT_PHASE = ExecutorConfigurationSupport.DEFAULT_PHASE;
+
+<span class="fc" id="L114">	private static final TimeUnit NANO = TimeUnit.NANOSECONDS;</span>
+
+
+<span class="fc" id="L117">	private final ScheduledExecutorService triggerExecutor = createScheduledExecutor();</span>
+
+<span class="fc" id="L119">	private final ExecutorLifecycleDelegate triggerLifecycle = new ExecutorLifecycleDelegate(this.triggerExecutor);</span>
+
+<span class="fc" id="L121">	private final ScheduledExecutorService fixedDelayExecutor = createFixedDelayExecutor();</span>
+
+<span class="fc" id="L123">	private final ExecutorLifecycleDelegate fixedDelayLifecycle = new ExecutorLifecycleDelegate(this.fixedDelayExecutor);</span>
+
+	private @Nullable ErrorHandler errorHandler;
+
+<span class="fc" id="L127">	private Clock clock = Clock.systemDefaultZone();</span>
+
+<span class="fc" id="L129">	private int phase = DEFAULT_PHASE;</span>
+
+	private @Nullable Executor targetTaskExecutor;
+
+	private @Nullable ApplicationContext applicationContext;
+
+
+	/**
+	 * Provide an {@link ErrorHandler} strategy.
+	 * @since 6.2
+	 */
+	public void setErrorHandler(ErrorHandler errorHandler) {
+<span class="fc" id="L141">		Assert.notNull(errorHandler, &quot;ErrorHandler must not be null&quot;);</span>
+<span class="fc" id="L142">		this.errorHandler = errorHandler;</span>
+<span class="fc" id="L143">	}</span>
+
+	/**
+	 * Set the clock to use for scheduling purposes.
+	 * &lt;p&gt;The default clock is the system clock for the default time zone.
+	 * @see Clock#systemDefaultZone()
+	 */
+	public void setClock(Clock clock) {
+<span class="nc" id="L151">		Assert.notNull(clock, &quot;Clock must not be null&quot;);</span>
+<span class="nc" id="L152">		this.clock = clock;</span>
+<span class="nc" id="L153">	}</span>
+
+	@Override
+	public Clock getClock() {
+<span class="fc" id="L157">		return this.clock;</span>
+	}
+
+	/**
+	 * Specify the lifecycle phase for pausing and resuming this executor.
+	 * The default is {@link #DEFAULT_PHASE}.
+	 * @see SmartLifecycle#getPhase()
+	 */
+	public void setPhase(int phase) {
+<span class="nc" id="L166">		this.phase = phase;</span>
+<span class="nc" id="L167">	}</span>
+
+	/**
+	 * Return the lifecycle phase for pausing and resuming this executor.
+	 * @see #setPhase
+	 */
+	@Override
+	public int getPhase() {
+<span class="fc" id="L175">		return this.phase;</span>
+	}
+
+	/**
+	 * Specify a custom target {@link Executor} to delegate to for
+	 * the individual execution of scheduled tasks. This can for example
+	 * be set to a separate thread pool for executing scheduled tasks,
+	 * whereas this scheduler keeps using its single scheduler thread.
+	 * &lt;p&gt;If not set, the regular {@link SimpleAsyncTaskExecutor}
+	 * arrangements kicks in with a new thread per task.
+	 */
+	public void setTargetTaskExecutor(Executor targetTaskExecutor) {
+<span class="nc bnc" id="L187" title="All 2 branches missed.">		this.targetTaskExecutor = (targetTaskExecutor == this ? null : targetTaskExecutor);</span>
+<span class="nc" id="L188">	}</span>
+
+	@Override
+	public void setApplicationContext(ApplicationContext applicationContext) {
+<span class="fc" id="L192">		this.applicationContext = applicationContext;</span>
+<span class="fc" id="L193">	}</span>
+
+
+	private ScheduledExecutorService createScheduledExecutor() {
+<span class="fc" id="L197">		return new ScheduledThreadPoolExecutor(1, this::newThread) {</span>
+			@Override
+			protected void beforeExecute(Thread thread, Runnable task) {
+<span class="fc" id="L200">				triggerLifecycle.beforeExecute(thread);</span>
+<span class="fc" id="L201">			}</span>
+			@Override
+			protected void afterExecute(Runnable task, Throwable ex) {
+<span class="fc" id="L204">				triggerLifecycle.afterExecute();</span>
+<span class="fc" id="L205">			}</span>
+		};
+	}
+
+	private ScheduledExecutorService createFixedDelayExecutor() {
+<span class="fc" id="L210">		return new ScheduledThreadPoolExecutor(1, this::newThread) {</span>
+			@Override
+			protected void beforeExecute(Thread thread, Runnable task) {
+<span class="nc" id="L213">				fixedDelayLifecycle.beforeExecute(thread);</span>
+<span class="nc" id="L214">			}</span>
+			@Override
+			protected void afterExecute(Runnable task, Throwable ex) {
+<span class="nc" id="L217">				fixedDelayLifecycle.afterExecute();</span>
+<span class="nc" id="L218">			}</span>
+		};
+	}
+
+	@Override
+	protected void doExecute(Runnable task) {
+<span class="pc bpc" id="L224" title="1 of 2 branches missed.">		if (this.targetTaskExecutor != null) {</span>
+<span class="nc" id="L225">			this.targetTaskExecutor.execute(task);</span>
+		}
+		else {
+<span class="fc" id="L228">			super.doExecute(task);</span>
+		}
+<span class="fc" id="L230">	}</span>
+
+	private Runnable taskOnSchedulerThread(Runnable task) {
+<span class="fc" id="L233">		return new DelegatingErrorHandlingRunnable(task,</span>
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">				(this.errorHandler != null ? this.errorHandler : TaskUtils.getDefaultErrorHandler(true)));</span>
+	}
+
+	private Runnable scheduledTask(Runnable task) {
+<span class="fc" id="L238">		return () -&gt; execute(new DelegatingErrorHandlingRunnable(task, this::shutdownAwareErrorHandler));</span>
+	}
+
+	private void shutdownAwareErrorHandler(Throwable ex) {
+<span class="pc bpc" id="L242" title="1 of 2 branches missed.">		if (this.errorHandler != null) {</span>
+<span class="fc" id="L243">			this.errorHandler.handleError(ex);</span>
+		}
+<span class="nc bnc" id="L245" title="All 2 branches missed.">		else if (this.triggerExecutor.isShutdown()) {</span>
+<span class="nc" id="L246">			LogFactory.getLog(getClass()).debug(&quot;Ignoring scheduled task exception after shutdown&quot;, ex);</span>
+		}
+		else {
+<span class="nc" id="L249">			TaskUtils.getDefaultErrorHandler(true).handleError(ex);</span>
+		}
+<span class="fc" id="L251">	}</span>
+
+
+	@Override
+	public void execute(Runnable task) {
+<span class="fc" id="L256">		super.execute(TaskUtils.decorateTaskWithErrorHandler(task, this.errorHandler, false));</span>
+<span class="fc" id="L257">	}</span>
+
+	@Override
+	public Future&lt;?&gt; submit(Runnable task) {
+<span class="fc" id="L261">		return super.submit(TaskUtils.decorateTaskWithErrorHandler(task, this.errorHandler, false));</span>
+	}
+
+	@Override
+	public &lt;T&gt; Future&lt;T&gt; submit(Callable&lt;T&gt; task) {
+<span class="fc" id="L266">		return super.submit(new DelegatingErrorHandlingCallable&lt;&gt;(task, this.errorHandler));</span>
+	}
+
+	@Override
+	public @Nullable ScheduledFuture&lt;?&gt; schedule(Runnable task, Trigger trigger) {
+		try {
+<span class="fc" id="L272">			Runnable delegate = scheduledTask(task);</span>
+			ErrorHandler errorHandler =
+<span class="pc bpc" id="L274" title="1 of 2 branches missed.">					(this.errorHandler != null ? this.errorHandler : TaskUtils.getDefaultErrorHandler(true));</span>
+<span class="fc" id="L275">			return new ReschedulingRunnable(</span>
+<span class="fc" id="L276">					delegate, trigger, this.clock, this.triggerExecutor, errorHandler).schedule();</span>
+		}
+<span class="nc" id="L278">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L279">			throw new TaskRejectedException(this.triggerExecutor, task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; schedule(Runnable task, Instant startTime) {
+<span class="fc" id="L285">		Duration delay = Duration.between(this.clock.instant(), startTime);</span>
+		try {
+<span class="fc" id="L287">			return this.triggerExecutor.schedule(scheduledTask(task), NANO.convert(delay), NANO);</span>
+		}
+<span class="nc" id="L289">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L290">			throw new TaskRejectedException(this.triggerExecutor, task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleAtFixedRate(Runnable task, Instant startTime, Duration period) {
+<span class="nc" id="L296">		Duration initialDelay = Duration.between(this.clock.instant(), startTime);</span>
+		try {
+<span class="nc" id="L298">			return this.triggerExecutor.scheduleAtFixedRate(scheduledTask(task),</span>
+<span class="nc" id="L299">					NANO.convert(initialDelay), NANO.convert(period), NANO);</span>
+		}
+<span class="nc" id="L301">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L302">			throw new TaskRejectedException(this.triggerExecutor, task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleAtFixedRate(Runnable task, Duration period) {
+		try {
+<span class="nc" id="L309">			return this.triggerExecutor.scheduleAtFixedRate(scheduledTask(task),</span>
+<span class="nc" id="L310">					0, NANO.convert(period), NANO);</span>
+		}
+<span class="nc" id="L312">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L313">			throw new TaskRejectedException(this.triggerExecutor, task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleWithFixedDelay(Runnable task, Instant startTime, Duration delay) {
+<span class="fc" id="L319">		Duration initialDelay = Duration.between(this.clock.instant(), startTime);</span>
+		try {
+			// Blocking task on scheduler thread for fixed delay semantics
+<span class="fc" id="L322">			return this.fixedDelayExecutor.scheduleWithFixedDelay(taskOnSchedulerThread(task),</span>
+<span class="fc" id="L323">					NANO.convert(initialDelay), NANO.convert(delay), NANO);</span>
+		}
+<span class="nc" id="L325">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L326">			throw new TaskRejectedException(this.fixedDelayExecutor, task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleWithFixedDelay(Runnable task, Duration delay) {
+		try {
+			// Blocking task on scheduler thread for fixed delay semantics
+<span class="nc" id="L334">			return this.fixedDelayExecutor.scheduleWithFixedDelay(taskOnSchedulerThread(task),</span>
+<span class="nc" id="L335">					0, NANO.convert(delay), NANO);</span>
+		}
+<span class="nc" id="L337">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L338">			throw new TaskRejectedException(this.fixedDelayExecutor, task, ex);</span>
+		}
+	}
+
+
+	@Override
+	public void start() {
+<span class="fc" id="L345">		this.triggerLifecycle.start();</span>
+<span class="fc" id="L346">		this.fixedDelayLifecycle.start();</span>
+<span class="fc" id="L347">	}</span>
+
+	@Override
+	public void stop() {
+<span class="fc" id="L351">		this.triggerLifecycle.stop();</span>
+<span class="fc" id="L352">		this.fixedDelayLifecycle.stop();</span>
+<span class="fc" id="L353">	}</span>
+
+	@Override
+	public void stop(Runnable callback) {
+<span class="nc" id="L357">		this.triggerLifecycle.stop();  // no callback necessary since it's just triggers with hand-offs</span>
+<span class="nc" id="L358">		this.fixedDelayLifecycle.stop(callback);  // callback for currently executing fixed-delay tasks</span>
+<span class="nc" id="L359">	}</span>
+
+	@Override
+	public boolean isRunning() {
+<span class="pc bpc" id="L363" title="1 of 4 branches missed.">		return (this.triggerLifecycle.isRunning() || this.fixedDelayLifecycle.isRunning());</span>
+	}
+
+	@Override
+	public void onApplicationEvent(ContextClosedEvent event) {
+<span class="pc bpc" id="L368" title="1 of 2 branches missed.">		if (event.getApplicationContext() == this.applicationContext) {</span>
+<span class="fc" id="L369">			this.triggerExecutor.shutdown();</span>
+<span class="fc" id="L370">			this.fixedDelayExecutor.shutdown();</span>
+		}
+<span class="fc" id="L372">	}</span>
+
+	@Override
+	public void close() {
+<span class="pc bpc" id="L376" title="1 of 2 branches missed.">		for (Runnable remainingTask : this.triggerExecutor.shutdownNow()) {</span>
+<span class="nc bnc" id="L377" title="All 2 branches missed.">			if (remainingTask instanceof Future&lt;?&gt; future) {</span>
+<span class="nc" id="L378">				future.cancel(true);</span>
+			}
+<span class="nc" id="L380">		}</span>
+<span class="pc bpc" id="L381" title="1 of 2 branches missed.">		for (Runnable remainingTask : this.fixedDelayExecutor.shutdownNow()) {</span>
+<span class="nc bnc" id="L382" title="All 2 branches missed.">			if (remainingTask instanceof Future&lt;?&gt; future) {</span>
+<span class="nc" id="L383">				future.cancel(true);</span>
+			}
+<span class="nc" id="L385">		}</span>
+<span class="fc" id="L386">		super.close();</span>
+<span class="fc" id="L387">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

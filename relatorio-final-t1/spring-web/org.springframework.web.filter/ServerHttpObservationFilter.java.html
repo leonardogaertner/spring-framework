@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ServerHttpObservationFilter.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.filter</a> &gt; <span class="el_source">ServerHttpObservationFilter.java</span></div><h1>ServerHttpObservationFilter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.filter;
+
+import java.io.IOException;
+import java.util.Optional;
+
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
+import jakarta.servlet.AsyncEvent;
+import jakarta.servlet.AsyncListener;
+import jakarta.servlet.DispatcherType;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.RequestDispatcher;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.http.HttpStatus;
+import org.springframework.http.server.observation.DefaultServerRequestObservationConvention;
+import org.springframework.http.server.observation.ServerHttpObservationDocumentation;
+import org.springframework.http.server.observation.ServerRequestObservationContext;
+import org.springframework.http.server.observation.ServerRequestObservationConvention;
+
+
+/**
+ * {@link jakarta.servlet.Filter} that creates {@link Observation observations}
+ * for HTTP exchanges. This collects information about the execution time and
+ * information gathered from the {@link ServerRequestObservationContext}.
+ * &lt;p&gt;Web Frameworks can fetch the current {@link ServerRequestObservationContext context}
+ * as a {@link #CURRENT_OBSERVATION_CONTEXT_ATTRIBUTE request attribute} and contribute
+ * additional information to it.
+ * The configured {@link ServerRequestObservationConvention} will use this context to collect
+ * {@link io.micrometer.common.KeyValue metadata} and attach it to the observation.
+ *
+ * @author Brian Clozel
+ * @since 6.0
+ */
+public class ServerHttpObservationFilter extends OncePerRequestFilter {
+
+	/**
+	 * Name of the request attribute holding the {@link ServerRequestObservationContext} for the current observation.
+	 */
+<span class="fc" id="L60">	public static final String CURRENT_OBSERVATION_CONTEXT_ATTRIBUTE =</span>
+<span class="fc" id="L61">			ServerHttpObservationFilter.class.getName() + &quot;.context&quot;;</span>
+
+<span class="fc" id="L63">	private static final String CURRENT_OBSERVATION_ATTRIBUTE =</span>
+<span class="fc" id="L64">			ServerHttpObservationFilter.class.getName() + &quot;.observation&quot;;</span>
+
+<span class="fc" id="L66">	private static final ServerRequestObservationConvention DEFAULT_OBSERVATION_CONVENTION =</span>
+			new DefaultServerRequestObservationConvention();
+
+
+	private final ObservationRegistry observationRegistry;
+
+	private final ServerRequestObservationConvention observationConvention;
+
+
+	/**
+	 * Create an {@code HttpRequestsObservationFilter} that records observations
+	 * against the given {@link ObservationRegistry}. The default
+	 * {@link DefaultServerRequestObservationConvention convention} will be used.
+	 * @param observationRegistry the registry to use for recording observations
+	 */
+	public ServerHttpObservationFilter(ObservationRegistry observationRegistry) {
+<span class="nc" id="L82">		this(observationRegistry, DEFAULT_OBSERVATION_CONVENTION);</span>
+<span class="nc" id="L83">	}</span>
+
+	/**
+	 * Create an {@code HttpRequestsObservationFilter} that records observations
+	 * against the given {@link ObservationRegistry} with a custom convention.
+	 * @param observationRegistry the registry to use for recording observations
+	 * @param observationConvention the convention to use for all recorded observations
+	 */
+<span class="nc" id="L91">	public ServerHttpObservationFilter(ObservationRegistry observationRegistry, ServerRequestObservationConvention observationConvention) {</span>
+<span class="nc" id="L92">		this.observationRegistry = observationRegistry;</span>
+<span class="nc" id="L93">		this.observationConvention = observationConvention;</span>
+<span class="nc" id="L94">	}</span>
+
+
+	@Override
+	protected boolean shouldNotFilterAsyncDispatch() {
+<span class="nc" id="L99">		return false;</span>
+	}
+
+	@Override
+	@SuppressWarnings(&quot;try&quot;)
+	protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain filterChain)
+			throws ServletException, IOException {
+
+<span class="nc" id="L107">		Observation observation = createOrFetchObservation(request, response);</span>
+<span class="nc" id="L108">		try (Observation.Scope scope = observation.openScope()) {</span>
+<span class="nc" id="L109">			onScopeOpened(scope, request, response);</span>
+<span class="nc" id="L110">			filterChain.doFilter(request, response);</span>
+		}
+<span class="nc" id="L112">		catch (Exception ex) {</span>
+<span class="nc" id="L113">			observation.error(unwrapServletException(ex));</span>
+<span class="nc" id="L114">			response.setStatus(HttpStatus.INTERNAL_SERVER_ERROR.value());</span>
+<span class="nc" id="L115">			throw ex;</span>
+		}
+		finally {
+			// If async is started during the first dispatch, register a listener for completion notification.
+<span class="nc bnc" id="L119" title="All 4 branches missed.">			if (request.isAsyncStarted() &amp;&amp; request.getDispatcherType() == DispatcherType.REQUEST) {</span>
+<span class="nc" id="L120">				request.getAsyncContext().addListener(new ObservationAsyncListener(observation));</span>
+			}
+			// scope is opened for ASYNC dispatches, but the observation will be closed
+			// by the async listener.
+<span class="nc bnc" id="L124" title="All 2 branches missed.">			else if (!isAsyncDispatch(request)) {</span>
+<span class="nc" id="L125">				Throwable error = fetchException(request);</span>
+<span class="nc bnc" id="L126" title="All 2 branches missed.">				if (error != null) {</span>
+<span class="nc" id="L127">					observation.error(error);</span>
+				}
+<span class="nc" id="L129">				observation.stop();</span>
+			}
+		}
+<span class="nc" id="L132">	}</span>
+
+	/**
+	 * Notify this filter that a new {@link Observation.Scope} is opened for the
+	 * observation that was just created.
+	 * @param scope the newly opened observation scope
+	 * @param request the HTTP client request
+	 * @param response the filter's response
+	 * @since 6.2
+	 */
+	protected void onScopeOpened(Observation.Scope scope, HttpServletRequest request, HttpServletResponse response) {
+<span class="nc" id="L143">	}</span>
+
+	private Observation createOrFetchObservation(HttpServletRequest request, HttpServletResponse response) {
+<span class="nc" id="L146">		Observation observation = (Observation) request.getAttribute(CURRENT_OBSERVATION_ATTRIBUTE);</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">		if (observation == null) {</span>
+<span class="nc" id="L148">			ServerRequestObservationContext context = new ServerRequestObservationContext(request, response);</span>
+<span class="nc" id="L149">			observation = ServerHttpObservationDocumentation.HTTP_SERVLET_SERVER_REQUESTS.observation(</span>
+<span class="nc" id="L150">					this.observationConvention, DEFAULT_OBSERVATION_CONVENTION, () -&gt; context, this.observationRegistry)</span>
+<span class="nc" id="L151">					.start();</span>
+<span class="nc" id="L152">			request.setAttribute(CURRENT_OBSERVATION_ATTRIBUTE, observation);</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">			if (!observation.isNoop()) {</span>
+<span class="nc" id="L154">				request.setAttribute(CURRENT_OBSERVATION_CONTEXT_ATTRIBUTE, observation.getContext());</span>
+			}
+		}
+<span class="nc" id="L157">		return observation;</span>
+	}
+
+
+	/**
+	 * Get the current {@link ServerRequestObservationContext observation context} from the given request, if available.
+	 * @param request the current request
+	 * @return the current observation context
+	 */
+	public static Optional&lt;ServerRequestObservationContext&gt; findObservationContext(HttpServletRequest request) {
+<span class="fc" id="L167">		return Optional.ofNullable(</span>
+<span class="fc" id="L168">				(ServerRequestObservationContext) request.getAttribute(CURRENT_OBSERVATION_CONTEXT_ATTRIBUTE));</span>
+	}
+
+	static @Nullable Throwable fetchException(ServletRequest request) {
+<span class="nc" id="L172">		return (Throwable) request.getAttribute(RequestDispatcher.ERROR_EXCEPTION);</span>
+	}
+
+	static Throwable unwrapServletException(Throwable ex) {
+<span class="nc bnc" id="L176" title="All 2 branches missed.">		if (ex instanceof ServletException) {</span>
+<span class="nc" id="L177">			Throwable cause = ex.getCause();</span>
+<span class="nc bnc" id="L178" title="All 2 branches missed.">			if (cause != null) {</span>
+<span class="nc" id="L179">				return cause;</span>
+			}
+		}
+<span class="nc" id="L182">		return ex;</span>
+	}
+
+
+	private static class ObservationAsyncListener implements AsyncListener {
+
+		private final Observation currentObservation;
+
+<span class="nc" id="L190">		public ObservationAsyncListener(Observation currentObservation) {</span>
+<span class="nc" id="L191">			this.currentObservation = currentObservation;</span>
+<span class="nc" id="L192">		}</span>
+
+		@Override
+		public void onStartAsync(AsyncEvent event) {
+<span class="nc" id="L196">			event.getAsyncContext().addListener(this);</span>
+<span class="nc" id="L197">		}</span>
+
+		@Override
+		public void onTimeout(AsyncEvent event) {
+<span class="nc" id="L201">			this.currentObservation.stop();</span>
+<span class="nc" id="L202">		}</span>
+
+		@Override
+		public void onComplete(AsyncEvent event) {
+<span class="nc" id="L206">			this.currentObservation.stop();</span>
+<span class="nc" id="L207">		}</span>
+
+		@Override
+		public void onError(AsyncEvent event) {
+<span class="nc" id="L211">			this.currentObservation.error(unwrapServletException(event.getThrowable()));</span>
+<span class="nc" id="L212">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

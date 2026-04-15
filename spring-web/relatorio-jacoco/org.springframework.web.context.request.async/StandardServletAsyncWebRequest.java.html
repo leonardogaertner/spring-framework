@@ -1,0 +1,707 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>StandardServletAsyncWebRequest.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.context.request.async</a> &gt; <span class="el_source">StandardServletAsyncWebRequest.java</span></div><h1>StandardServletAsyncWebRequest.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.context.request.async;
+
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
+
+import jakarta.servlet.AsyncContext;
+import jakarta.servlet.AsyncEvent;
+import jakarta.servlet.AsyncListener;
+import jakarta.servlet.ServletOutputStream;
+import jakarta.servlet.WriteListener;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import jakarta.servlet.http.HttpServletResponseWrapper;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.util.Assert;
+import org.springframework.web.context.request.ServletWebRequest;
+
+/**
+ * A Servlet implementation of {@link AsyncWebRequest}.
+ *
+ * &lt;p&gt;The servlet and all filters involved in an async request must have async
+ * support enabled using the Servlet API or by adding an
+ * &lt;code&gt;&amp;lt;async-supported&amp;gt;true&amp;lt;/async-supported&amp;gt;&lt;/code&gt; element to servlet and filter
+ * declarations in {@code web.xml}.
+ *
+ * @author Rossen Stoyanchev
+ * @since 3.2
+ */
+public class StandardServletAsyncWebRequest extends ServletWebRequest implements AsyncWebRequest, AsyncListener {
+
+<span class="nc" id="L54">	private final List&lt;Runnable&gt; timeoutHandlers = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L56">	private final List&lt;Consumer&lt;Throwable&gt;&gt; exceptionHandlers = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L58">	private final List&lt;Runnable&gt; completionHandlers = new ArrayList&lt;&gt;();</span>
+
+	private @Nullable Long timeout;
+
+	private @Nullable AsyncContext asyncContext;
+
+	private State state;
+
+<span class="nc" id="L66">	private final ReentrantLock stateLock = new ReentrantLock();</span>
+
+
+	/**
+	 * Create a new instance for the given request/response pair.
+	 * @param request current HTTP request
+	 * @param response current HTTP response
+	 */
+	public StandardServletAsyncWebRequest(HttpServletRequest request, HttpServletResponse response) {
+<span class="nc" id="L75">		this(request, response, null);</span>
+<span class="nc" id="L76">	}</span>
+
+	/**
+	 * Constructor to wrap the request and response for the current dispatch that
+	 * also picks up the state of the last (probably the REQUEST) dispatch.
+	 * @param request current HTTP request
+	 * @param response current HTTP response
+	 * @param previousRequest the existing request from the last dispatch
+	 * @since 5.3.33
+	 */
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	StandardServletAsyncWebRequest(HttpServletRequest request, HttpServletResponse response,
+			@Nullable StandardServletAsyncWebRequest previousRequest) {
+
+<span class="nc" id="L90">		super(request, new LifecycleHttpServletResponse(response));</span>
+
+<span class="nc bnc" id="L92" title="All 2 branches missed.">		this.state = (previousRequest != null ? previousRequest.state : State.NEW);</span>
+
+		//noinspection DataFlowIssue
+<span class="nc" id="L95">		((LifecycleHttpServletResponse) getResponse()).setAsyncWebRequest(this);</span>
+<span class="nc" id="L96">	}</span>
+
+
+	/**
+	 * In Servlet 3 async processing, the timeout period begins after the
+	 * container processing thread has exited.
+	 */
+	@Override
+	public void setTimeout(@Nullable Long timeout) {
+<span class="nc bnc" id="L105" title="All 2 branches missed.">		Assert.state(!isAsyncStarted(), &quot;Cannot change the timeout with concurrent handling in progress&quot;);</span>
+<span class="nc" id="L106">		this.timeout = timeout;</span>
+<span class="nc" id="L107">	}</span>
+
+	@Override
+	public void addTimeoutHandler(Runnable timeoutHandler) {
+<span class="nc" id="L111">		this.timeoutHandlers.add(timeoutHandler);</span>
+<span class="nc" id="L112">	}</span>
+
+	@Override
+	public void addErrorHandler(Consumer&lt;Throwable&gt; exceptionHandler) {
+<span class="nc" id="L116">		this.exceptionHandlers.add(exceptionHandler);</span>
+<span class="nc" id="L117">	}</span>
+
+	@Override
+	public void addCompletionHandler(Runnable runnable) {
+<span class="nc" id="L121">		this.completionHandlers.add(runnable);</span>
+<span class="nc" id="L122">	}</span>
+
+	@Override
+	public boolean isAsyncStarted() {
+<span class="nc bnc" id="L126" title="All 4 branches missed.">		return (this.asyncContext != null &amp;&amp; getRequest().isAsyncStarted());</span>
+	}
+
+	/**
+	 * Whether async request processing has completed.
+	 * &lt;p&gt;It is important to avoid use of request and response objects after async
+	 * processing has completed. Servlet containers often re-use them.
+	 */
+	@Override
+	public boolean isAsyncComplete() {
+<span class="nc bnc" id="L136" title="All 2 branches missed.">		return (this.state == State.COMPLETED);</span>
+	}
+
+	@Override
+	public void startAsync() {
+<span class="nc" id="L141">		Assert.state(getRequest().isAsyncSupported(),</span>
+				&quot;Async support must be enabled on a servlet and for all filters involved &quot; +
+				&quot;in async request processing. This is done in Java code using the Servlet API &quot; +
+				&quot;or by adding \&quot;&lt;async-supported&gt;true&lt;/async-supported&gt;\&quot; to servlet and &quot; +
+				&quot;filter declarations in web.xml.&quot;);
+
+<span class="nc bnc" id="L147" title="All 2 branches missed.">		if (isAsyncStarted()) {</span>
+<span class="nc" id="L148">			return;</span>
+		}
+
+<span class="nc bnc" id="L151" title="All 2 branches missed.">		if (this.state == State.NEW) {</span>
+<span class="nc" id="L152">			this.state = State.ASYNC;</span>
+		}
+		else {
+<span class="nc bnc" id="L155" title="All 2 branches missed.">			Assert.state(this.state == State.ASYNC, &quot;Cannot start async: [&quot; + this.state + &quot;]&quot;);</span>
+		}
+
+<span class="nc" id="L158">		this.asyncContext = getRequest().startAsync(getRequest(), getResponse());</span>
+<span class="nc" id="L159">		this.asyncContext.addListener(this);</span>
+<span class="nc bnc" id="L160" title="All 2 branches missed.">		if (this.timeout != null) {</span>
+<span class="nc" id="L161">			this.asyncContext.setTimeout(this.timeout);</span>
+		}
+<span class="nc" id="L163">	}</span>
+
+	@Override
+	public void dispatch() {
+<span class="nc bnc" id="L167" title="All 2 branches missed.">		Assert.state(this.asyncContext != null, &quot;AsyncContext not yet initialized&quot;);</span>
+<span class="nc bnc" id="L168" title="All 2 branches missed.">		if (!this.isAsyncComplete()) {</span>
+<span class="nc" id="L169">			this.asyncContext.dispatch();</span>
+		}
+<span class="nc" id="L171">	}</span>
+
+
+	// ---------------------------------------------------------------------
+	// Implementation of AsyncListener methods
+	// ---------------------------------------------------------------------
+
+	@Override
+	public void onStartAsync(AsyncEvent event) throws IOException {
+<span class="nc" id="L180">	}</span>
+
+	@Override
+	public void onTimeout(AsyncEvent event) throws IOException {
+<span class="nc" id="L184">		this.timeoutHandlers.forEach(Runnable::run);</span>
+<span class="nc" id="L185">	}</span>
+
+	@Override
+	public void onError(AsyncEvent event) throws IOException {
+<span class="nc" id="L189">		this.stateLock.lock();</span>
+		try {
+<span class="nc" id="L191">			this.state = State.ERROR;</span>
+<span class="nc" id="L192">			Throwable ex = event.getThrowable();</span>
+<span class="nc" id="L193">			this.exceptionHandlers.forEach(consumer -&gt; consumer.accept(ex));</span>
+		}
+		finally {
+<span class="nc" id="L196">			this.stateLock.unlock();</span>
+		}
+<span class="nc" id="L198">	}</span>
+
+	@Override
+	public void onComplete(AsyncEvent event) throws IOException {
+<span class="nc" id="L202">		this.stateLock.lock();</span>
+		try {
+<span class="nc" id="L204">			this.completionHandlers.forEach(Runnable::run);</span>
+<span class="nc" id="L205">			this.asyncContext = null;</span>
+<span class="nc" id="L206">			this.state = State.COMPLETED;</span>
+		}
+		finally {
+<span class="nc" id="L209">			this.stateLock.unlock();</span>
+		}
+<span class="nc" id="L211">	}</span>
+
+
+	/**
+	 * Return 0 when there is no need to obtain a lock (no async handling in
+	 * progress), 1 if lock was acquired, and -1 if lock is not acquired because
+	 * request is no longer usable.
+	 */
+	private int tryObtainLock() {
+
+<span class="nc bnc" id="L221" title="All 2 branches missed.">		if (this.state == State.NEW) {</span>
+<span class="nc" id="L222">			return 0;</span>
+		}
+
+		// Do not wait indefinitely, stop if we moved on from ASYNC state (for example, to ERROR),
+		// helps to avoid ABBA deadlock with onError callback
+
+<span class="nc bnc" id="L228" title="All 2 branches missed.">		while (this.state == State.ASYNC) {</span>
+			try {
+<span class="nc bnc" id="L230" title="All 2 branches missed.">				if (this.stateLock.tryLock(500, TimeUnit.MILLISECONDS)) {</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">					if (this.state == State.ASYNC) {</span>
+<span class="nc" id="L232">						return 1;</span>
+					}
+<span class="nc" id="L234">					this.stateLock.unlock();</span>
+<span class="nc" id="L235">					break;</span>
+				}
+			}
+<span class="nc" id="L238">			catch (InterruptedException ignored) {</span>
+<span class="nc" id="L239">			}</span>
+		}
+
+<span class="nc" id="L242">		return -1;</span>
+	}
+
+	/**
+	 * Package private access for testing only.
+	 */
+	ReentrantLock stateLock() {
+<span class="nc" id="L249">		return this.stateLock;</span>
+	}
+
+
+	/**
+	 * Response wrapper to wrap the output stream with {@link LifecycleServletOutputStream}.
+	 * @since 5.3.33
+	 */
+	private static final class LifecycleHttpServletResponse extends HttpServletResponseWrapper {
+
+		private @Nullable StandardServletAsyncWebRequest asyncWebRequest;
+
+		private @Nullable ServletOutputStream outputStream;
+
+		private @Nullable PrintWriter writer;
+
+		public LifecycleHttpServletResponse(HttpServletResponse response) {
+<span class="nc" id="L266">			super(response);</span>
+<span class="nc" id="L267">		}</span>
+
+		public void setAsyncWebRequest(StandardServletAsyncWebRequest asyncWebRequest) {
+<span class="nc" id="L270">			this.asyncWebRequest = asyncWebRequest;</span>
+<span class="nc" id="L271">		}</span>
+
+		@Override
+		@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+		public ServletOutputStream getOutputStream() throws IOException {
+<span class="nc" id="L276">			int level = obtainLockOrRaiseException();</span>
+			try {
+<span class="nc bnc" id="L278" title="All 2 branches missed.">				if (this.outputStream == null) {</span>
+<span class="nc" id="L279">					Assert.notNull(this.asyncWebRequest, &quot;Not initialized&quot;);</span>
+<span class="nc" id="L280">					ServletOutputStream delegate = getResponse().getOutputStream();</span>
+<span class="nc" id="L281">					this.outputStream = new LifecycleServletOutputStream(delegate, this);</span>
+				}
+			}
+<span class="nc" id="L284">			catch (IOException ex) {</span>
+<span class="nc" id="L285">				handleIOException(ex, &quot;Failed to get ServletResponseOutput&quot;);</span>
+			}
+			finally {
+<span class="nc" id="L288">				releaseLock(level);</span>
+			}
+<span class="nc" id="L290">			return this.outputStream;</span>
+		}
+
+		@Override
+		@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+		public PrintWriter getWriter() throws IOException {
+<span class="nc" id="L296">			int level = obtainLockOrRaiseException();</span>
+			try {
+<span class="nc bnc" id="L298" title="All 2 branches missed.">				if (this.writer == null) {</span>
+<span class="nc" id="L299">					Assert.notNull(this.asyncWebRequest, &quot;Not initialized&quot;);</span>
+<span class="nc" id="L300">					this.writer = new LifecyclePrintWriter(getResponse().getWriter(), this.asyncWebRequest);</span>
+				}
+			}
+<span class="nc" id="L303">			catch (IOException ex) {</span>
+<span class="nc" id="L304">				handleIOException(ex, &quot;Failed to get PrintWriter&quot;);</span>
+			}
+			finally {
+<span class="nc" id="L307">				releaseLock(level);</span>
+			}
+<span class="nc" id="L309">			return this.writer;</span>
+		}
+
+		@Override
+		public void flushBuffer() throws IOException {
+<span class="nc" id="L314">			int level = obtainLockOrRaiseException();</span>
+			try {
+<span class="nc" id="L316">				getResponse().flushBuffer();</span>
+			}
+<span class="nc" id="L318">			catch (IOException ex) {</span>
+<span class="nc" id="L319">				handleIOException(ex, &quot;ServletResponse failed to flushBuffer&quot;);</span>
+			}
+			finally {
+<span class="nc" id="L322">				releaseLock(level);</span>
+			}
+<span class="nc" id="L324">		}</span>
+
+		private int obtainLockOrRaiseException() throws AsyncRequestNotUsableException {
+<span class="nc" id="L327">			Assert.notNull(this.asyncWebRequest, &quot;Not initialized&quot;);</span>
+<span class="nc" id="L328">			int result = this.asyncWebRequest.tryObtainLock();</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">			if (result == -1) {</span>
+<span class="nc" id="L330">				throw new AsyncRequestNotUsableException(&quot;Response not usable after &quot; +</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">						(this.asyncWebRequest.state == State.COMPLETED ?</span>
+<span class="nc" id="L332">								&quot;async request completion&quot; : &quot;response errors&quot;) + &quot;.&quot;);</span>
+			}
+<span class="nc" id="L334">			return result;</span>
+		}
+
+		void handleIOException(IOException ex, String msg) throws AsyncRequestNotUsableException {
+<span class="nc" id="L338">			Assert.notNull(this.asyncWebRequest, &quot;Not initialized&quot;);</span>
+<span class="nc" id="L339">			this.asyncWebRequest.state = State.ERROR;</span>
+<span class="nc" id="L340">			throw new AsyncRequestNotUsableException(msg + &quot;: &quot; + ex.getMessage(), ex);</span>
+		}
+
+		void releaseLock(int level) {
+<span class="nc" id="L344">			Assert.notNull(this.asyncWebRequest, &quot;Not initialized&quot;);</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">			if (level &gt; 0) {</span>
+<span class="nc" id="L346">				this.asyncWebRequest.stateLock.unlock();</span>
+			}
+<span class="nc" id="L348">		}</span>
+	}
+
+
+	/**
+	 * Wraps a ServletOutputStream to prevent use after Servlet container onError
+	 * notifications, and after async request completion.
+	 * @since 5.3.33
+	 */
+	private static final class LifecycleServletOutputStream extends ServletOutputStream {
+
+		private final ServletOutputStream delegate;
+
+		private final LifecycleHttpServletResponse response;
+
+<span class="nc" id="L363">		private LifecycleServletOutputStream(ServletOutputStream delegate, LifecycleHttpServletResponse response) {</span>
+<span class="nc" id="L364">			this.delegate = delegate;</span>
+<span class="nc" id="L365">			this.response = response;</span>
+<span class="nc" id="L366">		}</span>
+
+		@Override
+		public boolean isReady() {
+<span class="nc" id="L370">			return this.delegate.isReady();</span>
+		}
+
+		@Override
+		public void setWriteListener(WriteListener writeListener) {
+<span class="nc" id="L375">			this.delegate.setWriteListener(writeListener);</span>
+<span class="nc" id="L376">		}</span>
+
+		@Override
+		public void write(int b) throws IOException {
+<span class="nc" id="L380">			int level = this.response.obtainLockOrRaiseException();</span>
+			try {
+<span class="nc" id="L382">				this.delegate.write(b);</span>
+			}
+<span class="nc" id="L384">			catch (IOException ex) {</span>
+<span class="nc" id="L385">				this.response.handleIOException(ex, &quot;ServletOutputStream failed to write&quot;);</span>
+			}
+			finally {
+<span class="nc" id="L388">				this.response.releaseLock(level);</span>
+			}
+<span class="nc" id="L390">		}</span>
+
+		@Override
+		public void write(byte[] buf, int offset, int len) throws IOException {
+<span class="nc" id="L394">			int level = this.response.obtainLockOrRaiseException();</span>
+			try {
+<span class="nc" id="L396">				this.delegate.write(buf, offset, len);</span>
+			}
+<span class="nc" id="L398">			catch (IOException ex) {</span>
+<span class="nc" id="L399">				this.response.handleIOException(ex, &quot;ServletOutputStream failed to write&quot;);</span>
+			}
+			finally {
+<span class="nc" id="L402">				this.response.releaseLock(level);</span>
+			}
+<span class="nc" id="L404">		}</span>
+
+		@Override
+		public void flush() throws IOException {
+<span class="nc" id="L408">			int level = this.response.obtainLockOrRaiseException();</span>
+			try {
+<span class="nc" id="L410">				this.delegate.flush();</span>
+			}
+<span class="nc" id="L412">			catch (IOException ex) {</span>
+<span class="nc" id="L413">				this.response.handleIOException(ex, &quot;ServletOutputStream failed to flush&quot;);</span>
+			}
+			finally {
+<span class="nc" id="L416">				this.response.releaseLock(level);</span>
+			}
+<span class="nc" id="L418">		}</span>
+
+		@Override
+		public void close() throws IOException {
+<span class="nc" id="L422">			int level = this.response.obtainLockOrRaiseException();</span>
+			try {
+<span class="nc" id="L424">				this.delegate.close();</span>
+			}
+<span class="nc" id="L426">			catch (IOException ex) {</span>
+<span class="nc" id="L427">				this.response.handleIOException(ex, &quot;ServletOutputStream failed to close&quot;);</span>
+			}
+			finally {
+<span class="nc" id="L430">				this.response.releaseLock(level);</span>
+			}
+<span class="nc" id="L432">		}</span>
+
+	}
+
+
+	/**
+	 * Wraps a PrintWriter to prevent use after Servlet container onError
+	 * notifications, and after async request completion.
+	 * @since 5.3.33
+	 */
+	private static final class LifecyclePrintWriter extends PrintWriter {
+
+		private final PrintWriter delegate;
+
+		private final StandardServletAsyncWebRequest asyncWebRequest;
+
+		private LifecyclePrintWriter(PrintWriter delegate, StandardServletAsyncWebRequest asyncWebRequest) {
+<span class="nc" id="L449">			super(delegate);</span>
+<span class="nc" id="L450">			this.delegate = delegate;</span>
+<span class="nc" id="L451">			this.asyncWebRequest = asyncWebRequest;</span>
+<span class="nc" id="L452">		}</span>
+
+		@Override
+		public void flush() {
+<span class="nc" id="L456">			int level = this.asyncWebRequest.tryObtainLock();</span>
+<span class="nc bnc" id="L457" title="All 2 branches missed.">			if (level &gt; -1) {</span>
+				try {
+<span class="nc" id="L459">					this.delegate.flush();</span>
+				}
+				finally {
+<span class="nc" id="L462">					releaseLock(level);</span>
+				}
+			}
+<span class="nc" id="L465">		}</span>
+
+		@Override
+		public void close() {
+<span class="nc" id="L469">			int level = this.asyncWebRequest.tryObtainLock();</span>
+<span class="nc bnc" id="L470" title="All 2 branches missed.">			if (level &gt; -1) {</span>
+				try {
+<span class="nc" id="L472">					this.delegate.close();</span>
+				}
+				finally {
+<span class="nc" id="L475">					releaseLock(level);</span>
+				}
+			}
+<span class="nc" id="L478">		}</span>
+
+		@Override
+		public boolean checkError() {
+<span class="nc" id="L482">			return this.delegate.checkError();</span>
+		}
+
+		@Override
+		public void write(int c) {
+<span class="nc" id="L487">			int level = this.asyncWebRequest.tryObtainLock();</span>
+<span class="nc bnc" id="L488" title="All 2 branches missed.">			if (level &gt; -1) {</span>
+				try {
+<span class="nc" id="L490">					this.delegate.write(c);</span>
+				}
+				finally {
+<span class="nc" id="L493">					releaseLock(level);</span>
+				}
+			}
+<span class="nc" id="L496">		}</span>
+
+		@Override
+		public void write(char[] buf, int off, int len) {
+<span class="nc" id="L500">			int level = this.asyncWebRequest.tryObtainLock();</span>
+<span class="nc bnc" id="L501" title="All 2 branches missed.">			if (level &gt; -1) {</span>
+				try {
+<span class="nc" id="L503">					this.delegate.write(buf, off, len);</span>
+				}
+				finally {
+<span class="nc" id="L506">					releaseLock(level);</span>
+				}
+			}
+<span class="nc" id="L509">		}</span>
+
+		@Override
+		public void write(char[] buf) {
+<span class="nc" id="L513">			this.delegate.write(buf);</span>
+<span class="nc" id="L514">		}</span>
+
+		@Override
+		public void write(String s, int off, int len) {
+<span class="nc" id="L518">			int level = this.asyncWebRequest.tryObtainLock();</span>
+<span class="nc bnc" id="L519" title="All 2 branches missed.">			if (level &gt; -1) {</span>
+				try {
+<span class="nc" id="L521">					this.delegate.write(s, off, len);</span>
+				}
+				finally {
+<span class="nc" id="L524">					releaseLock(level);</span>
+				}
+			}
+<span class="nc" id="L527">		}</span>
+
+		@Override
+		public void write(String s) {
+<span class="nc" id="L531">			this.delegate.write(s);</span>
+<span class="nc" id="L532">		}</span>
+
+		private void releaseLock(int level) {
+<span class="nc bnc" id="L535" title="All 2 branches missed.">			if (level &gt; 0) {</span>
+<span class="nc" id="L536">				this.asyncWebRequest.stateLock.unlock();</span>
+			}
+<span class="nc" id="L538">		}</span>
+
+		// Plain delegates
+
+		@Override
+		public void print(boolean b) {
+<span class="nc" id="L544">			this.delegate.print(b);</span>
+<span class="nc" id="L545">		}</span>
+
+		@Override
+		public void print(char c) {
+<span class="nc" id="L549">			this.delegate.print(c);</span>
+<span class="nc" id="L550">		}</span>
+
+		@Override
+		public void print(int i) {
+<span class="nc" id="L554">			this.delegate.print(i);</span>
+<span class="nc" id="L555">		}</span>
+
+		@Override
+		public void print(long l) {
+<span class="nc" id="L559">			this.delegate.print(l);</span>
+<span class="nc" id="L560">		}</span>
+
+		@Override
+		public void print(float f) {
+<span class="nc" id="L564">			this.delegate.print(f);</span>
+<span class="nc" id="L565">		}</span>
+
+		@Override
+		public void print(double d) {
+<span class="nc" id="L569">			this.delegate.print(d);</span>
+<span class="nc" id="L570">		}</span>
+
+		@Override
+		public void print(char[] s) {
+<span class="nc" id="L574">			this.delegate.print(s);</span>
+<span class="nc" id="L575">		}</span>
+
+		@Override
+		public void print(String s) {
+<span class="nc" id="L579">			this.delegate.print(s);</span>
+<span class="nc" id="L580">		}</span>
+
+		@Override
+		public void print(Object obj) {
+<span class="nc" id="L584">			this.delegate.print(obj);</span>
+<span class="nc" id="L585">		}</span>
+
+		@Override
+		public void println() {
+<span class="nc" id="L589">			this.delegate.println();</span>
+<span class="nc" id="L590">		}</span>
+
+		@Override
+		public void println(boolean x) {
+<span class="nc" id="L594">			this.delegate.println(x);</span>
+<span class="nc" id="L595">		}</span>
+
+		@Override
+		public void println(char x) {
+<span class="nc" id="L599">			this.delegate.println(x);</span>
+<span class="nc" id="L600">		}</span>
+
+		@Override
+		public void println(int x) {
+<span class="nc" id="L604">			this.delegate.println(x);</span>
+<span class="nc" id="L605">		}</span>
+
+		@Override
+		public void println(long x) {
+<span class="nc" id="L609">			this.delegate.println(x);</span>
+<span class="nc" id="L610">		}</span>
+
+		@Override
+		public void println(float x) {
+<span class="nc" id="L614">			this.delegate.println(x);</span>
+<span class="nc" id="L615">		}</span>
+
+		@Override
+		public void println(double x) {
+<span class="nc" id="L619">			this.delegate.println(x);</span>
+<span class="nc" id="L620">		}</span>
+
+		@Override
+		public void println(char[] x) {
+<span class="nc" id="L624">			this.delegate.println(x);</span>
+<span class="nc" id="L625">		}</span>
+
+		@Override
+		public void println(String x) {
+<span class="nc" id="L629">			this.delegate.println(x);</span>
+<span class="nc" id="L630">		}</span>
+
+		@Override
+		public void println(Object x) {
+<span class="nc" id="L634">			this.delegate.println(x);</span>
+<span class="nc" id="L635">		}</span>
+
+		@Override
+		public PrintWriter printf(String format, Object... args) {
+<span class="nc" id="L639">			return this.delegate.printf(format, args);</span>
+		}
+
+		@Override
+		public PrintWriter printf(Locale l, String format, Object... args) {
+<span class="nc" id="L644">			return this.delegate.printf(l, format, args);</span>
+		}
+
+		@Override
+		public PrintWriter format(String format, Object... args) {
+<span class="nc" id="L649">			return this.delegate.format(format, args);</span>
+		}
+
+		@Override
+		public PrintWriter format(Locale l, String format, Object... args) {
+<span class="nc" id="L654">			return this.delegate.format(l, format, args);</span>
+		}
+
+		@Override
+		public PrintWriter append(CharSequence csq) {
+<span class="nc" id="L659">			return this.delegate.append(csq);</span>
+		}
+
+		@Override
+		public PrintWriter append(CharSequence csq, int start, int end) {
+<span class="nc" id="L664">			return this.delegate.append(csq, start, end);</span>
+		}
+
+		@Override
+		public PrintWriter append(char c) {
+<span class="nc" id="L669">			return this.delegate.append(c);</span>
+		}
+	}
+
+
+	/**
+	 * Represents a state for {@link StandardServletAsyncWebRequest} to be in.
+	 * &lt;p&gt;&lt;pre&gt;
+	 *    +------ NEW
+	 *    |        |
+	 *    |        v
+	 *    |      ASYNC ----&gt; +
+	 *    |        |         |
+	 *    |        v         |
+	 *    +----&gt; ERROR       |
+	 *             |         |
+	 *             v         |
+	 *         COMPLETED &lt;---+
+	 * &lt;/pre&gt;
+	 * @since 5.3.33
+	 */
+<span class="nc" id="L690">	private enum State {</span>
+
+		/** New request (may not start async handling). */
+<span class="nc" id="L693">		NEW,</span>
+
+		/** Async handling has started. */
+<span class="nc" id="L696">		ASYNC,</span>
+
+		/** ServletOutputStream failed, or onError notification received. */
+<span class="nc" id="L699">		ERROR,</span>
+
+		/** onComplete notification received. */
+<span class="nc" id="L702">		COMPLETED</span>
+
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

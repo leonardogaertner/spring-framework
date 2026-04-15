@@ -1,0 +1,434 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SQLErrorCodeSQLExceptionTranslator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.support</a> &gt; <span class="el_source">SQLErrorCodeSQLExceptionTranslator.java</span></div><h1>SQLErrorCodeSQLExceptionTranslator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.support;
+
+import java.lang.reflect.Constructor;
+import java.sql.BatchUpdateException;
+import java.sql.SQLException;
+import java.util.Arrays;
+
+import javax.sql.DataSource;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.PermissionDeniedDataAccessException;
+import org.springframework.dao.TransientDataAccessResourceException;
+import org.springframework.jdbc.BadSqlGrammarException;
+import org.springframework.jdbc.InvalidResultSetAccessException;
+import org.springframework.util.function.SingletonSupplier;
+import org.springframework.util.function.SupplierUtils;
+
+/**
+ * Implementation of {@link SQLExceptionTranslator} that analyzes vendor-specific error codes.
+ * More precise than an implementation based on SQL state, but heavily vendor-specific.
+ *
+ * &lt;p&gt;This class applies the following matching rules:
+ * &lt;ul&gt;
+ * &lt;li&gt;Try custom translation implemented by any subclass. Note that this class is
+ * concrete and is typically used itself, in which case this rule doesn't apply.
+ * &lt;li&gt;Apply error code matching. Error codes are obtained from the SQLErrorCodesFactory
+ * by default. This factory loads a &quot;sql-error-codes.xml&quot; file from the class path,
+ * defining error code mappings for database names from database meta-data.
+ * &lt;li&gt;Fallback to a fallback translator. {@link SQLStateSQLExceptionTranslator} is the
+ * default fallback translator, analyzing the exception's SQL state only. Since Java 6
+ * which introduces its own {@code SQLException} subclass hierarchy, we use
+ * {@link SQLExceptionSubclassTranslator} by default, which in turns falls back
+ * to Spring's own SQL state translation when not encountering specific subclasses.
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;The configuration file named &quot;sql-error-codes.xml&quot; is by default read from
+ * this package. It can be overridden through a file of the same name in the root
+ * of the class path (for example, in the &quot;/WEB-INF/classes&quot; directory), as long as the
+ * Spring JDBC package is loaded from the same ClassLoader.
+ *
+ * &lt;p&gt;This translator is commonly used by default if a user-provided `sql-error-codes.xml`
+ * file has been found in the root of the classpath, as a signal to use this strategy.
+ * Otherwise, {@link SQLExceptionSubclassTranslator} serves as the default translator
+ * as of 6.0.
+ *
+ * @author Rod Johnson
+ * @author Thomas Risberg
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @see SQLErrorCodesFactory
+ * @see SQLStateSQLExceptionTranslator
+ */
+public class SQLErrorCodeSQLExceptionTranslator extends AbstractFallbackSQLExceptionTranslator {
+
+	private static final int MESSAGE_ONLY_CONSTRUCTOR = 1;
+	private static final int MESSAGE_THROWABLE_CONSTRUCTOR = 2;
+	private static final int MESSAGE_SQLEX_CONSTRUCTOR = 3;
+	private static final int MESSAGE_SQL_THROWABLE_CONSTRUCTOR = 4;
+	private static final int MESSAGE_SQL_SQLEX_CONSTRUCTOR = 5;
+
+<span class="fc" id="L84">	private static final boolean userProvidedErrorCodesFilePresent =</span>
+			new ClassPathResource(SQLErrorCodesFactory.SQL_ERROR_CODE_OVERRIDE_PATH,
+<span class="fc" id="L86">					SQLErrorCodesFactory.class.getClassLoader()).exists();</span>
+
+	private @Nullable SingletonSupplier&lt;SQLErrorCodes&gt; sqlErrorCodes;
+
+
+	/**
+	 * Constructor for use as a JavaBean.
+	 * The SqlErrorCodes or DataSource property must be set.
+	 */
+<span class="fc" id="L95">	public SQLErrorCodeSQLExceptionTranslator() {</span>
+<span class="fc" id="L96">		setFallbackTranslator(new SQLExceptionSubclassTranslator());</span>
+<span class="fc" id="L97">	}</span>
+
+	/**
+	 * Create an SQL error code translator for the given DataSource.
+	 * Invoking this constructor will cause a Connection to be obtained
+	 * from the DataSource to get the meta-data.
+	 * @param dataSource the DataSource to use to find meta-data and establish
+	 * which error codes are usable
+	 * @see SQLErrorCodesFactory
+	 */
+	public SQLErrorCodeSQLExceptionTranslator(DataSource dataSource) {
+<span class="fc" id="L108">		this();</span>
+<span class="fc" id="L109">		setDataSource(dataSource);</span>
+<span class="fc" id="L110">	}</span>
+
+	/**
+	 * Create an SQL error code translator for the given database product name.
+	 * Invoking this constructor will avoid obtaining a Connection from the
+	 * DataSource to get the meta-data.
+	 * @param dbName the database product name that identifies the error codes entry
+	 * @see SQLErrorCodesFactory
+	 * @see java.sql.DatabaseMetaData#getDatabaseProductName()
+	 */
+	public SQLErrorCodeSQLExceptionTranslator(String dbName) {
+<span class="fc" id="L121">		this();</span>
+<span class="fc" id="L122">		setDatabaseProductName(dbName);</span>
+<span class="fc" id="L123">	}</span>
+
+	/**
+	 * Create an SQLErrorCode translator given these error codes.
+	 * Does not require a database meta-data lookup to be performed using a connection.
+	 * @param sec error codes
+	 */
+	public SQLErrorCodeSQLExceptionTranslator(SQLErrorCodes sec) {
+<span class="fc" id="L131">		this();</span>
+<span class="fc" id="L132">		this.sqlErrorCodes = SingletonSupplier.of(sec);</span>
+<span class="fc" id="L133">	}</span>
+
+
+	/**
+	 * Set the DataSource for this translator.
+	 * &lt;p&gt;Setting this property will cause a Connection to be obtained from
+	 * the DataSource to get the meta-data.
+	 * @param dataSource the DataSource to use to find meta-data and establish
+	 * which error codes are usable
+	 * @see SQLErrorCodesFactory#getErrorCodes(javax.sql.DataSource)
+	 * @see java.sql.DatabaseMetaData#getDatabaseProductName()
+	 */
+	public void setDataSource(DataSource dataSource) {
+<span class="fc" id="L146">		this.sqlErrorCodes =</span>
+<span class="fc" id="L147">				SingletonSupplier.of(() -&gt; SQLErrorCodesFactory.getInstance().resolveErrorCodes(dataSource));</span>
+<span class="fc" id="L148">		this.sqlErrorCodes.get();  // try early initialization - otherwise the supplier will retry later</span>
+<span class="fc" id="L149">	}</span>
+
+	/**
+	 * Set the database product name for this translator.
+	 * &lt;p&gt;Setting this property will avoid obtaining a Connection from the DataSource
+	 * to get the meta-data.
+	 * @param dbName the database product name that identifies the error codes entry
+	 * @see SQLErrorCodesFactory#getErrorCodes(String)
+	 * @see java.sql.DatabaseMetaData#getDatabaseProductName()
+	 */
+	public void setDatabaseProductName(String dbName) {
+<span class="fc" id="L160">		this.sqlErrorCodes = SingletonSupplier.of(SQLErrorCodesFactory.getInstance().getErrorCodes(dbName));</span>
+<span class="fc" id="L161">	}</span>
+
+	/**
+	 * Set custom error codes to be used for translation.
+	 * @param sec custom error codes to use
+	 */
+	public void setSqlErrorCodes(@Nullable SQLErrorCodes sec) {
+<span class="fc" id="L168">		this.sqlErrorCodes = SingletonSupplier.ofNullable(sec);</span>
+<span class="fc" id="L169">	}</span>
+
+	/**
+	 * Return the error codes used by this translator.
+	 * Usually determined via a DataSource.
+	 * @see #setDataSource
+	 */
+	public @Nullable SQLErrorCodes getSqlErrorCodes() {
+<span class="fc" id="L177">		return SupplierUtils.resolve(this.sqlErrorCodes);</span>
+	}
+
+
+	@SuppressWarnings(&quot;deprecation&quot;)
+	@Override
+	protected @Nullable DataAccessException doTranslate(String task, @Nullable String sql, SQLException ex) {
+<span class="fc" id="L184">		SQLException sqlEx = ex;</span>
+<span class="pc bpc" id="L185" title="1 of 4 branches missed.">		if (sqlEx instanceof BatchUpdateException &amp;&amp; sqlEx.getNextException() != null) {</span>
+<span class="fc" id="L186">			SQLException nestedSqlEx = sqlEx.getNextException();</span>
+<span class="pc bpc" id="L187" title="3 of 4 branches missed.">			if (nestedSqlEx.getErrorCode() &gt; 0 || nestedSqlEx.getSQLState() != null) {</span>
+<span class="fc" id="L188">				sqlEx = nestedSqlEx;</span>
+			}
+		}
+
+		// First, try custom translation from overridden method.
+<span class="fc" id="L193">		DataAccessException dae = customTranslate(task, sql, sqlEx);</span>
+<span class="fc bfc" id="L194" title="All 2 branches covered.">		if (dae != null) {</span>
+<span class="fc" id="L195">			return dae;</span>
+		}
+
+		// Next, try the custom SQLException translator, if available.
+<span class="fc" id="L199">		SQLErrorCodes sqlErrorCodes = getSqlErrorCodes();</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">		if (sqlErrorCodes != null) {</span>
+<span class="fc" id="L201">			SQLExceptionTranslator customTranslator = sqlErrorCodes.getCustomSqlExceptionTranslator();</span>
+<span class="fc bfc" id="L202" title="All 2 branches covered.">			if (customTranslator != null) {</span>
+<span class="fc" id="L203">				dae = customTranslator.translate(task, sql, sqlEx);</span>
+<span class="fc bfc" id="L204" title="All 2 branches covered.">				if (dae != null) {</span>
+<span class="fc" id="L205">					return dae;</span>
+				}
+			}
+		}
+
+		// Check SQLErrorCodes with corresponding error code, if available.
+<span class="fc bfc" id="L211" title="All 2 branches covered.">		if (sqlErrorCodes != null) {</span>
+			String errorCode;
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">			if (sqlErrorCodes.isUseSqlStateForTranslation()) {</span>
+<span class="nc" id="L214">				errorCode = sqlEx.getSQLState();</span>
+			}
+			else {
+				// Try to find SQLException with actual error code, looping through the causes.
+				// For example, applicable to java.sql.DataTruncation as of JDK 1.6.
+<span class="fc" id="L219">				SQLException current = sqlEx;</span>
+<span class="pc bpc" id="L220" title="1 of 4 branches missed.">				while (current.getErrorCode() == 0 &amp;&amp; current.getCause() instanceof SQLException sqlException) {</span>
+<span class="fc" id="L221">					current = sqlException;</span>
+				}
+<span class="fc" id="L223">				errorCode = Integer.toString(current.getErrorCode());</span>
+			}
+
+<span class="pc bpc" id="L226" title="1 of 2 branches missed.">			if (errorCode != null) {</span>
+				// Look for defined custom translations first.
+<span class="fc" id="L228">				CustomSQLErrorCodesTranslation[] customTranslations = sqlErrorCodes.getCustomTranslations();</span>
+<span class="fc bfc" id="L229" title="All 2 branches covered.">				if (customTranslations != null) {</span>
+<span class="fc bfc" id="L230" title="All 2 branches covered.">					for (CustomSQLErrorCodesTranslation customTranslation : customTranslations) {</span>
+<span class="fc bfc" id="L231" title="All 2 branches covered.">						if (Arrays.binarySearch(customTranslation.getErrorCodes(), errorCode) &gt;= 0 &amp;&amp;</span>
+<span class="pc bpc" id="L232" title="1 of 2 branches missed.">								customTranslation.getExceptionClass() != null) {</span>
+<span class="fc" id="L233">							dae = createCustomException(task, sql, sqlEx, customTranslation.getExceptionClass());</span>
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">							if (dae != null) {</span>
+<span class="fc" id="L235">								logTranslation(task, sql, sqlEx, true);</span>
+<span class="fc" id="L236">								return dae;</span>
+							}
+						}
+					}
+				}
+				// Next, look for grouped error codes.
+<span class="fc bfc" id="L242" title="All 2 branches covered.">				if (Arrays.binarySearch(sqlErrorCodes.getBadSqlGrammarCodes(), errorCode) &gt;= 0) {</span>
+<span class="fc" id="L243">					logTranslation(task, sql, sqlEx, false);</span>
+<span class="pc bpc" id="L244" title="1 of 2 branches missed.">					return new BadSqlGrammarException(task, (sql != null ? sql : &quot;&quot;), sqlEx);</span>
+				}
+<span class="fc bfc" id="L246" title="All 2 branches covered.">				else if (Arrays.binarySearch(sqlErrorCodes.getInvalidResultSetAccessCodes(), errorCode) &gt;= 0) {</span>
+<span class="fc" id="L247">					logTranslation(task, sql, sqlEx, false);</span>
+<span class="pc bpc" id="L248" title="1 of 2 branches missed.">					return new InvalidResultSetAccessException(task, (sql != null ? sql : &quot;&quot;), sqlEx);</span>
+				}
+<span class="fc bfc" id="L250" title="All 2 branches covered.">				else if (Arrays.binarySearch(sqlErrorCodes.getDuplicateKeyCodes(), errorCode) &gt;= 0) {</span>
+<span class="fc" id="L251">					logTranslation(task, sql, sqlEx, false);</span>
+<span class="fc" id="L252">					return new DuplicateKeyException(buildMessage(task, sql, sqlEx), sqlEx);</span>
+				}
+<span class="fc bfc" id="L254" title="All 2 branches covered.">				else if (Arrays.binarySearch(sqlErrorCodes.getDataIntegrityViolationCodes(), errorCode) &gt;= 0) {</span>
+<span class="fc" id="L255">					logTranslation(task, sql, sqlEx, false);</span>
+<span class="fc" id="L256">					return new DataIntegrityViolationException(buildMessage(task, sql, sqlEx), sqlEx);</span>
+				}
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">				else if (Arrays.binarySearch(sqlErrorCodes.getPermissionDeniedCodes(), errorCode) &gt;= 0) {</span>
+<span class="nc" id="L259">					logTranslation(task, sql, sqlEx, false);</span>
+<span class="nc" id="L260">					return new PermissionDeniedDataAccessException(buildMessage(task, sql, sqlEx), sqlEx);</span>
+				}
+<span class="fc bfc" id="L262" title="All 2 branches covered.">				else if (Arrays.binarySearch(sqlErrorCodes.getDataAccessResourceFailureCodes(), errorCode) &gt;= 0) {</span>
+<span class="fc" id="L263">					logTranslation(task, sql, sqlEx, false);</span>
+<span class="fc" id="L264">					return new DataAccessResourceFailureException(buildMessage(task, sql, sqlEx), sqlEx);</span>
+				}
+<span class="pc bpc" id="L266" title="1 of 2 branches missed.">				else if (Arrays.binarySearch(sqlErrorCodes.getTransientDataAccessResourceCodes(), errorCode) &gt;= 0) {</span>
+<span class="nc" id="L267">					logTranslation(task, sql, sqlEx, false);</span>
+<span class="nc" id="L268">					return new TransientDataAccessResourceException(buildMessage(task, sql, sqlEx), sqlEx);</span>
+				}
+<span class="fc bfc" id="L270" title="All 2 branches covered.">				else if (Arrays.binarySearch(sqlErrorCodes.getCannotAcquireLockCodes(), errorCode) &gt;= 0) {</span>
+<span class="fc" id="L271">					logTranslation(task, sql, sqlEx, false);</span>
+<span class="fc" id="L272">					return new CannotAcquireLockException(buildMessage(task, sql, sqlEx), sqlEx);</span>
+				}
+<span class="fc bfc" id="L274" title="All 2 branches covered.">				else if (Arrays.binarySearch(sqlErrorCodes.getDeadlockLoserCodes(), errorCode) &gt;= 0) {</span>
+<span class="fc" id="L275">					logTranslation(task, sql, sqlEx, false);</span>
+<span class="fc" id="L276">					return new org.springframework.dao.DeadlockLoserDataAccessException(buildMessage(task, sql, sqlEx), sqlEx);</span>
+				}
+<span class="fc bfc" id="L278" title="All 2 branches covered.">				else if (Arrays.binarySearch(sqlErrorCodes.getCannotSerializeTransactionCodes(), errorCode) &gt;= 0) {</span>
+<span class="fc" id="L279">					logTranslation(task, sql, sqlEx, false);</span>
+<span class="fc" id="L280">					return new org.springframework.dao.CannotSerializeTransactionException(buildMessage(task, sql, sqlEx), sqlEx);</span>
+				}
+			}
+		}
+
+		// We couldn't identify it more precisely - let's hand it over to the SQLState fallback translator.
+<span class="pc bpc" id="L286" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+			String codes;
+<span class="nc bnc" id="L288" title="All 4 branches missed.">			if (sqlErrorCodes != null &amp;&amp; sqlErrorCodes.isUseSqlStateForTranslation()) {</span>
+<span class="nc" id="L289">				codes = &quot;SQL state '&quot; + sqlEx.getSQLState() + &quot;', error code '&quot; + sqlEx.getErrorCode();</span>
+			}
+			else {
+<span class="nc" id="L292">				codes = &quot;Error code '&quot; + sqlEx.getErrorCode() + &quot;'&quot;;</span>
+			}
+<span class="nc" id="L294">			logger.debug(&quot;Unable to translate SQLException with &quot; + codes + &quot;, will now try the fallback translator&quot;);</span>
+		}
+
+<span class="fc" id="L297">		return null;</span>
+	}
+
+	/**
+	 * Subclasses can override this method to attempt a custom mapping from
+	 * {@link SQLException} to {@link DataAccessException}.
+	 * @param task readable text describing the task being attempted
+	 * @param sql the SQL query or update that caused the problem (may be {@code null})
+	 * @param sqlEx the offending SQLException
+	 * @return {@code null} if no custom translation applies, otherwise a {@link DataAccessException}
+	 * resulting from custom translation. This exception should include the {@code sqlEx} parameter
+	 * as a nested root cause. This implementation always returns {@code null}, meaning that the
+	 * translator always falls back to the default error codes.
+	 * @deprecated as of 6.1, in favor of {@link #setCustomTranslator}
+	 */
+	@Deprecated(since = &quot;6.1&quot;)
+	protected @Nullable DataAccessException customTranslate(String task, @Nullable String sql, SQLException sqlEx) {
+<span class="fc" id="L314">		return null;</span>
+	}
+
+	/**
+	 * Create a custom {@link DataAccessException}, based on a given exception
+	 * class from a {@link CustomSQLErrorCodesTranslation} definition.
+	 * @param task readable text describing the task being attempted
+	 * @param sql the SQL query or update that caused the problem (may be {@code null})
+	 * @param sqlEx the offending SQLException
+	 * @param exceptionClass the exception class to use, as defined in the
+	 * {@link CustomSQLErrorCodesTranslation} definition
+	 * @return {@code null} if the custom exception could not be created, otherwise
+	 * the resulting {@link DataAccessException}. This exception should include the
+	 * {@code sqlEx} parameter as a nested root cause.
+	 * @see CustomSQLErrorCodesTranslation#setExceptionClass
+	 */
+	protected @Nullable DataAccessException createCustomException(
+			String task, @Nullable String sql, SQLException sqlEx, Class&lt;?&gt; exceptionClass) {
+
+		// Find appropriate constructor for the given exception class
+		try {
+<span class="fc" id="L335">			int constructorType = 0;</span>
+<span class="fc" id="L336">			Constructor&lt;?&gt;[] constructors = exceptionClass.getConstructors();</span>
+<span class="fc bfc" id="L337" title="All 2 branches covered.">			for (Constructor&lt;?&gt; constructor : constructors) {</span>
+<span class="fc" id="L338">				Class&lt;?&gt;[] parameterTypes = constructor.getParameterTypes();</span>
+<span class="pc bpc" id="L339" title="2 of 6 branches missed.">				if (parameterTypes.length == 1 &amp;&amp; String.class == parameterTypes[0] &amp;&amp;</span>
+						constructorType &lt; MESSAGE_ONLY_CONSTRUCTOR) {
+<span class="fc" id="L341">					constructorType = MESSAGE_ONLY_CONSTRUCTOR;</span>
+				}
+<span class="pc bpc" id="L343" title="3 of 8 branches missed.">				if (parameterTypes.length == 2 &amp;&amp; String.class == parameterTypes[0] &amp;&amp;</span>
+						Throwable.class == parameterTypes[1] &amp;&amp;
+						constructorType &lt; MESSAGE_THROWABLE_CONSTRUCTOR) {
+<span class="fc" id="L346">					constructorType = MESSAGE_THROWABLE_CONSTRUCTOR;</span>
+				}
+<span class="pc bpc" id="L348" title="4 of 8 branches missed.">				if (parameterTypes.length == 2 &amp;&amp; String.class == parameterTypes[0] &amp;&amp;</span>
+						SQLException.class == parameterTypes[1] &amp;&amp;
+						constructorType &lt; MESSAGE_SQLEX_CONSTRUCTOR) {
+<span class="nc" id="L351">					constructorType = MESSAGE_SQLEX_CONSTRUCTOR;</span>
+				}
+<span class="pc bpc" id="L353" title="9 of 10 branches missed.">				if (parameterTypes.length == 3 &amp;&amp; String.class == parameterTypes[0] &amp;&amp;</span>
+						String.class == parameterTypes[1] &amp;&amp; Throwable.class == parameterTypes[2] &amp;&amp;
+						constructorType &lt; MESSAGE_SQL_THROWABLE_CONSTRUCTOR) {
+<span class="nc" id="L356">					constructorType = MESSAGE_SQL_THROWABLE_CONSTRUCTOR;</span>
+				}
+<span class="pc bpc" id="L358" title="9 of 10 branches missed.">				if (parameterTypes.length == 3 &amp;&amp; String.class == parameterTypes[0] &amp;&amp;</span>
+						String.class == parameterTypes[1] &amp;&amp; SQLException.class == parameterTypes[2] &amp;&amp;
+						constructorType &lt; MESSAGE_SQL_SQLEX_CONSTRUCTOR) {
+<span class="nc" id="L361">					constructorType = MESSAGE_SQL_SQLEX_CONSTRUCTOR;</span>
+				}
+			}
+
+			// invoke constructor
+			Constructor&lt;?&gt; exceptionConstructor;
+<span class="pc bpc" id="L367" title="5 of 6 branches missed.">			return switch (constructorType) {</span>
+				case MESSAGE_SQL_SQLEX_CONSTRUCTOR -&gt; {
+<span class="nc" id="L369">					Class&lt;?&gt;[] messageAndSqlAndSqlExArgsClass = new Class&lt;?&gt;[] {String.class, String.class, SQLException.class};</span>
+<span class="nc" id="L370">					Object[] messageAndSqlAndSqlExArgs = new Object[] {task, sql, sqlEx};</span>
+<span class="nc" id="L371">					exceptionConstructor = exceptionClass.getConstructor(messageAndSqlAndSqlExArgsClass);</span>
+<span class="nc" id="L372">					yield (DataAccessException) exceptionConstructor.newInstance(messageAndSqlAndSqlExArgs);</span>
+				}
+				case MESSAGE_SQL_THROWABLE_CONSTRUCTOR -&gt; {
+<span class="nc" id="L375">					Class&lt;?&gt;[] messageAndSqlAndThrowableArgsClass = new Class&lt;?&gt;[] {String.class, String.class, Throwable.class};</span>
+<span class="nc" id="L376">					Object[] messageAndSqlAndThrowableArgs = new Object[] {task, sql, sqlEx};</span>
+<span class="nc" id="L377">					exceptionConstructor = exceptionClass.getConstructor(messageAndSqlAndThrowableArgsClass);</span>
+<span class="nc" id="L378">					yield (DataAccessException) exceptionConstructor.newInstance(messageAndSqlAndThrowableArgs);</span>
+				}
+				case MESSAGE_SQLEX_CONSTRUCTOR -&gt; {
+<span class="nc" id="L381">					Class&lt;?&gt;[] messageAndSqlExArgsClass = new Class&lt;?&gt;[] {String.class, SQLException.class};</span>
+<span class="nc" id="L382">					Object[] messageAndSqlExArgs = new Object[] {task + &quot;: &quot; + sqlEx.getMessage(), sqlEx};</span>
+<span class="nc" id="L383">					exceptionConstructor = exceptionClass.getConstructor(messageAndSqlExArgsClass);</span>
+<span class="nc" id="L384">					yield (DataAccessException) exceptionConstructor.newInstance(messageAndSqlExArgs);</span>
+				}
+				case MESSAGE_THROWABLE_CONSTRUCTOR -&gt; {
+<span class="fc" id="L387">					Class&lt;?&gt;[] messageAndThrowableArgsClass = new Class&lt;?&gt;[] {String.class, Throwable.class};</span>
+<span class="fc" id="L388">					Object[] messageAndThrowableArgs = new Object[] {task + &quot;: &quot; + sqlEx.getMessage(), sqlEx};</span>
+<span class="fc" id="L389">					exceptionConstructor = exceptionClass.getConstructor(messageAndThrowableArgsClass);</span>
+<span class="fc" id="L390">					yield (DataAccessException)exceptionConstructor.newInstance(messageAndThrowableArgs);</span>
+				}
+				case MESSAGE_ONLY_CONSTRUCTOR -&gt; {
+<span class="nc" id="L393">					Class&lt;?&gt;[] messageOnlyArgsClass = new Class&lt;?&gt;[] {String.class};</span>
+<span class="nc" id="L394">					Object[] messageOnlyArgs = new Object[] {task + &quot;: &quot; + sqlEx.getMessage()};</span>
+<span class="nc" id="L395">					exceptionConstructor = exceptionClass.getConstructor(messageOnlyArgsClass);</span>
+<span class="nc" id="L396">					yield (DataAccessException) exceptionConstructor.newInstance(messageOnlyArgs);</span>
+				}
+				default -&gt; {
+<span class="nc bnc" id="L399" title="All 2 branches missed.">					if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L400">						logger.warn(&quot;Unable to find appropriate constructor of custom exception class [&quot; +</span>
+<span class="nc" id="L401">								exceptionClass.getName() + &quot;]&quot;);</span>
+					}
+<span class="nc" id="L403">					yield null;</span>
+				}
+			};
+		}
+<span class="nc" id="L407">		catch (Throwable ex) {</span>
+<span class="nc bnc" id="L408" title="All 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L409">				logger.warn(&quot;Unable to instantiate custom exception class [&quot; + exceptionClass.getName() + &quot;]&quot;, ex);</span>
+			}
+<span class="nc" id="L411">			return null;</span>
+		}
+	}
+
+	private void logTranslation(String task, @Nullable String sql, SQLException sqlEx, boolean custom) {
+<span class="pc bpc" id="L416" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc bnc" id="L417" title="All 2 branches missed.">			String intro = custom ? &quot;Custom translation of&quot; : &quot;Translating&quot;;</span>
+<span class="nc" id="L418">			logger.debug(intro + &quot; SQLException with SQL state '&quot; + sqlEx.getSQLState() +</span>
+<span class="nc" id="L419">					&quot;', error code '&quot; + sqlEx.getErrorCode() + &quot;', message [&quot; + sqlEx.getMessage() + &quot;]&quot; +</span>
+<span class="nc bnc" id="L420" title="All 2 branches missed.">					(sql != null ? &quot;; SQL was [&quot; + sql + &quot;]&quot;: &quot;&quot;) + &quot; for task [&quot; + task + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L422">	}</span>
+
+
+	/**
+	 * Check whether there is a user-provided `sql-error-codes.xml` file
+	 * in the root of the classpath.
+	 */
+	static boolean hasUserProvidedErrorCodesFile() {
+<span class="fc" id="L430">		return userProvidedErrorCodesFilePresent;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

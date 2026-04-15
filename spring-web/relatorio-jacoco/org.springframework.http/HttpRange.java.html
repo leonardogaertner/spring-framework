@@ -1,0 +1,345 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HttpRange.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http</a> &gt; <span class="el_source">HttpRange.java</span></div><h1>HttpRange.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.StringJoiner;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.io.InputStreamResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.ResourceRegion;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Represents an HTTP (byte) range for use with the HTTP {@code &quot;Range&quot;} header.
+ *
+ * @author Arjen Poutsma
+ * @author Juergen Hoeller
+ * @since 4.2
+ * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc7233&quot;&gt;HTTP/1.1: Range Requests&lt;/a&gt;
+ * @see HttpHeaders#setRange(List)
+ * @see HttpHeaders#getRange()
+ */
+<span class="nc" id="L47">public abstract class HttpRange {</span>
+
+	/** Maximum ranges per request. */
+	private static final int MAX_RANGES = 100;
+
+	private static final String BYTE_RANGE_PREFIX = &quot;bytes=&quot;;
+
+
+	/**
+	 * Turn a {@code Resource} into a {@link ResourceRegion} using the range
+	 * information contained in the current {@code HttpRange}.
+	 * @param resource the {@code Resource} to select the region from
+	 * @return the selected region of the given {@code Resource}
+	 * @since 4.3
+	 */
+	public ResourceRegion toResourceRegion(Resource resource) {
+		// Don't try to determine contentLength on InputStreamResource - cannot be read afterwards...
+		// Note: custom InputStreamResource subclasses could provide a pre-calculated content length!
+<span class="nc bnc" id="L65" title="All 2 branches missed.">		Assert.isTrue(resource.getClass() != InputStreamResource.class,</span>
+				&quot;Cannot convert an InputStreamResource to a ResourceRegion&quot;);
+<span class="nc" id="L67">		long contentLength = getLengthFor(resource);</span>
+<span class="nc" id="L68">		long start = getRangeStart(contentLength);</span>
+<span class="nc" id="L69">		long end = getRangeEnd(contentLength);</span>
+<span class="nc bnc" id="L70" title="All 2 branches missed.">		Assert.isTrue(start &lt; contentLength, () -&gt; &quot;'position' exceeds the resource length &quot; + contentLength);</span>
+<span class="nc" id="L71">		return new ResourceRegion(resource, start, end - start + 1);</span>
+	}
+
+	/**
+	 * Return the start of the range given the total length of a representation.
+	 * @param length the length of the representation
+	 * @return the start of this range for the representation
+	 */
+	public abstract long getRangeStart(long length);
+
+	/**
+	 * Return the end of the range (inclusive) given the total length of a representation.
+	 * @param length the length of the representation
+	 * @return the end of the range for the representation
+	 */
+	public abstract long getRangeEnd(long length);
+
+
+	/**
+	 * Create an {@code HttpRange} from the given position to the end.
+	 * @param firstBytePos the first byte position
+	 * @return a byte range that ranges from {@code firstPos} till the end
+	 * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc7233#section-2.1&quot;&gt;Byte Ranges&lt;/a&gt;
+	 */
+	public static HttpRange createByteRange(long firstBytePos) {
+<span class="nc" id="L96">		return new ByteRange(firstBytePos, null);</span>
+	}
+
+	/**
+	 * Create a {@code HttpRange} from the given fist to last position.
+	 * @param firstBytePos the first byte position
+	 * @param lastBytePos the last byte position
+	 * @return a byte range that ranges from {@code firstPos} till {@code lastPos}
+	 * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc7233#section-2.1&quot;&gt;Byte Ranges&lt;/a&gt;
+	 */
+	public static HttpRange createByteRange(long firstBytePos, long lastBytePos) {
+<span class="nc" id="L107">		return new ByteRange(firstBytePos, lastBytePos);</span>
+	}
+
+	/**
+	 * Create an {@code HttpRange} that ranges over the last given number of bytes.
+	 * @param suffixLength the number of bytes for the range
+	 * @return a byte range that ranges over the last {@code suffixLength} number of bytes
+	 * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc7233#section-2.1&quot;&gt;Byte Ranges&lt;/a&gt;
+	 */
+	public static HttpRange createSuffixRange(long suffixLength) {
+<span class="nc" id="L117">		return new SuffixByteRange(suffixLength);</span>
+	}
+
+	/**
+	 * Parse the given, comma-separated string into a list of {@code HttpRange} objects.
+	 * &lt;p&gt;This method can be used to parse an {@code Range} header.
+	 * @param ranges the string to parse
+	 * @return the list of ranges
+	 * @throws IllegalArgumentException if the string cannot be parsed
+	 * or if the number of ranges is greater than 100
+	 */
+	public static List&lt;HttpRange&gt; parseRanges(@Nullable String ranges) {
+<span class="nc bnc" id="L129" title="All 2 branches missed.">		if (!StringUtils.hasLength(ranges)) {</span>
+<span class="nc" id="L130">			return Collections.emptyList();</span>
+		}
+<span class="nc bnc" id="L132" title="All 2 branches missed.">		if (!ranges.startsWith(BYTE_RANGE_PREFIX)) {</span>
+<span class="nc" id="L133">			throw new IllegalArgumentException(&quot;Range '&quot; + ranges + &quot;' does not start with 'bytes='&quot;);</span>
+		}
+<span class="nc" id="L135">		ranges = ranges.substring(BYTE_RANGE_PREFIX.length());</span>
+
+<span class="nc" id="L137">		String[] tokens = StringUtils.tokenizeToStringArray(ranges, &quot;,&quot;);</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">		if (tokens.length &gt; MAX_RANGES) {</span>
+<span class="nc" id="L139">			throw new IllegalArgumentException(&quot;Too many ranges: &quot; + tokens.length);</span>
+		}
+<span class="nc" id="L141">		List&lt;HttpRange&gt; result = new ArrayList&lt;&gt;(tokens.length);</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">		for (String token : tokens) {</span>
+<span class="nc" id="L143">			result.add(parseRange(token));</span>
+		}
+<span class="nc" id="L145">		return result;</span>
+	}
+
+	private static HttpRange parseRange(String range) {
+<span class="nc" id="L149">		Assert.hasLength(range, &quot;Range String must not be empty&quot;);</span>
+<span class="nc" id="L150">		int dashIdx = range.indexOf('-');</span>
+<span class="nc bnc" id="L151" title="All 2 branches missed.">		if (dashIdx &gt; 0) {</span>
+<span class="nc" id="L152">			long firstPos = Long.parseLong(range, 0, dashIdx, 10);</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">			if (dashIdx &lt; range.length() - 1) {</span>
+<span class="nc" id="L154">				Long lastPos = Long.parseLong(range, dashIdx + 1, range.length(), 10);</span>
+<span class="nc" id="L155">				return new ByteRange(firstPos, lastPos);</span>
+			}
+			else {
+<span class="nc" id="L158">				return new ByteRange(firstPos, null);</span>
+			}
+		}
+<span class="nc bnc" id="L161" title="All 2 branches missed.">		else if (dashIdx == 0) {</span>
+<span class="nc" id="L162">			long suffixLength = Long.parseLong(range, 1, range.length(), 10);</span>
+<span class="nc" id="L163">			return new SuffixByteRange(suffixLength);</span>
+		}
+		else {
+<span class="nc" id="L166">			throw new IllegalArgumentException(&quot;Range '&quot; + range + &quot;' does not contain \&quot;-\&quot;&quot;);</span>
+		}
+	}
+
+	/**
+	 * Convert each {@code HttpRange} into a {@code ResourceRegion}, selecting the
+	 * appropriate segment of the given {@code Resource} using HTTP Range information.
+	 * @param ranges the list of ranges
+	 * @param resource the resource to select the regions from
+	 * @return the list of regions for the given resource
+	 * @throws IllegalArgumentException if the sum of all ranges exceeds the resource length
+	 * @since 4.3
+	 */
+	public static List&lt;ResourceRegion&gt; toResourceRegions(List&lt;HttpRange&gt; ranges, Resource resource) {
+<span class="nc bnc" id="L180" title="All 2 branches missed.">		if (CollectionUtils.isEmpty(ranges)) {</span>
+<span class="nc" id="L181">			return Collections.emptyList();</span>
+		}
+<span class="nc" id="L183">		List&lt;ResourceRegion&gt; regions = new ArrayList&lt;&gt;(ranges.size());</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">		for (HttpRange range : ranges) {</span>
+<span class="nc" id="L185">			regions.add(range.toResourceRegion(resource));</span>
+<span class="nc" id="L186">		}</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">		if (ranges.size() &gt; 1) {</span>
+<span class="nc" id="L188">			long length = getLengthFor(resource);</span>
+<span class="nc" id="L189">			long total = 0;</span>
+<span class="nc bnc" id="L190" title="All 2 branches missed.">			for (ResourceRegion region : regions) {</span>
+<span class="nc" id="L191">				total += region.getCount();</span>
+<span class="nc" id="L192">			}</span>
+<span class="nc bnc" id="L193" title="All 2 branches missed.">			if (total &gt;= length) {</span>
+<span class="nc" id="L194">				throw new IllegalArgumentException(&quot;The sum of all ranges (&quot; + total +</span>
+						&quot;) should be less than the resource length (&quot; + length + &quot;)&quot;);
+			}
+		}
+<span class="nc" id="L198">		return regions;</span>
+	}
+
+	private static long getLengthFor(Resource resource) {
+		try {
+<span class="nc" id="L203">			long contentLength = resource.contentLength();</span>
+<span class="nc bnc" id="L204" title="All 2 branches missed.">			Assert.isTrue(contentLength &gt; 0, &quot;Resource content length should be &gt; 0&quot;);</span>
+<span class="nc" id="L205">			return contentLength;</span>
+		}
+<span class="nc" id="L207">		catch (IOException ex) {</span>
+<span class="nc" id="L208">			throw new IllegalArgumentException(&quot;Failed to obtain Resource content length&quot;, ex);</span>
+		}
+	}
+
+	/**
+	 * Return a string representation of the given list of {@code HttpRange} objects.
+	 * &lt;p&gt;This method can be used to for an {@code Range} header.
+	 * @param ranges the ranges to create a string of
+	 * @return the string representation
+	 */
+	public static String toString(Collection&lt;HttpRange&gt; ranges) {
+<span class="nc" id="L219">		Assert.notEmpty(ranges, &quot;Ranges Collection must not be empty&quot;);</span>
+<span class="nc" id="L220">		StringJoiner builder = new StringJoiner(&quot;, &quot;, BYTE_RANGE_PREFIX, &quot;&quot;);</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">		for (HttpRange range : ranges) {</span>
+<span class="nc" id="L222">			builder.add(range.toString());</span>
+<span class="nc" id="L223">		}</span>
+<span class="nc" id="L224">		return builder.toString();</span>
+	}
+
+
+	/**
+	 * Represents an HTTP/1.1 byte range, with a first and optional last position.
+	 * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc7233#section-2.1&quot;&gt;Byte Ranges&lt;/a&gt;
+	 * @see HttpRange#createByteRange(long)
+	 * @see HttpRange#createByteRange(long, long)
+	 */
+	private static class ByteRange extends HttpRange {
+
+		private final long firstPos;
+
+		private final @Nullable Long lastPos;
+
+<span class="nc" id="L240">		public ByteRange(long firstPos, @Nullable Long lastPos) {</span>
+<span class="nc" id="L241">			assertPositions(firstPos, lastPos);</span>
+<span class="nc" id="L242">			this.firstPos = firstPos;</span>
+<span class="nc" id="L243">			this.lastPos = lastPos;</span>
+<span class="nc" id="L244">		}</span>
+
+		private void assertPositions(long firstBytePos, @Nullable Long lastBytePos) {
+<span class="nc bnc" id="L247" title="All 2 branches missed.">			if (firstBytePos &lt; 0) {</span>
+<span class="nc" id="L248">				throw new IllegalArgumentException(&quot;Invalid first byte position: &quot; + firstBytePos);</span>
+			}
+<span class="nc bnc" id="L250" title="All 4 branches missed.">			if (lastBytePos != null &amp;&amp; lastBytePos &lt; firstBytePos) {</span>
+<span class="nc" id="L251">				throw new IllegalArgumentException(&quot;firstBytePosition=&quot; + firstBytePos +</span>
+						&quot; should be less than or equal to lastBytePosition=&quot; + lastBytePos);
+			}
+<span class="nc" id="L254">		}</span>
+
+		@Override
+		public long getRangeStart(long length) {
+<span class="nc" id="L258">			return this.firstPos;</span>
+		}
+
+		@Override
+		public long getRangeEnd(long length) {
+<span class="nc bnc" id="L263" title="All 4 branches missed.">			if (this.lastPos != null &amp;&amp; this.lastPos &lt; length) {</span>
+<span class="nc" id="L264">				return this.lastPos;</span>
+			}
+			else {
+<span class="nc" id="L267">				return length - 1;</span>
+			}
+		}
+
+		@Override
+		public boolean equals(@Nullable Object other) {
+<span class="nc bnc" id="L273" title="All 6 branches missed.">			return (this == other || (other instanceof ByteRange that &amp;&amp;</span>
+					this.firstPos == that.firstPos &amp;&amp;
+<span class="nc bnc" id="L275" title="All 2 branches missed.">					ObjectUtils.nullSafeEquals(this.lastPos, that.lastPos)));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L280">			return Objects.hash(this.firstPos, this.lastPos);</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L285">			StringBuilder builder = new StringBuilder();</span>
+<span class="nc" id="L286">			builder.append(this.firstPos);</span>
+<span class="nc" id="L287">			builder.append('-');</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">			if (this.lastPos != null) {</span>
+<span class="nc" id="L289">				builder.append(this.lastPos);</span>
+			}
+<span class="nc" id="L291">			return builder.toString();</span>
+		}
+	}
+
+
+	/**
+	 * Represents an HTTP/1.1 suffix byte range, with a number of suffix bytes.
+	 * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc7233#section-2.1&quot;&gt;Byte Ranges&lt;/a&gt;
+	 * @see HttpRange#createSuffixRange(long)
+	 */
+	private static class SuffixByteRange extends HttpRange {
+
+		private final long suffixLength;
+
+<span class="nc" id="L305">		public SuffixByteRange(long suffixLength) {</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">			if (suffixLength &lt; 0) {</span>
+<span class="nc" id="L307">				throw new IllegalArgumentException(&quot;Invalid suffix length: &quot; + suffixLength);</span>
+			}
+<span class="nc" id="L309">			this.suffixLength = suffixLength;</span>
+<span class="nc" id="L310">		}</span>
+
+		@Override
+		public long getRangeStart(long length) {
+<span class="nc bnc" id="L314" title="All 2 branches missed.">			if (this.suffixLength &lt; length) {</span>
+<span class="nc" id="L315">				return length - this.suffixLength;</span>
+			}
+			else {
+<span class="nc" id="L318">				return 0;</span>
+			}
+		}
+
+		@Override
+		public long getRangeEnd(long length) {
+<span class="nc" id="L324">			return length - 1;</span>
+		}
+
+		@Override
+		public boolean equals(@Nullable Object other) {
+<span class="nc bnc" id="L329" title="All 6 branches missed.">			return (this == other || (other instanceof SuffixByteRange that &amp;&amp;</span>
+					this.suffixLength == that.suffixLength));
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L335">			return Long.hashCode(this.suffixLength);</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L340">			return &quot;-&quot; + this.suffixLength;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

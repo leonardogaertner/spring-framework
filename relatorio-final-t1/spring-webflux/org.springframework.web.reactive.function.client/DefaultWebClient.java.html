@@ -1,0 +1,769 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>DefaultWebClient.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.function.client</a> &gt; <span class="el_source">DefaultWebClient.java</span></div><h1>DefaultWebClient.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.function.client;
+
+import java.net.URI;
+import java.nio.charset.Charset;
+import java.time.ZonedDateTime;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.IntPredicate;
+import java.util.function.Predicate;
+
+import io.micrometer.observation.Observation;
+import io.micrometer.observation.ObservationRegistry;
+import io.micrometer.observation.contextpropagation.ObservationThreadLocalAccessor;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.SignalType;
+
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.MediaType;
+import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.reactive.ClientHttpRequest;
+import org.springframework.http.client.reactive.ClientHttpResponse;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.client.ApiVersionInserter;
+import org.springframework.web.reactive.function.BodyExtractor;
+import org.springframework.web.reactive.function.BodyInserter;
+import org.springframework.web.reactive.function.BodyInserters;
+import org.springframework.web.util.UriBuilder;
+import org.springframework.web.util.UriBuilderFactory;
+
+/**
+ * The default implementation of {@link WebClient},
+ * as created by the static factory methods.
+ *
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @author Sebastien Deleuze
+ * @since 5.0
+ * @see WebClient#create()
+ * @see WebClient#create(String)
+ */
+final class DefaultWebClient implements WebClient {
+
+	// Copy of CoExchangeFilterFunction.COROUTINE_CONTEXT_ATTRIBUTE value to avoid compilation errors in Eclipse
+	private static final String COROUTINE_CONTEXT_ATTRIBUTE = &quot;org.springframework.web.reactive.function.client.CoExchangeFilterFunction.context&quot;;
+
+<span class="fc" id="L78">	private static final String URI_TEMPLATE_ATTRIBUTE = WebClient.class.getName() + &quot;.uriTemplate&quot;;</span>
+
+<span class="fc" id="L80">	private static final Mono&lt;ClientResponse&gt; NO_HTTP_CLIENT_RESPONSE_ERROR = Mono.error(</span>
+<span class="fc" id="L81">			() -&gt; new IllegalStateException(&quot;The underlying HTTP client completed without emitting a response.&quot;));</span>
+
+<span class="fc" id="L83">	private static final DefaultClientRequestObservationConvention DEFAULT_OBSERVATION_CONVENTION =</span>
+			new DefaultClientRequestObservationConvention();
+
+
+	private final ExchangeFunction exchangeFunction;
+
+	private final @Nullable ExchangeFilterFunction filterFunctions;
+
+	private final UriBuilderFactory uriBuilderFactory;
+
+	private final @Nullable HttpHeaders defaultHeaders;
+
+	private final @Nullable MultiValueMap&lt;String, String&gt; defaultCookies;
+
+	private final @Nullable Object defaultApiVersion;
+
+	private final @Nullable ApiVersionInserter apiVersionInserter;
+
+	private final @Nullable Consumer&lt;RequestHeadersSpec&lt;?&gt;&gt; defaultRequest;
+
+	private final List&lt;DefaultResponseSpec.StatusHandler&gt; defaultStatusHandlers;
+
+	private final ObservationRegistry observationRegistry;
+
+	private final @Nullable ClientRequestObservationConvention observationConvention;
+
+	private final DefaultWebClientBuilder builder;
+
+
+	DefaultWebClient(ExchangeFunction exchangeFunction, @Nullable ExchangeFilterFunction filterFunctions,
+			UriBuilderFactory uriBuilderFactory, @Nullable HttpHeaders defaultHeaders,
+			@Nullable MultiValueMap&lt;String, String&gt; defaultCookies,
+			@Nullable Object defaultApiVersion, @Nullable ApiVersionInserter apiVersionInserter,
+			@Nullable Consumer&lt;RequestHeadersSpec&lt;?&gt;&gt; defaultRequest,
+			@Nullable Map&lt;Predicate&lt;HttpStatusCode&gt;, Function&lt;ClientResponse, Mono&lt;? extends Throwable&gt;&gt;&gt; statusHandlerMap,
+			ObservationRegistry observationRegistry, @Nullable ClientRequestObservationConvention observationConvention,
+<span class="fc" id="L119">			DefaultWebClientBuilder builder) {</span>
+
+<span class="fc" id="L121">		this.exchangeFunction = exchangeFunction;</span>
+<span class="fc" id="L122">		this.filterFunctions = filterFunctions;</span>
+<span class="fc" id="L123">		this.uriBuilderFactory = uriBuilderFactory;</span>
+<span class="fc" id="L124">		this.defaultHeaders = defaultHeaders;</span>
+<span class="fc" id="L125">		this.defaultCookies = defaultCookies;</span>
+<span class="fc" id="L126">		this.defaultApiVersion = defaultApiVersion;</span>
+<span class="fc" id="L127">		this.apiVersionInserter = apiVersionInserter;</span>
+<span class="fc" id="L128">		this.defaultRequest = defaultRequest;</span>
+<span class="fc" id="L129">		this.defaultStatusHandlers = initStatusHandlers(statusHandlerMap);</span>
+<span class="fc" id="L130">		this.observationRegistry = observationRegistry;</span>
+<span class="fc" id="L131">		this.observationConvention = observationConvention;</span>
+<span class="fc" id="L132">		this.builder = builder;</span>
+<span class="fc" id="L133">	}</span>
+
+	private static List&lt;DefaultResponseSpec.StatusHandler&gt; initStatusHandlers(
+			@Nullable Map&lt;Predicate&lt;HttpStatusCode&gt;, Function&lt;ClientResponse, Mono&lt;? extends Throwable&gt;&gt;&gt; handlerMap) {
+
+<span class="fc bfc" id="L138" title="All 2 branches covered.">		return (CollectionUtils.isEmpty(handlerMap) ? Collections.emptyList() :</span>
+<span class="fc" id="L139">				handlerMap.entrySet().stream()</span>
+<span class="fc" id="L140">						.map(entry -&gt; new DefaultResponseSpec.StatusHandler(entry.getKey(), entry.getValue()))</span>
+<span class="fc" id="L141">						.toList());</span>
+	}
+
+
+	@Override
+	public RequestHeadersUriSpec&lt;?&gt; get() {
+<span class="fc" id="L147">		return methodInternal(HttpMethod.GET);</span>
+	}
+
+	@Override
+	public RequestHeadersUriSpec&lt;?&gt; head() {
+<span class="nc" id="L152">		return methodInternal(HttpMethod.HEAD);</span>
+	}
+
+	@Override
+	public RequestBodyUriSpec post() {
+<span class="fc" id="L157">		return methodInternal(HttpMethod.POST);</span>
+	}
+
+	@Override
+	public RequestBodyUriSpec put() {
+<span class="nc" id="L162">		return methodInternal(HttpMethod.PUT);</span>
+	}
+
+	@Override
+	public RequestBodyUriSpec patch() {
+<span class="nc" id="L167">		return methodInternal(HttpMethod.PATCH);</span>
+	}
+
+	@Override
+	public RequestHeadersUriSpec&lt;?&gt; delete() {
+<span class="nc" id="L172">		return methodInternal(HttpMethod.DELETE);</span>
+	}
+
+	@Override
+	public RequestHeadersUriSpec&lt;?&gt; options() {
+<span class="nc" id="L177">		return methodInternal(HttpMethod.OPTIONS);</span>
+	}
+
+	@Override
+	public RequestBodyUriSpec method(HttpMethod httpMethod) {
+<span class="fc" id="L182">		return methodInternal(httpMethod);</span>
+	}
+
+	private RequestBodyUriSpec methodInternal(HttpMethod httpMethod) {
+<span class="fc" id="L186">		DefaultRequestBodyUriSpec spec = new DefaultRequestBodyUriSpec(httpMethod);</span>
+<span class="fc bfc" id="L187" title="All 2 branches covered.">		if (this.defaultRequest != null) {</span>
+<span class="fc" id="L188">			this.defaultRequest.accept(spec);</span>
+		}
+<span class="fc" id="L190">		return spec;</span>
+	}
+
+	@Override
+	public Builder mutate() {
+<span class="fc" id="L195">		return new DefaultWebClientBuilder(this.builder);</span>
+	}
+
+	private static Mono&lt;Void&gt; releaseIfNotConsumed(ClientResponse response) {
+<span class="fc" id="L199">		return response.releaseBody().onErrorComplete();</span>
+	}
+
+	private static &lt;T&gt; Mono&lt;T&gt; releaseIfNotConsumed(ClientResponse response, Throwable ex) {
+<span class="fc" id="L203">		return response.releaseBody().onErrorComplete().then(Mono.error(ex));</span>
+	}
+
+
+	private class DefaultRequestBodyUriSpec implements RequestBodyUriSpec {
+
+<span class="fc" id="L209">		private static final Object NO_VERSION = new Object();</span>
+
+		private final HttpMethod httpMethod;
+
+		private @Nullable URI uri;
+
+		private @Nullable HttpHeaders headers;
+
+		private @Nullable MultiValueMap&lt;String, String&gt; cookies;
+
+		private @Nullable Object apiVersion;
+
+		private @Nullable BodyInserter&lt;?, ? super ClientHttpRequest&gt; inserter;
+
+<span class="fc" id="L223">		private final Map&lt;String, Object&gt; attributes = new LinkedHashMap&lt;&gt;(4);</span>
+
+		private @Nullable Consumer&lt;ClientHttpRequest&gt; httpRequestConsumer;
+
+<span class="fc" id="L227">		DefaultRequestBodyUriSpec(HttpMethod httpMethod) {</span>
+<span class="fc" id="L228">			this.httpMethod = httpMethod;</span>
+<span class="fc" id="L229">		}</span>
+
+		@Override
+		public RequestBodySpec uri(String uriTemplate, @Nullable Object... uriVariables) {
+<span class="fc" id="L233">			UriBuilder uriBuilder = uriBuilderFactory.uriString(uriTemplate);</span>
+<span class="fc" id="L234">			attribute(URI_TEMPLATE_ATTRIBUTE, uriBuilder.toUriString());</span>
+<span class="fc" id="L235">			return uri(uriBuilder.build(uriVariables));</span>
+		}
+
+		@Override
+		public RequestBodySpec uri(String uriTemplate, Map&lt;String, ?&gt; uriVariables) {
+<span class="fc" id="L240">			UriBuilder uriBuilder = uriBuilderFactory.uriString(uriTemplate);</span>
+<span class="fc" id="L241">			attribute(URI_TEMPLATE_ATTRIBUTE, uriBuilder.toUriString());</span>
+<span class="fc" id="L242">			return uri(uriBuilder.build(uriVariables));</span>
+		}
+
+		@Override
+		public RequestBodySpec uri(String uriTemplate, Function&lt;UriBuilder, URI&gt; uriFunction) {
+<span class="fc" id="L247">			UriBuilder uriBuilder = uriBuilderFactory.uriString(uriTemplate);</span>
+<span class="fc" id="L248">			attribute(URI_TEMPLATE_ATTRIBUTE, uriBuilder.toUriString());</span>
+<span class="fc" id="L249">			return uri(uriFunction.apply(uriBuilder));</span>
+		}
+
+		@Override
+		public RequestBodySpec uri(Function&lt;UriBuilder, URI&gt; uriFunction) {
+<span class="fc" id="L254">			return uri(uriFunction.apply(uriBuilderFactory.builder()));</span>
+		}
+
+		@Override
+		public RequestBodySpec uri(URI uri) {
+<span class="fc" id="L259">			this.uri = uri;</span>
+<span class="fc" id="L260">			return this;</span>
+		}
+
+		private HttpHeaders getHeaders() {
+<span class="fc bfc" id="L264" title="All 2 branches covered.">			if (this.headers == null) {</span>
+<span class="fc" id="L265">				this.headers = new HttpHeaders();</span>
+			}
+<span class="fc" id="L267">			return this.headers;</span>
+		}
+
+		private MultiValueMap&lt;String, String&gt; getCookies() {
+<span class="pc bpc" id="L271" title="1 of 2 branches missed.">			if (this.cookies == null) {</span>
+<span class="fc" id="L272">				this.cookies = new LinkedMultiValueMap&lt;&gt;(3);</span>
+			}
+<span class="fc" id="L274">			return this.cookies;</span>
+		}
+
+		@Override
+		public DefaultRequestBodyUriSpec header(String headerName, String... headerValues) {
+<span class="fc bfc" id="L279" title="All 2 branches covered.">			for (String headerValue : headerValues) {</span>
+<span class="fc" id="L280">				getHeaders().add(headerName, headerValue);</span>
+			}
+<span class="fc" id="L282">			return this;</span>
+		}
+
+		@Override
+		public DefaultRequestBodyUriSpec headers(Consumer&lt;HttpHeaders&gt; headersConsumer) {
+<span class="fc" id="L287">			headersConsumer.accept(getHeaders());</span>
+<span class="fc" id="L288">			return this;</span>
+		}
+
+		@Override
+		public DefaultRequestBodyUriSpec accept(MediaType... acceptableMediaTypes) {
+<span class="fc" id="L293">			getHeaders().setAccept(Arrays.asList(acceptableMediaTypes));</span>
+<span class="fc" id="L294">			return this;</span>
+		}
+
+		@Override
+		public DefaultRequestBodyUriSpec acceptCharset(Charset... acceptableCharsets) {
+<span class="nc" id="L299">			getHeaders().setAcceptCharset(Arrays.asList(acceptableCharsets));</span>
+<span class="nc" id="L300">			return this;</span>
+		}
+
+		@Override
+		public DefaultRequestBodyUriSpec contentType(MediaType contentType) {
+<span class="nc" id="L305">			getHeaders().setContentType(contentType);</span>
+<span class="nc" id="L306">			return this;</span>
+		}
+
+		@Override
+		public DefaultRequestBodyUriSpec contentLength(long contentLength) {
+<span class="nc" id="L311">			getHeaders().setContentLength(contentLength);</span>
+<span class="nc" id="L312">			return this;</span>
+		}
+
+		@Override
+		public DefaultRequestBodyUriSpec cookie(String name, String value) {
+<span class="fc" id="L317">			getCookies().add(name, value);</span>
+<span class="fc" id="L318">			return this;</span>
+		}
+
+		@Override
+		public DefaultRequestBodyUriSpec cookies(Consumer&lt;MultiValueMap&lt;String, String&gt;&gt; cookiesConsumer) {
+<span class="fc" id="L323">			cookiesConsumer.accept(getCookies());</span>
+<span class="fc" id="L324">			return this;</span>
+		}
+
+		@Override
+		public DefaultRequestBodyUriSpec ifModifiedSince(ZonedDateTime ifModifiedSince) {
+<span class="nc" id="L329">			getHeaders().setIfModifiedSince(ifModifiedSince);</span>
+<span class="nc" id="L330">			return this;</span>
+		}
+
+		@Override
+		public DefaultRequestBodyUriSpec ifNoneMatch(String... ifNoneMatches) {
+<span class="nc" id="L335">			getHeaders().setIfNoneMatch(Arrays.asList(ifNoneMatches));</span>
+<span class="nc" id="L336">			return this;</span>
+		}
+
+		@Override
+		public DefaultRequestBodyUriSpec apiVersion(@Nullable Object version) {
+<span class="fc bfc" id="L341" title="All 2 branches covered.">			this.apiVersion = (version != null ? version : NO_VERSION);</span>
+<span class="fc" id="L342">			return this;</span>
+		}
+
+		@Override
+		public RequestBodySpec attribute(String name, Object value) {
+<span class="fc" id="L347">			this.attributes.put(name, value);</span>
+<span class="fc" id="L348">			return this;</span>
+		}
+
+		@Override
+		public RequestBodySpec attributes(Consumer&lt;Map&lt;String, Object&gt;&gt; attributesConsumer) {
+<span class="fc" id="L353">			attributesConsumer.accept(this.attributes);</span>
+<span class="fc" id="L354">			return this;</span>
+		}
+
+		@Override
+		public RequestBodySpec httpRequest(Consumer&lt;ClientHttpRequest&gt; requestConsumer) {
+<span class="pc bpc" id="L359" title="1 of 2 branches missed.">			this.httpRequestConsumer = (this.httpRequestConsumer != null ?</span>
+<span class="pc" id="L360">					this.httpRequestConsumer.andThen(requestConsumer) : requestConsumer);</span>
+<span class="fc" id="L361">			return this;</span>
+		}
+
+		@Override
+		public RequestHeadersSpec&lt;?&gt; bodyValue(Object body) {
+<span class="fc" id="L366">			this.inserter = BodyInserters.fromValue(body);</span>
+<span class="fc" id="L367">			return this;</span>
+		}
+
+		@Override
+		public &lt;T&gt; RequestHeadersSpec&lt;?&gt; bodyValue(T body, ParameterizedTypeReference&lt;T&gt; bodyType) {
+<span class="fc" id="L372">			this.inserter = BodyInserters.fromValue(body, bodyType);</span>
+<span class="fc" id="L373">			return this;</span>
+		}
+
+		@Override
+		public &lt;T, P extends Publisher&lt;T&gt;&gt; RequestHeadersSpec&lt;?&gt; body(
+				P publisher, ParameterizedTypeReference&lt;T&gt; elementTypeRef) {
+<span class="nc" id="L379">			this.inserter = BodyInserters.fromPublisher(publisher, elementTypeRef);</span>
+<span class="nc" id="L380">			return this;</span>
+		}
+
+		@Override
+		public &lt;T, P extends Publisher&lt;T&gt;&gt; RequestHeadersSpec&lt;?&gt; body(P publisher, Class&lt;T&gt; elementClass) {
+<span class="fc" id="L385">			this.inserter = BodyInserters.fromPublisher(publisher, elementClass);</span>
+<span class="fc" id="L386">			return this;</span>
+		}
+
+		@Override
+		public RequestHeadersSpec&lt;?&gt; body(Object producer, Class&lt;?&gt; elementClass) {
+<span class="nc" id="L391">			this.inserter = BodyInserters.fromProducer(producer, elementClass);</span>
+<span class="nc" id="L392">			return this;</span>
+		}
+
+		@Override
+		public RequestHeadersSpec&lt;?&gt; body(Object producer, ParameterizedTypeReference&lt;?&gt; elementTypeRef) {
+<span class="nc" id="L397">			this.inserter = BodyInserters.fromProducer(producer, elementTypeRef);</span>
+<span class="nc" id="L398">			return this;</span>
+		}
+
+		@Override
+		public RequestHeadersSpec&lt;?&gt; body(BodyInserter&lt;?, ? super ClientHttpRequest&gt; inserter) {
+<span class="nc" id="L403">			this.inserter = inserter;</span>
+<span class="nc" id="L404">			return this;</span>
+		}
+
+		@Override
+		public ResponseSpec retrieve() {
+<span class="fc" id="L409">			return new DefaultResponseSpec(</span>
+<span class="fc" id="L410">					this.httpMethod, initUri(), exchange(), DefaultWebClient.this.defaultStatusHandlers);</span>
+		}
+
+		@Override
+		public &lt;V&gt; Mono&lt;V&gt; exchangeToMono(Function&lt;ClientResponse, ? extends Mono&lt;V&gt;&gt; responseHandler) {
+<span class="fc" id="L415">			return exchange().flatMap(response -&gt; {</span>
+				try {
+<span class="fc" id="L417">					return responseHandler.apply(response)</span>
+<span class="fc" id="L418">							.flatMap(value -&gt; releaseIfNotConsumed(response).thenReturn(value))</span>
+<span class="fc" id="L419">							.switchIfEmpty(Mono.defer(() -&gt; releaseIfNotConsumed(response).then(Mono.empty())))</span>
+<span class="pc" id="L420">							.onErrorResume(ex -&gt; releaseIfNotConsumed(response, ex));</span>
+				}
+<span class="nc" id="L422">				catch (Throwable ex) {</span>
+<span class="nc" id="L423">					return releaseIfNotConsumed(response, ex);</span>
+				}
+			});
+		}
+
+		@Override
+		public &lt;V&gt; Flux&lt;V&gt; exchangeToFlux(Function&lt;ClientResponse, ? extends Flux&lt;V&gt;&gt; responseHandler) {
+<span class="nc" id="L430">			return exchange().flatMapMany(response -&gt; {</span>
+				try {
+<span class="nc" id="L432">					return responseHandler.apply(response)</span>
+<span class="nc" id="L433">							.concatWith(Flux.defer(() -&gt; releaseIfNotConsumed(response).then(Mono.empty())))</span>
+<span class="nc" id="L434">							.onErrorResume(ex -&gt; releaseIfNotConsumed(response, ex));</span>
+				}
+<span class="nc" id="L436">				catch (Throwable ex) {</span>
+<span class="nc" id="L437">					return releaseIfNotConsumed(response, ex);</span>
+				}
+			});
+		}
+
+		private Mono&lt;ClientResponse&gt; exchange() {
+<span class="fc" id="L443">			ClientRequest.Builder requestBuilder = initRequestBuilder();</span>
+<span class="fc" id="L444">			return Mono.deferContextual(contextView -&gt; {</span>
+<span class="fc" id="L445">				Observation observation = ClientHttpObservationDocumentation.HTTP_REACTIVE_CLIENT_EXCHANGES.observation(observationConvention,</span>
+<span class="fc" id="L446">						DEFAULT_OBSERVATION_CONVENTION, () -&gt; new ClientRequestObservationContext(requestBuilder), observationRegistry);</span>
+<span class="fc" id="L447">				observation</span>
+<span class="fc" id="L448">						.parentObservation(contextView.getOrDefault(ObservationThreadLocalAccessor.KEY, null))</span>
+<span class="fc" id="L449">						.start();</span>
+<span class="fc" id="L450">				ExchangeFilterFunction filterFunction = new ObservationFilterFunction(observation.getContext());</span>
+<span class="fc bfc" id="L451" title="All 2 branches covered.">				if (filterFunctions != null) {</span>
+<span class="fc" id="L452">					filterFunction = filterFunctions.andThen(filterFunction);</span>
+				}
+<span class="fc" id="L454">				contextView.getOrEmpty(COROUTINE_CONTEXT_ATTRIBUTE)</span>
+<span class="fc" id="L455">						.ifPresent(context -&gt; requestBuilder.attribute(COROUTINE_CONTEXT_ATTRIBUTE, context));</span>
+<span class="fc" id="L456">				ClientRequest request = requestBuilder.build();</span>
+<span class="fc bfc" id="L457" title="All 2 branches covered.">				if (observation.getContext() instanceof ClientRequestObservationContext observationContext) {</span>
+<span class="fc" id="L458">					observationContext.setUriTemplate((String) request.attribute(URI_TEMPLATE_ATTRIBUTE).orElse(null));</span>
+<span class="fc" id="L459">					observationContext.setRequest(request);</span>
+				}
+<span class="fc" id="L461">				final ExchangeFilterFunction finalFilterFunction = filterFunction;</span>
+<span class="fc" id="L462">				Mono&lt;ClientResponse&gt; responseMono = Mono.defer(</span>
+<span class="fc" id="L463">								() -&gt; finalFilterFunction.apply(exchangeFunction).exchange(request))</span>
+<span class="fc" id="L464">						.checkpoint(&quot;Request to &quot; +</span>
+<span class="fc" id="L465">								WebClientUtils.getRequestDescription(request.method(), request.url()) +</span>
+								&quot; [DefaultWebClient]&quot;)
+<span class="fc" id="L467">						.switchIfEmpty(NO_HTTP_CLIENT_RESPONSE_ERROR);</span>
+<span class="fc" id="L468">				final AtomicBoolean responseReceived = new AtomicBoolean();</span>
+<span class="fc" id="L469">				return responseMono</span>
+<span class="fc" id="L470">						.doOnNext(response -&gt; responseReceived.set(true))</span>
+<span class="fc" id="L471">						.doOnError(observation::error)</span>
+<span class="fc" id="L472">						.doFinally(signalType -&gt; {</span>
+<span class="fc bfc" id="L473" title="All 4 branches covered.">							if (signalType == SignalType.CANCEL &amp;&amp; !responseReceived.get() &amp;&amp;</span>
+<span class="pc bpc" id="L474" title="1 of 2 branches missed.">									observation.getContext() instanceof ClientRequestObservationContext observationContext) {</span>
+<span class="fc" id="L475">								observationContext.setAborted(true);</span>
+							}
+<span class="fc" id="L477">							observation.stop();</span>
+<span class="fc" id="L478">						})</span>
+<span class="fc" id="L479">						.contextWrite(context -&gt; context.put(ObservationThreadLocalAccessor.KEY, observation));</span>
+			});
+		}
+
+		private ClientRequest.Builder initRequestBuilder() {
+<span class="fc" id="L484">			ClientRequest.Builder builder = ClientRequest.create(this.httpMethod, initUri())</span>
+<span class="fc" id="L485">					.headers(this::initHeaders)</span>
+<span class="fc" id="L486">					.cookies(this::initCookies)</span>
+<span class="fc" id="L487">					.attributes(attributes -&gt; attributes.putAll(this.attributes));</span>
+<span class="fc bfc" id="L488" title="All 2 branches covered.">			if (this.httpRequestConsumer != null) {</span>
+<span class="fc" id="L489">				builder.httpRequest(this.httpRequestConsumer);</span>
+			}
+<span class="fc bfc" id="L491" title="All 2 branches covered.">			if (this.inserter != null) {</span>
+<span class="fc" id="L492">				builder.body(this.inserter);</span>
+			}
+<span class="fc" id="L494">			return builder;</span>
+		}
+
+		private URI initUri() {
+<span class="fc bfc" id="L498" title="All 2 branches covered.">			URI uriToUse = (this.uri != null ? this.uri : uriBuilderFactory.expand(&quot;&quot;));</span>
+<span class="fc" id="L499">			Object version = getApiVersionOrDefault();</span>
+<span class="fc bfc" id="L500" title="All 2 branches covered.">			if (version != null) {</span>
+<span class="pc bpc" id="L501" title="1 of 2 branches missed.">				Assert.state(apiVersionInserter != null, &quot;No ApiVersionInserter configured&quot;);</span>
+<span class="fc" id="L502">				uriToUse = apiVersionInserter.insertVersion(version, uriToUse);</span>
+			}
+<span class="fc" id="L504">			return uriToUse;</span>
+		}
+
+		private @Nullable Object getApiVersionOrDefault() {
+<span class="fc bfc" id="L508" title="All 2 branches covered.">			if (this.apiVersion == null) {</span>
+<span class="fc" id="L509">				return DefaultWebClient.this.defaultApiVersion;</span>
+			}
+<span class="fc bfc" id="L511" title="All 2 branches covered.">			else if (this.apiVersion == NO_VERSION) {</span>
+<span class="fc" id="L512">				return null;</span>
+			}
+			else {
+<span class="fc" id="L515">				return this.apiVersion;</span>
+			}
+		}
+
+		private void initHeaders(HttpHeaders out) {
+<span class="pc bpc" id="L520" title="1 of 4 branches missed.">			if (defaultHeaders != null &amp;&amp; !defaultHeaders.isEmpty()) {</span>
+<span class="fc" id="L521">				out.putAll(defaultHeaders);</span>
+			}
+<span class="fc bfc" id="L523" title="All 4 branches covered.">			if (this.headers != null &amp;&amp; !this.headers.isEmpty()) {</span>
+<span class="fc" id="L524">				out.putAll(this.headers);</span>
+			}
+<span class="fc" id="L526">			Object version = getApiVersionOrDefault();</span>
+<span class="fc bfc" id="L527" title="All 2 branches covered.">			if (version != null) {</span>
+<span class="pc bpc" id="L528" title="1 of 2 branches missed.">				Assert.state(apiVersionInserter != null, &quot;No ApiVersionInserter configured&quot;);</span>
+<span class="fc" id="L529">				apiVersionInserter.insertVersion(version, out);</span>
+			}
+<span class="fc" id="L531">		}</span>
+
+		private void initCookies(MultiValueMap&lt;String, String&gt; out) {
+<span class="fc bfc" id="L534" title="All 2 branches covered.">			if (!CollectionUtils.isEmpty(defaultCookies)) {</span>
+<span class="fc" id="L535">				out.putAll(defaultCookies);</span>
+			}
+<span class="fc bfc" id="L537" title="All 2 branches covered.">			if (!CollectionUtils.isEmpty(this.cookies)) {</span>
+<span class="fc" id="L538">				out.putAll(this.cookies);</span>
+			}
+<span class="fc" id="L540">		}</span>
+	}
+
+
+	private static class DefaultResponseSpec implements ResponseSpec {
+
+<span class="fc" id="L546">		private static final StatusHandler DEFAULT_STATUS_HANDLER =</span>
+<span class="fc bfc" id="L547" title="All 2 branches covered.">				new StatusHandler(code -&gt; code.value() &gt;= 400, ClientResponse::createException);</span>
+
+
+		private final HttpMethod httpMethod;
+
+		private final URI uri;
+
+		private final Mono&lt;ClientResponse&gt; responseMono;
+
+<span class="fc" id="L556">		private final List&lt;StatusHandler&gt; statusHandlers = new ArrayList&lt;&gt;(1);</span>
+
+		private final int defaultStatusHandlerCount;
+
+		DefaultResponseSpec(HttpMethod httpMethod, URI uri, Mono&lt;ClientResponse&gt; responseMono,
+<span class="fc" id="L561">				List&lt;StatusHandler&gt; defaultStatusHandlers) {</span>
+
+<span class="fc" id="L563">			this.httpMethod = httpMethod;</span>
+<span class="fc" id="L564">			this.uri = uri;</span>
+<span class="fc" id="L565">			this.responseMono = responseMono;</span>
+<span class="fc" id="L566">			this.statusHandlers.addAll(defaultStatusHandlers);</span>
+<span class="fc" id="L567">			this.statusHandlers.add(DEFAULT_STATUS_HANDLER);</span>
+<span class="fc" id="L568">			this.defaultStatusHandlerCount = this.statusHandlers.size();</span>
+<span class="fc" id="L569">		}</span>
+
+		@Override
+		public ResponseSpec onStatus(Predicate&lt;HttpStatusCode&gt; statusCodePredicate,
+				Function&lt;ClientResponse, Mono&lt;? extends Throwable&gt;&gt; exceptionFunction) {
+
+<span class="fc" id="L575">			Assert.notNull(statusCodePredicate, &quot;StatusCodePredicate must not be null&quot;);</span>
+<span class="fc" id="L576">			Assert.notNull(exceptionFunction, &quot;Function must not be null&quot;);</span>
+<span class="fc" id="L577">			int index = this.statusHandlers.size() - this.defaultStatusHandlerCount;  // Default handlers always last</span>
+<span class="fc" id="L578">			this.statusHandlers.add(index, new StatusHandler(statusCodePredicate, exceptionFunction));</span>
+<span class="fc" id="L579">			return this;</span>
+		}
+
+		@Override
+		public ResponseSpec onRawStatus(IntPredicate statusCodePredicate,
+				Function&lt;ClientResponse, Mono&lt;? extends Throwable&gt;&gt; exceptionFunction) {
+
+<span class="nc" id="L586">			return onStatus(toStatusCodePredicate(statusCodePredicate), exceptionFunction);</span>
+		}
+
+		private static Predicate&lt;HttpStatusCode&gt; toStatusCodePredicate(IntPredicate predicate) {
+<span class="nc" id="L590">			return value -&gt; predicate.test(value.value());</span>
+		}
+
+		@Override
+		public &lt;T&gt; Mono&lt;T&gt; bodyToMono(Class&lt;T&gt; elementClass) {
+<span class="fc" id="L595">			Assert.notNull(elementClass, &quot;Class must not be null&quot;);</span>
+<span class="fc" id="L596">			return this.responseMono.flatMap(response -&gt;</span>
+<span class="fc" id="L597">					handleBodyMono(response, response.bodyToMono(elementClass)));</span>
+		}
+
+		@Override
+		public &lt;T&gt; Mono&lt;T&gt; bodyToMono(ParameterizedTypeReference&lt;T&gt; elementTypeRef) {
+<span class="fc" id="L602">			Assert.notNull(elementTypeRef, &quot;ParameterizedTypeReference must not be null&quot;);</span>
+<span class="fc" id="L603">			return this.responseMono.flatMap(response -&gt;</span>
+<span class="fc" id="L604">					handleBodyMono(response, response.bodyToMono(elementTypeRef)));</span>
+		}
+
+		@Override
+		public &lt;T&gt; Flux&lt;T&gt; bodyToFlux(Class&lt;T&gt; elementClass) {
+<span class="fc" id="L609">			Assert.notNull(elementClass, &quot;Class must not be null&quot;);</span>
+<span class="fc" id="L610">			return this.responseMono.flatMapMany(response -&gt;</span>
+<span class="fc" id="L611">					handleBodyFlux(response, response.bodyToFlux(elementClass)));</span>
+		}
+
+		@Override
+		public &lt;T&gt; Flux&lt;T&gt; bodyToFlux(ParameterizedTypeReference&lt;T&gt; elementTypeRef) {
+<span class="fc" id="L616">			Assert.notNull(elementTypeRef, &quot;ParameterizedTypeReference must not be null&quot;);</span>
+<span class="fc" id="L617">			return this.responseMono.flatMapMany(response -&gt;</span>
+<span class="fc" id="L618">					handleBodyFlux(response, response.bodyToFlux(elementTypeRef)));</span>
+		}
+
+		@Override
+		public &lt;T&gt; Mono&lt;ResponseEntity&lt;T&gt;&gt; toEntity(Class&lt;T&gt; bodyClass) {
+<span class="fc" id="L623">			return this.responseMono.flatMap(response -&gt;</span>
+<span class="fc" id="L624">					WebClientUtils.mapToEntity(response,</span>
+<span class="fc" id="L625">							handleBodyMono(response, response.bodyToMono(bodyClass))));</span>
+		}
+
+		@Override
+		public &lt;T&gt; Mono&lt;ResponseEntity&lt;T&gt;&gt; toEntity(ParameterizedTypeReference&lt;T&gt; bodyTypeRef) {
+<span class="fc" id="L630">			return this.responseMono.flatMap(response -&gt;</span>
+<span class="fc" id="L631">					WebClientUtils.mapToEntity(response,</span>
+<span class="fc" id="L632">							handleBodyMono(response, response.bodyToMono(bodyTypeRef))));</span>
+		}
+
+		@Override
+		public &lt;T&gt; Mono&lt;ResponseEntity&lt;List&lt;T&gt;&gt;&gt; toEntityList(Class&lt;T&gt; elementClass) {
+<span class="fc" id="L637">			return this.responseMono.flatMap(response -&gt;</span>
+<span class="fc" id="L638">					WebClientUtils.mapToEntityList(response,</span>
+<span class="fc" id="L639">							handleBodyFlux(response, response.bodyToFlux(elementClass))));</span>
+		}
+
+		@Override
+		public &lt;T&gt; Mono&lt;ResponseEntity&lt;List&lt;T&gt;&gt;&gt; toEntityList(ParameterizedTypeReference&lt;T&gt; elementTypeRef) {
+<span class="fc" id="L644">			return this.responseMono.flatMap(response -&gt;</span>
+<span class="fc" id="L645">					WebClientUtils.mapToEntityList(response,</span>
+<span class="fc" id="L646">							handleBodyFlux(response, response.bodyToFlux(elementTypeRef))));</span>
+		}
+
+		@Override
+		public &lt;T&gt; Mono&lt;ResponseEntity&lt;Flux&lt;T&gt;&gt;&gt; toEntityFlux(Class&lt;T&gt; elementType) {
+<span class="fc" id="L651">			return this.responseMono.flatMap(response -&gt;</span>
+<span class="fc" id="L652">					handlerEntityFlux(response, response.bodyToFlux(elementType)));</span>
+		}
+
+		@Override
+		public &lt;T&gt; Mono&lt;ResponseEntity&lt;Flux&lt;T&gt;&gt;&gt; toEntityFlux(ParameterizedTypeReference&lt;T&gt; elementTypeRef) {
+<span class="fc" id="L657">			return this.responseMono.flatMap(response -&gt;</span>
+<span class="fc" id="L658">					handlerEntityFlux(response, response.bodyToFlux(elementTypeRef)));</span>
+		}
+
+		@Override
+		public &lt;T&gt; Mono&lt;ResponseEntity&lt;Flux&lt;T&gt;&gt;&gt; toEntityFlux(BodyExtractor&lt;Flux&lt;T&gt;, ? super ClientHttpResponse&gt; bodyExtractor) {
+<span class="fc" id="L663">			return this.responseMono.flatMap(response -&gt;</span>
+<span class="fc" id="L664">					handlerEntityFlux(response, response.body(bodyExtractor)));</span>
+		}
+
+		@Override
+		public Mono&lt;ResponseEntity&lt;Void&gt;&gt; toBodilessEntity() {
+<span class="fc" id="L669">			return this.responseMono.flatMap(response -&gt;</span>
+<span class="fc" id="L670">					WebClientUtils.mapToEntity(response, handleBodyMono(response, Mono.&lt;Void&gt;empty()))</span>
+<span class="fc" id="L671">							.flatMap(entity -&gt; response.releaseBody()</span>
+<span class="fc" id="L672">									.onErrorResume(WebClientUtils.WRAP_EXCEPTION_PREDICATE, exceptionWrappingFunction(response))</span>
+<span class="fc" id="L673">									.thenReturn(entity))</span>
+			);
+		}
+
+		private &lt;T&gt; Mono&lt;T&gt; handleBodyMono(ClientResponse response, Mono&lt;T&gt; body) {
+<span class="fc" id="L678">			body = body.onErrorResume(WebClientUtils.WRAP_EXCEPTION_PREDICATE, exceptionWrappingFunction(response));</span>
+<span class="fc" id="L679">			Mono&lt;T&gt; result = applyStatusHandlers(response);</span>
+<span class="fc bfc" id="L680" title="All 2 branches covered.">			return (result != null ? result.switchIfEmpty(body) : body);</span>
+		}
+
+		private &lt;T&gt; Publisher&lt;T&gt; handleBodyFlux(ClientResponse response, Flux&lt;T&gt; body) {
+<span class="fc" id="L684">			body = body.onErrorResume(WebClientUtils.WRAP_EXCEPTION_PREDICATE, exceptionWrappingFunction(response));</span>
+<span class="fc" id="L685">			Mono&lt;T&gt; result = applyStatusHandlers(response);</span>
+<span class="fc bfc" id="L686" title="All 2 branches covered.">			return (result != null ? result.flux().switchIfEmpty(body) : body);</span>
+		}
+
+		private &lt;T&gt; Mono&lt;? extends ResponseEntity&lt;Flux&lt;T&gt;&gt;&gt; handlerEntityFlux(ClientResponse response, Flux&lt;T&gt; body) {
+<span class="fc" id="L690">			ResponseEntity&lt;Flux&lt;T&gt;&gt; entity = new ResponseEntity&lt;&gt;(</span>
+<span class="fc" id="L691">					body.onErrorResume(WebClientUtils.WRAP_EXCEPTION_PREDICATE, exceptionWrappingFunction(response)),</span>
+<span class="fc" id="L692">					response.headers().asHttpHeaders(),</span>
+<span class="fc" id="L693">					response.statusCode());</span>
+
+<span class="fc" id="L695">			Mono&lt;ResponseEntity&lt;Flux&lt;T&gt;&gt;&gt; result = applyStatusHandlers(response);</span>
+<span class="pc bpc" id="L696" title="1 of 2 branches missed.">			return (result != null ? result.defaultIfEmpty(entity) : Mono.just(entity));</span>
+		}
+
+		private &lt;T&gt; Function&lt;Throwable, Mono&lt;? extends T&gt;&gt; exceptionWrappingFunction(ClientResponse response) {
+<span class="fc" id="L700">			return t -&gt; response.createException().flatMap(ex -&gt; Mono.error(ex.initCause(t)));</span>
+		}
+
+		private &lt;T&gt; @Nullable Mono&lt;T&gt; applyStatusHandlers(ClientResponse response) {
+<span class="fc" id="L704">			HttpStatusCode statusCode = response.statusCode();</span>
+<span class="fc bfc" id="L705" title="All 2 branches covered.">			for (StatusHandler handler : this.statusHandlers) {</span>
+<span class="fc bfc" id="L706" title="All 2 branches covered.">				if (handler.test(statusCode)) {</span>
+					Mono&lt;? extends Throwable&gt; exMono;
+					try {
+<span class="fc" id="L709">						exMono = handler.apply(response);</span>
+<span class="fc" id="L710">						exMono = exMono.flatMap(ex -&gt; releaseIfNotConsumed(response, ex));</span>
+<span class="fc" id="L711">						exMono = exMono.onErrorResume(ex -&gt; releaseIfNotConsumed(response, ex));</span>
+					}
+<span class="fc" id="L713">					catch (Throwable ex2) {</span>
+<span class="fc" id="L714">						exMono = releaseIfNotConsumed(response, ex2);</span>
+<span class="fc" id="L715">					}</span>
+<span class="fc" id="L716">					Mono&lt;T&gt; result = exMono.flatMap(Mono::error);</span>
+<span class="fc" id="L717">					return result.checkpoint(statusCode + &quot; from &quot; +</span>
+<span class="fc" id="L718">							WebClientUtils.getRequestDescription(this.httpMethod, this.uri) +</span>
+							&quot; [DefaultWebClient]&quot;);
+				}
+<span class="fc" id="L721">			}</span>
+<span class="fc" id="L722">			return null;</span>
+		}
+
+
+		private static class StatusHandler {
+
+			private final Predicate&lt;HttpStatusCode&gt; predicate;
+
+			private final Function&lt;ClientResponse, Mono&lt;? extends Throwable&gt;&gt; exceptionFunction;
+
+			public StatusHandler(Predicate&lt;HttpStatusCode&gt; predicate,
+<span class="fc" id="L733">					Function&lt;ClientResponse, Mono&lt;? extends Throwable&gt;&gt; exceptionFunction) {</span>
+
+<span class="fc" id="L735">				this.predicate = predicate;</span>
+<span class="fc" id="L736">				this.exceptionFunction = exceptionFunction;</span>
+<span class="fc" id="L737">			}</span>
+
+			public boolean test(HttpStatusCode status) {
+<span class="fc" id="L740">				return this.predicate.test(status);</span>
+			}
+
+			public Mono&lt;? extends Throwable&gt; apply(ClientResponse response) {
+<span class="fc" id="L744">				return this.exceptionFunction.apply(response);</span>
+			}
+		}
+	}
+
+
+	private static class ObservationFilterFunction implements ExchangeFilterFunction {
+
+		private final Observation.Context observationContext;
+
+<span class="fc" id="L754">		ObservationFilterFunction(Observation.Context observationContext) {</span>
+<span class="fc" id="L755">			this.observationContext = observationContext;</span>
+<span class="fc" id="L756">		}</span>
+
+		@Override
+		public Mono&lt;ClientResponse&gt; filter(ClientRequest request, ExchangeFunction next) {
+<span class="fc" id="L760">			Mono&lt;ClientResponse&gt; exchange = next.exchange(request);</span>
+<span class="fc bfc" id="L761" title="All 2 branches covered.">			if (this.observationContext instanceof ClientRequestObservationContext clientContext) {</span>
+<span class="fc" id="L762">				exchange = exchange.doOnNext(clientContext::setResponse);</span>
+			}
+<span class="fc" id="L764">			return exchange;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

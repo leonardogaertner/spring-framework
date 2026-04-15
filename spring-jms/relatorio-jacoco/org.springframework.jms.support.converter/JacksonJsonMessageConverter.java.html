@@ -1,0 +1,495 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>JacksonJsonMessageConverter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jms.support.converter</a> &gt; <span class="el_source">JacksonJsonMessageConverter.java</span></div><h1>JacksonJsonMessageConverter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jms.support.converter;
+
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
+import java.io.StringWriter;
+import java.io.UnsupportedEncodingException;
+import java.util.HashMap;
+import java.util.Map;
+
+import com.fasterxml.jackson.annotation.JsonView;
+import jakarta.jms.BytesMessage;
+import jakarta.jms.JMSException;
+import jakarta.jms.Message;
+import jakarta.jms.Session;
+import jakarta.jms.TextMessage;
+import org.jspecify.annotations.Nullable;
+import tools.jackson.databind.JavaType;
+import tools.jackson.databind.ObjectWriter;
+import tools.jackson.databind.cfg.MapperBuilder;
+import tools.jackson.databind.json.JsonMapper;
+
+import org.springframework.beans.factory.BeanClassLoaderAware;
+import org.springframework.core.MethodParameter;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+
+/**
+ * Message converter that uses Jackson 3.x to convert messages to and from JSON.
+ *
+ * &lt;p&gt;Maps an object to a {@link BytesMessage}, or to a {@link TextMessage} if the
+ * {@link #setTargetType targetType} is set to {@link MessageType#TEXT}.
+ * Converts from a {@link TextMessage} or {@link BytesMessage} to an object.
+ *
+ * @author Sebastien Deleuze
+ * @since 7.0
+ */
+public class JacksonJsonMessageConverter implements SmartMessageConverter, BeanClassLoaderAware {
+
+	/**
+	 * The default encoding used for writing to text messages: UTF-8.
+	 */
+	public static final String DEFAULT_ENCODING = &quot;UTF-8&quot;;
+
+
+	private final JsonMapper mapper;
+
+<span class="pc" id="L64">	private MessageType targetType = MessageType.BYTES;</span>
+
+	private @Nullable String encoding;
+
+	private @Nullable String encodingPropertyName;
+
+	private @Nullable String typeIdPropertyName;
+
+<span class="pc" id="L72">	private Map&lt;String, Class&lt;?&gt;&gt; idClassMappings = new HashMap&lt;&gt;();</span>
+
+<span class="pc" id="L74">	private final Map&lt;Class&lt;?&gt;, String&gt; classIdMappings = new HashMap&lt;&gt;();</span>
+
+	private @Nullable ClassLoader beanClassLoader;
+
+
+	/**
+	 * Construct a new instance with a {@link JsonMapper} customized with the
+	 * {@link tools.jackson.databind.JacksonModule}s found by
+	 * {@link MapperBuilder#findModules(ClassLoader)}.
+	 */
+	public JacksonJsonMessageConverter() {
+<span class="fc" id="L85">		this(JsonMapper.builder());</span>
+<span class="fc" id="L86">	}</span>
+
+	/**
+	 * Construct a new instance with the provided {@link JsonMapper.Builder}
+	 * customized with the {@link tools.jackson.databind.JacksonModule}s found
+	 * by {@link MapperBuilder#findModules(ClassLoader)}.
+	 * @see JsonMapper#builder()
+	 */
+<span class="fc" id="L94">	public JacksonJsonMessageConverter(JsonMapper.Builder builder) {</span>
+<span class="fc" id="L95">		Assert.notNull(builder, &quot;JsonMapper.Builder must not be null&quot;);</span>
+<span class="fc" id="L96">		this.mapper = builder.findAndAddModules(JacksonJsonMessageConverter.class.getClassLoader()).build();</span>
+<span class="fc" id="L97">	}</span>
+
+	/**
+	 * Construct a new instance with the provided {@link JsonMapper}.
+	 * @see JsonMapper#builder()
+	 */
+<span class="nc" id="L103">	public JacksonJsonMessageConverter(JsonMapper mapper) {</span>
+<span class="nc" id="L104">		Assert.notNull(mapper, &quot;JsonMapper must not be null&quot;);</span>
+<span class="nc" id="L105">		this.mapper = mapper;</span>
+<span class="nc" id="L106">	}</span>
+
+	/**
+	 * Specify whether {@link #toMessage(Object, Session)} should marshal to a
+	 * {@link BytesMessage} or a {@link TextMessage}.
+	 * &lt;p&gt;The default is {@link MessageType#BYTES}, i.e. this converter marshals to
+	 * a {@link BytesMessage}. Note that the default version of this converter
+	 * supports {@link MessageType#BYTES} and {@link MessageType#TEXT} only.
+	 * @see MessageType#BYTES
+	 * @see MessageType#TEXT
+	 */
+	public void setTargetType(MessageType targetType) {
+<span class="fc" id="L118">		Assert.notNull(targetType, &quot;MessageType must not be null&quot;);</span>
+<span class="fc" id="L119">		this.targetType = targetType;</span>
+<span class="fc" id="L120">	}</span>
+
+	/**
+	 * Specify the encoding to use when converting to and from text-based
+	 * message body content. The default encoding will be &quot;UTF-8&quot;.
+	 * &lt;p&gt;When reading from a text-based message, an encoding may have been
+	 * suggested through a special JMS property which will then be preferred
+	 * over the encoding set on this MessageConverter instance.
+	 * @see #setEncodingPropertyName
+	 */
+	public void setEncoding(String encoding) {
+<span class="nc" id="L131">		this.encoding = encoding;</span>
+<span class="nc" id="L132">	}</span>
+
+	/**
+	 * Specify the name of the JMS message property that carries the encoding from
+	 * bytes to String and back is BytesMessage is used during the conversion process.
+	 * &lt;p&gt;Default is none. Setting this property is optional; if not set, UTF-8 will
+	 * be used for decoding any incoming bytes message.
+	 * @see #setEncoding
+	 */
+	public void setEncodingPropertyName(String encodingPropertyName) {
+<span class="fc" id="L142">		this.encodingPropertyName = encodingPropertyName;</span>
+<span class="fc" id="L143">	}</span>
+
+	/**
+	 * Specify the name of the JMS message property that carries the type id for the
+	 * contained object: either a mapped id value or a raw Java class name.
+	 * &lt;p&gt;Default is none. &lt;b&gt;NOTE: This property needs to be set in order to allow
+	 * for converting from an incoming message to a Java object.&lt;/b&gt;
+	 * @see #setTypeIdMappings
+	 */
+	public void setTypeIdPropertyName(String typeIdPropertyName) {
+<span class="fc" id="L153">		this.typeIdPropertyName = typeIdPropertyName;</span>
+<span class="fc" id="L154">	}</span>
+
+	/**
+	 * Specify mappings from type ids to Java classes, if desired.
+	 * This allows for synthetic ids in the type id message property,
+	 * instead of transferring Java class names.
+	 * &lt;p&gt;Default is no custom mappings, i.e. transferring raw Java class names.
+	 * @param typeIdMappings a Map with type id values as keys and Java classes as values
+	 */
+	public void setTypeIdMappings(Map&lt;String, Class&lt;?&gt;&gt; typeIdMappings) {
+<span class="nc" id="L164">		this.idClassMappings = new HashMap&lt;&gt;();</span>
+<span class="nc" id="L165">		typeIdMappings.forEach((id, clazz) -&gt; {</span>
+<span class="nc" id="L166">			this.idClassMappings.put(id, clazz);</span>
+<span class="nc" id="L167">			this.classIdMappings.put(clazz, id);</span>
+<span class="nc" id="L168">		});</span>
+<span class="nc" id="L169">	}</span>
+
+	@Override
+	public void setBeanClassLoader(ClassLoader classLoader) {
+<span class="nc" id="L173">		this.beanClassLoader = classLoader;</span>
+<span class="nc" id="L174">	}</span>
+
+
+	@Override
+	public Message toMessage(Object object, Session session) throws JMSException, MessageConversionException {
+		Message message;
+		try {
+<span class="pc bpc" id="L181" title="1 of 3 branches missed.">			message = switch (this.targetType) {</span>
+<span class="fc" id="L182">				case TEXT -&gt; mapToTextMessage(object, session, this.mapper.writer());</span>
+<span class="fc" id="L183">				case BYTES -&gt; mapToBytesMessage(object, session, this.mapper.writer());</span>
+<span class="nc" id="L184">				default -&gt; mapToMessage(object, session, this.mapper.writer(), this.targetType);</span>
+			};
+		}
+<span class="nc" id="L187">		catch (IOException ex) {</span>
+<span class="nc" id="L188">			throw new MessageConversionException(&quot;Could not map JSON object [&quot; + object + &quot;]&quot;, ex);</span>
+<span class="fc" id="L189">		}</span>
+<span class="fc" id="L190">		setTypeIdOnMessage(object, message);</span>
+<span class="fc" id="L191">		return message;</span>
+	}
+
+	@Override
+	public Message toMessage(Object object, Session session, @Nullable Object conversionHint)
+			throws JMSException, MessageConversionException {
+
+<span class="fc" id="L198">		return toMessage(object, session, getSerializationView(conversionHint));</span>
+	}
+
+	/**
+	 * Convert a Java object to a JMS Message using the specified json view
+	 * and the supplied session  to create the message object.
+	 * @param object the object to convert
+	 * @param session the Session to use for creating a JMS Message
+	 * @param jsonView the view to use to filter the content
+	 * @return the JMS Message
+	 * @throws JMSException if thrown by JMS API methods
+	 * @throws MessageConversionException in case of conversion failure
+	 */
+	public Message toMessage(Object object, Session session, @Nullable Class&lt;?&gt; jsonView)
+			throws JMSException, MessageConversionException {
+
+<span class="fc bfc" id="L214" title="All 2 branches covered.">		if (jsonView != null) {</span>
+<span class="fc" id="L215">			return toMessage(object, session, this.mapper.writerWithView(jsonView));</span>
+		}
+		else {
+<span class="fc" id="L218">			return toMessage(object, session, this.mapper.writer());</span>
+		}
+	}
+
+	@Override
+	public Object fromMessage(Message message) throws JMSException, MessageConversionException {
+		try {
+<span class="fc" id="L225">			JavaType targetJavaType = getJavaTypeForMessage(message);</span>
+<span class="fc" id="L226">			return convertToObject(message, targetJavaType);</span>
+		}
+<span class="nc" id="L228">		catch (IOException ex) {</span>
+<span class="nc" id="L229">			throw new MessageConversionException(&quot;Failed to convert JSON message content&quot;, ex);</span>
+		}
+	}
+
+	protected Message toMessage(Object object, Session session, ObjectWriter objectWriter)
+			throws JMSException, MessageConversionException {
+
+		Message message;
+		try {
+<span class="pc bpc" id="L238" title="2 of 3 branches missed.">			message = switch (this.targetType) {</span>
+<span class="fc" id="L239">				case TEXT -&gt; mapToTextMessage(object, session, objectWriter);</span>
+<span class="nc" id="L240">				case BYTES -&gt; mapToBytesMessage(object, session, objectWriter);</span>
+<span class="nc" id="L241">				default -&gt; mapToMessage(object, session, objectWriter, this.targetType);</span>
+			};
+		}
+<span class="nc" id="L244">		catch (IOException ex) {</span>
+<span class="nc" id="L245">			throw new MessageConversionException(&quot;Could not map JSON object [&quot; + object + &quot;]&quot;, ex);</span>
+<span class="fc" id="L246">		}</span>
+<span class="fc" id="L247">		setTypeIdOnMessage(object, message);</span>
+<span class="fc" id="L248">		return message;</span>
+	}
+
+
+	/**
+	 * Map the given object to a {@link TextMessage}.
+	 * @param object the object to be mapped
+	 * @param session current JMS session
+	 * @param objectWriter the writer to use
+	 * @return the resulting message
+	 * @throws JMSException if thrown by JMS methods
+	 * @throws IOException in case of I/O errors
+	 * @see Session#createBytesMessage
+	 */
+	protected TextMessage mapToTextMessage(Object object, Session session, ObjectWriter objectWriter)
+			throws JMSException, IOException {
+
+<span class="fc" id="L265">		StringWriter writer = new StringWriter(1024);</span>
+<span class="fc" id="L266">		objectWriter.writeValue(writer, object);</span>
+<span class="fc" id="L267">		return session.createTextMessage(writer.toString());</span>
+	}
+
+	/**
+	 * Map the given object to a {@link BytesMessage}.
+	 * @param object the object to be mapped
+	 * @param session current JMS session
+	 * @param objectWriter the writer to use
+	 * @return the resulting message
+	 * @throws JMSException if thrown by JMS methods
+	 * @throws IOException in case of I/O errors
+	 * @see Session#createBytesMessage
+	 */
+	protected BytesMessage mapToBytesMessage(Object object, Session session, ObjectWriter objectWriter)
+			throws JMSException, IOException {
+
+<span class="fc" id="L283">		ByteArrayOutputStream bos = new ByteArrayOutputStream(1024);</span>
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">		if (this.encoding != null) {</span>
+<span class="nc" id="L285">			OutputStreamWriter writer = new OutputStreamWriter(bos, this.encoding);</span>
+<span class="nc" id="L286">			objectWriter.writeValue(writer, object);</span>
+<span class="nc" id="L287">		}</span>
+		else {
+			// Jackson usually defaults to UTF-8 but can also go straight to bytes, for example, for Smile.
+			// We use a direct byte array argument for the latter case to work as well.
+<span class="fc" id="L291">			objectWriter.writeValue(bos, object);</span>
+		}
+
+<span class="fc" id="L294">		BytesMessage message = session.createBytesMessage();</span>
+<span class="fc" id="L295">		message.writeBytes(bos.toByteArray());</span>
+<span class="pc bpc" id="L296" title="1 of 2 branches missed.">		if (this.encodingPropertyName != null) {</span>
+<span class="fc" id="L297">			message.setStringProperty(this.encodingPropertyName,</span>
+<span class="pc bpc" id="L298" title="1 of 2 branches missed.">					(this.encoding != null ? this.encoding : DEFAULT_ENCODING));</span>
+		}
+<span class="fc" id="L300">		return message;</span>
+	}
+
+	/**
+	 * Template method that allows for custom message mapping.
+	 * Invoked when {@link #setTargetType} is not {@link MessageType#TEXT} or
+	 * {@link MessageType#BYTES}.
+	 * &lt;p&gt;The default implementation throws an {@link IllegalArgumentException}.
+	 * @param object the object to marshal
+	 * @param session the JMS Session
+	 * @param objectWriter the writer to use
+	 * @param targetType the target message type (other than TEXT or BYTES)
+	 * @return the resulting message
+	 * @throws JMSException if thrown by JMS methods
+	 * @throws IOException in case of I/O errors
+	 */
+	protected Message mapToMessage(Object object, Session session, ObjectWriter objectWriter, MessageType targetType)
+			throws JMSException, IOException {
+
+<span class="nc" id="L319">		throw new IllegalArgumentException(&quot;Unsupported message type [&quot; + targetType +</span>
+				&quot;]. JacksonJsonMessageConverter by default only supports TextMessages and BytesMessages.&quot;);
+	}
+
+	/**
+	 * Set a type id for the given payload object on the given JMS Message.
+	 * &lt;p&gt;The default implementation consults the configured type id mapping and
+	 * sets the resulting value (either a mapped id or the raw Java class name)
+	 * into the configured type id message property.
+	 * @param object the payload object to set a type id for
+	 * @param message the JMS Message on which to set the type id property
+	 * @throws JMSException if thrown by JMS methods
+	 * @see #getJavaTypeForMessage(Message)
+	 * @see #setTypeIdPropertyName(String)
+	 * @see #setTypeIdMappings(Map)
+	 */
+	protected void setTypeIdOnMessage(Object object, Message message) throws JMSException {
+<span class="fc bfc" id="L336" title="All 2 branches covered.">		if (this.typeIdPropertyName != null) {</span>
+<span class="fc" id="L337">			String typeId = this.classIdMappings.get(object.getClass());</span>
+<span class="pc bpc" id="L338" title="1 of 2 branches missed.">			if (typeId == null) {</span>
+<span class="fc" id="L339">				typeId = object.getClass().getName();</span>
+			}
+<span class="fc" id="L341">			message.setStringProperty(this.typeIdPropertyName, typeId);</span>
+		}
+<span class="fc" id="L343">	}</span>
+
+	/**
+	 * Convenience method to dispatch to converters for individual message types.
+	 */
+	private Object convertToObject(Message message, JavaType targetJavaType) throws JMSException, IOException {
+<span class="fc bfc" id="L349" title="All 2 branches covered.">		if (message instanceof TextMessage textMessage) {</span>
+<span class="fc" id="L350">			return convertFromTextMessage(textMessage, targetJavaType);</span>
+		}
+<span class="pc bpc" id="L352" title="1 of 2 branches missed.">		else if (message instanceof BytesMessage bytesMessage) {</span>
+<span class="fc" id="L353">			return convertFromBytesMessage(bytesMessage, targetJavaType);</span>
+		}
+		else {
+<span class="nc" id="L356">			return convertFromMessage(message, targetJavaType);</span>
+		}
+	}
+
+	/**
+	 * Convert a TextMessage to a Java Object with the specified type.
+	 * @param message the input message
+	 * @param targetJavaType the target type
+	 * @return the message converted to an object
+	 * @throws JMSException if thrown by JMS
+	 * @throws IOException in case of I/O errors
+	 */
+	protected Object convertFromTextMessage(TextMessage message, JavaType targetJavaType)
+			throws JMSException, IOException {
+
+<span class="fc" id="L371">		String body = message.getText();</span>
+<span class="fc" id="L372">		return this.mapper.readValue(body, targetJavaType);</span>
+	}
+
+	/**
+	 * Convert a BytesMessage to a Java Object with the specified type.
+	 * @param message the input message
+	 * @param targetJavaType the target type
+	 * @return the message converted to an object
+	 * @throws JMSException if thrown by JMS
+	 * @throws IOException in case of I/O errors
+	 */
+	protected Object convertFromBytesMessage(BytesMessage message, JavaType targetJavaType)
+			throws JMSException, IOException {
+
+<span class="fc" id="L386">		String encoding = this.encoding;</span>
+<span class="pc bpc" id="L387" title="2 of 4 branches missed.">		if (this.encodingPropertyName != null &amp;&amp; message.propertyExists(this.encodingPropertyName)) {</span>
+<span class="nc" id="L388">			encoding = message.getStringProperty(this.encodingPropertyName);</span>
+		}
+<span class="fc" id="L390">		byte[] bytes = new byte[(int) message.getBodyLength()];</span>
+<span class="fc" id="L391">		message.readBytes(bytes);</span>
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">		if (encoding != null) {</span>
+			try {
+<span class="nc" id="L394">				String body = new String(bytes, encoding);</span>
+<span class="nc" id="L395">				return this.mapper.readValue(body, targetJavaType);</span>
+			}
+<span class="nc" id="L397">			catch (UnsupportedEncodingException ex) {</span>
+<span class="nc" id="L398">				throw new MessageConversionException(&quot;Cannot convert bytes to String&quot;, ex);</span>
+			}
+		}
+		else {
+			// Jackson internally performs encoding detection, falling back to UTF-8.
+<span class="fc" id="L403">			return this.mapper.readValue(bytes, targetJavaType);</span>
+		}
+	}
+
+	/**
+	 * Template method that allows for custom message mapping.
+	 * Invoked when {@link #setTargetType} is not {@link MessageType#TEXT} or
+	 * {@link MessageType#BYTES}.
+	 * &lt;p&gt;The default implementation throws an {@link IllegalArgumentException}.
+	 * @param message the input message
+	 * @param targetJavaType the target type
+	 * @return the message converted to an object
+	 * @throws JMSException if thrown by JMS
+	 * @throws IOException in case of I/O errors
+	 */
+	protected Object convertFromMessage(Message message, JavaType targetJavaType)
+			throws JMSException, IOException {
+
+<span class="nc" id="L421">		throw new IllegalArgumentException(&quot;Unsupported message type [&quot; + message.getClass() +</span>
+				&quot;]. JacksonJsonMessageConverter by default only supports TextMessages and BytesMessages.&quot;);
+	}
+
+	/**
+	 * Determine a Jackson JavaType for the given JMS Message,
+	 * typically parsing a type id message property.
+	 * &lt;p&gt;The default implementation parses the configured type id property name
+	 * and consults the configured type id mapping. This can be overridden with
+	 * a different strategy, for example, doing some heuristics based on message origin.
+	 * @param message the JMS Message from which to get the type id property
+	 * @throws JMSException if thrown by JMS methods
+	 * @see #setTypeIdOnMessage(Object, Message)
+	 * @see #setTypeIdPropertyName(String)
+	 * @see #setTypeIdMappings(Map)
+	 */
+	protected JavaType getJavaTypeForMessage(Message message) throws JMSException {
+<span class="fc" id="L438">		String typeId = message.getStringProperty(this.typeIdPropertyName);</span>
+<span class="pc bpc" id="L439" title="1 of 2 branches missed.">		if (typeId == null) {</span>
+<span class="nc" id="L440">			throw new MessageConversionException(</span>
+					&quot;Could not find type id property [&quot; + this.typeIdPropertyName + &quot;] on message [&quot; +
+<span class="nc" id="L442">					message.getJMSMessageID() + &quot;] from destination [&quot; + message.getJMSDestination() + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L444">		Class&lt;?&gt; mappedClass = this.idClassMappings.get(typeId);</span>
+<span class="pc bpc" id="L445" title="1 of 2 branches missed.">		if (mappedClass != null) {</span>
+<span class="nc" id="L446">			return this.mapper.constructType(mappedClass);</span>
+		}
+		try {
+<span class="fc" id="L449">			Class&lt;?&gt; typeClass = ClassUtils.forName(typeId, this.beanClassLoader);</span>
+<span class="fc" id="L450">			return this.mapper.constructType(typeClass);</span>
+		}
+<span class="nc" id="L452">		catch (Throwable ex) {</span>
+<span class="nc" id="L453">			throw new MessageConversionException(&quot;Failed to resolve type id [&quot; + typeId + &quot;]&quot;, ex);</span>
+		}
+	}
+
+	/**
+	 * Determine a Jackson serialization view based on the given conversion hint.
+	 * @param conversionHint the conversion hint Object as passed into the
+	 * converter for the current conversion attempt
+	 * @return the serialization view class, or {@code null} if none
+	 */
+	protected @Nullable Class&lt;?&gt; getSerializationView(@Nullable Object conversionHint) {
+<span class="fc bfc" id="L464" title="All 2 branches covered.">		if (conversionHint instanceof MethodParameter methodParam) {</span>
+<span class="fc" id="L465">			JsonView annotation = methodParam.getParameterAnnotation(JsonView.class);</span>
+<span class="pc bpc" id="L466" title="1 of 2 branches missed.">			if (annotation == null) {</span>
+<span class="fc" id="L467">				annotation = methodParam.getMethodAnnotation(JsonView.class);</span>
+<span class="fc bfc" id="L468" title="All 2 branches covered.">				if (annotation == null) {</span>
+<span class="fc" id="L469">					return null;</span>
+				}
+			}
+<span class="fc" id="L472">			return extractViewClass(annotation, conversionHint);</span>
+		}
+<span class="pc bpc" id="L474" title="1 of 2 branches missed.">		else if (conversionHint instanceof JsonView jsonView) {</span>
+<span class="nc" id="L475">			return extractViewClass(jsonView, conversionHint);</span>
+		}
+<span class="pc bpc" id="L477" title="1 of 2 branches missed.">		else if (conversionHint instanceof Class&lt;?&gt; clazz) {</span>
+<span class="nc" id="L478">			return clazz;</span>
+		}
+		else {
+<span class="fc" id="L481">			return null;</span>
+		}
+	}
+
+	private Class&lt;?&gt; extractViewClass(JsonView annotation, Object conversionHint) {
+<span class="fc" id="L486">		Class&lt;?&gt;[] classes = annotation.value();</span>
+<span class="fc bfc" id="L487" title="All 2 branches covered.">		if (classes.length != 1) {</span>
+<span class="fc" id="L488">			throw new IllegalArgumentException(</span>
+					&quot;@JsonView only supported for handler methods with exactly 1 class argument: &quot; + conversionHint);
+		}
+<span class="fc" id="L491">		return classes[0];</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

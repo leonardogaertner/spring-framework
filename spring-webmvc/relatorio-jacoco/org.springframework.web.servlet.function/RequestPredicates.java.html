@@ -1,0 +1,1477 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequestPredicates.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.function</a> &gt; <span class="el_source">RequestPredicates.java</span></div><h1>RequestPredicates.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.function;
+
+import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.URI;
+import java.security.Principal;
+import java.time.Instant;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.function.Consumer;
+import java.util.function.Function;
+import java.util.function.Predicate;
+
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.Cookie;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpSession;
+import jakarta.servlet.http.Part;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.ParameterizedTypeReference;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.MediaType;
+import org.springframework.http.converter.HttpMessageConverter;
+import org.springframework.http.server.PathContainer;
+import org.springframework.http.server.RequestPath;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.MimeTypeUtils;
+import org.springframework.util.MultiValueMap;
+import org.springframework.validation.BindException;
+import org.springframework.web.accept.ApiVersionHolder;
+import org.springframework.web.accept.ApiVersionStrategy;
+import org.springframework.web.bind.WebDataBinder;
+import org.springframework.web.cors.CorsUtils;
+import org.springframework.web.servlet.HandlerMapping;
+import org.springframework.web.util.UriBuilder;
+import org.springframework.web.util.UriUtils;
+import org.springframework.web.util.pattern.PathPattern;
+import org.springframework.web.util.pattern.PathPatternParser;
+
+/**
+ * Implementations of {@link RequestPredicate} that implement various useful
+ * request matching operations, such as matching based on path, HTTP method, etc.
+ *
+ * @author Arjen Poutsma
+ * @author Sam Brannen
+ * @since 5.2
+ */
+<span class="nc" id="L75">public abstract class RequestPredicates {</span>
+
+<span class="fc" id="L77">	private static final Log logger = LogFactory.getLog(RequestPredicates.class);</span>
+
+
+	/**
+	 * Return a {@code RequestPredicate} that always matches.
+	 * @return a predicate that always matches
+	 */
+	public static RequestPredicate all() {
+<span class="fc" id="L85">		return request -&gt; true;</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that matches if the request's
+	 * HTTP method is equal to the given method.
+	 * @param httpMethod the HTTP method to match against
+	 * @return a predicate that tests against the given HTTP method
+	 */
+	public static RequestPredicate method(HttpMethod httpMethod) {
+<span class="fc" id="L95">		Assert.notNull(httpMethod, &quot;HttpMethod must not be null&quot;);</span>
+<span class="fc" id="L96">		return new SingleHttpMethodPredicate(httpMethod);</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that matches if the request's
+	 * HTTP method is equal to one the of the given methods.
+	 * @param httpMethods the HTTP methods to match against
+	 * @return a predicate that tests against the given HTTP methods
+	 */
+	public static RequestPredicate methods(HttpMethod... httpMethods) {
+<span class="fc" id="L106">		Assert.notEmpty(httpMethods, &quot;HttpMethods must not be empty&quot;);</span>
+<span class="fc bfc" id="L107" title="All 2 branches covered.">		if (httpMethods.length == 1) {</span>
+<span class="fc" id="L108">			return new SingleHttpMethodPredicate(httpMethods[0]);</span>
+		}
+		else {
+<span class="fc" id="L111">			return new MultipleHttpMethodsPredicate(httpMethods);</span>
+		}
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that tests the request path
+	 * against the given path pattern.
+	 * @param pattern the pattern to match to
+	 * @return a predicate that tests against the given path pattern
+	 * @see org.springframework.web.util.pattern.PathPattern
+	 */
+	public static RequestPredicate path(String pattern) {
+<span class="fc" id="L123">		Assert.notNull(pattern, &quot;'pattern' must not be null&quot;);</span>
+<span class="fc" id="L124">		PathPatternParser parser = PathPatternParser.defaultInstance;</span>
+<span class="fc" id="L125">		pattern = parser.initFullPathPattern(pattern);</span>
+<span class="fc" id="L126">		return pathPredicates(parser).apply(pattern);</span>
+	}
+
+	/**
+	 * Return a function that creates new path-matching {@code RequestPredicates}
+	 * from pattern Strings using the given {@link PathPatternParser}.
+	 * &lt;p&gt;This method can be used to specify a non-default, customized
+	 * {@code PathPatternParser} when resolving path patterns.
+	 * @param patternParser the parser used to parse patterns given to the returned function
+	 * @return a function that resolves a pattern String into a path-matching
+	 * {@code RequestPredicates} instance
+	 */
+	public static Function&lt;String, RequestPredicate&gt; pathPredicates(PathPatternParser patternParser) {
+<span class="fc" id="L139">		Assert.notNull(patternParser, &quot;PathPatternParser must not be null&quot;);</span>
+<span class="fc" id="L140">		return pattern -&gt; new PathPatternPredicate(patternParser.parse(pattern));</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that tests the request's headers
+	 * against the given headers predicate.
+	 * @param headersPredicate a predicate that tests against the request headers
+	 * @return a predicate that tests against the given header predicate
+	 */
+	public static RequestPredicate headers(Predicate&lt;ServerRequest.Headers&gt; headersPredicate) {
+<span class="fc" id="L150">		return new HeadersPredicate(headersPredicate);</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that tests if the request's
+	 * {@linkplain ServerRequest.Headers#contentType() content type} is
+	 * {@linkplain MediaType#includes(MediaType) included} by any of the given media types.
+	 * @param mediaTypes the media types to match the request's content type against
+	 * @return a predicate that tests the request's content type against the given media types
+	 */
+	public static RequestPredicate contentType(MediaType... mediaTypes) {
+<span class="fc" id="L161">		Assert.notEmpty(mediaTypes, &quot;'mediaTypes' must not be empty&quot;);</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">		if (mediaTypes.length == 1) {</span>
+<span class="fc" id="L163">			return new SingleContentTypePredicate(mediaTypes[0]);</span>
+		}
+		else {
+<span class="fc" id="L166">			return new MultipleContentTypesPredicate(mediaTypes);</span>
+		}
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that tests if the request's
+	 * {@linkplain ServerRequest.Headers#accept() accept} header is
+	 * {@linkplain MediaType#isCompatibleWith(MediaType) compatible} with any of the given media types.
+	 * @param mediaTypes the media types to match the request's accept header against
+	 * @return a predicate that tests the request's accept header against the given media types
+	 */
+	public static RequestPredicate accept(MediaType... mediaTypes) {
+<span class="fc" id="L178">		Assert.notEmpty(mediaTypes, &quot;'mediaTypes' must not be empty&quot;);</span>
+<span class="fc bfc" id="L179" title="All 2 branches covered.">		if (mediaTypes.length == 1) {</span>
+<span class="fc" id="L180">			return new SingleAcceptPredicate(mediaTypes[0]);</span>
+		}
+		else {
+<span class="fc" id="L183">			return new MultipleAcceptsPredicate(mediaTypes);</span>
+		}
+	}
+
+	/**
+	 * {@code RequestPredicate} to match to the request API version extracted
+	 * from and parsed with the configured {@link ApiVersionStrategy}.
+	 * &lt;p&gt;The version may be one of the following:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;Fixed version (&quot;1.2&quot;) -- match this version only.
+	 * &lt;li&gt;Baseline version (&quot;1.2+&quot;) -- match this and subsequent versions.
+	 * &lt;/ul&gt;
+	 * &lt;p&gt;A baseline version allows n endpoint route to continue to work in
+	 * subsequent versions if it remains compatible until an incompatible change
+	 * eventually leads to the creation of a new route.
+	 * @param version the version to use
+	 * @return the created predicate instance
+	 * @since 7.0
+	 */
+	public static RequestPredicate version(Object version) {
+<span class="fc" id="L203">		return new ApiVersionPredicate(version);</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that matches if request's HTTP method is {@code GET}
+	 * and the given {@code pattern} matches against the request path.
+	 * @param pattern the path pattern to match against
+	 * @return a predicate that matches if the request method is GET and if the given pattern
+	 * matches against the request path
+	 * @see org.springframework.web.util.pattern.PathPattern
+	 */
+	public static RequestPredicate GET(String pattern) {
+<span class="fc" id="L215">		return method(HttpMethod.GET).and(path(pattern));</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that matches if request's HTTP method is {@code HEAD}
+	 * and the given {@code pattern} matches against the request path.
+	 * @param pattern the path pattern to match against
+	 * @return a predicate that matches if the request method is HEAD and if the given pattern
+	 * matches against the request path
+	 * @see org.springframework.web.util.pattern.PathPattern
+	 */
+	public static RequestPredicate HEAD(String pattern) {
+<span class="fc" id="L227">		return method(HttpMethod.HEAD).and(path(pattern));</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that matches if request's HTTP method is {@code POST}
+	 * and the given {@code pattern} matches against the request path.
+	 * @param pattern the path pattern to match against
+	 * @return a predicate that matches if the request method is POST and if the given pattern
+	 * matches against the request path
+	 * @see org.springframework.web.util.pattern.PathPattern
+	 */
+	public static RequestPredicate POST(String pattern) {
+<span class="fc" id="L239">		return method(HttpMethod.POST).and(path(pattern));</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that matches if request's HTTP method is {@code PUT}
+	 * and the given {@code pattern} matches against the request path.
+	 * @param pattern the path pattern to match against
+	 * @return a predicate that matches if the request method is PUT and if the given pattern
+	 * matches against the request path
+	 * @see org.springframework.web.util.pattern.PathPattern
+	 */
+	public static RequestPredicate PUT(String pattern) {
+<span class="fc" id="L251">		return method(HttpMethod.PUT).and(path(pattern));</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that matches if request's HTTP method is {@code PATCH}
+	 * and the given {@code pattern} matches against the request path.
+	 * @param pattern the path pattern to match against
+	 * @return a predicate that matches if the request method is PATCH and if the given pattern
+	 * matches against the request path
+	 * @see org.springframework.web.util.pattern.PathPattern
+	 */
+	public static RequestPredicate PATCH(String pattern) {
+<span class="fc" id="L263">		return method(HttpMethod.PATCH).and(path(pattern));</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that matches if request's HTTP method is {@code DELETE}
+	 * and the given {@code pattern} matches against the request path.
+	 * @param pattern the path pattern to match against
+	 * @return a predicate that matches if the request method is DELETE and if the given pattern
+	 * matches against the request path
+	 * @see org.springframework.web.util.pattern.PathPattern
+	 */
+	public static RequestPredicate DELETE(String pattern) {
+<span class="fc" id="L275">		return method(HttpMethod.DELETE).and(path(pattern));</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that matches if request's HTTP method is {@code OPTIONS}
+	 * and the given {@code pattern} matches against the request path.
+	 * @param pattern the path pattern to match against
+	 * @return a predicate that matches if the request method is OPTIONS and if the given pattern
+	 * matches against the request path
+	 * @see org.springframework.web.util.pattern.PathPattern
+	 */
+	public static RequestPredicate OPTIONS(String pattern) {
+<span class="fc" id="L287">		return method(HttpMethod.OPTIONS).and(path(pattern));</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that matches if the request's path has the given extension.
+	 * @param extension the path extension to match against, ignoring case
+	 * @return a predicate that matches if the request's path has the given file extension
+	 * @deprecated without replacement to discourage use of path extensions for request
+	 * mapping and for content negotiation (with similar deprecations and removals already
+	 * applied to annotated controllers). For further context, please read issue
+	 * &lt;a href=&quot;https://github.com/spring-projects/spring-framework/issues/24179&quot;&gt;#24179&lt;/a&gt;
+	 */
+	@Deprecated(since = &quot;7.0&quot;, forRemoval = true)
+	public static RequestPredicate pathExtension(String extension) {
+<span class="fc" id="L301">		Assert.notNull(extension, &quot;'extension' must not be null&quot;);</span>
+<span class="fc" id="L302">		return new PathExtensionPredicate(extension);</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that matches if the request's path matches the given
+	 * predicate.
+	 * @param extensionPredicate the predicate to test against the request path extension
+	 * @return a predicate that matches if the given predicate matches against the request's path
+	 * file extension
+	 * @deprecated without replacement to discourage use of path extensions for request
+	 * mapping and for content negotiation (with similar deprecations and removals already
+	 * applied to annotated controllers). For further context, please read issue
+	 * &lt;a href=&quot;https://github.com/spring-projects/spring-framework/issues/24179&quot;&gt;#24179&lt;/a&gt;
+	 */
+	@Deprecated(since = &quot;7.0&quot;, forRemoval = true)
+	public static RequestPredicate pathExtension(Predicate&lt;String&gt; extensionPredicate) {
+<span class="fc" id="L318">		return new PathExtensionPredicate(extensionPredicate);</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that matches if the request's parameter of the given name
+	 * has the given value.
+	 * @param name the name of the parameter to test against
+	 * @param value the value of the parameter to test against
+	 * @return a predicate that matches if the parameter has the given value
+	 * @see ServerRequest#param(String)
+	 */
+	public static RequestPredicate param(String name, String value) {
+<span class="fc" id="L330">		return new ParamPredicate(name, value);</span>
+	}
+
+	/**
+	 * Return a {@code RequestPredicate} that tests the request's parameter of the given name
+	 * against the given predicate.
+	 * @param name the name of the parameter to test against
+	 * @param predicate the predicate to test against the parameter value
+	 * @return a predicate that matches the given predicate against the parameter of the given name
+	 * @see ServerRequest#param(String)
+	 */
+	public static RequestPredicate param(String name, Predicate&lt;String&gt; predicate) {
+<span class="fc" id="L342">		return new ParamPredicate(name, predicate);</span>
+	}
+
+
+	private static void traceMatch(String prefix, Object desired, @Nullable Object actual, boolean match) {
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L348">			logger.trace(String.format(&quot;%s \&quot;%s\&quot; %s against value \&quot;%s\&quot;&quot;,</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">					prefix, desired, match ? &quot;matches&quot; : &quot;does not match&quot;, actual));</span>
+		}
+<span class="fc" id="L351">	}</span>
+
+	private static PathPattern mergePatterns(@Nullable PathPattern oldPattern, PathPattern newPattern) {
+<span class="fc bfc" id="L354" title="All 2 branches covered.">		if (oldPattern != null) {</span>
+<span class="fc" id="L355">			return oldPattern.combine(newPattern);</span>
+		}
+		else {
+<span class="fc" id="L358">			return newPattern;</span>
+		}
+	}
+
+
+	/**
+	 * Receives notifications from the logical structure of request predicates.
+	 */
+	public interface Visitor {
+
+		/**
+		 * Receive notification of an HTTP method predicate.
+		 * @param methods the HTTP methods that make up the predicate
+		 * @see RequestPredicates#method(HttpMethod)
+		 */
+		void method(Set&lt;HttpMethod&gt; methods);
+
+		/**
+		 * Receive notification of a path predicate.
+		 * @param pattern the path pattern that makes up the predicate
+		 * @see RequestPredicates#path(String)
+		 * @see org.springframework.web.util.pattern.PathPattern
+		 */
+		void path(String pattern);
+
+		/**
+		 * Receive notification of a path extension predicate.
+		 * @param extension the path extension that makes up the predicate
+		 * @see RequestPredicates#pathExtension(String)
+		 * @deprecated without replacement to discourage use of path extensions for request
+		 * mapping and for content negotiation (with similar deprecations and removals already
+		 * applied to annotated controllers). For further context, please read issue
+		 * &lt;a href=&quot;https://github.com/spring-projects/spring-framework/issues/24179&quot;&gt;#24179&lt;/a&gt;
+		 */
+		@Deprecated(since = &quot;7.0&quot;, forRemoval = true)
+		void pathExtension(String extension);
+
+		/**
+		 * Receive notification of an HTTP header predicate.
+		 * @param name the name of the HTTP header to check
+		 * @param value the desired value of the HTTP header
+		 * @see RequestPredicates#headers(Predicate)
+		 * @see RequestPredicates#contentType(MediaType...)
+		 * @see RequestPredicates#accept(MediaType...)
+		 */
+		void header(String name, String value);
+
+		/**
+		 * Receive notification of a parameter predicate.
+		 * @param name the name of the parameter
+		 * @param value the desired value of the parameter
+		 * @see RequestPredicates#param(String, String)
+		 */
+		void param(String name, String value);
+
+		/**
+		 * Receive notification of an API version predicate. The version could
+		 * be fixed (&quot;1.2&quot;) or baseline (&quot;1.2+&quot;).
+		 * @param version the configured version
+		 * @since 7.0
+		 */
+		void version(String version);
+
+		/**
+		 * Receive first notification of a logical AND predicate.
+		 * The first subsequent notification will contain the left-hand side of the AND-predicate;
+		 * followed by {@link #and()}, followed by the right-hand side, followed by {@link #endAnd()}.
+		 * @see RequestPredicate#and(RequestPredicate)
+		 */
+		void startAnd();
+
+		/**
+		 * Receive &quot;middle&quot; notification of a logical AND predicate.
+		 * The following notification contains the right-hand side, followed by {@link #endAnd()}.
+		 * @see RequestPredicate#and(RequestPredicate)
+		 */
+		void and();
+
+		/**
+		 * Receive last notification of a logical AND predicate.
+		 * @see RequestPredicate#and(RequestPredicate)
+		 */
+		void endAnd();
+
+		/**
+		 * Receive first notification of a logical OR predicate.
+		 * The first subsequent notification will contain the left-hand side of the OR-predicate;
+		 * the second notification contains the right-hand side, followed by {@link #endOr()}.
+		 * @see RequestPredicate#or(RequestPredicate)
+		 */
+		void startOr();
+
+		/**
+		 * Receive &quot;middle&quot; notification of a logical OR predicate.
+		 * The following notification contains the right-hand side, followed by {@link #endOr()}.
+		 * @see RequestPredicate#or(RequestPredicate)
+		 */
+		void or();
+
+		/**
+		 * Receive last notification of a logical OR predicate.
+		 * @see RequestPredicate#or(RequestPredicate)
+		 */
+		void endOr();
+
+		/**
+		 * Receive first notification of a negated predicate.
+		 * The first subsequent notification will contain the negated predicated, followed
+		 * by {@link #endNegate()}.
+		 * @see RequestPredicate#negate()
+		 */
+		void startNegate();
+
+		/**
+		 * Receive last notification of a negated predicate.
+		 * @see RequestPredicate#negate()
+		 */
+		void endNegate();
+
+		/**
+		 * Receive first notification of an unknown predicate.
+		 */
+		void unknown(RequestPredicate predicate);
+	}
+
+
+	/**
+	 * Extension of {@code RequestPredicate} that can modify the {@code ServerRequest}.
+	 */
+	private abstract static class RequestModifyingPredicate implements RequestPredicate {
+
+
+		public static RequestModifyingPredicate of(RequestPredicate requestPredicate) {
+<span class="fc bfc" id="L491" title="All 2 branches covered.">			if (requestPredicate instanceof RequestModifyingPredicate modifyingPredicate) {</span>
+<span class="fc" id="L492">				return modifyingPredicate;</span>
+			}
+			else {
+<span class="fc" id="L495">				return new RequestModifyingPredicate() {</span>
+					@Override
+					protected Result testInternal(ServerRequest request) {
+<span class="fc" id="L498">						return Result.of(requestPredicate.test(request));</span>
+					}
+				};
+			}
+		}
+
+
+		@Override
+		public final boolean test(ServerRequest request) {
+<span class="fc" id="L507">			Result result = testInternal(request);</span>
+<span class="fc" id="L508">			boolean value = result.value();</span>
+<span class="fc bfc" id="L509" title="All 2 branches covered.">			if (value) {</span>
+<span class="fc" id="L510">				result.modifyAttributes(request.attributes());</span>
+			}
+<span class="fc" id="L512">			return value;</span>
+		}
+
+		protected abstract Result testInternal(ServerRequest request);
+
+
+		protected static final class Result {
+
+<span class="fc" id="L520">			private static final Result TRUE = new Result(true, null);</span>
+
+<span class="fc" id="L522">			private static final Result FALSE = new Result(false, null);</span>
+
+
+			private final boolean value;
+
+
+			private final @Nullable Consumer&lt;Map&lt;String, Object&gt;&gt; modifyAttributes;
+
+
+<span class="fc" id="L531">			private Result(boolean value, @Nullable Consumer&lt;Map&lt;String, Object&gt;&gt; modifyAttributes) {</span>
+<span class="fc" id="L532">				this.value = value;</span>
+<span class="fc" id="L533">				this.modifyAttributes = modifyAttributes;</span>
+<span class="fc" id="L534">			}</span>
+
+
+			public static Result of(boolean value) {
+<span class="fc" id="L538">				return of(value, null);</span>
+			}
+
+			public static Result of(boolean value, @Nullable Consumer&lt;Map&lt;String, Object&gt;&gt; modifyAttributes) {
+<span class="fc bfc" id="L542" title="All 2 branches covered.">				if (modifyAttributes == null) {</span>
+<span class="fc bfc" id="L543" title="All 2 branches covered.">					return value ? TRUE : FALSE;</span>
+				}
+				else {
+<span class="fc" id="L546">					return new Result(value, modifyAttributes);</span>
+				}
+			}
+
+
+			public boolean value() {
+<span class="fc" id="L552">				return this.value;</span>
+			}
+
+			public void modifyAttributes(Map&lt;String, Object&gt; attributes) {
+<span class="fc bfc" id="L556" title="All 2 branches covered.">				if (this.modifyAttributes != null) {</span>
+<span class="fc" id="L557">					this.modifyAttributes.accept(attributes);</span>
+				}
+<span class="fc" id="L559">			}</span>
+
+			public boolean modifiesAttributes() {
+<span class="fc bfc" id="L562" title="All 2 branches covered.">				return this.modifyAttributes != null;</span>
+			}
+		}
+
+	}
+
+
+	private static class SingleHttpMethodPredicate implements RequestPredicate {
+
+		private final HttpMethod httpMethod;
+
+<span class="fc" id="L573">		public SingleHttpMethodPredicate(HttpMethod httpMethod) {</span>
+<span class="fc" id="L574">			this.httpMethod = httpMethod;</span>
+<span class="fc" id="L575">		}</span>
+
+		@Override
+		public boolean test(ServerRequest request) {
+<span class="fc" id="L579">			HttpMethod method = method(request);</span>
+<span class="fc" id="L580">			boolean match = this.httpMethod.equals(method);</span>
+<span class="fc" id="L581">			traceMatch(&quot;Method&quot;, this.httpMethod, method, match);</span>
+<span class="fc" id="L582">			return match;</span>
+		}
+
+		static HttpMethod method(ServerRequest request) {
+<span class="fc bfc" id="L586" title="All 2 branches covered.">			if (CorsUtils.isPreFlightRequest(request.servletRequest())) {</span>
+<span class="fc" id="L587">				String accessControlRequestMethod =</span>
+<span class="fc" id="L588">						request.headers().firstHeader(HttpHeaders.ACCESS_CONTROL_REQUEST_METHOD);</span>
+<span class="pc bpc" id="L589" title="1 of 2 branches missed.">				if (accessControlRequestMethod != null) {</span>
+<span class="fc" id="L590">					return HttpMethod.valueOf(accessControlRequestMethod);</span>
+				}
+			}
+<span class="fc" id="L593">			return request.method();</span>
+		}
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="fc" id="L598">			visitor.method(Set.of(this.httpMethod));</span>
+<span class="fc" id="L599">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L603">			return this.httpMethod.toString();</span>
+		}
+	}
+
+
+	private static class MultipleHttpMethodsPredicate implements RequestPredicate {
+
+		private final Set&lt;HttpMethod&gt; httpMethods;
+
+<span class="fc" id="L612">		public MultipleHttpMethodsPredicate(HttpMethod[] httpMethods) {</span>
+<span class="fc" id="L613">			this.httpMethods = new LinkedHashSet&lt;&gt;(Arrays.asList(httpMethods));</span>
+<span class="fc" id="L614">		}</span>
+
+		@Override
+		public boolean test(ServerRequest request) {
+<span class="fc" id="L618">			HttpMethod method = SingleHttpMethodPredicate.method(request);</span>
+<span class="fc" id="L619">			boolean match = this.httpMethods.contains(method);</span>
+<span class="fc" id="L620">			traceMatch(&quot;Method&quot;, this.httpMethods, method, match);</span>
+<span class="fc" id="L621">			return match;</span>
+		}
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="fc" id="L626">			visitor.method(Collections.unmodifiableSet(this.httpMethods));</span>
+<span class="fc" id="L627">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L631">			return this.httpMethods.toString();</span>
+		}
+	}
+
+
+	private static class PathPatternPredicate extends RequestModifyingPredicate
+			implements ChangePathPatternParserVisitor.Target {
+
+		private PathPattern pattern;
+
+
+<span class="fc" id="L642">		public PathPatternPredicate(PathPattern pattern) {</span>
+<span class="fc" id="L643">			Assert.notNull(pattern, &quot;'pattern' must not be null&quot;);</span>
+<span class="fc" id="L644">			this.pattern = pattern;</span>
+<span class="fc" id="L645">		}</span>
+
+
+		@Override
+		protected Result testInternal(ServerRequest request) {
+<span class="fc" id="L650">			PathContainer pathContainer = request.requestPath().pathWithinApplication();</span>
+<span class="fc" id="L651">			PathPattern.PathMatchInfo info = this.pattern.matchAndExtract(pathContainer);</span>
+<span class="fc bfc" id="L652" title="All 2 branches covered.">			traceMatch(&quot;Pattern&quot;, this.pattern.getPatternString(), request.path(), info != null);</span>
+<span class="fc bfc" id="L653" title="All 2 branches covered.">			if (info != null) {</span>
+<span class="fc" id="L654">				return Result.of(true, attributes -&gt; modifyAttributes(attributes, request, info.getUriVariables()));</span>
+			}
+			else {
+<span class="fc" id="L657">				return Result.of(false);</span>
+			}
+		}
+
+		private void modifyAttributes(Map&lt;String, Object&gt; attributes, ServerRequest request,
+				Map&lt;String, String&gt; variables) {
+
+<span class="fc" id="L664">			Map&lt;String, String&gt; pathVariables = CollectionUtils.compositeMap(request.pathVariables(), variables);</span>
+
+<span class="fc" id="L666">			attributes.put(RouterFunctions.URI_TEMPLATE_VARIABLES_ATTRIBUTE,</span>
+<span class="fc" id="L667">					Collections.unmodifiableMap(pathVariables));</span>
+
+<span class="fc" id="L669">			PathPattern pattern = mergePatterns(</span>
+<span class="fc" id="L670">					(PathPattern) attributes.get(RouterFunctions.MATCHING_PATTERN_ATTRIBUTE),</span>
+					this.pattern);
+
+<span class="fc" id="L673">			attributes.put(RouterFunctions.MATCHING_PATTERN_ATTRIBUTE, pattern);</span>
+<span class="fc" id="L674">		}</span>
+
+		@Override
+		public Optional&lt;ServerRequest&gt; nest(ServerRequest request) {
+<span class="fc" id="L678">			return Optional.ofNullable(this.pattern.matchStartOfPath(request.requestPath().pathWithinApplication()))</span>
+<span class="fc" id="L679">					.map(info -&gt; new NestedPathPatternServerRequestWrapper(request, info, this.pattern));</span>
+		}
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="fc" id="L684">			visitor.path(this.pattern.getPatternString());</span>
+<span class="fc" id="L685">		}</span>
+
+		@Override
+		public void changeParser(PathPatternParser parser) {
+<span class="fc" id="L689">			String patternString = this.pattern.getPatternString();</span>
+<span class="fc" id="L690">			this.pattern = parser.parse(patternString);</span>
+<span class="fc" id="L691">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L695">			return this.pattern.getPatternString();</span>
+		}
+	}
+
+
+	private static class HeadersPredicate implements RequestPredicate {
+
+		private final Predicate&lt;ServerRequest.Headers&gt; headersPredicate;
+
+<span class="fc" id="L704">		public HeadersPredicate(Predicate&lt;ServerRequest.Headers&gt; headersPredicate) {</span>
+<span class="fc" id="L705">			Assert.notNull(headersPredicate, &quot;Predicate must not be null&quot;);</span>
+<span class="fc" id="L706">			this.headersPredicate = headersPredicate;</span>
+<span class="fc" id="L707">		}</span>
+
+		@Override
+		public boolean test(ServerRequest request) {
+<span class="fc bfc" id="L711" title="All 2 branches covered.">			if (CorsUtils.isPreFlightRequest(request.servletRequest())) {</span>
+<span class="fc" id="L712">				return true;</span>
+			}
+			else {
+<span class="fc" id="L715">				return this.headersPredicate.test(request.headers());</span>
+			}
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L721">			return this.headersPredicate.toString();</span>
+		}
+	}
+
+
+	private static class SingleContentTypePredicate extends HeadersPredicate {
+
+		private final MediaType mediaType;
+
+		public SingleContentTypePredicate(MediaType mediaType) {
+<span class="fc" id="L731">			super(headers -&gt; {</span>
+<span class="fc" id="L732">				MediaType contentType = headers.contentType().orElse(MediaType.APPLICATION_OCTET_STREAM);</span>
+<span class="fc" id="L733">				boolean match = mediaType.includes(contentType);</span>
+<span class="fc" id="L734">				traceMatch(&quot;Content-Type&quot;, mediaType, contentType, match);</span>
+<span class="fc" id="L735">				return match;</span>
+			});
+<span class="fc" id="L737">			this.mediaType = mediaType;</span>
+<span class="fc" id="L738">		}</span>
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="fc" id="L742">			visitor.header(HttpHeaders.CONTENT_TYPE, this.mediaType.toString());</span>
+<span class="fc" id="L743">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L747">			return &quot;Content-Type: &quot; + this.mediaType;</span>
+		}
+	}
+
+
+	private static class MultipleContentTypesPredicate extends HeadersPredicate {
+
+		private final MediaType[] mediaTypes;
+
+		public MultipleContentTypesPredicate(MediaType[] mediaTypes) {
+<span class="fc" id="L757">			super(headers -&gt; {</span>
+<span class="fc" id="L758">				MediaType contentType = headers.contentType().orElse(MediaType.APPLICATION_OCTET_STREAM);</span>
+<span class="fc" id="L759">				boolean match = false;</span>
+<span class="fc bfc" id="L760" title="All 2 branches covered.">				for (MediaType mediaType : mediaTypes) {</span>
+<span class="fc bfc" id="L761" title="All 2 branches covered.">					if (mediaType.includes(contentType)) {</span>
+<span class="fc" id="L762">						match = true;</span>
+<span class="fc" id="L763">						break;</span>
+					}
+				}
+<span class="fc" id="L766">				traceMatch(&quot;Content-Type&quot;, mediaTypes, contentType, match);</span>
+<span class="fc" id="L767">				return match;</span>
+			});
+<span class="fc" id="L769">			this.mediaTypes = mediaTypes;</span>
+<span class="fc" id="L770">		}</span>
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="fc" id="L774">			visitor.header(HttpHeaders.CONTENT_TYPE, Arrays.toString(this.mediaTypes));</span>
+<span class="fc" id="L775">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L779">			return &quot;Content-Type: &quot; + Arrays.toString(this.mediaTypes);</span>
+		}
+	}
+
+
+	private static class SingleAcceptPredicate extends HeadersPredicate {
+
+		private final MediaType mediaType;
+
+		public SingleAcceptPredicate(MediaType mediaType) {
+<span class="fc" id="L789">			super(headers -&gt; {</span>
+<span class="fc" id="L790">				List&lt;MediaType&gt; acceptedMediaTypes = acceptedMediaTypes(headers);</span>
+<span class="fc" id="L791">				boolean match = false;</span>
+<span class="fc bfc" id="L792" title="All 2 branches covered.">				for (MediaType acceptedMediaType : acceptedMediaTypes) {</span>
+<span class="fc bfc" id="L793" title="All 2 branches covered.">					if (acceptedMediaType.isCompatibleWith(mediaType)) {</span>
+<span class="fc" id="L794">						match = true;</span>
+<span class="fc" id="L795">						break;</span>
+					}
+<span class="fc" id="L797">				}</span>
+<span class="fc" id="L798">				traceMatch(&quot;Accept&quot;, mediaType, acceptedMediaTypes, match);</span>
+<span class="fc" id="L799">				return match;</span>
+			});
+<span class="fc" id="L801">			this.mediaType = mediaType;</span>
+<span class="fc" id="L802">		}</span>
+
+		static List&lt;MediaType&gt; acceptedMediaTypes(ServerRequest.Headers headers) {
+<span class="fc" id="L805">			List&lt;MediaType&gt; acceptedMediaTypes = headers.accept();</span>
+<span class="fc bfc" id="L806" title="All 2 branches covered.">			if (acceptedMediaTypes.isEmpty()) {</span>
+<span class="fc" id="L807">				acceptedMediaTypes = Collections.singletonList(MediaType.ALL);</span>
+			}
+			else {
+<span class="fc" id="L810">				MimeTypeUtils.sortBySpecificity(acceptedMediaTypes);</span>
+			}
+<span class="fc" id="L812">			return acceptedMediaTypes;</span>
+		}
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="fc" id="L817">			visitor.header(HttpHeaders.ACCEPT, this.mediaType.toString());</span>
+<span class="fc" id="L818">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L822">			return &quot;Accept: &quot; + this.mediaType;</span>
+		}
+	}
+
+
+	private static class MultipleAcceptsPredicate extends HeadersPredicate {
+
+		private final MediaType[] mediaTypes;
+
+		public MultipleAcceptsPredicate(MediaType[] mediaTypes) {
+<span class="fc" id="L832">			super(headers -&gt; {</span>
+<span class="fc" id="L833">				List&lt;MediaType&gt; acceptedMediaTypes = SingleAcceptPredicate.acceptedMediaTypes(headers);</span>
+<span class="fc" id="L834">				boolean match = false;</span>
+				outer:
+<span class="fc bfc" id="L836" title="All 2 branches covered.">				for (MediaType acceptedMediaType : acceptedMediaTypes) {</span>
+<span class="fc bfc" id="L837" title="All 2 branches covered.">					for (MediaType mediaType : mediaTypes) {</span>
+<span class="fc bfc" id="L838" title="All 2 branches covered.">						if (acceptedMediaType.isCompatibleWith(mediaType)) {</span>
+<span class="fc" id="L839">							match = true;</span>
+<span class="fc" id="L840">							break outer;</span>
+						}
+					}
+<span class="fc" id="L843">				}</span>
+<span class="fc" id="L844">				traceMatch(&quot;Accept&quot;, mediaTypes, acceptedMediaTypes, match);</span>
+<span class="fc" id="L845">				return match;</span>
+			});
+<span class="fc" id="L847">			this.mediaTypes = mediaTypes;</span>
+<span class="fc" id="L848">		}</span>
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="nc" id="L852">			visitor.header(HttpHeaders.ACCEPT, Arrays.toString(this.mediaTypes));</span>
+<span class="nc" id="L853">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L857">			return &quot;Accept: &quot; + Arrays.toString(this.mediaTypes);</span>
+		}
+	}
+
+
+	private static class ApiVersionPredicate implements RequestPredicate {
+
+		private final String version;
+
+		private final boolean baselineVersion;
+
+		private @Nullable Comparable&lt;?&gt; parsedVersion;
+
+<span class="fc" id="L870">		public ApiVersionPredicate(Object version) {</span>
+<span class="pc bpc" id="L871" title="1 of 2 branches missed.">			if (version instanceof String s) {</span>
+<span class="fc" id="L872">				this.baselineVersion = s.endsWith(&quot;+&quot;);</span>
+<span class="fc" id="L873">				this.version = initVersion(s, this.baselineVersion);</span>
+			}
+			else {
+<span class="nc" id="L876">				this.baselineVersion = false;</span>
+<span class="nc" id="L877">				this.version = version.toString();</span>
+<span class="nc" id="L878">				this.parsedVersion = (Comparable&lt;?&gt;) version;</span>
+			}
+<span class="fc" id="L880">		}</span>
+
+		private static String initVersion(String version, boolean baselineVersion) {
+<span class="fc bfc" id="L883" title="All 2 branches covered.">			return (baselineVersion ? version.substring(0, version.length() - 1) : version);</span>
+		}
+
+		@Override
+		public boolean test(ServerRequest request) {
+<span class="fc bfc" id="L888" title="All 2 branches covered.">			if (this.parsedVersion == null) {</span>
+<span class="fc" id="L889">				ApiVersionStrategy strategy = request.apiVersionStrategy();</span>
+<span class="pc bpc" id="L890" title="1 of 2 branches missed.">				Assert.state(strategy != null, &quot;No ApiVersionStrategy to parse version with&quot;);</span>
+<span class="fc" id="L891">				this.parsedVersion = strategy.parseVersion(this.version);</span>
+			}
+
+<span class="fc" id="L894">			ApiVersionHolder requestVersionHolder =</span>
+<span class="fc" id="L895">					(ApiVersionHolder) request.attribute(HandlerMapping.API_VERSION_ATTRIBUTE)</span>
+<span class="pc" id="L896">							.orElseThrow(() -&gt; new IllegalStateException(&quot;Expect API version attribute&quot;));</span>
+
+<span class="pc bpc" id="L898" title="1 of 2 branches missed.">			if (!requestVersionHolder.hasVersion()) {</span>
+<span class="nc" id="L899">				traceMatch(&quot;Version&quot;, this.version, null, true);</span>
+<span class="nc" id="L900">				return true;</span>
+			}
+
+<span class="fc" id="L903">			Comparable&lt;?&gt; requestVersion = requestVersionHolder.getVersion();</span>
+
+<span class="fc" id="L905">			int result = compareVersions(this.parsedVersion, requestVersion);</span>
+<span class="fc bfc" id="L906" title="All 6 branches covered.">			boolean match = (this.baselineVersion ? result &lt;= 0 : result == 0);</span>
+<span class="fc" id="L907">			traceMatch(&quot;Version&quot;, this.version, requestVersion, match);</span>
+<span class="fc" id="L908">			return match;</span>
+		}
+
+		@SuppressWarnings(&quot;unchecked&quot;)
+		private &lt;V extends Comparable&lt;V&gt;&gt; int compareVersions(Object v1, Object v2) {
+<span class="fc" id="L913">			return ((V) v1).compareTo((V) v2);</span>
+		}
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="fc bfc" id="L918" title="All 2 branches covered.">			visitor.version(this.version + (this.baselineVersion ? &quot;+&quot; : &quot;&quot;));</span>
+<span class="fc" id="L919">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L923">			return this.version;</span>
+		}
+	}
+
+
+	@Deprecated(since = &quot;7.0&quot;, forRemoval = true)
+	private static class PathExtensionPredicate implements RequestPredicate {
+
+		private final Predicate&lt;String&gt; extensionPredicate;
+
+		private final @Nullable String extension;
+
+<span class="fc" id="L935">		public PathExtensionPredicate(Predicate&lt;String&gt; extensionPredicate) {</span>
+<span class="fc" id="L936">			Assert.notNull(extensionPredicate, &quot;Predicate must not be null&quot;);</span>
+<span class="fc" id="L937">			this.extensionPredicate = extensionPredicate;</span>
+<span class="fc" id="L938">			this.extension = null;</span>
+<span class="fc" id="L939">		}</span>
+
+<span class="fc" id="L941">		public PathExtensionPredicate(String extension) {</span>
+<span class="fc" id="L942">			Assert.notNull(extension, &quot;Extension must not be null&quot;);</span>
+
+<span class="fc" id="L944">			this.extensionPredicate = s -&gt; {</span>
+<span class="fc" id="L945">				boolean match = extension.equalsIgnoreCase(s);</span>
+<span class="fc" id="L946">				traceMatch(&quot;Extension&quot;, extension, s, match);</span>
+<span class="fc" id="L947">				return match;</span>
+			};
+<span class="fc" id="L949">			this.extension = extension;</span>
+<span class="fc" id="L950">		}</span>
+
+		@Override
+		public boolean test(ServerRequest request) {
+<span class="fc" id="L954">			String pathExtension = UriUtils.extractFileExtension(request.path());</span>
+<span class="fc bfc" id="L955" title="All 4 branches covered.">			return (pathExtension != null &amp;&amp; this.extensionPredicate.test(pathExtension));</span>
+		}
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="nc" id="L960">			visitor.pathExtension(</span>
+<span class="nc bnc" id="L961" title="All 2 branches missed.">					(this.extension != null) ?</span>
+<span class="nc" id="L962">							this.extension :</span>
+<span class="nc" id="L963">							this.extensionPredicate.toString());</span>
+<span class="nc" id="L964">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L968">			return String.format(&quot;*.%s&quot;,</span>
+<span class="nc bnc" id="L969" title="All 2 branches missed.">					(this.extension != null) ?</span>
+<span class="nc" id="L970">							this.extension :</span>
+<span class="nc" id="L971">							this.extensionPredicate);</span>
+		}
+	}
+
+
+	private static class ParamPredicate implements RequestPredicate {
+
+		private final String name;
+
+		private final Predicate&lt;String&gt; valuePredicate;
+
+		private final @Nullable String value;
+
+<span class="fc" id="L984">		public ParamPredicate(String name, Predicate&lt;String&gt; valuePredicate) {</span>
+<span class="fc" id="L985">			Assert.notNull(name, &quot;Name must not be null&quot;);</span>
+<span class="fc" id="L986">			Assert.notNull(valuePredicate, &quot;Predicate must not be null&quot;);</span>
+<span class="fc" id="L987">			this.name = name;</span>
+<span class="fc" id="L988">			this.valuePredicate = valuePredicate;</span>
+<span class="fc" id="L989">			this.value = null;</span>
+<span class="fc" id="L990">		}</span>
+
+<span class="fc" id="L992">		public ParamPredicate(String name, String value) {</span>
+<span class="fc" id="L993">			Assert.notNull(name, &quot;Name must not be null&quot;);</span>
+<span class="fc" id="L994">			Assert.notNull(value, &quot;Value must not be null&quot;);</span>
+<span class="fc" id="L995">			this.name = name;</span>
+<span class="fc" id="L996">			this.valuePredicate = value::equals;</span>
+<span class="fc" id="L997">			this.value = value;</span>
+<span class="fc" id="L998">		}</span>
+
+		@Override
+		public boolean test(ServerRequest request) {
+<span class="fc" id="L1002">			Optional&lt;String&gt; s = request.param(this.name);</span>
+<span class="fc" id="L1003">			return s.filter(this.valuePredicate).isPresent();</span>
+		}
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="fc" id="L1008">			visitor.param(this.name,</span>
+<span class="pc bpc" id="L1009" title="1 of 2 branches missed.">					(this.value != null) ?</span>
+<span class="fc" id="L1010">							this.value :</span>
+<span class="nc" id="L1011">							this.valuePredicate.toString());</span>
+<span class="fc" id="L1012">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L1016">			return String.format(&quot;?%s %s&quot;, this.name,</span>
+<span class="nc bnc" id="L1017" title="All 2 branches missed.">					(this.value != null) ?</span>
+<span class="nc" id="L1018">							this.value :</span>
+<span class="nc" id="L1019">							this.valuePredicate);</span>
+		}
+	}
+
+
+	/**
+	 * {@link RequestPredicate} for where both {@code left} and {@code right} predicates
+	 * must match.
+	 */
+	static class AndRequestPredicate extends RequestModifyingPredicate
+			implements ChangePathPatternParserVisitor.Target {
+
+		private final RequestPredicate left;
+
+		private final RequestModifyingPredicate leftModifying;
+
+		private final RequestPredicate right;
+
+		private final RequestModifyingPredicate rightModifying;
+
+
+<span class="fc" id="L1040">		public AndRequestPredicate(RequestPredicate left, RequestPredicate right) {</span>
+<span class="fc" id="L1041">			Assert.notNull(left, &quot;Left RequestPredicate must not be null&quot;);</span>
+<span class="fc" id="L1042">			Assert.notNull(right, &quot;Right RequestPredicate must not be null&quot;);</span>
+<span class="fc" id="L1043">			this.left = left;</span>
+<span class="fc" id="L1044">			this.leftModifying = of(left);</span>
+<span class="fc" id="L1045">			this.right = right;</span>
+<span class="fc" id="L1046">			this.rightModifying = of(right);</span>
+<span class="fc" id="L1047">		}</span>
+
+
+		@Override
+		protected Result testInternal(ServerRequest request) {
+<span class="fc" id="L1052">			Result leftResult = this.leftModifying.testInternal(request);</span>
+<span class="fc bfc" id="L1053" title="All 2 branches covered.">			if (!leftResult.value()) {</span>
+<span class="fc" id="L1054">				return leftResult;</span>
+			}
+			// ensure that attributes (and uri variables) set in left and available in right
+			ServerRequest rightRequest;
+<span class="fc bfc" id="L1058" title="All 2 branches covered.">			if (leftResult.modifiesAttributes()) {</span>
+<span class="fc" id="L1059">				Map&lt;String, Object&gt; leftAttributes = new LinkedHashMap&lt;&gt;(2);</span>
+<span class="fc" id="L1060">				leftResult.modifyAttributes(leftAttributes);</span>
+<span class="fc" id="L1061">				rightRequest = new ExtendedAttributesServerRequestWrapper(request, leftAttributes);</span>
+<span class="fc" id="L1062">			}</span>
+			else {
+<span class="fc" id="L1064">				rightRequest = request;</span>
+			}
+<span class="fc" id="L1066">			Result rightResult = this.rightModifying.testInternal(rightRequest);</span>
+<span class="fc bfc" id="L1067" title="All 2 branches covered.">			if (!rightResult.value()) {</span>
+<span class="fc" id="L1068">				return rightResult;</span>
+			}
+<span class="fc" id="L1070">			return Result.of(true, attributes -&gt; {</span>
+<span class="fc" id="L1071">				leftResult.modifyAttributes(attributes);</span>
+<span class="fc" id="L1072">				rightResult.modifyAttributes(attributes);</span>
+<span class="fc" id="L1073">			});</span>
+		}
+
+		@Override
+		public Optional&lt;ServerRequest&gt; nest(ServerRequest request) {
+<span class="nc" id="L1078">			return this.left.nest(request).flatMap(this.right::nest);</span>
+		}
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="fc" id="L1083">			visitor.startAnd();</span>
+<span class="fc" id="L1084">			this.left.accept(visitor);</span>
+<span class="fc" id="L1085">			visitor.and();</span>
+<span class="fc" id="L1086">			this.right.accept(visitor);</span>
+<span class="fc" id="L1087">			visitor.endAnd();</span>
+<span class="fc" id="L1088">		}</span>
+
+		@Override
+		public void changeParser(PathPatternParser parser) {
+<span class="pc bpc" id="L1092" title="1 of 2 branches missed.">			if (this.left instanceof ChangePathPatternParserVisitor.Target target) {</span>
+<span class="nc" id="L1093">				target.changeParser(parser);</span>
+			}
+<span class="fc bfc" id="L1095" title="All 2 branches covered.">			if (this.right instanceof ChangePathPatternParserVisitor.Target target) {</span>
+<span class="fc" id="L1096">				target.changeParser(parser);</span>
+			}
+<span class="fc" id="L1098">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L1102">			return String.format(&quot;(%s &amp;&amp; %s)&quot;, this.left, this.right);</span>
+		}
+	}
+
+
+	/**
+	 * {@link RequestPredicate} that negates a delegate predicate.
+	 */
+	static class NegateRequestPredicate extends RequestModifyingPredicate
+			implements ChangePathPatternParserVisitor.Target {
+
+		private final RequestPredicate delegate;
+
+		private final RequestModifyingPredicate delegateModifying;
+
+
+<span class="fc" id="L1118">		public NegateRequestPredicate(RequestPredicate delegate) {</span>
+<span class="fc" id="L1119">			Assert.notNull(delegate, &quot;Delegate must not be null&quot;);</span>
+<span class="fc" id="L1120">			this.delegate = delegate;</span>
+<span class="fc" id="L1121">			this.delegateModifying = of(delegate);</span>
+<span class="fc" id="L1122">		}</span>
+
+
+		@Override
+		protected Result testInternal(ServerRequest request) {
+<span class="fc" id="L1127">			Result result = this.delegateModifying.testInternal(request);</span>
+<span class="fc bfc" id="L1128" title="All 2 branches covered.">			return Result.of(!result.value(), result::modifyAttributes);</span>
+		}
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="fc" id="L1133">			visitor.startNegate();</span>
+<span class="fc" id="L1134">			this.delegate.accept(visitor);</span>
+<span class="fc" id="L1135">			visitor.endNegate();</span>
+<span class="fc" id="L1136">		}</span>
+
+		@Override
+		public void changeParser(PathPatternParser parser) {
+<span class="nc bnc" id="L1140" title="All 2 branches missed.">			if (this.delegate instanceof ChangePathPatternParserVisitor.Target target) {</span>
+<span class="nc" id="L1141">				target.changeParser(parser);</span>
+			}
+<span class="nc" id="L1143">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L1147">			return &quot;!&quot; + this.delegate;</span>
+		}
+	}
+
+
+	/**
+	 * {@link RequestPredicate} where either {@code left} or {@code right} predicates
+	 * may match.
+	 */
+	static class OrRequestPredicate extends RequestModifyingPredicate
+			implements ChangePathPatternParserVisitor.Target {
+
+		private final RequestPredicate left;
+
+		private final RequestModifyingPredicate leftModifying;
+
+		private final RequestPredicate right;
+
+		private final RequestModifyingPredicate rightModifying;
+
+
+<span class="fc" id="L1168">		public OrRequestPredicate(RequestPredicate left, RequestPredicate right) {</span>
+<span class="fc" id="L1169">			Assert.notNull(left, &quot;Left RequestPredicate must not be null&quot;);</span>
+<span class="fc" id="L1170">			Assert.notNull(right, &quot;Right RequestPredicate must not be null&quot;);</span>
+<span class="fc" id="L1171">			this.left = left;</span>
+<span class="fc" id="L1172">			this.leftModifying = of(left);</span>
+<span class="fc" id="L1173">			this.right = right;</span>
+<span class="fc" id="L1174">			this.rightModifying = of(right);</span>
+<span class="fc" id="L1175">		}</span>
+
+		@Override
+		protected Result testInternal(ServerRequest request) {
+<span class="fc" id="L1179">			Result leftResult = this.leftModifying.testInternal(request);</span>
+<span class="fc bfc" id="L1180" title="All 2 branches covered.">			if (leftResult.value()) {</span>
+<span class="fc" id="L1181">				return leftResult;</span>
+			}
+			else {
+<span class="fc" id="L1184">				return this.rightModifying.testInternal(request);</span>
+			}
+		}
+
+		@Override
+		public Optional&lt;ServerRequest&gt; nest(ServerRequest request) {
+<span class="nc" id="L1190">			Optional&lt;ServerRequest&gt; leftResult = this.left.nest(request);</span>
+<span class="nc bnc" id="L1191" title="All 2 branches missed.">			if (leftResult.isPresent()) {</span>
+<span class="nc" id="L1192">				return leftResult;</span>
+			}
+			else {
+<span class="nc" id="L1195">				return this.right.nest(request);</span>
+			}
+		}
+
+		@Override
+		public void accept(Visitor visitor) {
+<span class="fc" id="L1201">			visitor.startOr();</span>
+<span class="fc" id="L1202">			this.left.accept(visitor);</span>
+<span class="fc" id="L1203">			visitor.or();</span>
+<span class="fc" id="L1204">			this.right.accept(visitor);</span>
+<span class="fc" id="L1205">			visitor.endOr();</span>
+<span class="fc" id="L1206">		}</span>
+
+		@Override
+		public void changeParser(PathPatternParser parser) {
+<span class="nc bnc" id="L1210" title="All 2 branches missed.">			if (this.left instanceof ChangePathPatternParserVisitor.Target target) {</span>
+<span class="nc" id="L1211">				target.changeParser(parser);</span>
+			}
+<span class="nc bnc" id="L1213" title="All 2 branches missed.">			if (this.right instanceof ChangePathPatternParserVisitor.Target target) {</span>
+<span class="nc" id="L1214">				target.changeParser(parser);</span>
+			}
+<span class="nc" id="L1216">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L1220">			return String.format(&quot;(%s || %s)&quot;, this.left, this.right);</span>
+		}
+	}
+
+
+
+	private abstract static class DelegatingServerRequest implements ServerRequest {
+
+		private final ServerRequest delegate;
+
+
+<span class="fc" id="L1231">		protected DelegatingServerRequest(ServerRequest delegate) {</span>
+<span class="fc" id="L1232">			Assert.notNull(delegate, &quot;Delegate must not be null&quot;);</span>
+<span class="fc" id="L1233">			this.delegate = delegate;</span>
+<span class="fc" id="L1234">		}</span>
+
+		@Override
+		public HttpMethod method() {
+<span class="fc" id="L1238">			return this.delegate.method();</span>
+		}
+
+		@Override
+		public URI uri() {
+<span class="nc" id="L1243">			return this.delegate.uri();</span>
+		}
+
+		@Override
+		public UriBuilder uriBuilder() {
+<span class="nc" id="L1248">			return this.delegate.uriBuilder();</span>
+		}
+
+		@Override
+		public String path() {
+<span class="nc" id="L1253">			return this.delegate.path();</span>
+		}
+
+		@Override
+		public RequestPath requestPath() {
+<span class="nc" id="L1258">			return this.delegate.requestPath();</span>
+		}
+
+		@Override
+		public Headers headers() {
+<span class="fc" id="L1263">			return this.delegate.headers();</span>
+		}
+
+		@Override
+		public MultiValueMap&lt;String, Cookie&gt; cookies() {
+<span class="nc" id="L1268">			return this.delegate.cookies();</span>
+		}
+
+		@Override
+		public Optional&lt;InetSocketAddress&gt; remoteAddress() {
+<span class="nc" id="L1273">			return this.delegate.remoteAddress();</span>
+		}
+
+		@Override
+		public List&lt;HttpMessageConverter&lt;?&gt;&gt; messageConverters() {
+<span class="nc" id="L1278">			return this.delegate.messageConverters();</span>
+		}
+
+		@Override
+		public @Nullable ApiVersionStrategy apiVersionStrategy() {
+<span class="fc" id="L1283">			return this.delegate.apiVersionStrategy();</span>
+		}
+
+		@Override
+		public &lt;T&gt; T body(Class&lt;T&gt; bodyType) throws ServletException, IOException {
+<span class="nc" id="L1288">			return this.delegate.body(bodyType);</span>
+		}
+
+		@Override
+		public &lt;T&gt; T body(ParameterizedTypeReference&lt;T&gt; bodyType) throws ServletException, IOException {
+<span class="nc" id="L1293">			return this.delegate.body(bodyType);</span>
+		}
+
+		@Override
+		public &lt;T&gt; T bind(Class&lt;T&gt; bindType) throws BindException {
+<span class="nc" id="L1298">			return this.delegate.bind(bindType);</span>
+		}
+
+		@Override
+		public &lt;T&gt; T bind(Class&lt;T&gt; bindType, Consumer&lt;WebDataBinder&gt; dataBinderCustomizer) throws BindException {
+<span class="nc" id="L1303">			return this.delegate.bind(bindType, dataBinderCustomizer);</span>
+		}
+
+		@Override
+		public Optional&lt;Object&gt; attribute(String name) {
+<span class="nc" id="L1308">			return this.delegate.attribute(name);</span>
+		}
+
+		@Override
+		public Map&lt;String, Object&gt; attributes() {
+<span class="nc" id="L1313">			return this.delegate.attributes();</span>
+		}
+
+		@Override
+		public Optional&lt;String&gt; param(String name) {
+<span class="nc" id="L1318">			return this.delegate.param(name);</span>
+		}
+
+		@Override
+		public MultiValueMap&lt;String, String&gt; params() {
+<span class="nc" id="L1323">			return this.delegate.params();</span>
+		}
+
+		@Override
+		public MultiValueMap&lt;String, Part&gt; multipartData() throws IOException, ServletException {
+<span class="nc" id="L1328">			return this.delegate.multipartData();</span>
+		}
+
+		@Override
+		public String pathVariable(String name) {
+<span class="nc" id="L1333">			return this.delegate.pathVariable(name);</span>
+		}
+
+		@Override
+		public Map&lt;String, String&gt; pathVariables() {
+<span class="nc" id="L1338">			return this.delegate.pathVariables();</span>
+		}
+
+		@Override
+		public HttpSession session() {
+<span class="nc" id="L1343">			return this.delegate.session();</span>
+		}
+
+		@Override
+		public Optional&lt;Principal&gt; principal() {
+<span class="nc" id="L1348">			return this.delegate.principal();</span>
+		}
+
+		@Override
+		public HttpServletRequest servletRequest() {
+<span class="fc" id="L1353">			return this.delegate.servletRequest();</span>
+		}
+
+		@Override
+		public Optional&lt;ServerResponse&gt; checkNotModified(Instant lastModified) {
+<span class="nc" id="L1358">			return this.delegate.checkNotModified(lastModified);</span>
+		}
+
+		@Override
+		public Optional&lt;ServerResponse&gt; checkNotModified(String etag) {
+<span class="nc" id="L1363">			return this.delegate.checkNotModified(etag);</span>
+		}
+
+		@Override
+		public Optional&lt;ServerResponse&gt; checkNotModified(Instant lastModified, String etag) {
+<span class="nc" id="L1368">			return this.delegate.checkNotModified(lastModified, etag);</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L1373">			return this.delegate.toString();</span>
+		}
+	}
+
+
+	private static class ExtendedAttributesServerRequestWrapper extends DelegatingServerRequest {
+
+		private final Map&lt;String, Object&gt; attributes;
+
+
+		public ExtendedAttributesServerRequestWrapper(ServerRequest delegate, Map&lt;String, Object&gt; newAttributes) {
+<span class="fc" id="L1384">			super(delegate);</span>
+<span class="fc" id="L1385">			Assert.notNull(newAttributes, &quot;NewAttributes must not be null&quot;);</span>
+<span class="fc" id="L1386">			Map&lt;String, Object&gt; oldAttributes = delegate.attributes();</span>
+<span class="fc" id="L1387">			this.attributes = CollectionUtils.compositeMap(newAttributes, oldAttributes, newAttributes::put,</span>
+<span class="fc" id="L1388">					newAttributes::putAll);</span>
+<span class="fc" id="L1389">		}</span>
+
+		@Override
+		public Optional&lt;Object&gt; attribute(String name) {
+<span class="fc" id="L1393">			return Optional.ofNullable(this.attributes.get(name));</span>
+		}
+
+		@Override
+		public Map&lt;String, Object&gt; attributes() {
+<span class="fc" id="L1398">			return this.attributes;</span>
+		}
+
+		@Override
+		public String pathVariable(String name) {
+<span class="fc" id="L1403">			Map&lt;String, String&gt; pathVariables = pathVariables();</span>
+<span class="pc bpc" id="L1404" title="1 of 2 branches missed.">			if (pathVariables.containsKey(name)) {</span>
+<span class="fc" id="L1405">				return pathVariables.get(name);</span>
+			}
+			else {
+<span class="nc" id="L1408">				throw new IllegalArgumentException(&quot;No path variable with name \&quot;&quot; + name + &quot;\&quot; available&quot;);</span>
+			}
+		}
+
+		@Override
+		@SuppressWarnings(&quot;unchecked&quot;)
+		public Map&lt;String, String&gt; pathVariables() {
+<span class="fc" id="L1415">			return (Map&lt;String, String&gt;) this.attributes.getOrDefault(</span>
+<span class="fc" id="L1416">					RouterFunctions.URI_TEMPLATE_VARIABLES_ATTRIBUTE, Collections.emptyMap());</span>
+		}
+	}
+
+
+	private static class NestedPathPatternServerRequestWrapper extends ExtendedAttributesServerRequestWrapper {
+
+		private final RequestPath requestPath;
+
+
+		public NestedPathPatternServerRequestWrapper(ServerRequest request,
+				PathPattern.PathRemainingMatchInfo info, PathPattern pattern) {
+<span class="fc" id="L1428">			super(request, mergeAttributes(request, info.getUriVariables(), pattern));</span>
+<span class="fc" id="L1429">			this.requestPath = requestPath(request.requestPath(), info);</span>
+<span class="fc" id="L1430">		}</span>
+
+		private static Map&lt;String, Object&gt; mergeAttributes(ServerRequest request, Map&lt;String, String&gt; newPathVariables,
+				PathPattern newPathPattern) {
+
+
+<span class="fc" id="L1436">			Map&lt;String, String&gt; oldPathVariables = request.pathVariables();</span>
+			Map&lt;String, String&gt; pathVariables;
+<span class="pc bpc" id="L1438" title="1 of 2 branches missed.">			if (oldPathVariables.isEmpty()) {</span>
+<span class="fc" id="L1439">				pathVariables = newPathVariables;</span>
+			}
+			else {
+<span class="nc" id="L1442">				pathVariables = CollectionUtils.compositeMap(oldPathVariables, newPathVariables);</span>
+			}
+
+<span class="fc" id="L1445">			PathPattern oldPathPattern = (PathPattern) request.attribute(RouterFunctions.MATCHING_PATTERN_ATTRIBUTE)</span>
+<span class="fc" id="L1446">					.orElse(null);</span>
+<span class="fc" id="L1447">			PathPattern pathPattern = mergePatterns(oldPathPattern, newPathPattern);</span>
+
+<span class="fc" id="L1449">			Map&lt;String, Object&gt; result = CollectionUtils.newLinkedHashMap(2);</span>
+<span class="fc" id="L1450">			result.put(RouterFunctions.URI_TEMPLATE_VARIABLES_ATTRIBUTE, pathVariables);</span>
+<span class="fc" id="L1451">			result.put(RouterFunctions.MATCHING_PATTERN_ATTRIBUTE, pathPattern);</span>
+<span class="fc" id="L1452">			return result;</span>
+		}
+
+		private static RequestPath requestPath(RequestPath original, PathPattern.PathRemainingMatchInfo info) {
+<span class="fc" id="L1456">			StringBuilder contextPath = new StringBuilder(original.contextPath().value());</span>
+<span class="fc" id="L1457">			contextPath.append(info.getPathMatched().value());</span>
+<span class="fc" id="L1458">			int length = contextPath.length();</span>
+<span class="pc bpc" id="L1459" title="1 of 4 branches missed.">			if (length &gt; 0 &amp;&amp; contextPath.charAt(length - 1) == '/') {</span>
+<span class="fc" id="L1460">				contextPath.setLength(length - 1);</span>
+			}
+<span class="fc" id="L1462">			return original.modifyContextPath(contextPath.toString());</span>
+		}
+
+
+		@Override
+		public RequestPath requestPath() {
+<span class="fc" id="L1468">			return this.requestPath;</span>
+		}
+
+		@Override
+		public String path() {
+<span class="fc" id="L1473">			return this.requestPath.pathWithinApplication().value();</span>
+		}
+	}
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

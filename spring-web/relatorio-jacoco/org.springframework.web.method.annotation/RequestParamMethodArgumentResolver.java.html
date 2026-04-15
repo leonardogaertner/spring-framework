@@ -1,0 +1,290 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>RequestParamMethodArgumentResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.method.annotation</a> &gt; <span class="el_source">RequestParamMethodArgumentResolver.java</span></div><h1>RequestParamMethodArgumentResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.method.annotation;
+
+import java.beans.PropertyEditor;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.Part;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.core.convert.converter.Converter;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+import org.springframework.web.bind.MissingServletRequestParameterException;
+import org.springframework.web.bind.WebDataBinder;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RequestPart;
+import org.springframework.web.bind.annotation.ValueConstants;
+import org.springframework.web.context.request.NativeWebRequest;
+import org.springframework.web.method.support.UriComponentsContributor;
+import org.springframework.web.multipart.MultipartException;
+import org.springframework.web.multipart.MultipartFile;
+import org.springframework.web.multipart.MultipartRequest;
+import org.springframework.web.multipart.MultipartResolver;
+import org.springframework.web.multipart.support.MissingServletRequestPartException;
+import org.springframework.web.multipart.support.MultipartResolutionDelegate;
+import org.springframework.web.util.UriComponentsBuilder;
+
+/**
+ * Resolves method arguments annotated with @{@link RequestParam}, arguments of
+ * type {@link MultipartFile} in conjunction with Spring's {@link MultipartResolver}
+ * abstraction, and arguments of type {@code jakarta.servlet.http.Part} in conjunction
+ * with Servlet multipart requests. This resolver can also be created in default
+ * resolution mode in which simple types (int, long, etc.) not annotated with
+ * {@link RequestParam @RequestParam} are also treated as request parameters with
+ * the parameter name derived from the argument name.
+ *
+ * &lt;p&gt;If the method parameter type is {@link Map}, the name specified in the
+ * annotation is used to resolve the request parameter String value. The value is
+ * then converted to a {@link Map} via type conversion assuming a suitable
+ * {@link Converter} or {@link PropertyEditor} has been registered.
+ * Or if a request parameter name is not specified the
+ * {@link RequestParamMapMethodArgumentResolver} is used instead to provide
+ * access to all request parameters in the form of a map.
+ *
+ * &lt;p&gt;A {@link WebDataBinder} is invoked to apply type conversion to resolved request
+ * header values that don't yet match the method parameter type.
+ *
+ * @author Arjen Poutsma
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @since 3.1
+ * @see RequestParamMapMethodArgumentResolver
+ */
+public class RequestParamMethodArgumentResolver extends AbstractNamedValueMethodArgumentResolver
+		implements UriComponentsContributor {
+
+<span class="nc" id="L81">	private static final TypeDescriptor STRING_TYPE_DESCRIPTOR = TypeDescriptor.valueOf(String.class);</span>
+
+	private final boolean useDefaultResolution;
+
+
+	/**
+	 * Create a new {@link RequestParamMethodArgumentResolver} instance.
+	 * @param useDefaultResolution in default resolution mode a method argument
+	 * that is a simple type, as defined in {@link BeanUtils#isSimpleProperty},
+	 * is treated as a request parameter even if it isn't annotated, the
+	 * request parameter name is derived from the method parameter name.
+	 */
+<span class="nc" id="L93">	public RequestParamMethodArgumentResolver(boolean useDefaultResolution) {</span>
+<span class="nc" id="L94">		this.useDefaultResolution = useDefaultResolution;</span>
+<span class="nc" id="L95">	}</span>
+
+	/**
+	 * Create a new {@link RequestParamMethodArgumentResolver} instance.
+	 * @param beanFactory a bean factory used for resolving  ${...} placeholder
+	 * and #{...} SpEL expressions in default values, or {@code null} if default
+	 * values are not expected to contain expressions
+	 * @param useDefaultResolution in default resolution mode a method argument
+	 * that is a simple type, as defined in {@link BeanUtils#isSimpleProperty},
+	 * is treated as a request parameter even if it isn't annotated, the
+	 * request parameter name is derived from the method parameter name.
+	 */
+	public RequestParamMethodArgumentResolver(@Nullable ConfigurableBeanFactory beanFactory,
+			boolean useDefaultResolution) {
+
+<span class="nc" id="L110">		super(beanFactory);</span>
+<span class="nc" id="L111">		this.useDefaultResolution = useDefaultResolution;</span>
+<span class="nc" id="L112">	}</span>
+
+
+	/**
+	 * Supports the following:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;@RequestParam-annotated method arguments.
+	 * This excludes {@link Map} params where the annotation does not specify a name.
+	 * See {@link RequestParamMapMethodArgumentResolver} instead for such params.
+	 * &lt;li&gt;Arguments of type {@link MultipartFile} unless annotated with @{@link RequestPart}.
+	 * &lt;li&gt;Arguments of type {@code Part} unless annotated with @{@link RequestPart}.
+	 * &lt;li&gt;In default resolution mode, simple type arguments even if not with @{@link RequestParam}.
+	 * &lt;/ul&gt;
+	 */
+	@Override
+	public boolean supportsParameter(MethodParameter parameter) {
+<span class="nc bnc" id="L128" title="All 2 branches missed.">		if (parameter.hasParameterAnnotation(RequestParam.class)) {</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">			if (Map.class.isAssignableFrom(parameter.nestedIfOptional().getNestedParameterType())) {</span>
+<span class="nc" id="L130">				RequestParam requestParam = parameter.getParameterAnnotation(RequestParam.class);</span>
+<span class="nc bnc" id="L131" title="All 4 branches missed.">				return (requestParam != null &amp;&amp; StringUtils.hasText(requestParam.name()));</span>
+			}
+			else {
+<span class="nc" id="L134">				return true;</span>
+			}
+		}
+		else {
+<span class="nc bnc" id="L138" title="All 2 branches missed.">			if (parameter.hasParameterAnnotation(RequestPart.class)) {</span>
+<span class="nc" id="L139">				return false;</span>
+			}
+<span class="nc" id="L141">			parameter = parameter.nestedIfOptional();</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">			if (MultipartResolutionDelegate.isMultipartArgument(parameter)) {</span>
+<span class="nc" id="L143">				return true;</span>
+			}
+<span class="nc bnc" id="L145" title="All 2 branches missed.">			else if (this.useDefaultResolution) {</span>
+<span class="nc" id="L146">				return BeanUtils.isSimpleProperty(parameter.getNestedParameterType());</span>
+			}
+			else {
+<span class="nc" id="L149">				return false;</span>
+			}
+		}
+	}
+
+	@Override
+	protected NamedValueInfo createNamedValueInfo(MethodParameter parameter) {
+<span class="nc" id="L156">		RequestParam ann = parameter.getParameterAnnotation(RequestParam.class);</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">		return (ann != null ? new RequestParamNamedValueInfo(ann) : new RequestParamNamedValueInfo());</span>
+	}
+
+	@Override
+	protected @Nullable Object resolveName(String name, MethodParameter parameter, NativeWebRequest request) throws Exception {
+<span class="nc" id="L162">		HttpServletRequest servletRequest = request.getNativeRequest(HttpServletRequest.class);</span>
+
+<span class="nc bnc" id="L164" title="All 2 branches missed.">		if (servletRequest != null) {</span>
+<span class="nc" id="L165">			Object mpArg = MultipartResolutionDelegate.resolveMultipartArgument(name, parameter, servletRequest);</span>
+<span class="nc bnc" id="L166" title="All 2 branches missed.">			if (mpArg != MultipartResolutionDelegate.UNRESOLVABLE) {</span>
+<span class="nc" id="L167">				return mpArg;</span>
+			}
+		}
+
+<span class="nc" id="L171">		Object arg = null;</span>
+<span class="nc" id="L172">		MultipartRequest multipartRequest = request.getNativeRequest(MultipartRequest.class);</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">		if (multipartRequest != null) {</span>
+<span class="nc" id="L174">			List&lt;MultipartFile&gt; files = multipartRequest.getFiles(name);</span>
+<span class="nc bnc" id="L175" title="All 2 branches missed.">			if (!files.isEmpty()) {</span>
+<span class="nc bnc" id="L176" title="All 2 branches missed.">				arg = (files.size() == 1 ? files.get(0) : files);</span>
+			}
+		}
+<span class="nc bnc" id="L179" title="All 2 branches missed.">		if (arg == null) {</span>
+<span class="nc" id="L180">			String[] paramValues = request.getParameterValues(name);</span>
+<span class="nc bnc" id="L181" title="All 2 branches missed.">			if (paramValues == null) {</span>
+<span class="nc" id="L182">				paramValues = request.getParameterValues(name + &quot;[]&quot;);</span>
+			}
+<span class="nc bnc" id="L184" title="All 2 branches missed.">			if (paramValues != null) {</span>
+<span class="nc bnc" id="L185" title="All 2 branches missed.">				arg = (paramValues.length == 1 ? paramValues[0] : paramValues);</span>
+			}
+		}
+<span class="nc" id="L188">		return arg;</span>
+	}
+
+	@Override
+	protected void handleMissingValue(String name, MethodParameter parameter, NativeWebRequest request)
+			throws Exception {
+
+<span class="nc" id="L195">		handleMissingValueInternal(name, parameter, request, false);</span>
+<span class="nc" id="L196">	}</span>
+
+	@Override
+	protected void handleMissingValueAfterConversion(
+			String name, MethodParameter parameter, NativeWebRequest request) throws Exception {
+
+<span class="nc" id="L202">		handleMissingValueInternal(name, parameter, request, true);</span>
+<span class="nc" id="L203">	}</span>
+
+	protected void handleMissingValueInternal(
+			String name, MethodParameter parameter, NativeWebRequest request, boolean missingAfterConversion)
+			throws Exception {
+
+<span class="nc" id="L209">		HttpServletRequest servletRequest = request.getNativeRequest(HttpServletRequest.class);</span>
+<span class="nc bnc" id="L210" title="All 2 branches missed.">		if (MultipartResolutionDelegate.isMultipartArgument(parameter)) {</span>
+<span class="nc bnc" id="L211" title="All 4 branches missed.">			if (servletRequest == null || !MultipartResolutionDelegate.isMultipartRequest(servletRequest)) {</span>
+<span class="nc" id="L212">				throw new MultipartException(&quot;Current request is not a multipart request&quot;);</span>
+			}
+			else {
+<span class="nc" id="L215">				throw new MissingServletRequestPartException(name);</span>
+			}
+		}
+		else {
+<span class="nc" id="L219">			throw new MissingServletRequestParameterException(name, parameter, missingAfterConversion);</span>
+		}
+	}
+
+	@Override
+	public void contributeMethodArgument(MethodParameter parameter, @Nullable Object value,
+			UriComponentsBuilder builder, Map&lt;String, Object&gt; uriVariables, ConversionService conversionService) {
+
+<span class="nc" id="L227">		Class&lt;?&gt; paramType = parameter.getNestedParameterType();</span>
+<span class="nc bnc" id="L228" title="All 6 branches missed.">		if (Map.class.isAssignableFrom(paramType) || MultipartFile.class == paramType || Part.class == paramType) {</span>
+<span class="nc" id="L229">			return;</span>
+		}
+
+<span class="nc" id="L232">		RequestParam requestParam = parameter.getParameterAnnotation(RequestParam.class);</span>
+<span class="nc bnc" id="L233" title="All 4 branches missed.">		String name = (requestParam != null &amp;&amp; StringUtils.hasLength(requestParam.name()) ?</span>
+<span class="nc" id="L234">				requestParam.name() : parameter.getParameterName());</span>
+<span class="nc bnc" id="L235" title="All 2 branches missed.">		Assert.state(name != null, &quot;Unresolvable parameter name&quot;);</span>
+
+<span class="nc" id="L237">		parameter = parameter.nestedIfOptional();</span>
+<span class="nc bnc" id="L238" title="All 2 branches missed.">		if (value instanceof Optional&lt;?&gt; optional) {</span>
+<span class="nc" id="L239">			value = optional.orElse(null);</span>
+		}
+
+<span class="nc bnc" id="L242" title="All 2 branches missed.">		if (value == null) {</span>
+<span class="nc bnc" id="L243" title="All 2 branches missed.">			if (requestParam != null &amp;&amp;</span>
+<span class="nc bnc" id="L244" title="All 4 branches missed.">					(!requestParam.required() || !requestParam.defaultValue().equals(ValueConstants.DEFAULT_NONE))) {</span>
+<span class="nc" id="L245">				return;</span>
+			}
+<span class="nc" id="L247">			builder.queryParam(name);</span>
+		}
+<span class="nc bnc" id="L249" title="All 2 branches missed.">		else if (value instanceof Collection&lt;?&gt; elements) {</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">			for (Object element : elements) {</span>
+<span class="nc" id="L251">				element = formatUriValue(conversionService, TypeDescriptor.nested(parameter, 1), element);</span>
+<span class="nc" id="L252">				builder.queryParam(name, element);</span>
+<span class="nc" id="L253">			}</span>
+		}
+		else {
+<span class="nc" id="L256">			builder.queryParam(name, formatUriValue(conversionService, new TypeDescriptor(parameter), value));</span>
+		}
+<span class="nc" id="L258">	}</span>
+
+	protected @Nullable String formatUriValue(
+			@Nullable ConversionService cs, @Nullable TypeDescriptor sourceType, @Nullable Object value) {
+
+<span class="nc bnc" id="L263" title="All 2 branches missed.">		if (value == null) {</span>
+<span class="nc" id="L264">			return null;</span>
+		}
+<span class="nc bnc" id="L266" title="All 2 branches missed.">		else if (value instanceof String string) {</span>
+<span class="nc" id="L267">			return string;</span>
+		}
+<span class="nc bnc" id="L269" title="All 2 branches missed.">		else if (cs != null) {</span>
+<span class="nc" id="L270">			return (String) cs.convert(value, sourceType, STRING_TYPE_DESCRIPTOR);</span>
+		}
+		else {
+<span class="nc" id="L273">			return value.toString();</span>
+		}
+	}
+
+
+	private static class RequestParamNamedValueInfo extends NamedValueInfo {
+
+		public RequestParamNamedValueInfo() {
+<span class="nc" id="L281">			super(&quot;&quot;, false, ValueConstants.DEFAULT_NONE);</span>
+<span class="nc" id="L282">		}</span>
+
+		public RequestParamNamedValueInfo(RequestParam annotation) {
+<span class="nc" id="L285">			super(annotation.name(), annotation.required(), annotation.defaultValue());</span>
+<span class="nc" id="L286">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

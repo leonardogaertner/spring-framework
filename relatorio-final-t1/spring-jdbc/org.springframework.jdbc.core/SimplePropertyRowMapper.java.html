@@ -1,0 +1,216 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>SimplePropertyRowMapper.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-jdbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.core</a> &gt; <span class="el_source">SimplePropertyRowMapper.java</span></div><h1>SimplePropertyRowMapper.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.core;
+
+import java.beans.PropertyDescriptor;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Field;
+import java.lang.reflect.Method;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+import java.sql.SQLException;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.core.convert.support.DefaultConversionService;
+import org.springframework.jdbc.support.JdbcUtils;
+import org.springframework.util.Assert;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * {@link RowMapper} implementation that converts a row into a new instance
+ * of the specified mapped target class. The mapped target class must be a
+ * top-level class or {@code static} nested class, and it may expose either a
+ * &lt;em&gt;data class&lt;/em&gt; constructor with named parameters corresponding to column
+ * names or classic bean property setter methods with property names corresponding
+ * to column names or fields with corresponding field names.
+ *
+ * &lt;p&gt;When combining a data class constructor with setter methods, any property
+ * mapped successfully via a constructor argument will not be mapped additionally
+ * via a corresponding setter method or field mapping. This means that constructor
+ * arguments take precedence over property setter methods which in turn take
+ * precedence over direct field mappings.
+ *
+ * &lt;p&gt;To facilitate mapping between columns and properties that don't have matching
+ * names, try using underscore-separated column aliases in the SQL statement like
+ * {@code &quot;select fname as first_name from customer&quot;}, where {@code first_name}
+ * can be mapped to a {@code setFirstName(String)} method in the target class.
+ *
+ * &lt;p&gt;This is a flexible alternative to {@link DataClassRowMapper} and
+ * {@link BeanPropertyRowMapper} for scenarios where no specific customization
+ * and no pre-defined property mappings are needed.
+ *
+ * &lt;p&gt;In terms of its fallback property discovery algorithm, this class is similar to
+ * {@link org.springframework.jdbc.core.namedparam.SimplePropertySqlParameterSource}
+ * and is similarly used for {@link org.springframework.jdbc.core.simple.JdbcClient}.
+ *
+ * @author Juergen Hoeller
+ * @since 6.1
+ * @param &lt;T&gt; the result type
+ * @see DataClassRowMapper
+ * @see BeanPropertyRowMapper
+ * @see org.springframework.jdbc.core.simple.JdbcClient.StatementSpec#query(Class)
+ * @see org.springframework.jdbc.core.namedparam.SimplePropertySqlParameterSource
+ */
+public class SimplePropertyRowMapper&lt;T&gt; implements RowMapper&lt;T&gt; {
+
+<span class="fc" id="L79">	private static final Object NO_DESCRIPTOR = new Object();</span>
+
+	private final Class&lt;T&gt; mappedClass;
+
+	private final ConversionService conversionService;
+
+	private final Constructor&lt;T&gt; mappedConstructor;
+
+	private final @Nullable String[] constructorParameterNames;
+
+	private final TypeDescriptor[] constructorParameterTypes;
+
+<span class="fc" id="L91">	private final Map&lt;String, Object&gt; propertyDescriptors = new ConcurrentHashMap&lt;&gt;();</span>
+
+
+	/**
+	 * Create a new {@code SimplePropertyRowMapper}.
+	 * @param mappedClass the class that each row should be mapped to
+	 */
+	public SimplePropertyRowMapper(Class&lt;T&gt; mappedClass) {
+<span class="fc" id="L99">		this(mappedClass, DefaultConversionService.getSharedInstance());</span>
+<span class="fc" id="L100">	}</span>
+
+	/**
+	 * Create a new {@code SimplePropertyRowMapper}.
+	 * @param mappedClass the class that each row should be mapped to
+	 * @param conversionService a {@link ConversionService} for binding
+	 * JDBC values to bean properties
+	 */
+<span class="fc" id="L108">	public SimplePropertyRowMapper(Class&lt;T&gt; mappedClass, ConversionService conversionService) {</span>
+<span class="fc" id="L109">		Assert.notNull(mappedClass, &quot;Mapped Class must not be null&quot;);</span>
+<span class="fc" id="L110">		Assert.notNull(conversionService, &quot;ConversionService must not be null&quot;);</span>
+<span class="fc" id="L111">		this.mappedClass = mappedClass;</span>
+<span class="fc" id="L112">		this.conversionService = conversionService;</span>
+
+<span class="fc" id="L114">		this.mappedConstructor = BeanUtils.getResolvableConstructor(mappedClass);</span>
+<span class="fc" id="L115">		int paramCount = this.mappedConstructor.getParameterCount();</span>
+<span class="fc bfc" id="L116" title="All 2 branches covered.">		this.constructorParameterNames = (paramCount &gt; 0 ?</span>
+<span class="fc" id="L117">				BeanUtils.getParameterNames(this.mappedConstructor) : new String[0]);</span>
+<span class="fc" id="L118">		this.constructorParameterTypes = new TypeDescriptor[paramCount];</span>
+<span class="fc bfc" id="L119" title="All 2 branches covered.">		for (int i = 0; i &lt; paramCount; i++) {</span>
+<span class="fc" id="L120">			this.constructorParameterTypes[i] = new TypeDescriptor(new MethodParameter(this.mappedConstructor, i));</span>
+		}
+<span class="fc" id="L122">	}</span>
+
+
+	@Override
+	public T mapRow(ResultSet rs, int rowNumber) throws SQLException {
+<span class="fc" id="L127">		@Nullable Object[] args = new Object[this.constructorParameterNames.length];</span>
+<span class="fc" id="L128">		Set&lt;Integer&gt; usedIndex = new HashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L129" title="All 2 branches covered.">		for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="fc" id="L130">			String name = this.constructorParameterNames[i];</span>
+			int index;
+			try {
+				// Try direct name match first
+<span class="fc" id="L134">				index = rs.findColumn(name);</span>
+			}
+<span class="fc" id="L136">			catch (SQLException ex) {</span>
+				// Try underscored name match instead
+<span class="fc" id="L138">				index = rs.findColumn(JdbcUtils.convertPropertyNameToUnderscoreName(name));</span>
+<span class="fc" id="L139">			}</span>
+<span class="fc" id="L140">			TypeDescriptor td = this.constructorParameterTypes[i];</span>
+<span class="fc" id="L141">			Object value = JdbcUtils.getResultSetValue(rs, index, td.getType());</span>
+<span class="fc" id="L142">			usedIndex.add(index);</span>
+<span class="fc" id="L143">			args[i] = this.conversionService.convert(value, td);</span>
+		}
+<span class="fc" id="L145">		T mappedObject = BeanUtils.instantiateClass(this.mappedConstructor, args);</span>
+
+<span class="fc" id="L147">		ResultSetMetaData rsmd = rs.getMetaData();</span>
+<span class="fc" id="L148">		int columnCount = rsmd.getColumnCount();</span>
+<span class="fc bfc" id="L149" title="All 2 branches covered.">		for (int index = 1; index &lt;= columnCount; index++) {</span>
+<span class="fc bfc" id="L150" title="All 2 branches covered.">			if (!usedIndex.contains(index)) {</span>
+<span class="fc" id="L151">				Object desc = getDescriptor(JdbcUtils.lookupColumnName(rsmd, index));</span>
+<span class="fc bfc" id="L152" title="All 2 branches covered.">				if (desc instanceof MethodParameter mp) {</span>
+<span class="fc" id="L153">					Method method = mp.getMethod();</span>
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">					if (method != null) {</span>
+<span class="fc" id="L155">						Object value = JdbcUtils.getResultSetValue(rs, index, mp.getParameterType());</span>
+<span class="fc" id="L156">						value = this.conversionService.convert(value, new TypeDescriptor(mp));</span>
+<span class="fc" id="L157">						ReflectionUtils.makeAccessible(method);</span>
+<span class="fc" id="L158">						ReflectionUtils.invokeMethod(method, mappedObject, value);</span>
+					}
+<span class="fc" id="L160">				}</span>
+<span class="fc bfc" id="L161" title="All 2 branches covered.">				else if (desc instanceof Field field) {</span>
+<span class="fc" id="L162">					Object value = JdbcUtils.getResultSetValue(rs, index, field.getType());</span>
+<span class="fc" id="L163">					value = this.conversionService.convert(value, new TypeDescriptor(field));</span>
+<span class="fc" id="L164">					ReflectionUtils.makeAccessible(field);</span>
+<span class="fc" id="L165">					ReflectionUtils.setField(field, mappedObject, value);</span>
+				}
+			}
+		}
+
+<span class="fc" id="L170">		return mappedObject;</span>
+	}
+
+	private Object getDescriptor(String column) {
+<span class="fc" id="L174">		return this.propertyDescriptors.computeIfAbsent(column, name -&gt; {</span>
+
+			// Try direct match first
+<span class="fc" id="L177">			PropertyDescriptor pd = BeanUtils.getPropertyDescriptor(this.mappedClass, name);</span>
+<span class="pc bpc" id="L178" title="1 of 4 branches missed.">			if (pd != null &amp;&amp; pd.getWriteMethod() != null) {</span>
+<span class="fc" id="L179">				return BeanUtils.getWriteMethodParameter(pd);</span>
+			}
+<span class="fc" id="L181">			Field field = ReflectionUtils.findField(this.mappedClass, name);</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">			if (field != null) {</span>
+<span class="fc" id="L183">				return field;</span>
+			}
+
+			// Try de-underscored match instead
+<span class="fc" id="L187">			String adaptedName = JdbcUtils.convertUnderscoreNameToPropertyName(name);</span>
+<span class="fc bfc" id="L188" title="All 2 branches covered.">			if (!adaptedName.equals(name)) {</span>
+<span class="fc" id="L189">				pd = BeanUtils.getPropertyDescriptor(this.mappedClass, adaptedName);</span>
+<span class="pc bpc" id="L190" title="1 of 4 branches missed.">				if (pd != null &amp;&amp; pd.getWriteMethod() != null) {</span>
+<span class="fc" id="L191">					return BeanUtils.getWriteMethodParameter(pd);</span>
+				}
+<span class="fc" id="L193">				field = ReflectionUtils.findField(this.mappedClass, adaptedName);</span>
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">				if (field != null) {</span>
+<span class="nc" id="L195">					return field;</span>
+				}
+			}
+
+			// Fallback: case-insensitive match
+<span class="fc" id="L200">			PropertyDescriptor[] pds = BeanUtils.getPropertyDescriptors(this.mappedClass);</span>
+<span class="fc bfc" id="L201" title="All 2 branches covered.">			for (PropertyDescriptor candidate : pds) {</span>
+<span class="fc bfc" id="L202" title="All 2 branches covered.">				if (name.equalsIgnoreCase(candidate.getName())) {</span>
+<span class="fc" id="L203">					return BeanUtils.getWriteMethodParameter(candidate);</span>
+				}
+			}
+<span class="fc" id="L206">			field = ReflectionUtils.findFieldIgnoreCase(this.mappedClass, name);</span>
+<span class="pc bpc" id="L207" title="1 of 2 branches missed.">			if (field != null) {</span>
+<span class="nc" id="L208">				return field;</span>
+			}
+
+<span class="fc" id="L211">			return NO_DESCRIPTOR;</span>
+		});
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

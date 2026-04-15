@@ -1,0 +1,459 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ResourceBundleMessageSource.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.context.support</a> &gt; <span class="el_source">ResourceBundleMessageSource.java</span></div><h1>ResourceBundleMessageSource.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.context.support;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.Reader;
+import java.net.URL;
+import java.net.URLConnection;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.text.MessageFormat;
+import java.util.Locale;
+import java.util.Map;
+import java.util.MissingResourceException;
+import java.util.PropertyResourceBundle;
+import java.util.ResourceBundle;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.factory.BeanClassLoaderAware;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+
+/**
+ * {@link org.springframework.context.MessageSource} implementation that
+ * accesses resource bundles using specified basenames. This class relies
+ * on the underlying JDK's {@link java.util.ResourceBundle} implementation,
+ * in combination with the JDK's standard message parsing provided by
+ * {@link java.text.MessageFormat}.
+ *
+ * &lt;p&gt;This MessageSource caches both the accessed ResourceBundle instances and
+ * the generated MessageFormats for each message. It also implements rendering of
+ * no-arg messages without MessageFormat, as supported by the AbstractMessageSource
+ * base class. The caching provided by this MessageSource is significantly faster
+ * than the built-in caching of the {@code java.util.ResourceBundle} class.
+ *
+ * &lt;p&gt;The basenames follow {@link java.util.ResourceBundle} conventions: essentially,
+ * a fully-qualified classpath location. If it doesn't contain a package qualifier
+ * (such as {@code org.mypackage}), it will be resolved from the classpath root.
+ * Note that the JDK's standard ResourceBundle treats dots as package separators:
+ * This means that &quot;test.theme&quot; is effectively equivalent to &quot;test/theme&quot;.
+ *
+ * &lt;p&gt;On the classpath, bundle resources will be read with the locally configured
+ * {@link #setDefaultCharset Charset}: by default, ISO-8859-1; consider switching
+ * this to UTF-8, or to {@code null} for the platform default encoding. On the JDK 9+
+ * module path where locally provided {@code ResourceBundle.Control} handles are not
+ * supported, this MessageSource always falls back to {@link ResourceBundle#getBundle}
+ * retrieval with the platform default encoding: UTF-8 with an ISO-8859-1 fallback on
+ * JDK 9+ (configurable through the &quot;java.util.PropertyResourceBundle.encoding&quot; system
+ * property). Note that {@link #loadBundle(Reader)}/{@link #loadBundle(InputStream)}
+ * won't be called in this case either, effectively ignoring overrides in subclasses.
+ * Consider implementing a JDK 9 {@code java.util.spi.ResourceBundleProvider} instead.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Qimiao Chen
+ * @author Sam Brannen
+ * @see #setBasenames
+ * @see ReloadableResourceBundleMessageSource
+ * @see java.util.ResourceBundle
+ * @see java.text.MessageFormat
+ */
+public class ResourceBundleMessageSource extends AbstractResourceBasedMessageSource implements BeanClassLoaderAware {
+
+	private @Nullable ClassLoader bundleClassLoader;
+
+<span class="fc" id="L85">	private @Nullable ClassLoader beanClassLoader = ClassUtils.getDefaultClassLoader();</span>
+
+	/**
+	 * Cache to hold loaded ResourceBundles.
+	 * &lt;p&gt;This Map is keyed with the bundle basename, which holds a Map that is
+	 * keyed with the Locale and in turn holds the ResourceBundle instances.
+	 * This allows for very efficient hash lookups, significantly faster
+	 * than the ResourceBundle class's own cache.
+	 */
+<span class="fc" id="L94">	private final Map&lt;String, Map&lt;Locale, ResourceBundle&gt;&gt; cachedResourceBundles =</span>
+			new ConcurrentHashMap&lt;&gt;();
+
+	/**
+	 * Cache to hold already generated MessageFormats.
+	 * &lt;p&gt;This Map is keyed with the ResourceBundle, which holds a Map that is
+	 * keyed with the message code, which in turn holds a Map that is keyed
+	 * with the Locale and holds the MessageFormat values. This allows for
+	 * very efficient hash lookups without concatenated keys.
+	 * @see #getMessageFormat
+	 */
+<span class="fc" id="L105">	private final Map&lt;ResourceBundle, Map&lt;String, Map&lt;Locale, MessageFormat&gt;&gt;&gt; cachedBundleMessageFormats =</span>
+			new ConcurrentHashMap&lt;&gt;();
+
+<span class="fc" id="L108">	private volatile @Nullable MessageSourceControl control = new MessageSourceControl();</span>
+
+
+<span class="fc" id="L111">	public ResourceBundleMessageSource() {</span>
+<span class="fc" id="L112">		setDefaultCharset(StandardCharsets.ISO_8859_1);</span>
+<span class="fc" id="L113">	}</span>
+
+
+	/**
+	 * Set the ClassLoader to load resource bundles with.
+	 * &lt;p&gt;Default is the containing BeanFactory's
+	 * {@link org.springframework.beans.factory.BeanClassLoaderAware bean ClassLoader},
+	 * or the default ClassLoader determined by
+	 * {@link org.springframework.util.ClassUtils#getDefaultClassLoader()}
+	 * if not running within a BeanFactory.
+	 */
+	public void setBundleClassLoader(ClassLoader classLoader) {
+<span class="nc" id="L125">		this.bundleClassLoader = classLoader;</span>
+<span class="nc" id="L126">	}</span>
+
+	/**
+	 * Return the ClassLoader to load resource bundles with.
+	 * &lt;p&gt;Default is the containing BeanFactory's bean ClassLoader.
+	 * @see #setBundleClassLoader
+	 */
+	protected @Nullable ClassLoader getBundleClassLoader() {
+<span class="pc bpc" id="L134" title="1 of 2 branches missed.">		return (this.bundleClassLoader != null ? this.bundleClassLoader : this.beanClassLoader);</span>
+	}
+
+	@Override
+	public void setBeanClassLoader(ClassLoader classLoader) {
+<span class="fc" id="L139">		this.beanClassLoader = classLoader;</span>
+<span class="fc" id="L140">	}</span>
+
+
+	/**
+	 * Resolves the given message code as key in the registered resource bundles,
+	 * returning the value found in the bundle as-is (without MessageFormat parsing).
+	 */
+	@Override
+	protected @Nullable String resolveCodeWithoutArguments(String code, Locale locale) {
+<span class="fc" id="L149">		Set&lt;String&gt; basenames = getBasenameSet();</span>
+<span class="fc bfc" id="L150" title="All 2 branches covered.">		for (String basename : basenames) {</span>
+<span class="fc" id="L151">			ResourceBundle bundle = getResourceBundle(basename, locale);</span>
+<span class="pc bpc" id="L152" title="1 of 2 branches missed.">			if (bundle != null) {</span>
+<span class="fc" id="L153">				String result = getStringOrNull(bundle, code);</span>
+<span class="fc bfc" id="L154" title="All 2 branches covered.">				if (result != null) {</span>
+<span class="fc" id="L155">					return result;</span>
+				}
+			}
+<span class="fc" id="L158">		}</span>
+<span class="fc" id="L159">		return null;</span>
+	}
+
+	/**
+	 * Resolves the given message code as key in the registered resource bundles,
+	 * using a cached MessageFormat instance per message code.
+	 */
+	@Override
+	protected @Nullable MessageFormat resolveCode(String code, Locale locale) {
+<span class="fc" id="L168">		Set&lt;String&gt; basenames = getBasenameSet();</span>
+<span class="fc bfc" id="L169" title="All 2 branches covered.">		for (String basename : basenames) {</span>
+<span class="fc" id="L170">			ResourceBundle bundle = getResourceBundle(basename, locale);</span>
+<span class="pc bpc" id="L171" title="1 of 2 branches missed.">			if (bundle != null) {</span>
+<span class="fc" id="L172">				MessageFormat messageFormat = getMessageFormat(bundle, code, locale);</span>
+<span class="fc bfc" id="L173" title="All 2 branches covered.">				if (messageFormat != null) {</span>
+<span class="fc" id="L174">					return messageFormat;</span>
+				}
+			}
+<span class="fc" id="L177">		}</span>
+<span class="fc" id="L178">		return null;</span>
+	}
+
+
+	/**
+	 * Return a ResourceBundle for the given basename and Locale,
+	 * fetching already generated ResourceBundle from the cache.
+	 * @param basename the basename of the ResourceBundle
+	 * @param locale the Locale to find the ResourceBundle for
+	 * @return the resulting ResourceBundle, or {@code null} if none
+	 * found for the given basename and Locale
+	 */
+	protected @Nullable ResourceBundle getResourceBundle(String basename, Locale locale) {
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">		if (getCacheMillis() &gt;= 0) {</span>
+			// Fresh ResourceBundle.getBundle call in order to let ResourceBundle
+			// do its native caching, at the expense of more extensive lookup steps.
+<span class="nc" id="L194">			return doGetBundle(basename, locale);</span>
+		}
+		else {
+			// Cache forever: prefer locale cache over repeated getBundle calls.
+<span class="fc" id="L198">			Map&lt;Locale, ResourceBundle&gt; localeMap = this.cachedResourceBundles.get(basename);</span>
+<span class="fc bfc" id="L199" title="All 2 branches covered.">			if (localeMap != null) {</span>
+<span class="fc" id="L200">				ResourceBundle bundle = localeMap.get(locale);</span>
+<span class="fc bfc" id="L201" title="All 2 branches covered.">				if (bundle != null) {</span>
+<span class="fc" id="L202">					return bundle;</span>
+				}
+			}
+			try {
+<span class="fc" id="L206">				ResourceBundle bundle = doGetBundle(basename, locale);</span>
+<span class="fc bfc" id="L207" title="All 2 branches covered.">				if (localeMap == null) {</span>
+<span class="fc" id="L208">					localeMap = this.cachedResourceBundles.computeIfAbsent(basename, bn -&gt; new ConcurrentHashMap&lt;&gt;());</span>
+				}
+<span class="fc" id="L210">				localeMap.put(locale, bundle);</span>
+<span class="fc" id="L211">				return bundle;</span>
+			}
+<span class="nc" id="L213">			catch (MissingResourceException ex) {</span>
+<span class="nc bnc" id="L214" title="All 2 branches missed.">				if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L215">					logger.warn(&quot;ResourceBundle [&quot; + basename + &quot;] not found for MessageSource: &quot; + ex.getMessage());</span>
+				}
+				// Assume bundle not found
+				// -&gt; do NOT throw the exception to allow for checking parent message source.
+<span class="nc" id="L219">				return null;</span>
+			}
+		}
+	}
+
+	/**
+	 * Obtain the resource bundle for the given basename and Locale.
+	 * @param basename the basename to look for
+	 * @param locale the Locale to look for
+	 * @return the corresponding ResourceBundle
+	 * @throws MissingResourceException if no matching bundle could be found
+	 * @see java.util.ResourceBundle#getBundle(String, Locale, ClassLoader)
+	 * @see #getBundleClassLoader()
+	 */
+	protected ResourceBundle doGetBundle(String basename, Locale locale) throws MissingResourceException {
+<span class="fc" id="L234">		ClassLoader classLoader = getBundleClassLoader();</span>
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">		Assert.state(classLoader != null, &quot;No bundle ClassLoader set&quot;);</span>
+
+<span class="fc" id="L237">		MessageSourceControl control = this.control;</span>
+<span class="pc bpc" id="L238" title="1 of 2 branches missed.">		if (control != null) {</span>
+			try {
+<span class="fc" id="L240">				return ResourceBundle.getBundle(basename, locale, classLoader, control);</span>
+			}
+<span class="nc" id="L242">			catch (UnsupportedOperationException ex) {</span>
+				// Probably in a Java Module System environment on JDK 9+
+<span class="nc" id="L244">				this.control = null;</span>
+<span class="nc" id="L245">				Charset charset = getDefaultCharset();</span>
+<span class="nc bnc" id="L246" title="All 4 branches missed.">				if (charset != null &amp;&amp; logger.isInfoEnabled()) {</span>
+<span class="nc" id="L247">					logger.info(&quot;ResourceBundleMessageSource is configured to read resources with encoding '&quot; +</span>
+							charset + &quot;' but ResourceBundle.Control is not supported in current system environment: &quot; +
+<span class="nc" id="L249">							ex.getMessage() + &quot; - falling back to plain ResourceBundle.getBundle retrieval with the &quot; +</span>
+							&quot;platform default encoding. Consider setting the 'defaultCharset' property to 'null' &quot; +
+							&quot;for participating in the platform default and therefore avoiding this log message.&quot;);
+				}
+			}
+		}
+
+		// Fallback: plain getBundle lookup without Control handle
+<span class="nc" id="L257">		return ResourceBundle.getBundle(basename, locale, classLoader);</span>
+	}
+
+	/**
+	 * Load a property-based resource bundle from the given reader.
+	 * &lt;p&gt;This will be called in case of a {@linkplain #setDefaultCharset &quot;defaultCharset&quot;},
+	 * including {@link ResourceBundleMessageSource}'s default ISO-8859-1 encoding.
+	 * Note that this method can only be called with a {@code ResourceBundle.Control}:
+	 * When running on the JDK 9+ module path where such control handles are not
+	 * supported, any overrides in custom subclasses will effectively get ignored.
+	 * &lt;p&gt;The default implementation returns a {@link PropertyResourceBundle}.
+	 * @param reader the reader for the target resource
+	 * @return the fully loaded bundle
+	 * @throws IOException in case of I/O failure
+	 * @since 4.2
+	 * @see #loadBundle(InputStream)
+	 * @see PropertyResourceBundle#PropertyResourceBundle(Reader)
+	 */
+	protected ResourceBundle loadBundle(Reader reader) throws IOException {
+<span class="fc" id="L276">		return new PropertyResourceBundle(reader);</span>
+	}
+
+	/**
+	 * Load a property-based resource bundle from the given input stream,
+	 * picking up the default properties encoding on JDK 9+.
+	 * &lt;p&gt;This will only be called with {@linkplain #setDefaultCharset &quot;defaultCharset&quot;}
+	 * set to {@code null}, explicitly enforcing the platform default encoding
+	 * (which is UTF-8 with an ISO-8859-1 fallback on JDK 9+ but configurable
+	 * through the &quot;java.util.PropertyResourceBundle.encoding&quot; system property).
+	 * Note that this method can only be called with a {@code ResourceBundle.Control}:
+	 * When running on the JDK 9+ module path where such control handles are not
+	 * supported, any overrides in custom subclasses will effectively get ignored.
+	 * &lt;p&gt;The default implementation returns a {@link PropertyResourceBundle}.
+	 * @param inputStream the input stream for the target resource
+	 * @return the fully loaded bundle
+	 * @throws IOException in case of I/O failure
+	 * @since 5.1
+	 * @see #loadBundle(Reader)
+	 * @see PropertyResourceBundle#PropertyResourceBundle(InputStream)
+	 */
+	protected ResourceBundle loadBundle(InputStream inputStream) throws IOException {
+<span class="nc" id="L298">		return new PropertyResourceBundle(inputStream);</span>
+	}
+
+	/**
+	 * Return a MessageFormat for the given bundle and code,
+	 * fetching already generated MessageFormats from the cache.
+	 * @param bundle the ResourceBundle to work on
+	 * @param code the message code to retrieve
+	 * @param locale the Locale to use to build the MessageFormat
+	 * @return the resulting MessageFormat, or {@code null} if no message
+	 * defined for the given code
+	 * @throws MissingResourceException if thrown by the ResourceBundle
+	 */
+	protected @Nullable MessageFormat getMessageFormat(ResourceBundle bundle, String code, Locale locale)
+			throws MissingResourceException {
+
+<span class="fc" id="L314">		Map&lt;String, Map&lt;Locale, MessageFormat&gt;&gt; codeMap = this.cachedBundleMessageFormats.get(bundle);</span>
+<span class="fc" id="L315">		Map&lt;Locale, MessageFormat&gt; localeMap = null;</span>
+<span class="fc bfc" id="L316" title="All 2 branches covered.">		if (codeMap != null) {</span>
+<span class="fc" id="L317">			localeMap = codeMap.get(code);</span>
+<span class="fc bfc" id="L318" title="All 2 branches covered.">			if (localeMap != null) {</span>
+<span class="fc" id="L319">				MessageFormat result = localeMap.get(locale);</span>
+<span class="pc bpc" id="L320" title="1 of 2 branches missed.">				if (result != null) {</span>
+<span class="fc" id="L321">					return result;</span>
+				}
+			}
+		}
+
+<span class="fc" id="L326">		String msg = getStringOrNull(bundle, code);</span>
+<span class="fc bfc" id="L327" title="All 2 branches covered.">		if (msg != null) {</span>
+<span class="fc bfc" id="L328" title="All 2 branches covered.">			if (codeMap == null) {</span>
+<span class="fc" id="L329">				codeMap = this.cachedBundleMessageFormats.computeIfAbsent(bundle, b -&gt; new ConcurrentHashMap&lt;&gt;());</span>
+			}
+<span class="pc bpc" id="L331" title="1 of 2 branches missed.">			if (localeMap == null) {</span>
+<span class="fc" id="L332">				localeMap = codeMap.computeIfAbsent(code, c -&gt; new ConcurrentHashMap&lt;&gt;());</span>
+			}
+<span class="fc" id="L334">			MessageFormat result = createMessageFormat(msg, locale);</span>
+<span class="fc" id="L335">			localeMap.put(locale, result);</span>
+<span class="fc" id="L336">			return result;</span>
+		}
+
+<span class="fc" id="L339">		return null;</span>
+	}
+
+	/**
+	 * Efficiently retrieve the String value for the specified key,
+	 * or return {@code null} if not found.
+	 * &lt;p&gt;As of 4.2, the default implementation checks {@code containsKey}
+	 * before it attempts to call {@code getString} (which would require
+	 * catching {@code MissingResourceException} for key not found).
+	 * &lt;p&gt;Can be overridden in subclasses.
+	 * @param bundle the ResourceBundle to perform the lookup in
+	 * @param key the key to look up
+	 * @return the associated value, or {@code null} if none
+	 * @since 4.2
+	 * @see ResourceBundle#getString(String)
+	 * @see ResourceBundle#containsKey(String)
+	 */
+	protected @Nullable String getStringOrNull(ResourceBundle bundle, String key) {
+<span class="fc bfc" id="L357" title="All 2 branches covered.">		if (bundle.containsKey(key)) {</span>
+			try {
+<span class="fc" id="L359">				return bundle.getString(key);</span>
+			}
+<span class="nc" id="L361">			catch (MissingResourceException ex) {</span>
+				// Assume key not found for some other reason
+				// -&gt; do NOT throw the exception to allow for checking parent message source.
+			}
+		}
+<span class="fc" id="L366">		return null;</span>
+	}
+
+	/**
+	 * Show the configuration of this MessageSource.
+	 */
+	@Override
+	public String toString() {
+<span class="nc" id="L374">		return getClass().getName() + &quot;: basenames=&quot; + getBasenameSet();</span>
+	}
+
+
+	/**
+	 * Custom implementation of {@code ResourceBundle.Control}, adding support
+	 * for custom file encodings, deactivating the fallback to the system locale
+	 * and activating ResourceBundle's native cache, if desired.
+	 */
+<span class="fc" id="L383">	private class MessageSourceControl extends ResourceBundle.Control {</span>
+
+		@Override
+		public @Nullable ResourceBundle newBundle(String baseName, Locale locale, String format, ClassLoader loader, boolean reload)
+				throws IllegalAccessException, InstantiationException, IOException {
+
+			// Special handling of default encoding
+<span class="fc bfc" id="L390" title="All 2 branches covered.">			if (format.equals(&quot;java.properties&quot;)) {</span>
+<span class="fc" id="L391">				String bundleName = toBundleName(baseName, locale);</span>
+<span class="fc" id="L392">				final String resourceName = toResourceName(bundleName, &quot;properties&quot;);</span>
+<span class="fc" id="L393">				final ClassLoader classLoader = loader;</span>
+<span class="fc" id="L394">				final boolean reloadFlag = reload;</span>
+<span class="fc" id="L395">				InputStream inputStream = null;</span>
+<span class="pc bpc" id="L396" title="1 of 2 branches missed.">				if (reloadFlag) {</span>
+<span class="nc" id="L397">					URL url = classLoader.getResource(resourceName);</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">					if (url != null) {</span>
+<span class="nc" id="L399">						URLConnection connection = url.openConnection();</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">						if (connection != null) {</span>
+<span class="nc" id="L401">							connection.setUseCaches(false);</span>
+<span class="nc" id="L402">							inputStream = connection.getInputStream();</span>
+						}
+					}
+<span class="nc" id="L405">				}</span>
+				else {
+<span class="fc" id="L407">					inputStream = classLoader.getResourceAsStream(resourceName);</span>
+				}
+<span class="fc bfc" id="L409" title="All 2 branches covered.">				if (inputStream != null) {</span>
+<span class="fc" id="L410">					Charset charset = getDefaultCharset();</span>
+<span class="pc bpc" id="L411" title="1 of 2 branches missed.">					if (charset != null) {</span>
+<span class="fc" id="L412">						try (InputStreamReader bundleReader = new InputStreamReader(inputStream, charset)) {</span>
+<span class="fc" id="L413">							return loadBundle(bundleReader);</span>
+						}
+					}
+					else {
+<span class="nc" id="L417">						try (InputStream bundleStream = inputStream) {</span>
+<span class="nc" id="L418">							return loadBundle(bundleStream);</span>
+						}
+					}
+				}
+				else {
+<span class="fc" id="L423">					return null;</span>
+				}
+			}
+			else {
+				// Delegate handling of &quot;java.class&quot; format to standard Control
+<span class="fc" id="L428">				return super.newBundle(baseName, locale, format, loader, reload);</span>
+			}
+		}
+
+		@Override
+		public @Nullable Locale getFallbackLocale(String baseName, Locale locale) {
+<span class="fc" id="L434">			Locale defaultLocale = getDefaultLocale();</span>
+<span class="fc bfc" id="L435" title="All 4 branches covered.">			return (defaultLocale != null &amp;&amp; !defaultLocale.equals(locale) ? defaultLocale : null);</span>
+		}
+
+		@Override
+		public long getTimeToLive(String baseName, Locale locale) {
+<span class="fc" id="L440">			long cacheMillis = getCacheMillis();</span>
+<span class="pc bpc" id="L441" title="1 of 2 branches missed.">			return (cacheMillis &gt;= 0 ? cacheMillis : super.getTimeToLive(baseName, locale));</span>
+		}
+
+		@Override
+		public boolean needsReload(
+				String baseName, Locale locale, String format, ClassLoader loader, ResourceBundle bundle, long loadTime) {
+
+<span class="nc bnc" id="L448" title="All 2 branches missed.">			if (super.needsReload(baseName, locale, format, loader, bundle, loadTime)) {</span>
+<span class="nc" id="L449">				cachedBundleMessageFormats.remove(bundle);</span>
+<span class="nc" id="L450">				return true;</span>
+			}
+			else {
+<span class="nc" id="L453">				return false;</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

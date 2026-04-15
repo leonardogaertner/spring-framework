@@ -1,0 +1,334 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UrlHandlerFilter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.filter.reactive</a> &gt; <span class="el_source">UrlHandlerFilter.java</span></div><h1>UrlHandlerFilter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.filter.reactive;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Function;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.server.PathContainer;
+import org.springframework.http.server.RequestPath;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.StringUtils;
+import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.server.WebFilter;
+import org.springframework.web.server.WebFilterChain;
+import org.springframework.web.util.pattern.PathPattern;
+import org.springframework.web.util.pattern.PathPatternParser;
+
+/**
+ * {@link org.springframework.web.server.WebFilter} that modifies the URL, and
+ * then redirects or wraps the request to apply the change.
+ *
+ * &lt;p&gt;To create an instance, you can use the following:
+ *
+ * &lt;pre&gt;
+ * UrlHandlerFilter filter = UrlHandlerFilter
+ *    .trailingSlashHandler(&quot;/path1/**&quot;).redirect(HttpStatus.PERMANENT_REDIRECT)
+ *    .trailingSlashHandler(&quot;/path2/**&quot;).mutateRequest()
+ *    .build();
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;This {@code WebFilter} should be ordered ahead of security filters.
+ *
+ * @author Rossen Stoyanchev
+ * @since 6.2
+ */
+public final class UrlHandlerFilter implements WebFilter {
+
+<span class="nc" id="L66">	private static final Log logger = LogFactory.getLog(UrlHandlerFilter.class);</span>
+
+
+	private final MultiValueMap&lt;Handler, PathPattern&gt; handlers;
+
+
+<span class="nc" id="L72">	private UrlHandlerFilter(MultiValueMap&lt;Handler, PathPattern&gt; handlers) {</span>
+<span class="nc" id="L73">		this.handlers = new LinkedMultiValueMap&lt;&gt;(handlers);</span>
+<span class="nc" id="L74">	}</span>
+
+
+	@Override
+	public Mono&lt;Void&gt; filter(ServerWebExchange exchange, WebFilterChain chain) {
+<span class="nc" id="L79">		RequestPath path = exchange.getRequest().getPath();</span>
+<span class="nc bnc" id="L80" title="All 2 branches missed.">		for (Map.Entry&lt;Handler, List&lt;PathPattern&gt;&gt; entry : this.handlers.entrySet()) {</span>
+<span class="nc bnc" id="L81" title="All 2 branches missed.">			if (!entry.getKey().supports(exchange)) {</span>
+<span class="nc" id="L82">				continue;</span>
+			}
+<span class="nc bnc" id="L84" title="All 2 branches missed.">			for (PathPattern pattern : entry.getValue()) {</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">				if (pattern.matches(path)) {</span>
+<span class="nc" id="L86">					return entry.getKey().handle(exchange, chain);</span>
+				}
+<span class="nc" id="L88">			}</span>
+<span class="nc" id="L89">		}</span>
+<span class="nc" id="L90">		return chain.filter(exchange);</span>
+	}
+
+	/**
+	 * Add a handler that removes the trailing slash from URL paths to ensure
+	 * consistent interpretation of paths with or without a trailing slash for
+	 * requestion mapping purposes. This is important especially to avoid
+	 * misalignment between URL-based authorization decisions and web framework
+	 * request mappings.
+	 * &lt;p&gt;The root path {@code &quot;/&quot;} is excluded from trailing slash handling.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; A method-level {@code @RequestMapping(&quot;/&quot;)} adds
+	 * a trailing slash to a type-level prefix mapping, and therefore would never
+	 * match to a URL with the trailing slash removed. Use {@code @RequestMapping}
+	 * without a path instead to avoid the trailing slash in the mapping.
+	 * @param pathPatterns patterns to map the handler to, e.g.
+	 * &lt;code&gt;&quot;/path/&amp;#42;&quot;&lt;/code&gt;, &lt;code&gt;&quot;/path/&amp;#42;&amp;#42;&quot;&lt;/code&gt;, &lt;code&gt;&quot;/path/foo/&quot;&lt;/code&gt;
+	 * @return a spec to configure the trailing slash handler with
+	 * @see Builder#trailingSlashHandler(String...)
+	 */
+	public static Builder.TrailingSlashSpec trailingSlashHandler(String... pathPatterns) {
+<span class="nc" id="L110">		return new DefaultBuilder().trailingSlashHandler(pathPatterns);</span>
+	}
+
+
+	/**
+	 * Builder for {@link UrlHandlerFilter}.
+	 */
+	public interface Builder {
+
+		/**
+		 * Add a handler for URLs with a trailing slash.
+		 * @param pathPatterns path patterns to map the handler to, e.g.
+		 * &lt;code&gt;&quot;/path/&amp;#42;&quot;&lt;/code&gt;, &lt;code&gt;&quot;/path/&amp;#42;&amp;#42;&quot;&lt;/code&gt;,
+		 * &lt;code&gt;&quot;/path/foo/&quot;&lt;/code&gt;.
+		 * @return a spec to configure the handler with
+		 */
+		TrailingSlashSpec trailingSlashHandler(String... pathPatterns);
+
+		/**
+		 * Build the {@link UrlHandlerFilter} instance.
+		 */
+		UrlHandlerFilter build();
+
+
+		/**
+		 * A spec to configure a trailing slash handler.
+		 */
+		interface TrailingSlashSpec {
+
+			/**
+			 * Configure a request interceptor to be called just before the handler
+			 * is invoked when a URL with a trailing slash is matched.
+			 */
+			TrailingSlashSpec intercept(Function&lt;ServerHttpRequest, Mono&lt;Void&gt;&gt; interceptor);
+
+			/**
+			 * Handle requests by sending a redirect to the same URL but the
+			 * trailing slash trimmed.
+			 * @param statusCode the redirect status to use
+			 * @return the top level {@link Builder}, which allows adding more
+			 * handlers and then building the Filter instance.
+			 */
+			Builder redirect(HttpStatusCode statusCode);
+
+			/**
+			 * Handle the request by wrapping it in order to trim the trailing
+			 * slash, and delegating to the rest of the filter chain.
+			 * @return the top level {@link Builder}, which allows adding more
+			 * handlers and then building the Filter instance.
+			 */
+			Builder mutateRequest();
+		}
+	}
+
+
+	/**
+	 * Default {@link Builder} implementation.
+	 */
+<span class="nc" id="L168">	private static final class DefaultBuilder implements Builder {</span>
+
+<span class="nc" id="L170">		private final PathPatternParser patternParser = new PathPatternParser();</span>
+
+<span class="nc" id="L172">		private final MultiValueMap&lt;Handler, PathPattern&gt; handlers = new LinkedMultiValueMap&lt;&gt;();</span>
+
+		@Override
+		public TrailingSlashSpec trailingSlashHandler(String... patterns) {
+<span class="nc" id="L176">			return new DefaultTrailingSlashSpec(patterns);</span>
+		}
+
+		private DefaultBuilder addHandler(List&lt;PathPattern&gt; pathPatterns, Handler handler) {
+<span class="nc" id="L180">			pathPatterns.forEach(pattern -&gt; this.handlers.add(handler, pattern));</span>
+<span class="nc" id="L181">			return this;</span>
+		}
+
+		@Override
+		public UrlHandlerFilter build() {
+<span class="nc" id="L186">			return new UrlHandlerFilter(this.handlers);</span>
+		}
+
+
+		private final class DefaultTrailingSlashSpec implements TrailingSlashSpec {
+
+			private final List&lt;PathPattern&gt; pathPatterns;
+
+			private @Nullable List&lt;Function&lt;ServerHttpRequest, Mono&lt;Void&gt;&gt;&gt; interceptors;
+
+<span class="nc" id="L196">			private DefaultTrailingSlashSpec(String[] patterns) {</span>
+<span class="nc" id="L197">				this.pathPatterns = Arrays.stream(patterns)</span>
+<span class="nc bnc" id="L198" title="All 4 branches missed.">						.map(pattern -&gt; pattern.endsWith(&quot;**&quot;) || pattern.endsWith(&quot;/&quot;) ? pattern : pattern + &quot;/&quot;)</span>
+<span class="nc" id="L199">						.map(patternParser::parse)</span>
+<span class="nc" id="L200">						.toList();</span>
+<span class="nc" id="L201">			}</span>
+
+			@Override
+			public TrailingSlashSpec intercept(Function&lt;ServerHttpRequest, Mono&lt;Void&gt;&gt; interceptor) {
+<span class="nc bnc" id="L205" title="All 2 branches missed.">				this.interceptors = (this.interceptors != null ? this.interceptors : new ArrayList&lt;&gt;());</span>
+<span class="nc" id="L206">				this.interceptors.add(interceptor);</span>
+<span class="nc" id="L207">				return this;</span>
+			}
+
+			@Override
+			public Builder redirect(HttpStatusCode statusCode) {
+<span class="nc" id="L212">				Handler handler = new RedirectTrailingSlashHandler(statusCode, this.interceptors);</span>
+<span class="nc" id="L213">				return DefaultBuilder.this.addHandler(this.pathPatterns, handler);</span>
+			}
+
+			@Override
+			public Builder mutateRequest() {
+<span class="nc" id="L218">				Handler handler = new RequestWrappingTrailingSlashHandler(this.interceptors);</span>
+<span class="nc" id="L219">				return DefaultBuilder.this.addHandler(this.pathPatterns, handler);</span>
+			}
+		}
+	}
+
+
+	/**
+	 * Internal handler to encapsulate different ways to handle a request.
+	 */
+	private interface Handler {
+
+		/**
+		 * Whether the handler handles the given request.
+		 */
+		boolean supports(ServerWebExchange exchange);
+
+		/**
+		 * Handle the request, possibly delegating to the rest of the filter chain.
+		 */
+		Mono&lt;Void&gt; handle(ServerWebExchange exchange, WebFilterChain chain);
+	}
+
+
+	/**
+	 * Base class for trailing slash {@link Handler} implementations.
+	 */
+	private abstract static class AbstractTrailingSlashHandler implements Handler {
+
+<span class="nc" id="L247">		private static final List&lt;Function&lt;ServerHttpRequest, Mono&lt;Void&gt;&gt;&gt; defaultInterceptors =</span>
+<span class="nc" id="L248">				List.of(request -&gt; {</span>
+<span class="nc bnc" id="L249" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L250">						logger.trace(&quot;Handling trailing slash URL: &quot; + request.getMethod() + &quot; &quot; + request.getURI());</span>
+					}
+<span class="nc" id="L252">					return Mono.empty();</span>
+				});
+
+		private final List&lt;Function&lt;ServerHttpRequest, Mono&lt;Void&gt;&gt;&gt; interceptors;
+
+<span class="nc" id="L257">		protected AbstractTrailingSlashHandler(@Nullable List&lt;Function&lt;ServerHttpRequest, Mono&lt;Void&gt;&gt;&gt; interceptors) {</span>
+<span class="nc bnc" id="L258" title="All 2 branches missed.">			this.interceptors = (interceptors != null ? new ArrayList&lt;&gt;(interceptors) : defaultInterceptors);</span>
+<span class="nc" id="L259">		}</span>
+
+		@Override
+		public boolean supports(ServerWebExchange exchange) {
+<span class="nc" id="L263">			ServerHttpRequest request = exchange.getRequest();</span>
+<span class="nc" id="L264">			List&lt;PathContainer.Element&gt; elements = request.getPath().pathWithinApplication().elements();</span>
+<span class="nc bnc" id="L265" title="All 4 branches missed.">			return (elements.size() &gt; 1 &amp;&amp; elements.get(elements.size() - 1).value().equals(&quot;/&quot;));</span>
+		}
+
+		@Override
+		public Mono&lt;Void&gt; handle(ServerWebExchange exchange, WebFilterChain chain) {
+<span class="nc" id="L270">			List&lt;Mono&lt;Void&gt;&gt; monos = new ArrayList&lt;&gt;(this.interceptors.size());</span>
+<span class="nc" id="L271">			this.interceptors.forEach(interceptor -&gt; monos.add(interceptor.apply(exchange.getRequest())));</span>
+<span class="nc" id="L272">			return Flux.concat(monos).then(Mono.defer(() -&gt; handleInternal(exchange, chain)));</span>
+		}
+
+		protected abstract Mono&lt;Void&gt; handleInternal(ServerWebExchange exchange, WebFilterChain chain);
+
+		protected String trimTrailingSlash(ServerHttpRequest request) {
+<span class="nc" id="L278">			String path = request.getURI().getRawPath();</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">			int index = (StringUtils.hasLength(path) ? path.lastIndexOf('/') : -1);</span>
+<span class="nc bnc" id="L280" title="All 2 branches missed.">			return (index != -1 ? path.substring(0, index) : path);</span>
+		}
+	}
+
+
+	/**
+	 * Path handler that sends a redirect.
+	 */
+	private static final class RedirectTrailingSlashHandler extends AbstractTrailingSlashHandler {
+
+		private final HttpStatusCode statusCode;
+
+		RedirectTrailingSlashHandler(
+				HttpStatusCode statusCode, @Nullable List&lt;Function&lt;ServerHttpRequest, Mono&lt;Void&gt;&gt;&gt; interceptors) {
+
+<span class="nc" id="L295">			super(interceptors);</span>
+<span class="nc" id="L296">			this.statusCode = statusCode;</span>
+<span class="nc" id="L297">		}</span>
+
+		@Override
+		public Mono&lt;Void&gt; handleInternal(ServerWebExchange exchange, WebFilterChain chain) {
+<span class="nc" id="L301">			ServerHttpRequest request = exchange.getRequest();</span>
+<span class="nc" id="L302">			String query = request.getURI().getRawQuery();</span>
+<span class="nc" id="L303">			String location = trimTrailingSlash(request);</span>
+<span class="nc bnc" id="L304" title="All 2 branches missed.">			if (StringUtils.hasText(query)) {</span>
+<span class="nc" id="L305">				location += &quot;?&quot; + query;</span>
+			}
+
+<span class="nc" id="L308">			ServerHttpResponse response = exchange.getResponse();</span>
+<span class="nc" id="L309">			response.setStatusCode(this.statusCode);</span>
+<span class="nc" id="L310">			response.getHeaders().set(HttpHeaders.LOCATION, location);</span>
+<span class="nc" id="L311">			return Mono.empty();</span>
+		}
+	}
+
+
+	/**
+	 * Path handler that mutates the request and continues processing.
+	 */
+	private static final class RequestWrappingTrailingSlashHandler extends AbstractTrailingSlashHandler {
+
+		RequestWrappingTrailingSlashHandler(@Nullable List&lt;Function&lt;ServerHttpRequest, Mono&lt;Void&gt;&gt;&gt; interceptors) {
+<span class="nc" id="L322">			super(interceptors);</span>
+<span class="nc" id="L323">		}</span>
+
+		@Override
+		public Mono&lt;Void&gt; handleInternal(ServerWebExchange exchange, WebFilterChain chain) {
+<span class="nc" id="L327">			ServerHttpRequest request = exchange.getRequest();</span>
+<span class="nc" id="L328">			ServerHttpRequest mutatedRequest = request.mutate().path(trimTrailingSlash(request)).build();</span>
+<span class="nc" id="L329">			return chain.filter(exchange.mutate().request(mutatedRequest).build());</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

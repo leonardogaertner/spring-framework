@@ -1,0 +1,250 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReactorClientHttpConnector.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.client.reactive</a> &gt; <span class="el_source">ReactorClientHttpConnector.java</span></div><h1>ReactorClientHttpConnector.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.client.reactive;
+
+import java.net.URI;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Function;
+
+import io.netty.util.AttributeKey;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Mono;
+import reactor.netty.Connection;
+import reactor.netty.NettyOutbound;
+import reactor.netty.http.client.HttpClient;
+import reactor.netty.http.client.HttpClientRequest;
+import reactor.netty.resources.ConnectionProvider;
+import reactor.netty.resources.LoopResources;
+
+import org.springframework.context.SmartLifecycle;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.client.ReactorResourceFactory;
+import org.springframework.util.Assert;
+
+/**
+ * Reactor-Netty implementation of {@link ClientHttpConnector}.
+ *
+ * &lt;p&gt;This class implements {@link SmartLifecycle} and can be optionally declared
+ * as a Spring-managed bean.
+ *
+ * @author Brian Clozel
+ * @author Rossen Stoyanchev
+ * @author Sebastien Deleuze
+ * @author Juergen Hoeller
+ * @since 5.0
+ * @see reactor.netty.http.client.HttpClient
+ */
+public class ReactorClientHttpConnector implements ClientHttpConnector, SmartLifecycle {
+
+	/**
+	 * Channel attribute key under which {@code WebClient} request attributes are stored as a Map.
+	 * @since 6.2
+	 */
+<span class="nc" id="L60">	public static final AttributeKey&lt;Map&lt;String, Object&gt;&gt; ATTRIBUTES_KEY =</span>
+<span class="nc" id="L61">			AttributeKey.valueOf(ReactorClientHttpRequest.class.getName() + &quot;.ATTRIBUTES&quot;);</span>
+
+<span class="nc" id="L63">	private static final Log logger = LogFactory.getLog(ReactorClientHttpConnector.class);</span>
+
+<span class="nc" id="L65">	private static final Function&lt;HttpClient, HttpClient&gt; defaultInitializer = client -&gt; client.compress(true);</span>
+
+
+	private final @Nullable ReactorResourceFactory resourceFactory;
+
+	private final @Nullable Function&lt;HttpClient, HttpClient&gt; mapper;
+
+	private volatile @Nullable HttpClient httpClient;
+
+<span class="nc" id="L74">	private boolean lazyStart = false;</span>
+
+<span class="nc" id="L76">	private final Object lifecycleMonitor = new Object();</span>
+
+
+	/**
+	 * Default constructor. Initializes {@link HttpClient} via:
+	 * &lt;pre class=&quot;code&quot;&gt;HttpClient.create().compress(true)&lt;/pre&gt;
+	 */
+<span class="nc" id="L83">	public ReactorClientHttpConnector() {</span>
+<span class="nc" id="L84">		this.httpClient = defaultInitializer.apply(HttpClient.create());</span>
+<span class="nc" id="L85">		this.resourceFactory = null;</span>
+<span class="nc" id="L86">		this.mapper = null;</span>
+<span class="nc" id="L87">	}</span>
+
+	/**
+	 * Constructor with a pre-configured {@code HttpClient} instance.
+	 * @param httpClient the client to use
+	 * @since 5.1
+	 */
+<span class="nc" id="L94">	public ReactorClientHttpConnector(HttpClient httpClient) {</span>
+<span class="nc" id="L95">		Assert.notNull(httpClient, &quot;HttpClient is required&quot;);</span>
+<span class="nc" id="L96">		this.httpClient = httpClient;</span>
+<span class="nc" id="L97">		this.resourceFactory = null;</span>
+<span class="nc" id="L98">		this.mapper = null;</span>
+<span class="nc" id="L99">	}</span>
+
+	/**
+	 * Constructor with externally managed Reactor Netty resources, including
+	 * {@link LoopResources} for event loop threads, and {@link ConnectionProvider}
+	 * for the connection pool.
+	 * &lt;p&gt;This constructor should be used only when you don't want the client
+	 * to participate in the Reactor Netty global resources. By default the
+	 * client participates in the Reactor Netty global resources held in
+	 * {@link reactor.netty.http.HttpResources}, which is recommended since
+	 * fixed, shared resources are favored for event loop concurrency. However,
+	 * consider declaring a {@link ReactorResourceFactory} bean with
+	 * {@code globalResources=true} in order to ensure the Reactor Netty global
+	 * resources are shut down when the Spring ApplicationContext is stopped or closed
+	 * and restarted properly when the Spring ApplicationContext is
+	 * (with JVM Checkpoint Restore for example).
+	 * @param resourceFactory the resource factory to obtain the resources from
+	 * @param mapper a mapper for further initialization of the created client
+	 * @since 5.1
+	 */
+<span class="nc" id="L119">	public ReactorClientHttpConnector(ReactorResourceFactory resourceFactory, Function&lt;HttpClient, HttpClient&gt; mapper) {</span>
+<span class="nc" id="L120">		this.resourceFactory = resourceFactory;</span>
+<span class="nc" id="L121">		this.mapper = mapper;</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">		if (resourceFactory.isRunning()) {</span>
+<span class="nc" id="L123">			this.httpClient = createHttpClient(resourceFactory, mapper);</span>
+		}
+		else {
+<span class="nc" id="L126">			this.lazyStart = true;</span>
+		}
+<span class="nc" id="L128">	}</span>
+
+	private static HttpClient createHttpClient(ReactorResourceFactory factory, Function&lt;HttpClient, HttpClient&gt; mapper) {
+<span class="nc" id="L131">		return defaultInitializer.andThen(mapper).andThen(httpClient -&gt; httpClient.runOn(factory.getLoopResources()))</span>
+<span class="nc" id="L132">				.apply(HttpClient.create(factory.getConnectionProvider()));</span>
+	}
+
+
+	@Override
+	public Mono&lt;ClientHttpResponse&gt; connect(HttpMethod method, URI uri,
+			Function&lt;? super ClientHttpRequest, Mono&lt;Void&gt;&gt; requestCallback) {
+
+<span class="nc" id="L140">		HttpClient httpClient = this.httpClient;</span>
+<span class="nc bnc" id="L141" title="All 2 branches missed.">		if (httpClient == null) {</span>
+<span class="nc bnc" id="L142" title="All 4 branches missed.">			Assert.state(this.resourceFactory != null &amp;&amp; this.mapper != null, &quot;Illegal configuration&quot;);</span>
+<span class="nc bnc" id="L143" title="All 2 branches missed.">			if (this.resourceFactory.isRunning()) {</span>
+				// Retain HttpClient instance if resource factory has been started in the meantime,
+				// considering this connector instance as lazily started as well.
+<span class="nc" id="L146">				synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L147">					httpClient = this.httpClient;</span>
+<span class="nc bnc" id="L148" title="All 4 branches missed.">					if (httpClient == null &amp;&amp; this.lazyStart) {</span>
+<span class="nc" id="L149">						httpClient = createHttpClient(this.resourceFactory, this.mapper);</span>
+<span class="nc" id="L150">						this.httpClient = httpClient;</span>
+<span class="nc" id="L151">						this.lazyStart = false;</span>
+					}
+<span class="nc" id="L153">				}</span>
+			}
+<span class="nc bnc" id="L155" title="All 2 branches missed.">			if (httpClient == null) {</span>
+<span class="nc" id="L156">				httpClient = createHttpClient(this.resourceFactory, this.mapper);</span>
+			}
+		}
+
+<span class="nc" id="L160">		HttpClient.RequestSender requestSender = httpClient</span>
+<span class="nc" id="L161">				.request(io.netty.handler.codec.http.HttpMethod.valueOf(method.name()));</span>
+
+<span class="nc" id="L163">		requestSender = setUri(requestSender, uri);</span>
+<span class="nc" id="L164">		AtomicReference&lt;ReactorClientHttpResponse&gt; responseRef = new AtomicReference&lt;&gt;();</span>
+
+<span class="nc" id="L166">		return requestSender</span>
+<span class="nc" id="L167">				.send((request, outbound) -&gt; requestCallback.apply(adaptRequest(method, uri, request, outbound)))</span>
+<span class="nc" id="L168">				.responseConnection((response, connection) -&gt; {</span>
+<span class="nc" id="L169">					ReactorClientHttpResponse clientResponse = new ReactorClientHttpResponse(response, connection);</span>
+<span class="nc" id="L170">					responseRef.set(clientResponse);</span>
+<span class="nc" id="L171">					registerAttributeCallback(connection);</span>
+<span class="nc" id="L172">					return Mono.just((ClientHttpResponse) clientResponse);</span>
+				})
+<span class="nc" id="L174">				.next()</span>
+<span class="nc" id="L175">				.doOnCancel(() -&gt; {</span>
+<span class="nc" id="L176">					ReactorClientHttpResponse response = responseRef.get();</span>
+<span class="nc bnc" id="L177" title="All 2 branches missed.">					if (response != null) {</span>
+<span class="nc" id="L178">						response.releaseAfterCancel(method);</span>
+					}
+<span class="nc" id="L180">				});</span>
+	}
+
+	private static HttpClient.RequestSender setUri(HttpClient.RequestSender requestSender, URI uri) {
+<span class="nc bnc" id="L184" title="All 2 branches missed.">		if (uri.isAbsolute()) {</span>
+			try {
+<span class="nc" id="L186">				return requestSender.uri(uri);</span>
+			}
+<span class="nc" id="L188">			catch (Exception ex) {</span>
+				// Fall back on passing it in as a String
+			}
+		}
+<span class="nc" id="L192">		return requestSender.uri(uri.toString());</span>
+	}
+
+	private ReactorClientHttpRequest adaptRequest(HttpMethod method, URI uri, HttpClientRequest request,
+			NettyOutbound nettyOutbound) {
+
+<span class="nc" id="L198">		return new ReactorClientHttpRequest(method, uri, request, nettyOutbound);</span>
+	}
+
+	private static void registerAttributeCallback(Connection connection) {
+<span class="nc" id="L202">		connection.onTerminate().subscribe(aVoid -&gt; {},</span>
+<span class="nc" id="L203">				ex -&gt; clearAttribute(connection), () -&gt; clearAttribute(connection));</span>
+<span class="nc" id="L204">	}</span>
+
+	private static void clearAttribute(Connection connection) {
+		// Deprecation note on remove method: consider using set(Object) (with value of null)
+<span class="nc" id="L208">		connection.channel().attr(ATTRIBUTES_KEY).set(null);</span>
+<span class="nc" id="L209">	}</span>
+
+
+	@Override
+	public void start() {
+<span class="nc bnc" id="L214" title="All 4 branches missed.">		if (this.resourceFactory != null &amp;&amp; this.mapper != null) {</span>
+<span class="nc" id="L215">			synchronized (this.lifecycleMonitor) {</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">				if (this.httpClient == null) {</span>
+<span class="nc" id="L217">					this.httpClient = createHttpClient(this.resourceFactory, this.mapper);</span>
+<span class="nc" id="L218">					this.lazyStart = false;</span>
+				}
+<span class="nc" id="L220">			}</span>
+		}
+		else {
+<span class="nc" id="L223">			logger.warn(&quot;Restarting a ReactorClientHttpConnector bean is only supported &quot; +</span>
+					&quot;with externally managed Reactor Netty resources&quot;);
+		}
+<span class="nc" id="L226">	}</span>
+
+	@Override
+	public void stop() {
+<span class="nc bnc" id="L230" title="All 4 branches missed.">		if (this.resourceFactory != null &amp;&amp; this.mapper != null) {</span>
+<span class="nc" id="L231">			synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L232">				this.httpClient = null;</span>
+<span class="nc" id="L233">				this.lazyStart = false;</span>
+<span class="nc" id="L234">			}</span>
+		}
+<span class="nc" id="L236">	}</span>
+
+	@Override
+	public boolean isRunning() {
+<span class="nc bnc" id="L240" title="All 2 branches missed.">		return (this.httpClient != null);</span>
+	}
+
+	@Override
+	public int getPhase() {
+		// Start after ReactorResourceFactory
+<span class="nc" id="L246">		return 1;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

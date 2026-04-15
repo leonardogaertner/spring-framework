@@ -1,0 +1,849 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HibernateTransactionManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.orm.jpa.hibernate</a> &gt; <span class="el_source">HibernateTransactionManager.java</span></div><h1>HibernateTransactionManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.orm.jpa.hibernate;
+
+import java.sql.Connection;
+import java.util.function.Consumer;
+
+import javax.sql.DataSource;
+
+import org.hibernate.ConnectionReleaseMode;
+import org.hibernate.FlushMode;
+import org.hibernate.HibernateException;
+import org.hibernate.Interceptor;
+import org.hibernate.Session;
+import org.hibernate.SessionFactory;
+import org.hibernate.Transaction;
+import org.hibernate.engine.spi.SessionImplementor;
+import org.hibernate.resource.transaction.spi.TransactionStatus;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.support.DataAccessUtils;
+import org.springframework.jdbc.datasource.ConnectionHolder;
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.jdbc.datasource.JdbcTransactionObjectSupport;
+import org.springframework.jdbc.datasource.TransactionAwareDataSourceProxy;
+import org.springframework.orm.jpa.EntityManagerFactoryUtils;
+import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.IllegalTransactionStateException;
+import org.springframework.transaction.InvalidIsolationLevelException;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionSystemException;
+import org.springframework.transaction.support.AbstractPlatformTransactionManager;
+import org.springframework.transaction.support.DefaultTransactionStatus;
+import org.springframework.transaction.support.ResourceTransactionManager;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.util.Assert;
+
+/**
+ * {@link org.springframework.transaction.PlatformTransactionManager}
+ * implementation for a single Hibernate {@link SessionFactory}.
+ * Binds a Hibernate Session from the specified factory to the thread,
+ * potentially allowing for one thread-bound Session per factory.
+ * {@code SessionFactory.getCurrentSession()} is required for Hibernate
+ * access code that needs to support this transaction handling mechanism,
+ * with the SessionFactory being configured with {@link SpringSessionContext}.
+ *
+ * &lt;p&gt;Supports custom isolation levels, and timeouts that get applied as
+ * Hibernate transaction timeouts.
+ *
+ * &lt;p&gt;This transaction manager is appropriate for applications that use a single
+ * Hibernate SessionFactory for transactional data access, but it also supports
+ * direct DataSource access within a transaction (i.e. plain JDBC code working
+ * with the same DataSource). This allows for mixing services which access Hibernate
+ * and services which use plain JDBC (without being aware of Hibernate)!
+ * Application code needs to stick to the same simple Connection lookup pattern as
+ * with {@link org.springframework.jdbc.datasource.DataSourceTransactionManager}
+ * (i.e. {@link DataSourceUtils#getConnection}
+ * or going through a
+ * {@link TransactionAwareDataSourceProxy}).
+ *
+ * &lt;p&gt;Note: To be able to register a DataSource's Connection for plain JDBC code,
+ * this instance needs to be aware of the DataSource ({@link #setDataSource}).
+ * The given DataSource should obviously match the one used by the given SessionFactory.
+ *
+ * &lt;p&gt;JTA (usually through {@link org.springframework.transaction.jta.JtaTransactionManager})
+ * is necessary for accessing multiple transactional resources within the same
+ * transaction. The DataSource that Hibernate uses needs to be JTA-enabled in
+ * such a scenario (see container setup).
+ *
+ * &lt;p&gt;This transaction manager supports nested transactions via JDBC Savepoints.
+ * The {@link #setNestedTransactionAllowed &quot;nestedTransactionAllowed&quot;} flag defaults
+ * to &quot;false&quot;, though, as nested transactions will just apply to the JDBC Connection,
+ * not to the Hibernate Session and its cached entity objects and related context.
+ * You can manually set the flag to &quot;true&quot; if you want to use nested transactions
+ * for JDBC access code which participates in Hibernate transactions (provided that
+ * your JDBC driver supports savepoints). &lt;i&gt;Note that Hibernate itself does not
+ * support nested transactions! Hence, do not expect Hibernate access code to
+ * semantically participate in a nested transaction.&lt;/i&gt;
+ *
+ * @author Juergen Hoeller
+ * @since 7.0
+ * @see #setSessionFactory
+ * @see SessionFactory#getCurrentSession()
+ * @see org.springframework.jdbc.core.JdbcTemplate
+ * @see org.springframework.jdbc.support.JdbcTransactionManager
+ * @see org.springframework.orm.jpa.JpaTransactionManager
+ * @see org.springframework.orm.jpa.vendor.HibernateJpaDialect
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class HibernateTransactionManager extends AbstractPlatformTransactionManager
+		implements ResourceTransactionManager, BeanFactoryAware, InitializingBean {
+
+<span class="pc" id="L113">	private final HibernateExceptionTranslator exceptionTranslator = new HibernateExceptionTranslator();</span>
+
+	private @Nullable SessionFactory sessionFactory;
+
+	private @Nullable DataSource dataSource;
+
+<span class="pc" id="L119">	private boolean autodetectDataSource = true;</span>
+
+<span class="pc" id="L121">	private boolean prepareConnection = true;</span>
+
+<span class="pc" id="L123">	private boolean hibernateManagedSession = false;</span>
+
+	private @Nullable Consumer&lt;Session&gt; sessionInitializer;
+
+	private @Nullable Object entityInterceptor;
+
+	/**
+	 * Just needed for entityInterceptorBeanName.
+	 * @see #setEntityInterceptorBeanName
+	 */
+	private @Nullable BeanFactory beanFactory;
+
+
+	/**
+	 * Create a new HibernateTransactionManager instance.
+	 * A SessionFactory has to be set to be able to use it.
+	 * @see #setSessionFactory
+	 */
+<span class="fc" id="L141">	public HibernateTransactionManager() {</span>
+<span class="fc" id="L142">	}</span>
+
+	/**
+	 * Create a new HibernateTransactionManager instance.
+	 * @param sessionFactory the SessionFactory to manage transactions for
+	 */
+<span class="nc" id="L148">	public HibernateTransactionManager(SessionFactory sessionFactory) {</span>
+<span class="nc" id="L149">		this.sessionFactory = sessionFactory;</span>
+<span class="nc" id="L150">		afterPropertiesSet();</span>
+<span class="nc" id="L151">	}</span>
+
+
+	/**
+	 * Set the SessionFactory that this instance should manage transactions for.
+	 */
+	public void setSessionFactory(@Nullable SessionFactory sessionFactory) {
+<span class="fc" id="L158">		this.sessionFactory = sessionFactory;</span>
+<span class="fc" id="L159">	}</span>
+
+	/**
+	 * Return the SessionFactory that this instance should manage transactions for.
+	 */
+	public @Nullable SessionFactory getSessionFactory() {
+<span class="fc" id="L165">		return this.sessionFactory;</span>
+	}
+
+	/**
+	 * Obtain the SessionFactory for actual use.
+	 * @return the SessionFactory (never {@code null})
+	 * @throws IllegalStateException in case of no SessionFactory set
+	 */
+	protected final SessionFactory obtainSessionFactory() {
+<span class="fc" id="L174">		SessionFactory sessionFactory = getSessionFactory();</span>
+<span class="pc bpc" id="L175" title="1 of 2 branches missed.">		Assert.state(sessionFactory != null, &quot;No SessionFactory set&quot;);</span>
+<span class="fc" id="L176">		return sessionFactory;</span>
+	}
+
+	/**
+	 * Set the JDBC DataSource that this instance should manage transactions for.
+	 * &lt;p&gt;The DataSource should match the one used by the Hibernate SessionFactory:
+	 * for example, you could specify the same JNDI DataSource for both.
+	 * &lt;p&gt;If the SessionFactory was configured with LocalDataSourceConnectionProvider,
+	 * i.e. by Spring's LocalSessionFactoryBean with a specified &quot;dataSource&quot;,
+	 * the DataSource will be auto-detected. You can still explicitly specify the
+	 * DataSource, but you don't need to in this case.
+	 * &lt;p&gt;A transactional JDBC Connection for this DataSource will be provided to
+	 * application code accessing this DataSource directly via DataSourceUtils
+	 * or JdbcTemplate. The Connection will be taken from the Hibernate Session.
+	 * &lt;p&gt;The DataSource specified here should be the target DataSource to manage
+	 * transactions for, not a TransactionAwareDataSourceProxy. Only data access
+	 * code may work with TransactionAwareDataSourceProxy, while the transaction
+	 * manager needs to work on the underlying target DataSource. If there's
+	 * nevertheless a TransactionAwareDataSourceProxy passed in, it will be
+	 * unwrapped to extract its target DataSource.
+	 * &lt;p&gt;&lt;b&gt;NOTE: For scenarios with many transactions that just read data from
+	 * Hibernate's cache (and do not actually access the database), consider using
+	 * a {@link org.springframework.jdbc.datasource.LazyConnectionDataSourceProxy}
+	 * for the actual target DataSource. Alternatively, consider switching
+	 * {@link #setPrepareConnection &quot;prepareConnection&quot;} to {@code false}.&lt;/b&gt;
+	 * In both cases, this transaction manager will not eagerly acquire a
+	 * JDBC Connection for each Hibernate Session.
+	 * @see #setAutodetectDataSource
+	 * @see TransactionAwareDataSourceProxy
+	 * @see org.springframework.jdbc.datasource.LazyConnectionDataSourceProxy
+	 * @see org.springframework.jdbc.core.JdbcTemplate
+	 */
+	public void setDataSource(@Nullable DataSource dataSource) {
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">		if (dataSource instanceof TransactionAwareDataSourceProxy proxy) {</span>
+			// If we got a TransactionAwareDataSourceProxy, we need to perform transactions
+			// for its underlying target DataSource, else data access code won't see
+			// properly exposed transactions (i.e. transactions for the target DataSource).
+<span class="nc" id="L213">			this.dataSource = proxy.getTargetDataSource();</span>
+		}
+		else {
+<span class="fc" id="L216">			this.dataSource = dataSource;</span>
+		}
+<span class="fc" id="L218">	}</span>
+
+	/**
+	 * Return the JDBC DataSource that this instance manages transactions for.
+	 */
+	public @Nullable DataSource getDataSource() {
+<span class="fc" id="L224">		return this.dataSource;</span>
+	}
+
+	/**
+	 * Set whether to autodetect a JDBC DataSource used by the Hibernate SessionFactory,
+	 * if set via LocalSessionFactoryBean's {@code setDataSource}. Default is &quot;true&quot;.
+	 * &lt;p&gt;Can be turned off to deliberately ignore an available DataSource, in order
+	 * to not expose Hibernate transactions as JDBC transactions for that DataSource.
+	 * @see #setDataSource
+	 */
+	public void setAutodetectDataSource(boolean autodetectDataSource) {
+<span class="nc" id="L235">		this.autodetectDataSource = autodetectDataSource;</span>
+<span class="nc" id="L236">	}</span>
+
+	/**
+	 * Set whether to prepare the underlying JDBC Connection of a transactional
+	 * Hibernate Session, that is, whether to apply a transaction-specific
+	 * isolation level and/or the transaction's read-only flag to the underlying
+	 * JDBC Connection.
+	 * &lt;p&gt;Default is &quot;true&quot;. If you turn this flag off, the transaction manager
+	 * will not support per-transaction isolation levels anymore. It will not
+	 * call {@code Connection.setReadOnly(true)} for read-only transactions
+	 * anymore either. If this flag is turned off, no cleanup of a JDBC Connection
+	 * is required after a transaction, since no Connection settings will get modified.
+	 * @see Connection#setTransactionIsolation
+	 * @see Connection#setReadOnly
+	 */
+	public void setPrepareConnection(boolean prepareConnection) {
+<span class="nc" id="L252">		this.prepareConnection = prepareConnection;</span>
+<span class="nc" id="L253">	}</span>
+
+	/**
+	 * Set whether to operate on a Hibernate-managed Session instead of a
+	 * Spring-managed Session, that is, whether to obtain the Session through
+	 * Hibernate's {@link SessionFactory#getCurrentSession()} instead of
+	 * {@link SessionFactory#openSession()} (with a Spring
+	 * {@link TransactionSynchronizationManager} check preceding it).
+	 * &lt;p&gt;Default is &quot;false&quot;, i.e. using a Spring-managed Session: taking the current
+	 * thread-bound Session if available (for example, in an Open-Session-in-View scenario),
+	 * creating a new Session for the current transaction otherwise.
+	 * &lt;p&gt;Switch this flag to &quot;true&quot; in order to enforce use of a Hibernate-managed Session.
+	 * Note that this requires {@link SessionFactory#getCurrentSession()}
+	 * to always return a proper Session when called for a Spring-managed transaction;
+	 * transaction begin will fail if the {@code getCurrentSession()} call fails.
+	 * &lt;p&gt;This mode will typically be used in combination with a custom Hibernate
+	 * {@link org.hibernate.context.spi.CurrentSessionContext} implementation that stores
+	 * Sessions in a place other than Spring's TransactionSynchronizationManager.
+	 * It may also be used in combination with Spring's Open-Session-in-View support
+	 * (using Spring's default {@link SpringSessionContext}), in which case it subtly
+	 * differs from the Spring-managed Session mode: The pre-bound Session will &lt;i&gt;not&lt;/i&gt;
+	 * receive a {@code clear()} call (on rollback) or a {@code disconnect()}
+	 * call (on transaction completion) in such a scenario; this is rather left up
+	 * to a custom CurrentSessionContext implementation (if desired).
+	 */
+	public void setHibernateManagedSession(boolean hibernateManagedSession) {
+<span class="nc" id="L279">		this.hibernateManagedSession = hibernateManagedSession;</span>
+<span class="nc" id="L280">	}</span>
+
+	/**
+	 * Specify a callback for customizing every Hibernate {@code Session} resource
+	 * created for a new transaction managed by this {@code HibernateTransactionManager}.
+	 * &lt;p&gt;This enables convenient customizations for application purposes, for example,
+	 * setting Hibernate filters.
+	 * @see Session#enableFilter
+	 */
+	public void setSessionInitializer(Consumer&lt;Session&gt; sessionInitializer) {
+<span class="nc" id="L290">		this.sessionInitializer = sessionInitializer;</span>
+<span class="nc" id="L291">	}</span>
+
+	/**
+	 * Set the bean name of a Hibernate entity interceptor that allows to inspect
+	 * and change property values before writing to and reading from the database.
+	 * Will get applied to any new Session created by this transaction manager.
+	 * &lt;p&gt;Requires the bean factory to be known, to be able to resolve the bean
+	 * name to an interceptor instance on session creation. Typically used for
+	 * prototype interceptors, i.e. a new interceptor instance per session.
+	 * &lt;p&gt;Can also be used for shared interceptor instances, but it is recommended
+	 * to set the interceptor reference directly in such a scenario.
+	 * @param entityInterceptorBeanName the name of the entity interceptor in
+	 * the bean factory
+	 * @see #setBeanFactory
+	 * @see #setEntityInterceptor
+	 */
+	public void setEntityInterceptorBeanName(String entityInterceptorBeanName) {
+<span class="nc" id="L308">		this.entityInterceptor = entityInterceptorBeanName;</span>
+<span class="nc" id="L309">	}</span>
+
+	/**
+	 * Set a Hibernate entity interceptor that allows to inspect and change
+	 * property values before writing to and reading from the database.
+	 * Will get applied to any new Session created by this transaction manager.
+	 * &lt;p&gt;Such an interceptor can either be set at the SessionFactory level,
+	 * i.e. on LocalSessionFactoryBean, or at the Session level, i.e. on
+	 * HibernateTransactionManager.
+	 * @see LocalSessionFactoryBean#setEntityInterceptor
+	 */
+	public void setEntityInterceptor(@Nullable Interceptor entityInterceptor) {
+<span class="nc" id="L321">		this.entityInterceptor = entityInterceptor;</span>
+<span class="nc" id="L322">	}</span>
+
+	/**
+	 * Return the current Hibernate entity interceptor, or {@code null} if none.
+	 * Resolves an entity interceptor bean name via the bean factory,
+	 * if necessary.
+	 * @throws IllegalStateException if bean name specified but no bean factory set
+	 * @throws BeansException if bean name resolution via the bean factory failed
+	 * @see #setEntityInterceptor
+	 * @see #setEntityInterceptorBeanName
+	 * @see #setBeanFactory
+	 */
+	public @Nullable Interceptor getEntityInterceptor() throws IllegalStateException, BeansException {
+<span class="pc bpc" id="L335" title="1 of 2 branches missed.">		if (this.entityInterceptor instanceof Interceptor interceptor) {</span>
+<span class="nc" id="L336">			return interceptor;</span>
+		}
+<span class="pc bpc" id="L338" title="1 of 2 branches missed.">		else if (this.entityInterceptor instanceof String beanName) {</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">			if (this.beanFactory == null) {</span>
+<span class="nc" id="L340">				throw new IllegalStateException(&quot;Cannot get entity interceptor via bean name if no bean factory set&quot;);</span>
+			}
+<span class="nc" id="L342">			return this.beanFactory.getBean(beanName, Interceptor.class);</span>
+		}
+		else {
+<span class="fc" id="L345">			return null;</span>
+		}
+	}
+
+	/**
+	 * The bean factory just needs to be known for resolving entity interceptor
+	 * bean names. It does not need to be set for any other mode of operation.
+	 * @see #setEntityInterceptorBeanName
+	 */
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="fc" id="L356">		this.beanFactory = beanFactory;</span>
+<span class="fc" id="L357">	}</span>
+
+	@Override
+	public void afterPropertiesSet() {
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">		if (getSessionFactory() == null) {</span>
+<span class="nc" id="L362">			throw new IllegalArgumentException(&quot;Property 'sessionFactory' is required&quot;);</span>
+		}
+<span class="pc bpc" id="L364" title="3 of 4 branches missed.">		if (this.entityInterceptor instanceof String &amp;&amp; this.beanFactory == null) {</span>
+<span class="nc" id="L365">			throw new IllegalArgumentException(&quot;Property 'beanFactory' is required for 'entityInterceptorBeanName'&quot;);</span>
+		}
+
+		// Check for SessionFactory's DataSource.
+<span class="pc bpc" id="L369" title="2 of 4 branches missed.">		if (this.autodetectDataSource &amp;&amp; getDataSource() == null) {</span>
+<span class="fc" id="L370">			DataSource sfds = SpringSessionContext.determineDataSource(obtainSessionFactory());</span>
+<span class="pc bpc" id="L371" title="1 of 2 branches missed.">			if (sfds != null) {</span>
+				// Use the SessionFactory's DataSource for exposing transactions to JDBC code.
+<span class="pc bpc" id="L373" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L374">					logger.debug(&quot;Using DataSource [&quot; + sfds +</span>
+							&quot;] of Hibernate SessionFactory for HibernateTransactionManager&quot;);
+				}
+<span class="fc" id="L377">				setDataSource(sfds);</span>
+			}
+		}
+<span class="fc" id="L380">	}</span>
+
+
+	@Override
+	public Object getResourceFactory() {
+<span class="nc" id="L385">		return obtainSessionFactory();</span>
+	}
+
+	@Override
+	protected Object doGetTransaction() {
+<span class="fc" id="L390">		HibernateTransactionObject txObject = new HibernateTransactionObject();</span>
+<span class="fc" id="L391">		txObject.setSavepointAllowed(isNestedTransactionAllowed());</span>
+
+<span class="fc" id="L393">		SessionFactory sessionFactory = obtainSessionFactory();</span>
+<span class="fc" id="L394">		SessionHolder sessionHolder =</span>
+<span class="fc" id="L395">				(SessionHolder) TransactionSynchronizationManager.getResource(sessionFactory);</span>
+<span class="fc bfc" id="L396" title="All 2 branches covered.">		if (sessionHolder != null) {</span>
+<span class="pc bpc" id="L397" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L398">				logger.debug(&quot;Found thread-bound Session [&quot; + sessionHolder.getSession() + &quot;] for Hibernate transaction&quot;);</span>
+			}
+<span class="fc" id="L400">			txObject.setSessionHolder(sessionHolder);</span>
+		}
+<span class="pc bpc" id="L402" title="1 of 2 branches missed.">		else if (this.hibernateManagedSession) {</span>
+			try {
+<span class="nc" id="L404">				Session session = sessionFactory.getCurrentSession();</span>
+<span class="nc bnc" id="L405" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L406">					logger.debug(&quot;Found Hibernate-managed Session [&quot; + session + &quot;] for Spring-managed transaction&quot;);</span>
+				}
+<span class="nc" id="L408">				txObject.setExistingSession(session);</span>
+			}
+<span class="nc" id="L410">			catch (HibernateException ex) {</span>
+<span class="nc" id="L411">				throw new DataAccessResourceFailureException(</span>
+						&quot;Could not obtain Hibernate-managed Session for Spring-managed transaction&quot;, ex);
+<span class="nc" id="L413">			}</span>
+		}
+
+<span class="pc bpc" id="L416" title="1 of 2 branches missed.">		if (getDataSource() != null) {</span>
+<span class="fc" id="L417">			ConnectionHolder conHolder = (ConnectionHolder)</span>
+<span class="fc" id="L418">					TransactionSynchronizationManager.getResource(getDataSource());</span>
+<span class="fc" id="L419">			txObject.setConnectionHolder(conHolder);</span>
+		}
+
+<span class="fc" id="L422">		return txObject;</span>
+	}
+
+	@Override
+	protected boolean isExistingTransaction(Object transaction) {
+<span class="fc" id="L427">		HibernateTransactionObject txObject = (HibernateTransactionObject) transaction;</span>
+<span class="pc bpc" id="L428" title="1 of 4 branches missed.">		return (txObject.hasSpringManagedTransaction() ||</span>
+<span class="pc bnc" id="L429" title="All 2 branches missed.">				(this.hibernateManagedSession &amp;&amp; txObject.hasHibernateManagedTransaction()));</span>
+	}
+
+	@Override
+	protected void doBegin(Object transaction, TransactionDefinition definition) {
+<span class="fc" id="L434">		HibernateTransactionObject txObject = (HibernateTransactionObject) transaction;</span>
+
+<span class="pc bpc" id="L436" title="3 of 4 branches missed.">		if (txObject.hasConnectionHolder() &amp;&amp; !txObject.getConnectionHolder().isSynchronizedWithTransaction()) {</span>
+<span class="nc" id="L437">			throw new IllegalTransactionStateException(</span>
+					&quot;Pre-bound JDBC Connection found! HibernateTransactionManager does not support &quot; +
+					&quot;running within DataSourceTransactionManager if told to manage the DataSource itself. &quot; +
+					&quot;It is recommended to use a single HibernateTransactionManager for all transactions &quot; +
+					&quot;on a single DataSource, no matter whether Hibernate or JDBC access.&quot;);
+		}
+
+<span class="fc" id="L444">		SessionImplementor session = null;</span>
+
+		try {
+<span class="pc bpc" id="L447" title="3 of 4 branches missed.">			if (!txObject.hasSessionHolder() || txObject.getSessionHolder().isSynchronizedWithTransaction()) {</span>
+<span class="fc" id="L448">				Interceptor entityInterceptor = getEntityInterceptor();</span>
+<span class="pc bpc" id="L449" title="1 of 2 branches missed.">				Session newSession = (entityInterceptor != null ?</span>
+<span class="nc" id="L450">						obtainSessionFactory().withOptions().interceptor(entityInterceptor).openSession() :</span>
+<span class="fc" id="L451">						obtainSessionFactory().openSession());</span>
+<span class="pc bpc" id="L452" title="1 of 2 branches missed.">				if (this.sessionInitializer != null) {</span>
+<span class="nc" id="L453">					this.sessionInitializer.accept(newSession);</span>
+				}
+<span class="pc bpc" id="L455" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L456">					logger.debug(&quot;Opened new Session [&quot; + newSession + &quot;] for Hibernate transaction&quot;);</span>
+				}
+<span class="fc" id="L458">				txObject.setSession(newSession);</span>
+			}
+
+<span class="fc" id="L461">			session = txObject.getSessionHolder().getSession().unwrap(SessionImplementor.class);</span>
+
+<span class="fc bfc" id="L463" title="All 2 branches covered.">			boolean isolationLevelNeeded = (definition.getIsolationLevel() != TransactionDefinition.ISOLATION_DEFAULT);</span>
+<span class="fc bfc" id="L464" title="All 4 branches covered.">			if (isolationLevelNeeded || definition.isReadOnly()) {</span>
+<span class="pc bpc" id="L465" title="2 of 4 branches missed.">				if (this.prepareConnection &amp;&amp; ConnectionReleaseMode.ON_CLOSE.equals(</span>
+<span class="fc" id="L466">						session.getJdbcCoordinator().getLogicalConnection().getConnectionHandlingMode().getReleaseMode())) {</span>
+					// We're allowed to change the transaction settings of the JDBC Connection.
+<span class="pc bpc" id="L468" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L469">						logger.debug(&quot;Preparing JDBC Connection of Hibernate Session [&quot; + session + &quot;]&quot;);</span>
+					}
+<span class="fc" id="L471">					Connection con = session.getJdbcCoordinator().getLogicalConnection().getPhysicalConnection();</span>
+<span class="fc" id="L472">					Integer previousIsolationLevel = DataSourceUtils.prepareConnectionForTransaction(con, definition);</span>
+<span class="fc" id="L473">					txObject.setPreviousIsolationLevel(previousIsolationLevel);</span>
+<span class="fc" id="L474">					txObject.setReadOnly(definition.isReadOnly());</span>
+<span class="fc" id="L475">					txObject.connectionPrepared();</span>
+<span class="fc" id="L476">				}</span>
+				else {
+					// Not allowed to change the transaction settings of the JDBC Connection.
+<span class="nc bnc" id="L479" title="All 2 branches missed.">					if (isolationLevelNeeded) {</span>
+						// We should set a specific isolation level but are not allowed to...
+<span class="nc" id="L481">						throw new InvalidIsolationLevelException(</span>
+								&quot;HibernateTransactionManager is not allowed to support custom isolation levels: &quot; +
+								&quot;make sure that its 'prepareConnection' flag is on (the default) and that the &quot; +
+								&quot;Hibernate connection release mode is set to ON_CLOSE.&quot;);
+					}
+<span class="nc bnc" id="L486" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L487">						logger.debug(&quot;Not preparing JDBC Connection of Hibernate Session [&quot; + session + &quot;]&quot;);</span>
+					}
+				}
+			}
+
+<span class="pc bpc" id="L492" title="1 of 4 branches missed.">			if (definition.isReadOnly() &amp;&amp; txObject.isNewSession()) {</span>
+				// Just set to MANUAL in case of a new Session for this transaction.
+<span class="fc" id="L494">				session.setHibernateFlushMode(FlushMode.MANUAL);</span>
+				// We're also setting Hibernate's read-only entity mode by default.
+<span class="fc" id="L496">				session.setDefaultReadOnly(true);</span>
+			}
+
+<span class="pc bpc" id="L499" title="1 of 4 branches missed.">			if (!definition.isReadOnly() &amp;&amp; !txObject.isNewSession()) {</span>
+				// We need AUTO or COMMIT for a non-read-only transaction.
+<span class="nc" id="L501">				FlushMode flushMode = session.getHibernateFlushMode();</span>
+<span class="nc bnc" id="L502" title="All 2 branches missed.">				if (FlushMode.MANUAL.equals(flushMode)) {</span>
+<span class="nc" id="L503">					session.setHibernateFlushMode(FlushMode.AUTO);</span>
+<span class="nc" id="L504">					txObject.getSessionHolder().setPreviousFlushMode(flushMode);</span>
+				}
+			}
+
+			Transaction hibTx;
+
+			// Register transaction timeout.
+<span class="fc" id="L511">			int timeout = determineTimeout(definition);</span>
+<span class="pc bpc" id="L512" title="1 of 2 branches missed.">			if (timeout != TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+<span class="nc" id="L513">				hibTx = session.getTransaction();</span>
+<span class="nc" id="L514">				hibTx.setTimeout(timeout);</span>
+<span class="nc" id="L515">				hibTx.begin();</span>
+			}
+			else {
+				// Open a plain Hibernate transaction without specified timeout.
+<span class="fc" id="L519">				hibTx = session.beginTransaction();</span>
+			}
+
+			// Add the Hibernate transaction to the session holder.
+<span class="fc" id="L523">			txObject.getSessionHolder().setTransaction(hibTx);</span>
+
+			// Register the Hibernate Session's JDBC Connection for the DataSource, if set.
+<span class="pc bpc" id="L526" title="1 of 2 branches missed.">			if (getDataSource() != null) {</span>
+<span class="fc" id="L527">				final SessionImplementor sessionToUse = session;</span>
+<span class="fc" id="L528">				ConnectionHolder conHolder = new ConnectionHolder(</span>
+<span class="fc" id="L529">						() -&gt; sessionToUse.getJdbcCoordinator().getLogicalConnection().getPhysicalConnection());</span>
+<span class="pc bpc" id="L530" title="1 of 2 branches missed.">				if (timeout != TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+<span class="nc" id="L531">					conHolder.setTimeoutInSeconds(timeout);</span>
+				}
+<span class="pc bpc" id="L533" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L534">					logger.debug(&quot;Exposing Hibernate transaction as JDBC [&quot; + conHolder.getConnectionHandle() + &quot;]&quot;);</span>
+				}
+<span class="fc" id="L536">				TransactionSynchronizationManager.bindResource(getDataSource(), conHolder);</span>
+<span class="fc" id="L537">				txObject.setConnectionHolder(conHolder);</span>
+			}
+
+			// Bind the session holder to the thread.
+<span class="pc bpc" id="L541" title="1 of 2 branches missed.">			if (txObject.isNewSessionHolder()) {</span>
+<span class="fc" id="L542">				TransactionSynchronizationManager.bindResource(obtainSessionFactory(), txObject.getSessionHolder());</span>
+			}
+<span class="fc" id="L544">			txObject.getSessionHolder().setSynchronizedWithTransaction(true);</span>
+		}
+
+<span class="nc" id="L547">		catch (Throwable ex) {</span>
+<span class="nc bnc" id="L548" title="All 2 branches missed.">			if (txObject.isNewSession()) {</span>
+				try {
+<span class="nc bnc" id="L550" title="All 4 branches missed.">					if (session != null &amp;&amp; session.getTransaction().getStatus() == TransactionStatus.ACTIVE) {</span>
+<span class="nc" id="L551">						session.getTransaction().rollback();</span>
+					}
+				}
+<span class="nc" id="L554">				catch (Throwable ex2) {</span>
+<span class="nc" id="L555">					logger.debug(&quot;Could not rollback Session after failed transaction begin&quot;, ex);</span>
+				}
+				finally {
+<span class="nc" id="L558">					EntityManagerFactoryUtils.closeEntityManager(session);</span>
+<span class="nc" id="L559">					txObject.setSessionHolder(null);</span>
+				}
+			}
+<span class="nc" id="L562">			throw new CannotCreateTransactionException(&quot;Could not open Hibernate Session for transaction&quot;, ex);</span>
+<span class="fc" id="L563">		}</span>
+<span class="fc" id="L564">	}</span>
+
+	@Override
+	protected Object doSuspend(Object transaction) {
+<span class="nc" id="L568">		HibernateTransactionObject txObject = (HibernateTransactionObject) transaction;</span>
+<span class="nc" id="L569">		txObject.setSessionHolder(null);</span>
+<span class="nc" id="L570">		SessionHolder sessionHolder =</span>
+<span class="nc" id="L571">				(SessionHolder) TransactionSynchronizationManager.unbindResource(obtainSessionFactory());</span>
+<span class="nc" id="L572">		txObject.setConnectionHolder(null);</span>
+<span class="nc" id="L573">		ConnectionHolder connectionHolder = null;</span>
+<span class="nc bnc" id="L574" title="All 2 branches missed.">		if (getDataSource() != null) {</span>
+<span class="nc" id="L575">			connectionHolder = (ConnectionHolder) TransactionSynchronizationManager.unbindResource(getDataSource());</span>
+		}
+<span class="nc" id="L577">		return new SuspendedResourcesHolder(sessionHolder, connectionHolder);</span>
+	}
+
+	@Override
+	protected void doResume(@Nullable Object transaction, Object suspendedResources) {
+<span class="nc" id="L582">		SessionFactory sessionFactory = obtainSessionFactory();</span>
+
+<span class="nc" id="L584">		SuspendedResourcesHolder resourcesHolder = (SuspendedResourcesHolder) suspendedResources;</span>
+<span class="nc bnc" id="L585" title="All 2 branches missed.">		if (TransactionSynchronizationManager.hasResource(sessionFactory)) {</span>
+			// From non-transactional code running in active transaction synchronization
+			// -&gt; can be safely removed, will be closed on transaction completion.
+<span class="nc" id="L588">			TransactionSynchronizationManager.unbindResource(sessionFactory);</span>
+		}
+<span class="nc" id="L590">		TransactionSynchronizationManager.bindResource(sessionFactory, resourcesHolder.getSessionHolder());</span>
+<span class="nc" id="L591">		ConnectionHolder connectionHolder = resourcesHolder.getConnectionHolder();</span>
+<span class="nc bnc" id="L592" title="All 4 branches missed.">		if (connectionHolder != null &amp;&amp; getDataSource() != null) {</span>
+<span class="nc" id="L593">			TransactionSynchronizationManager.bindResource(getDataSource(), connectionHolder);</span>
+		}
+<span class="nc" id="L595">	}</span>
+
+	@Override
+	protected void doCommit(DefaultTransactionStatus status) {
+<span class="fc" id="L599">		HibernateTransactionObject txObject = (HibernateTransactionObject) status.getTransaction();</span>
+<span class="fc" id="L600">		Transaction hibTx = txObject.getSessionHolder().getTransaction();</span>
+<span class="pc bpc" id="L601" title="1 of 2 branches missed.">		Assert.state(hibTx != null, &quot;No Hibernate transaction&quot;);</span>
+<span class="pc bpc" id="L602" title="1 of 2 branches missed.">		if (status.isDebug()) {</span>
+<span class="nc" id="L603">			logger.debug(&quot;Committing Hibernate transaction on Session [&quot; +</span>
+<span class="nc" id="L604">					txObject.getSessionHolder().getSession() + &quot;]&quot;);</span>
+		}
+
+		try {
+<span class="fc" id="L608">			hibTx.commit();</span>
+		}
+<span class="nc" id="L610">		catch (org.hibernate.TransactionException ex) {</span>
+<span class="nc" id="L611">			DataAccessException dae = this.exceptionTranslator.translateExceptionIfPossible(ex);</span>
+<span class="nc bnc" id="L612" title="All 2 branches missed.">			if (dae != null) {</span>
+<span class="nc" id="L613">				throw dae;</span>
+			}
+<span class="nc" id="L615">			throw new TransactionSystemException(&quot;Could not commit Hibernate transaction&quot;, ex);</span>
+		}
+<span class="nc" id="L617">		catch (RuntimeException ex) {</span>
+			// Assumably failed to flush changes to database.
+<span class="nc" id="L619">			throw DataAccessUtils.translateIfNecessary(ex, this.exceptionTranslator);</span>
+<span class="fc" id="L620">		}</span>
+<span class="fc" id="L621">	}</span>
+
+	@Override
+	protected void doRollback(DefaultTransactionStatus status) {
+<span class="fc" id="L625">		HibernateTransactionObject txObject = (HibernateTransactionObject) status.getTransaction();</span>
+<span class="fc" id="L626">		Transaction hibTx = txObject.getSessionHolder().getTransaction();</span>
+<span class="pc bpc" id="L627" title="1 of 2 branches missed.">		Assert.state(hibTx != null, &quot;No Hibernate transaction&quot;);</span>
+<span class="pc bpc" id="L628" title="1 of 2 branches missed.">		if (status.isDebug()) {</span>
+<span class="nc" id="L629">			logger.debug(&quot;Rolling back Hibernate transaction on Session [&quot; +</span>
+<span class="nc" id="L630">					txObject.getSessionHolder().getSession() + &quot;]&quot;);</span>
+		}
+
+		try {
+<span class="fc" id="L634">			hibTx.rollback();</span>
+		}
+<span class="nc" id="L636">		catch (org.hibernate.TransactionException ex) {</span>
+<span class="nc" id="L637">			DataAccessException dae = this.exceptionTranslator.translateExceptionIfPossible(ex);</span>
+<span class="nc bnc" id="L638" title="All 2 branches missed.">			if (dae != null) {</span>
+<span class="nc" id="L639">				throw dae;</span>
+			}
+<span class="nc" id="L641">			throw new TransactionSystemException(&quot;Could not roll back Hibernate transaction&quot;, ex);</span>
+		}
+<span class="nc" id="L643">		catch (RuntimeException ex) {</span>
+			// Shouldn't really happen, as a rollback doesn't cause a flush.
+<span class="nc" id="L645">			throw DataAccessUtils.translateIfNecessary(ex, this.exceptionTranslator);</span>
+		}
+		finally {
+<span class="pc bpc" id="L648" title="3 of 4 branches missed.">			if (!txObject.isNewSession() &amp;&amp; !this.hibernateManagedSession) {</span>
+				// Clear all pending inserts/updates/deletes in the Session.
+				// Necessary for pre-bound Sessions, to avoid inconsistent state.
+<span class="nc" id="L651">				txObject.getSessionHolder().getSession().clear();</span>
+			}
+		}
+<span class="fc" id="L654">	}</span>
+
+	@Override
+	protected void doSetRollbackOnly(DefaultTransactionStatus status) {
+<span class="fc" id="L658">		HibernateTransactionObject txObject = (HibernateTransactionObject) status.getTransaction();</span>
+<span class="pc bpc" id="L659" title="1 of 2 branches missed.">		if (status.isDebug()) {</span>
+<span class="nc" id="L660">			logger.debug(&quot;Setting Hibernate transaction on Session [&quot; +</span>
+<span class="nc" id="L661">					txObject.getSessionHolder().getSession() + &quot;] rollback-only&quot;);</span>
+		}
+<span class="fc" id="L663">		txObject.setRollbackOnly();</span>
+<span class="fc" id="L664">	}</span>
+
+	@Override
+	protected void doCleanupAfterCompletion(Object transaction) {
+<span class="fc" id="L668">		HibernateTransactionObject txObject = (HibernateTransactionObject) transaction;</span>
+
+		// Remove the session holder from the thread.
+<span class="pc bpc" id="L671" title="1 of 2 branches missed.">		if (txObject.isNewSessionHolder()) {</span>
+<span class="fc" id="L672">			TransactionSynchronizationManager.unbindResource(obtainSessionFactory());</span>
+		}
+
+		// Remove the JDBC connection holder from the thread, if exposed.
+<span class="pc bpc" id="L676" title="1 of 2 branches missed.">		if (getDataSource() != null) {</span>
+<span class="fc" id="L677">			TransactionSynchronizationManager.unbindResource(getDataSource());</span>
+		}
+
+<span class="fc" id="L680">		SessionImplementor session = txObject.getSessionHolder().getSession().unwrap(SessionImplementor.class);</span>
+<span class="fc bfc" id="L681" title="All 2 branches covered.">		if (txObject.needsConnectionReset() &amp;&amp;</span>
+<span class="pc bpc" id="L682" title="1 of 2 branches missed.">				session.getJdbcCoordinator().getLogicalConnection().isPhysicallyConnected()) {</span>
+			// We're running with connection release mode ON_CLOSE: We're able to reset
+			// the isolation level and/or read-only flag of the JDBC Connection here.
+			// Else, we need to rely on the connection pool to perform proper cleanup.
+			try {
+<span class="fc" id="L687">				Connection con = session.getJdbcCoordinator().getLogicalConnection().getPhysicalConnection();</span>
+<span class="fc" id="L688">				DataSourceUtils.resetConnectionAfterTransaction(</span>
+<span class="fc" id="L689">						con, txObject.getPreviousIsolationLevel(), txObject.isReadOnly());</span>
+			}
+<span class="nc" id="L691">			catch (HibernateException ex) {</span>
+<span class="nc" id="L692">				logger.debug(&quot;Could not access JDBC Connection of Hibernate Session&quot;, ex);</span>
+			}
+<span class="nc" id="L694">			catch (Throwable ex) {</span>
+<span class="nc" id="L695">				logger.debug(&quot;Could not reset JDBC Connection after transaction&quot;, ex);</span>
+<span class="pc" id="L696">			}</span>
+		}
+
+<span class="pc bpc" id="L699" title="1 of 2 branches missed.">		if (txObject.isNewSession()) {</span>
+<span class="pc bpc" id="L700" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L701">				logger.debug(&quot;Closing Hibernate Session [&quot; + session + &quot;] after transaction&quot;);</span>
+			}
+<span class="fc" id="L703">			txObject.getSessionHolder().closeAll();</span>
+		}
+		else {
+<span class="nc bnc" id="L706" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L707">				logger.debug(&quot;Not closing pre-bound Hibernate Session [&quot; + session + &quot;] after transaction&quot;);</span>
+			}
+<span class="nc bnc" id="L709" title="All 2 branches missed.">			if (txObject.getSessionHolder().getPreviousFlushMode() != null) {</span>
+<span class="nc" id="L710">				session.setHibernateFlushMode(txObject.getSessionHolder().getPreviousFlushMode());</span>
+			}
+<span class="nc bnc" id="L712" title="All 2 branches missed.">			if (!this.hibernateManagedSession) {</span>
+<span class="nc" id="L713">				disconnectOnCompletion(session);</span>
+			}
+		}
+<span class="fc" id="L716">		txObject.getSessionHolder().clear();</span>
+<span class="fc" id="L717">	}</span>
+
+	/**
+	 * Disconnect a pre-existing Hibernate Session on transaction completion,
+	 * returning its database connection but preserving its entity state.
+	 * &lt;p&gt;The default implementation triggers a manual disconnect. Subclasses
+	 * may override this with a no-op or with fine-tuned disconnection logic.
+	 * @param session the Hibernate Session to disconnect
+	 */
+	protected void disconnectOnCompletion(Session session) {
+<span class="nc bnc" id="L727" title="All 2 branches missed.">		if (session instanceof SessionImplementor sessionImpl) {</span>
+<span class="nc" id="L728">			sessionImpl.getJdbcCoordinator().getLogicalConnection().manualDisconnect();</span>
+		}
+<span class="nc" id="L730">	}</span>
+
+
+	/**
+	 * Hibernate transaction object, representing a SessionHolder.
+	 * &lt;p&gt;Used as transaction object by HibernateTransactionManager.
+	 */
+<span class="fc" id="L737">	private class HibernateTransactionObject extends JdbcTransactionObjectSupport {</span>
+
+		private @Nullable SessionHolder sessionHolder;
+
+		private boolean newSessionHolder;
+
+		private boolean newSession;
+
+		private boolean needsConnectionReset;
+
+		public void setSession(Session session) {
+<span class="fc" id="L748">			this.sessionHolder = new SessionHolder(session);</span>
+<span class="fc" id="L749">			this.newSessionHolder = true;</span>
+<span class="fc" id="L750">			this.newSession = true;</span>
+<span class="fc" id="L751">		}</span>
+
+		public void setExistingSession(Session session) {
+<span class="nc" id="L754">			this.sessionHolder = new SessionHolder(session);</span>
+<span class="nc" id="L755">			this.newSessionHolder = true;</span>
+<span class="nc" id="L756">			this.newSession = false;</span>
+<span class="nc" id="L757">		}</span>
+
+		public void setSessionHolder(@Nullable SessionHolder sessionHolder) {
+<span class="fc" id="L760">			this.sessionHolder = sessionHolder;</span>
+<span class="fc" id="L761">			this.newSessionHolder = false;</span>
+<span class="fc" id="L762">			this.newSession = false;</span>
+<span class="fc" id="L763">		}</span>
+
+		public SessionHolder getSessionHolder() {
+<span class="pc bpc" id="L766" title="1 of 2 branches missed.">			Assert.state(this.sessionHolder != null, &quot;No SessionHolder available&quot;);</span>
+<span class="fc" id="L767">			return this.sessionHolder;</span>
+		}
+
+		public boolean hasSessionHolder() {
+<span class="pc bpc" id="L771" title="1 of 2 branches missed.">			return (this.sessionHolder != null);</span>
+		}
+
+		public boolean isNewSessionHolder() {
+<span class="fc" id="L775">			return this.newSessionHolder;</span>
+		}
+
+		public boolean isNewSession() {
+<span class="fc" id="L779">			return this.newSession;</span>
+		}
+
+		public void connectionPrepared() {
+<span class="fc" id="L783">			this.needsConnectionReset = true;</span>
+<span class="fc" id="L784">		}</span>
+
+		public boolean needsConnectionReset() {
+<span class="fc" id="L787">			return this.needsConnectionReset;</span>
+		}
+
+		public boolean hasSpringManagedTransaction() {
+<span class="pc bpc" id="L791" title="1 of 4 branches missed.">			return (this.sessionHolder != null &amp;&amp; this.sessionHolder.getTransaction() != null);</span>
+		}
+
+		public boolean hasHibernateManagedTransaction() {
+<span class="nc bnc" id="L795" title="All 2 branches missed.">			return (this.sessionHolder != null &amp;&amp;</span>
+<span class="nc bnc" id="L796" title="All 2 branches missed.">					this.sessionHolder.getSession().getTransaction().getStatus() == TransactionStatus.ACTIVE);</span>
+		}
+
+		public void setRollbackOnly() {
+<span class="fc" id="L800">			getSessionHolder().setRollbackOnly();</span>
+<span class="pc bpc" id="L801" title="1 of 2 branches missed.">			if (hasConnectionHolder()) {</span>
+<span class="fc" id="L802">				getConnectionHolder().setRollbackOnly();</span>
+			}
+<span class="fc" id="L804">		}</span>
+
+		@Override
+		public boolean isRollbackOnly() {
+<span class="pc bpc" id="L808" title="1 of 2 branches missed.">			return getSessionHolder().isRollbackOnly() ||</span>
+<span class="pc bpc" id="L809" title="2 of 4 branches missed.">					(hasConnectionHolder() &amp;&amp; getConnectionHolder().isRollbackOnly());</span>
+		}
+
+		@Override
+		public void flush() {
+			try {
+<span class="nc" id="L815">				getSessionHolder().getSession().flush();</span>
+			}
+<span class="nc" id="L817">			catch (RuntimeException ex) {</span>
+<span class="nc" id="L818">				throw DataAccessUtils.translateIfNecessary(ex, HibernateTransactionManager.this.exceptionTranslator);</span>
+<span class="nc" id="L819">			}</span>
+<span class="nc" id="L820">		}</span>
+	}
+
+
+	/**
+	 * Holder for suspended resources.
+	 * Used internally by {@code doSuspend} and {@code doResume}.
+	 */
+	private static final class SuspendedResourcesHolder {
+
+		private final SessionHolder sessionHolder;
+
+		private final @Nullable ConnectionHolder connectionHolder;
+
+<span class="nc" id="L834">		private SuspendedResourcesHolder(SessionHolder sessionHolder, @Nullable ConnectionHolder conHolder) {</span>
+<span class="nc" id="L835">			this.sessionHolder = sessionHolder;</span>
+<span class="nc" id="L836">			this.connectionHolder = conHolder;</span>
+<span class="nc" id="L837">		}</span>
+
+		private SessionHolder getSessionHolder() {
+<span class="nc" id="L840">			return this.sessionHolder;</span>
+		}
+
+		private @Nullable ConnectionHolder getConnectionHolder() {
+<span class="nc" id="L844">			return this.connectionHolder;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

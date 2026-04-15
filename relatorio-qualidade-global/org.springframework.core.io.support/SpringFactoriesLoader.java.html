@@ -1,0 +1,666 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SpringFactoriesLoader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.io.support</a> &gt; <span class="el_source">SpringFactoriesLoader.java</span></div><h1>SpringFactoriesLoader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.io.support;
+
+import java.io.IOException;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Modifier;
+import java.net.URL;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.function.BiConsumer;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.function.Supplier;
+
+import kotlin.jvm.JvmClassMappingKt;
+import kotlin.reflect.KFunction;
+import kotlin.reflect.KParameter;
+import kotlin.reflect.full.KClasses;
+import kotlin.reflect.jvm.KCallablesJvm;
+import kotlin.reflect.jvm.ReflectJvmMapping;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.KotlinDetector;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.core.io.UrlResource;
+import org.springframework.core.log.LogMessage;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ConcurrentReferenceHashMap;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * General purpose factory loading mechanism for internal use within the framework.
+ *
+ * &lt;p&gt;{@code SpringFactoriesLoader} {@linkplain #loadFactories loads} and instantiates
+ * factories of a given type from {@value #FACTORIES_RESOURCE_LOCATION} files which
+ * may be present in multiple JAR files in the classpath. The {@code spring.factories}
+ * file must be in {@link Properties} format, where the key is the fully qualified
+ * name of the interface or abstract class, and the value is a comma-separated list of
+ * implementation class names. For example:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;example.MyService=example.MyServiceImpl1,example.MyServiceImpl2&lt;/pre&gt;
+ *
+ * where {@code example.MyService} is the name of the interface, and {@code MyServiceImpl1}
+ * and {@code MyServiceImpl2} are two implementations.
+ *
+ * &lt;p&gt;Implementation classes &lt;b&gt;must&lt;/b&gt; have a single resolvable constructor that will
+ * be used to create the instance, either:
+ * &lt;ul&gt;
+ * &lt;li&gt;a primary or single constructor&lt;/li&gt;
+ * &lt;li&gt;a single public constructor&lt;/li&gt;
+ * &lt;li&gt;the default constructor&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;If the resolvable constructor has arguments, a suitable {@link ArgumentResolver
+ * ArgumentResolver} should be provided. To customize how instantiation failures
+ * are handled, consider providing a {@link FailureHandler FailureHandler}.
+ *
+ * @author Arjen Poutsma
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @author Andy Wilkinson
+ * @author Madhura Bhave
+ * @author Phillip Webb
+ * @since 3.2
+ */
+public class SpringFactoriesLoader {
+
+	/**
+	 * The location to look for factories.
+	 * &lt;p&gt;Can be present in multiple JAR files.
+	 */
+	public static final String FACTORIES_RESOURCE_LOCATION = &quot;META-INF/spring.factories&quot;;
+
+<span class="fc" id="L100">	private static final FailureHandler THROWING_FAILURE_HANDLER = FailureHandler.throwing();</span>
+
+<span class="fc" id="L102">	private static final Log logger = LogFactory.getLog(SpringFactoriesLoader.class);</span>
+
+<span class="fc" id="L104">	static final Map&lt;ClassLoader, Map&lt;String, Factories&gt;&gt; cache = new ConcurrentReferenceHashMap&lt;&gt;();</span>
+
+
+	private final @Nullable ClassLoader classLoader;
+
+	private final Map&lt;String, List&lt;String&gt;&gt; factories;
+
+
+	/**
+	 * Create a new {@link SpringFactoriesLoader} instance.
+	 * @param classLoader the classloader used to instantiate the factories
+	 * @param factories a map of factory class name to implementation class names
+	 * @since 6.0
+	 */
+<span class="fc" id="L118">	protected SpringFactoriesLoader(@Nullable ClassLoader classLoader, Map&lt;String, List&lt;String&gt;&gt; factories) {</span>
+<span class="fc" id="L119">		this.classLoader = classLoader;</span>
+<span class="fc" id="L120">		this.factories = factories;</span>
+<span class="fc" id="L121">	}</span>
+
+
+	/**
+	 * Load and instantiate the factory implementations of the given type from
+	 * {@value #FACTORIES_RESOURCE_LOCATION}, using the configured class loader
+	 * and a default argument resolver that expects a no-arg constructor.
+	 * &lt;p&gt;The returned factories are sorted using {@link AnnotationAwareOrderComparator}.
+	 * &lt;p&gt;If a custom instantiation strategy is required, use {@code load(...)}
+	 * with a custom {@link ArgumentResolver ArgumentResolver} and/or
+	 * {@link FailureHandler FailureHandler}.
+	 * &lt;p&gt;If duplicate implementation class names are discovered for a given factory
+	 * type, only one instance of the duplicated implementation type will be instantiated.
+	 * @param factoryType the interface or abstract class representing the factory
+	 * @throws IllegalArgumentException if any factory implementation class cannot
+	 * be loaded or if an error occurs while instantiating any factory
+	 * @since 6.0
+	 */
+	public &lt;T&gt; List&lt;T&gt; load(Class&lt;T&gt; factoryType) {
+<span class="fc" id="L140">		return load(factoryType, null, null);</span>
+	}
+
+	/**
+	 * Load and instantiate the factory implementations of the given type from
+	 * {@value #FACTORIES_RESOURCE_LOCATION}, using the configured class loader
+	 * and the given argument resolver.
+	 * &lt;p&gt;The returned factories are sorted using {@link AnnotationAwareOrderComparator}.
+	 * &lt;p&gt;If duplicate implementation class names are discovered for a given factory
+	 * type, only one instance of the duplicated implementation type will be instantiated.
+	 * @param factoryType the interface or abstract class representing the factory
+	 * @param argumentResolver strategy used to resolve constructor arguments by their type
+	 * @throws IllegalArgumentException if any factory implementation class cannot
+	 * be loaded or if an error occurs while instantiating any factory
+	 * @since 6.0
+	 */
+	public &lt;T&gt; List&lt;T&gt; load(Class&lt;T&gt; factoryType, @Nullable ArgumentResolver argumentResolver) {
+<span class="nc" id="L157">		return load(factoryType, argumentResolver, null);</span>
+	}
+
+	/**
+	 * Load and instantiate the factory implementations of the given type from
+	 * {@value #FACTORIES_RESOURCE_LOCATION}, using the configured class loader
+	 * with custom failure handling provided by the given failure handler.
+	 * &lt;p&gt;The returned factories are sorted using {@link AnnotationAwareOrderComparator}.
+	 * &lt;p&gt;If duplicate implementation class names are discovered for a given factory
+	 * type, only one instance of the duplicated implementation type will be instantiated.
+	 * &lt;p&gt;For any factory implementation class that cannot be loaded or error that
+	 * occurs while instantiating it, the given failure handler is called.
+	 * @param factoryType the interface or abstract class representing the factory
+	 * @param failureHandler strategy used to handle factory instantiation failures
+	 * @since 6.0
+	 */
+	public &lt;T&gt; List&lt;T&gt; load(Class&lt;T&gt; factoryType, @Nullable FailureHandler failureHandler) {
+<span class="fc" id="L174">		return load(factoryType, null, failureHandler);</span>
+	}
+
+	/**
+	 * Load and instantiate the factory implementations of the given type from
+	 * {@value #FACTORIES_RESOURCE_LOCATION}, using the configured class loader,
+	 * the given argument resolver, and custom failure handling provided by the given
+	 * failure handler.
+	 * &lt;p&gt;The returned factories are sorted using {@link AnnotationAwareOrderComparator}.
+	 * &lt;p&gt;If duplicate implementation class names are discovered for a given factory
+	 * type, only one instance of the duplicated implementation type will be instantiated.
+	 * &lt;p&gt;For any factory implementation class that cannot be loaded or error that
+	 * occurs while instantiating it, the given failure handler is called.
+	 * @param factoryType the interface or abstract class representing the factory
+	 * @param argumentResolver strategy used to resolve constructor arguments by their type
+	 * @param failureHandler strategy used to handle factory instantiation failures
+	 * @since 6.0
+	 */
+	public &lt;T&gt; List&lt;T&gt; load(Class&lt;T&gt; factoryType, @Nullable ArgumentResolver argumentResolver,
+			@Nullable FailureHandler failureHandler) {
+
+<span class="fc" id="L195">		Assert.notNull(factoryType, &quot;'factoryType' must not be null&quot;);</span>
+<span class="fc" id="L196">		List&lt;String&gt; implementationNames = loadFactoryNames(factoryType);</span>
+<span class="fc" id="L197">		logger.trace(LogMessage.format(&quot;Loaded [%s] names: %s&quot;, factoryType.getName(), implementationNames));</span>
+<span class="fc" id="L198">		List&lt;T&gt; result = new ArrayList&lt;&gt;(implementationNames.size());</span>
+<span class="fc bfc" id="L199" title="All 2 branches covered.">		FailureHandler failureHandlerToUse = (failureHandler != null) ? failureHandler : THROWING_FAILURE_HANDLER;</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">		for (String implementationName : implementationNames) {</span>
+<span class="fc" id="L201">			T factory = instantiateFactory(implementationName, factoryType, argumentResolver, failureHandlerToUse);</span>
+<span class="fc bfc" id="L202" title="All 2 branches covered.">			if (factory != null) {</span>
+<span class="fc" id="L203">				result.add(factory);</span>
+			}
+<span class="fc" id="L205">		}</span>
+<span class="fc" id="L206">		AnnotationAwareOrderComparator.sort(result);</span>
+<span class="fc" id="L207">		return result;</span>
+	}
+
+	private List&lt;String&gt; loadFactoryNames(Class&lt;?&gt; factoryType) {
+<span class="fc" id="L211">		return this.factories.getOrDefault(factoryType.getName(), Collections.emptyList());</span>
+	}
+
+	protected &lt;T&gt; @Nullable T instantiateFactory(String implementationName, Class&lt;T&gt; type,
+			@Nullable ArgumentResolver argumentResolver, FailureHandler failureHandler) {
+
+		try {
+<span class="fc" id="L218">			Class&lt;?&gt; factoryImplementationClass = ClassUtils.forName(implementationName, this.classLoader);</span>
+<span class="fc" id="L219">			Assert.isTrue(type.isAssignableFrom(factoryImplementationClass), () -&gt;</span>
+<span class="nc" id="L220">					&quot;Class [%s] is not assignable to factory type [%s]&quot;.formatted(implementationName, type.getName()));</span>
+<span class="fc" id="L221">			FactoryInstantiator&lt;T&gt; factoryInstantiator = FactoryInstantiator.forClass(factoryImplementationClass);</span>
+<span class="fc" id="L222">			return factoryInstantiator.instantiate(argumentResolver);</span>
+		}
+<span class="fc" id="L224">		catch (Throwable ex) {</span>
+<span class="fc" id="L225">			failureHandler.handleFailure(type, implementationName, ex);</span>
+<span class="fc" id="L226">			return null;</span>
+		}
+	}
+
+
+	/**
+	 * Load and instantiate the factory implementations of the given type from
+	 * {@value #FACTORIES_RESOURCE_LOCATION}, using the given class loader.
+	 * &lt;p&gt;The returned factories are sorted using {@link AnnotationAwareOrderComparator}.
+	 * &lt;p&gt;If duplicate implementation class names are discovered for a given factory
+	 * type, only one instance of the duplicated implementation type will be instantiated.
+	 * &lt;p&gt;For more advanced factory loading with {@link ArgumentResolver} or
+	 * {@link FailureHandler} support, use {@link #forDefaultResourceLocation(ClassLoader)}
+	 * to obtain a {@link SpringFactoriesLoader} instance.
+	 * @param factoryType the interface or abstract class representing the factory
+	 * @param classLoader the ClassLoader to use for loading (can be {@code null}
+	 * to use the default)
+	 * @throws IllegalArgumentException if any factory implementation class cannot
+	 * be loaded or if an error occurs while instantiating any factory
+	 */
+	public static &lt;T&gt; List&lt;T&gt; loadFactories(Class&lt;T&gt; factoryType, @Nullable ClassLoader classLoader) {
+<span class="fc" id="L247">		return forDefaultResourceLocation(classLoader).load(factoryType);</span>
+	}
+
+	/**
+	 * Load the fully qualified class names of factory implementations of the
+	 * given type from {@value #FACTORIES_RESOURCE_LOCATION}, using the given
+	 * class loader.
+	 * &lt;p&gt;If a particular implementation class name is discovered more than once
+	 * for the given factory type, duplicates will be ignored.
+	 * @param factoryType the interface or abstract class representing the factory
+	 * @param classLoader the ClassLoader to use for loading resources; can be
+	 * {@code null} to use the default
+	 * @throws IllegalArgumentException if an error occurs while loading factory names
+	 * @see #loadFactories
+	 * @deprecated as of 6.0 in favor of {@link #load(Class, ArgumentResolver, FailureHandler)}
+	 */
+	@Deprecated(since = &quot;6.0&quot;)
+	public static List&lt;String&gt; loadFactoryNames(Class&lt;?&gt; factoryType, @Nullable ClassLoader classLoader) {
+<span class="nc" id="L265">		return forDefaultResourceLocation(classLoader).loadFactoryNames(factoryType);</span>
+	}
+
+	/**
+	 * Create a {@link SpringFactoriesLoader} instance that will load and
+	 * instantiate the factory implementations from
+	 * {@value #FACTORIES_RESOURCE_LOCATION}, using the default class loader.
+	 * @return a {@link SpringFactoriesLoader} instance
+	 * @since 6.0
+	 * @see #forDefaultResourceLocation(ClassLoader)
+	 */
+	public static SpringFactoriesLoader forDefaultResourceLocation() {
+<span class="nc" id="L277">		return forDefaultResourceLocation(null);</span>
+	}
+
+	/**
+	 * Create a {@link SpringFactoriesLoader} instance that will load and
+	 * instantiate the factory implementations from
+	 * {@value #FACTORIES_RESOURCE_LOCATION}, using the given class loader.
+	 * @param classLoader the ClassLoader to use for loading resources; can be
+	 * {@code null} to use the default
+	 * @return a {@link SpringFactoriesLoader} instance
+	 * @since 6.0
+	 * @see #forDefaultResourceLocation()
+	 */
+	public static SpringFactoriesLoader forDefaultResourceLocation(@Nullable ClassLoader classLoader) {
+<span class="fc" id="L291">		return forResourceLocation(FACTORIES_RESOURCE_LOCATION, classLoader);</span>
+	}
+
+	/**
+	 * Create a {@link SpringFactoriesLoader} instance that will load and
+	 * instantiate the factory implementations from the given location,
+	 * using the default class loader.
+	 * @param resourceLocation the resource location to look for factories
+	 * @return a {@link SpringFactoriesLoader} instance
+	 * @since 6.0
+	 * @see #forResourceLocation(String, ClassLoader)
+	 */
+	public static SpringFactoriesLoader forResourceLocation(String resourceLocation) {
+<span class="fc" id="L304">		return forResourceLocation(resourceLocation, null);</span>
+	}
+
+	/**
+	 * Create a {@link SpringFactoriesLoader} instance that will load and
+	 * instantiate the factory implementations from the given location,
+	 * using the given class loader.
+	 * @param resourceLocation the resource location to look for factories
+	 * @param classLoader the ClassLoader to use for loading resources;
+	 * can be {@code null} to use the default
+	 * @return a {@link SpringFactoriesLoader} instance
+	 * @since 6.0
+	 * @see #forResourceLocation(String)
+	 */
+	public static SpringFactoriesLoader forResourceLocation(String resourceLocation, @Nullable ClassLoader classLoader) {
+<span class="fc" id="L319">		Assert.hasText(resourceLocation, &quot;'resourceLocation' must not be empty&quot;);</span>
+<span class="fc bfc" id="L320" title="All 2 branches covered.">		ClassLoader resourceClassLoader = (classLoader != null ? classLoader :</span>
+<span class="fc" id="L321">				SpringFactoriesLoader.class.getClassLoader());</span>
+<span class="fc" id="L322">		Map&lt;String, Factories&gt; factoriesCache = cache.computeIfAbsent(</span>
+<span class="fc" id="L323">				resourceClassLoader, key -&gt; new ConcurrentReferenceHashMap&lt;&gt;());</span>
+<span class="fc" id="L324">		Factories factories = factoriesCache.computeIfAbsent(resourceLocation,</span>
+<span class="fc" id="L325">				key -&gt; new Factories(loadFactoriesResource(resourceClassLoader, resourceLocation)));</span>
+<span class="fc" id="L326">		return new SpringFactoriesLoader(classLoader, factories.byType());</span>
+	}
+
+	protected static Map&lt;String, List&lt;String&gt;&gt; loadFactoriesResource(ClassLoader classLoader, String resourceLocation) {
+<span class="fc" id="L330">		Map&lt;String, List&lt;String&gt;&gt; result = new LinkedHashMap&lt;&gt;();</span>
+		try {
+<span class="fc" id="L332">			Enumeration&lt;URL&gt; urls = classLoader.getResources(resourceLocation);</span>
+<span class="fc bfc" id="L333" title="All 2 branches covered.">			while (urls.hasMoreElements()) {</span>
+<span class="fc" id="L334">				UrlResource resource = new UrlResource(urls.nextElement());</span>
+<span class="fc" id="L335">				Properties properties = PropertiesLoaderUtils.loadProperties(resource);</span>
+<span class="fc" id="L336">				properties.forEach((name, value) -&gt; {</span>
+<span class="fc" id="L337">					String[] factoryImplementationNames = StringUtils.commaDelimitedListToStringArray((String) value);</span>
+<span class="fc" id="L338">					List&lt;String&gt; implementations = result.computeIfAbsent(((String) name).trim(),</span>
+<span class="fc" id="L339">							key -&gt; new ArrayList&lt;&gt;(factoryImplementationNames.length));</span>
+<span class="fc" id="L340">					Arrays.stream(factoryImplementationNames).map(String::trim).forEach(implementations::add);</span>
+<span class="fc" id="L341">				});</span>
+<span class="fc" id="L342">			}</span>
+<span class="fc" id="L343">			result.replaceAll(SpringFactoriesLoader::toDistinctUnmodifiableList);</span>
+		}
+<span class="nc" id="L345">		catch (IOException ex) {</span>
+<span class="nc" id="L346">			throw new IllegalArgumentException(&quot;Unable to load factories from location [&quot; + resourceLocation + &quot;]&quot;, ex);</span>
+<span class="fc" id="L347">		}</span>
+<span class="fc" id="L348">		return Collections.unmodifiableMap(result);</span>
+	}
+
+	private static List&lt;String&gt; toDistinctUnmodifiableList(String factoryType, List&lt;String&gt; implementations) {
+<span class="fc" id="L352">		return implementations.stream().distinct().toList();</span>
+	}
+
+
+	/**
+	 * Internal instantiator used to create the factory instance.
+	 * @since 6.0
+	 * @param &lt;T&gt; the instance implementation type
+	 */
+	static final class FactoryInstantiator&lt;T&gt; {
+
+<span class="fc" id="L363">		private static final boolean KOTLIN_REFLECT_PRESENT = KotlinDetector.isKotlinReflectPresent();</span>
+
+		private final Constructor&lt;T&gt; constructor;
+
+
+<span class="fc" id="L368">		private FactoryInstantiator(Constructor&lt;T&gt; constructor) {</span>
+<span class="fc" id="L369">			ReflectionUtils.makeAccessible(constructor);</span>
+<span class="fc" id="L370">			this.constructor = constructor;</span>
+<span class="fc" id="L371">		}</span>
+
+		T instantiate(@Nullable ArgumentResolver argumentResolver) throws Exception {
+<span class="fc" id="L374">			Object[] args = resolveArgs(argumentResolver);</span>
+<span class="pc bpc" id="L375" title="2 of 4 branches missed.">			if (KOTLIN_REFLECT_PRESENT &amp;&amp; KotlinDetector.isKotlinType(this.constructor.getDeclaringClass())) {</span>
+<span class="nc" id="L376">				return KotlinDelegate.instantiate(this.constructor, args);</span>
+			}
+<span class="fc" id="L378">			return this.constructor.newInstance(args);</span>
+		}
+
+		private Object[] resolveArgs(@Nullable ArgumentResolver argumentResolver) {
+<span class="fc" id="L382">			Class&lt;?&gt;[] types = this.constructor.getParameterTypes();</span>
+<span class="pc bpc" id="L383" title="1 of 2 branches missed.">			return (argumentResolver != null ?</span>
+<span class="nc" id="L384">					Arrays.stream(types).map(argumentResolver::resolve).toArray() :</span>
+<span class="fc" id="L385">					new Object[types.length]);</span>
+		}
+
+		@SuppressWarnings(&quot;unchecked&quot;)
+		static &lt;T&gt; FactoryInstantiator&lt;T&gt; forClass(Class&lt;?&gt; factoryImplementationClass) {
+<span class="fc" id="L390">			Constructor&lt;?&gt; constructor = findConstructor(factoryImplementationClass);</span>
+<span class="pc bpc" id="L391" title="1 of 2 branches missed.">			Assert.state(constructor != null, () -&gt;</span>
+<span class="nc" id="L392">					&quot;Class [%s] has no suitable constructor&quot;.formatted(factoryImplementationClass.getName()));</span>
+<span class="fc" id="L393">			return new FactoryInstantiator&lt;&gt;((Constructor&lt;T&gt;) constructor);</span>
+		}
+
+		private static @Nullable Constructor&lt;?&gt; findConstructor(Class&lt;?&gt; factoryImplementationClass) {
+			// Same algorithm as BeanUtils.getResolvableConstructor
+<span class="fc" id="L398">			Constructor&lt;?&gt; constructor = findPrimaryKotlinConstructor(factoryImplementationClass);</span>
+<span class="pc bpc" id="L399" title="1 of 2 branches missed.">			constructor = (constructor != null ? constructor :</span>
+<span class="fc" id="L400">					findSingleConstructor(factoryImplementationClass.getConstructors()));</span>
+<span class="fc bfc" id="L401" title="All 2 branches covered.">			constructor = (constructor != null ? constructor :</span>
+<span class="fc" id="L402">					findSingleConstructor(factoryImplementationClass.getDeclaredConstructors()));</span>
+<span class="fc bfc" id="L403" title="All 2 branches covered.">			constructor = (constructor != null ? constructor :</span>
+<span class="fc" id="L404">					findDeclaredConstructor(factoryImplementationClass));</span>
+<span class="fc" id="L405">			return constructor;</span>
+		}
+
+		private static @Nullable Constructor&lt;?&gt; findPrimaryKotlinConstructor(Class&lt;?&gt; factoryImplementationClass) {
+<span class="pc bpc" id="L409" title="1 of 2 branches missed.">			return (KotlinDetector.isKotlinType(factoryImplementationClass) ?</span>
+<span class="pc" id="L410">					KotlinDelegate.findPrimaryConstructor(factoryImplementationClass) : null);</span>
+		}
+
+		private static @Nullable Constructor&lt;?&gt; findSingleConstructor(Constructor&lt;?&gt;[] constructors) {
+<span class="fc bfc" id="L414" title="All 2 branches covered.">			return (constructors.length == 1 ? constructors[0] : null);</span>
+		}
+
+		private static @Nullable Constructor&lt;?&gt; findDeclaredConstructor(Class&lt;?&gt; factoryImplementationClass) {
+			try {
+<span class="fc" id="L419">				return factoryImplementationClass.getDeclaredConstructor();</span>
+			}
+<span class="nc" id="L421">			catch (NoSuchMethodException ex) {</span>
+<span class="nc" id="L422">				return null;</span>
+			}
+		}
+	}
+
+
+	/**
+	 * Nested class to avoid a hard dependency on Kotlin at runtime.
+	 * @since 6.0
+	 */
+	private static class KotlinDelegate {
+
+		static &lt;T&gt; @Nullable Constructor&lt;T&gt; findPrimaryConstructor(Class&lt;T&gt; clazz) {
+			try {
+<span class="nc" id="L436">				KFunction&lt;T&gt; primaryConstructor = KClasses.getPrimaryConstructor(JvmClassMappingKt.getKotlinClass(clazz));</span>
+<span class="nc bnc" id="L437" title="All 2 branches missed.">				if (primaryConstructor != null) {</span>
+<span class="nc" id="L438">					Constructor&lt;T&gt; constructor = ReflectJvmMapping.getJavaConstructor(</span>
+							primaryConstructor);
+<span class="nc bnc" id="L440" title="All 2 branches missed.">					Assert.state(constructor != null, () -&gt;</span>
+<span class="nc" id="L441">							&quot;Failed to find Java constructor for Kotlin primary constructor: &quot; + clazz.getName());</span>
+<span class="nc" id="L442">					return constructor;</span>
+				}
+			}
+<span class="nc" id="L445">			catch (UnsupportedOperationException ignored) {</span>
+<span class="nc" id="L446">			}</span>
+<span class="nc" id="L447">			return null;</span>
+		}
+
+		static &lt;T&gt; T instantiate(Constructor&lt;T&gt; constructor, Object[] args) throws Exception {
+<span class="nc" id="L451">			KFunction&lt;T&gt; kotlinConstructor = ReflectJvmMapping.getKotlinFunction(constructor);</span>
+<span class="nc bnc" id="L452" title="All 2 branches missed.">			if (kotlinConstructor == null) {</span>
+<span class="nc" id="L453">				return constructor.newInstance(args);</span>
+			}
+<span class="nc" id="L455">			makeAccessible(constructor, kotlinConstructor);</span>
+<span class="nc" id="L456">			return instantiate(kotlinConstructor, convertArgs(args, kotlinConstructor.getParameters()));</span>
+		}
+
+		private static &lt;T&gt; void makeAccessible(Constructor&lt;T&gt; constructor,
+				KFunction&lt;T&gt; kotlinConstructor) {
+<span class="nc bnc" id="L461" title="All 2 branches missed.">			if ((!Modifier.isPublic(constructor.getModifiers()) ||</span>
+<span class="nc bnc" id="L462" title="All 2 branches missed.">					!Modifier.isPublic(constructor.getDeclaringClass().getModifiers()))) {</span>
+<span class="nc" id="L463">				KCallablesJvm.setAccessible(kotlinConstructor, true);</span>
+			}
+<span class="nc" id="L465">		}</span>
+
+		private static Map&lt;KParameter, Object&gt; convertArgs(Object[] args, List&lt;KParameter&gt; parameters) {
+<span class="nc" id="L468">			Map&lt;KParameter, Object&gt; result = CollectionUtils.newHashMap(parameters.size());</span>
+<span class="nc bnc" id="L469" title="All 2 branches missed.">			Assert.isTrue(args.length &lt;= parameters.size(),</span>
+					&quot;Number of provided arguments should be less than or equal to the number of constructor parameters&quot;);
+<span class="nc bnc" id="L471" title="All 2 branches missed.">			for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="nc bnc" id="L472" title="All 4 branches missed.">				if (!parameters.get(i).isOptional() || args[i] != null) {</span>
+<span class="nc" id="L473">					result.put(parameters.get(i), args[i]);</span>
+				}
+			}
+<span class="nc" id="L476">			return result;</span>
+		}
+
+		private static &lt;T&gt; T instantiate(KFunction&lt;T&gt; kotlinConstructor, Map&lt;KParameter, Object&gt; args) {
+<span class="nc" id="L480">			return kotlinConstructor.callBy(args);</span>
+		}
+	}
+
+
+	/**
+	 * Strategy for resolving constructor arguments based on their type.
+	 * @since 6.0
+	 * @see ArgumentResolver#of(Class, Object)
+	 * @see ArgumentResolver#ofSupplied(Class, Supplier)
+	 * @see ArgumentResolver#from(Function)
+	 */
+	@FunctionalInterface
+	public interface ArgumentResolver {
+
+		/**
+		 * Resolve the given argument if possible.
+		 * @param &lt;T&gt; the argument type
+		 * @param type the argument type
+		 * @return the resolved argument value or {@code null}
+		 */
+		&lt;T&gt; @Nullable T resolve(Class&lt;T&gt; type);
+
+		/**
+		 * Create a new composed {@link ArgumentResolver} by combining this resolver
+		 * with the given type and value.
+		 * @param &lt;T&gt; the argument type
+		 * @param type the argument type
+		 * @param value the argument value
+		 * @return a new composite {@link ArgumentResolver} instance
+		 */
+		default &lt;T&gt; ArgumentResolver and(Class&lt;T&gt; type, T value) {
+<span class="nc" id="L512">			return and(ArgumentResolver.of(type, value));</span>
+		}
+
+		/**
+		 * Create a new composed {@link ArgumentResolver} by combining this resolver
+		 * with the given type and value.
+		 * @param &lt;T&gt; the argument type
+		 * @param type the argument type
+		 * @param valueSupplier the argument value supplier
+		 * @return a new composite {@link ArgumentResolver} instance
+		 */
+		default &lt;T&gt; ArgumentResolver andSupplied(Class&lt;T&gt; type, Supplier&lt;T&gt; valueSupplier) {
+<span class="nc" id="L524">			return and(ArgumentResolver.ofSupplied(type, valueSupplier));</span>
+		}
+
+		/**
+		 * Create a new composed {@link ArgumentResolver} by combining this resolver
+		 * with the given resolver.
+		 * @param argumentResolver the argument resolver to add
+		 * @return a new composite {@link ArgumentResolver} instance
+		 */
+		default ArgumentResolver and(ArgumentResolver argumentResolver) {
+<span class="nc" id="L534">			return from(type -&gt; {</span>
+<span class="nc" id="L535">				Object resolved = resolve(type);</span>
+<span class="nc bnc" id="L536" title="All 2 branches missed.">				return (resolved != null ? resolved : argumentResolver.resolve(type));</span>
+			});
+		}
+
+		/**
+		 * Factory method that returns an {@link ArgumentResolver} that always
+		 * returns {@code null}.
+		 * @return a new {@link ArgumentResolver} instance
+		 */
+		static ArgumentResolver none() {
+<span class="nc" id="L546">			return from(type -&gt; null);</span>
+		}
+
+		/**
+		 * Factory method that can be used to create an {@link ArgumentResolver}
+		 * that resolves only the given type.
+		 * @param &lt;T&gt; the argument type
+		 * @param type the argument type
+		 * @param value the argument value
+		 * @return a new {@link ArgumentResolver} instance
+		 */
+		static &lt;T&gt; ArgumentResolver of(Class&lt;T&gt; type, T value) {
+<span class="nc" id="L558">			return ofSupplied(type, () -&gt; value);</span>
+		}
+
+		/**
+		 * Factory method that can be used to create an {@link ArgumentResolver}
+		 * that resolves only the given type.
+		 * @param &lt;T&gt; the argument type
+		 * @param type the argument type
+		 * @param valueSupplier the argument value supplier
+		 * @return a new {@link ArgumentResolver} instance
+		 */
+		static &lt;T&gt; ArgumentResolver ofSupplied(Class&lt;T&gt; type, Supplier&lt;T&gt; valueSupplier) {
+<span class="nc bnc" id="L570" title="All 2 branches missed.">			return from(candidateType -&gt; (candidateType.equals(type) ? valueSupplier.get() : null));</span>
+		}
+
+		/**
+		 * Factory method that creates a new {@link ArgumentResolver} from a
+		 * lambda friendly function. The given function is provided with the
+		 * argument type and must provide an instance of that type or {@code null}.
+		 * @param function the resolver function
+		 * @return a new {@link ArgumentResolver} instance backed by the function
+		 */
+		static ArgumentResolver from(Function&lt;Class&lt;?&gt;, @Nullable Object&gt; function) {
+<span class="nc" id="L581">			return new ArgumentResolver() {</span>
+				@SuppressWarnings(&quot;unchecked&quot;)
+				@Override
+				public &lt;T&gt; @Nullable T resolve(Class&lt;T&gt; type) {
+<span class="nc" id="L585">					return (T) function.apply(type);</span>
+				}
+			};
+		}
+	}
+
+
+	/**
+	 * Strategy for handling a failure that occurs when instantiating a factory.
+	 * @since 6.0
+	 * @see FailureHandler#throwing()
+	 * @see FailureHandler#logging(Log)
+	 */
+	@FunctionalInterface
+	public interface FailureHandler {
+
+		/**
+		 * Handle the {@code failure} that occurred when instantiating the
+		 * {@code factoryImplementationName} that was expected to be of the
+		 * given {@code factoryType}.
+		 * @param factoryType the type of the factory
+		 * @param factoryImplementationName the name of the factory implementation
+		 * @param failure the failure that occurred
+		 * @see #throwing()
+		 * @see #logging
+		 */
+		void handleFailure(Class&lt;?&gt; factoryType, String factoryImplementationName, Throwable failure);
+
+
+		/**
+		 * Create a new {@link FailureHandler} that handles errors by throwing an
+		 * {@link IllegalArgumentException}.
+		 * @return a new {@link FailureHandler} instance
+		 * @see #throwing(BiFunction)
+		 */
+		static FailureHandler throwing() {
+<span class="fc" id="L621">			return throwing(IllegalArgumentException::new);</span>
+		}
+
+		/**
+		 * Create a new {@link FailureHandler} that handles errors by throwing an
+		 * exception.
+		 * @param exceptionFactory factory used to create the exception
+		 * @return a new {@link FailureHandler} instance
+		 */
+		static FailureHandler throwing(BiFunction&lt;String, Throwable, ? extends RuntimeException&gt; exceptionFactory) {
+<span class="fc" id="L631">			return handleMessage((messageSupplier, failure) -&gt; {</span>
+<span class="nc" id="L632">				throw exceptionFactory.apply(messageSupplier.get(), failure);</span>
+			});
+		}
+
+		/**
+		 * Create a new {@link FailureHandler} that handles errors by logging trace
+		 * messages.
+		 * @param logger the logger used to log messages
+		 * @return a new {@link FailureHandler} instance
+		 */
+		static FailureHandler logging(Log logger) {
+<span class="nc" id="L643">			return handleMessage((messageSupplier, failure) -&gt; logger.trace(LogMessage.of(messageSupplier), failure));</span>
+		}
+
+		/**
+		 * Create a new {@link FailureHandler} that handles errors using a standard
+		 * formatted message.
+		 * @param messageHandler the message handler used to handle the problem
+		 * @return a new {@link FailureHandler} instance
+		 */
+		static FailureHandler handleMessage(BiConsumer&lt;Supplier&lt;String&gt;, Throwable&gt; messageHandler) {
+<span class="fc" id="L653">			return (factoryType, factoryImplementationName, failure) -&gt; {</span>
+<span class="nc" id="L654">				Supplier&lt;String&gt; messageSupplier = () -&gt; &quot;Unable to instantiate factory class [%s] for factory type [%s]&quot;</span>
+<span class="nc" id="L655">						.formatted(factoryImplementationName, factoryType.getName());</span>
+<span class="nc" id="L656">				messageHandler.accept(messageSupplier, failure);</span>
+<span class="nc" id="L657">			};</span>
+		}
+	}
+
+
+<span class="fc" id="L662">	private record Factories(Map&lt;String, List&lt;String&gt;&gt; byType) {</span>
+
+	}
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

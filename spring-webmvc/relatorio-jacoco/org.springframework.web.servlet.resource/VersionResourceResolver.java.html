@@ -1,0 +1,343 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>VersionResourceResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.resource</a> &gt; <span class="el_source">VersionResourceResolver.java</span></div><h1>VersionResourceResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.resource;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URI;
+import java.net.URL;
+import java.nio.channels.ReadableByteChannel;
+import java.nio.charset.Charset;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+
+import jakarta.servlet.http.HttpServletRequest;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.io.AbstractResource;
+import org.springframework.core.io.Resource;
+import org.springframework.http.HttpHeaders;
+import org.springframework.util.AntPathMatcher;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+
+/**
+ * Resolves request paths containing a version string that can be used as part
+ * of an HTTP caching strategy in which a resource is cached with a date in the
+ * distant future (for example, 1 year) and cached until the version, and therefore the
+ * URL, is changed.
+ *
+ * &lt;p&gt;Different versioning strategies exist, and this resolver must be configured
+ * with one or more such strategies along with path mappings to indicate which
+ * strategy applies to which resources.
+ *
+ * &lt;p&gt;{@code ContentVersionStrategy} is a good default choice except in cases
+ * where it cannot be used. Most notably the {@code ContentVersionStrategy}
+ * cannot be combined with JavaScript module loaders. For such cases the
+ * {@code FixedVersionStrategy} is a better choice.
+ *
+ * &lt;p&gt;Note that using this resolver to serve CSS files means that the
+ * {@link CssLinkResourceTransformer} should also be used in order to modify
+ * links within CSS files to also contain the appropriate versions generated
+ * by this resolver.
+ *
+ * @author Brian Clozel
+ * @author Rossen Stoyanchev
+ * @since 4.1
+ * @see VersionStrategy
+ */
+<span class="fc" id="L69">public class VersionResourceResolver extends AbstractResourceResolver {</span>
+
+<span class="fc" id="L71">	private final AntPathMatcher pathMatcher = new AntPathMatcher();</span>
+
+	/** Map from path pattern -&gt; VersionStrategy. */
+<span class="fc" id="L74">	private final Map&lt;String, VersionStrategy&gt; versionStrategyMap = new LinkedHashMap&lt;&gt;();</span>
+
+
+	/**
+	 * Set a Map with URL paths as keys and {@code VersionStrategy} as values.
+	 * &lt;p&gt;Supports direct URL matches and Ant-style pattern matches. For syntax
+	 * details, see the {@link org.springframework.util.AntPathMatcher} javadoc.
+	 * @param map a map with URLs as keys and version strategies as values
+	 */
+	public void setStrategyMap(Map&lt;String, VersionStrategy&gt; map) {
+<span class="fc" id="L84">		this.versionStrategyMap.clear();</span>
+<span class="fc" id="L85">		this.versionStrategyMap.putAll(map);</span>
+<span class="fc" id="L86">	}</span>
+
+	/**
+	 * Return the map with version strategies keyed by path pattern.
+	 */
+	public Map&lt;String, VersionStrategy&gt; getStrategyMap() {
+<span class="fc" id="L92">		return this.versionStrategyMap;</span>
+	}
+
+	/**
+	 * Insert a content-based version in resource URLs that match the given path
+	 * patterns. The version is computed from the content of the file, for example,
+	 * {@code &quot;css/main-e36d2e05253c6c7085a91522ce43a0b4.css&quot;}. This is a good
+	 * default strategy to use except when it cannot be, for example when using
+	 * JavaScript module loaders, use {@link #addFixedVersionStrategy} instead
+	 * for serving JavaScript files.
+	 * @param pathPatterns one or more resource URL path patterns,
+	 * relative to the pattern configured with the resource handler
+	 * @return the current instance for chained method invocation
+	 * @see ContentVersionStrategy
+	 */
+	public VersionResourceResolver addContentVersionStrategy(String... pathPatterns) {
+<span class="fc" id="L108">		addVersionStrategy(new ContentVersionStrategy(), pathPatterns);</span>
+<span class="fc" id="L109">		return this;</span>
+	}
+
+	/**
+	 * Insert a fixed, prefix-based version in resource URLs that match the given
+	 * path patterns, for example: &lt;code&gt;&quot;{version}/js/main.js&quot;&lt;/code&gt;. This is useful (vs.
+	 * content-based versions) when using JavaScript module loaders.
+	 * &lt;p&gt;The version may be a random number, the current date, or a value
+	 * fetched from a git commit sha, a property file, or environment variable
+	 * and set with SpEL expressions in the configuration (for example, see {@code @Value}
+	 * in Java config).
+	 * &lt;p&gt;If not done already, variants of the given {@code pathPatterns}, prefixed with
+	 * the {@code version} will be also configured. For example, adding a {@code &quot;/js/**&quot;} path pattern
+	 * will also configure automatically a {@code &quot;/v1.0.0/js/**&quot;} with {@code &quot;v1.0.0&quot;} the
+	 * {@code version} String given as an argument.
+	 * @param version a version string
+	 * @param pathPatterns one or more resource URL path patterns,
+	 * relative to the pattern configured with the resource handler
+	 * @return the current instance for chained method invocation
+	 * @see FixedVersionStrategy
+	 */
+	public VersionResourceResolver addFixedVersionStrategy(String version, String... pathPatterns) {
+<span class="fc" id="L131">		List&lt;String&gt; patternsList = Arrays.asList(pathPatterns);</span>
+<span class="fc" id="L132">		List&lt;String&gt; prefixedPatterns = new ArrayList&lt;&gt;(pathPatterns.length);</span>
+<span class="fc" id="L133">		String versionPrefix = &quot;/&quot; + version;</span>
+<span class="fc bfc" id="L134" title="All 2 branches covered.">		for (String pattern : patternsList) {</span>
+<span class="fc" id="L135">			prefixedPatterns.add(pattern);</span>
+<span class="fc bfc" id="L136" title="All 4 branches covered.">			if (!pattern.startsWith(versionPrefix) &amp;&amp; !patternsList.contains(versionPrefix + pattern)) {</span>
+<span class="fc" id="L137">				prefixedPatterns.add(versionPrefix + pattern);</span>
+			}
+<span class="fc" id="L139">		}</span>
+<span class="fc" id="L140">		return addVersionStrategy(new FixedVersionStrategy(version), StringUtils.toStringArray(prefixedPatterns));</span>
+	}
+
+	/**
+	 * Register a custom VersionStrategy to apply to resource URLs that match the
+	 * given path patterns.
+	 * @param strategy the custom strategy
+	 * @param pathPatterns one or more resource URL path patterns,
+	 * relative to the pattern configured with the resource handler
+	 * @return the current instance for chained method invocation
+	 * @see VersionStrategy
+	 */
+	public VersionResourceResolver addVersionStrategy(VersionStrategy strategy, String... pathPatterns) {
+<span class="fc bfc" id="L153" title="All 2 branches covered.">		for (String pattern : pathPatterns) {</span>
+<span class="fc" id="L154">			getStrategyMap().put(pattern, strategy);</span>
+		}
+<span class="fc" id="L156">		return this;</span>
+	}
+
+
+	@Override
+	protected @Nullable Resource resolveResourceInternal(@Nullable HttpServletRequest request, String requestPath,
+			List&lt;? extends Resource&gt; locations, ResourceResolverChain chain) {
+
+<span class="fc" id="L164">		Resource resolved = chain.resolveResource(request, requestPath, locations);</span>
+<span class="fc bfc" id="L165" title="All 2 branches covered.">		if (resolved != null) {</span>
+<span class="fc" id="L166">			return resolved;</span>
+		}
+
+<span class="fc" id="L169">		VersionStrategy versionStrategy = getStrategyForPath(requestPath);</span>
+<span class="fc bfc" id="L170" title="All 2 branches covered.">		if (versionStrategy == null) {</span>
+<span class="fc" id="L171">			return null;</span>
+		}
+
+<span class="fc" id="L174">		String candidateVersion = versionStrategy.extractVersion(requestPath);</span>
+<span class="fc bfc" id="L175" title="All 2 branches covered.">		if (!StringUtils.hasLength(candidateVersion)) {</span>
+<span class="fc" id="L176">			return null;</span>
+		}
+
+<span class="fc" id="L179">		String simplePath = versionStrategy.removeVersion(requestPath, candidateVersion);</span>
+<span class="fc" id="L180">		Resource baseResource = chain.resolveResource(request, simplePath, locations);</span>
+<span class="fc bfc" id="L181" title="All 2 branches covered.">		if (baseResource == null) {</span>
+<span class="fc" id="L182">			return null;</span>
+		}
+
+<span class="fc" id="L185">		String actualVersion = versionStrategy.getResourceVersion(baseResource);</span>
+<span class="fc bfc" id="L186" title="All 2 branches covered.">		if (candidateVersion.equals(actualVersion)) {</span>
+<span class="fc" id="L187">			return new FileNameVersionedResource(baseResource, candidateVersion);</span>
+		}
+		else {
+<span class="pc bpc" id="L190" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L191">				logger.trace(&quot;Found resource for \&quot;&quot; + requestPath + &quot;\&quot;, but version [&quot; +</span>
+						candidateVersion + &quot;] does not match&quot;);
+			}
+<span class="fc" id="L194">			return null;</span>
+		}
+	}
+
+	@Override
+	protected @Nullable String resolveUrlPathInternal(String resourceUrlPath,
+			List&lt;? extends Resource&gt; locations, ResourceResolverChain chain) {
+
+<span class="fc" id="L202">		String baseUrl = chain.resolveUrlPath(resourceUrlPath, locations);</span>
+<span class="fc bfc" id="L203" title="All 2 branches covered.">		if (StringUtils.hasText(baseUrl)) {</span>
+<span class="fc" id="L204">			VersionStrategy versionStrategy = getStrategyForPath(resourceUrlPath);</span>
+<span class="fc bfc" id="L205" title="All 2 branches covered.">			if (versionStrategy == null) {</span>
+<span class="fc" id="L206">				return baseUrl;</span>
+			}
+<span class="fc" id="L208">			Resource resource = chain.resolveResource(null, baseUrl, locations);</span>
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">			Assert.state(resource != null, &quot;Unresolvable resource&quot;);</span>
+<span class="fc" id="L210">			String version = versionStrategy.getResourceVersion(resource);</span>
+<span class="fc" id="L211">			return versionStrategy.addVersion(baseUrl, version);</span>
+		}
+<span class="fc" id="L213">		return baseUrl;</span>
+	}
+
+	/**
+	 * Find a {@code VersionStrategy} for the request path of the requested resource.
+	 * @return an instance of a {@code VersionStrategy} or null if none matches that request path
+	 */
+	protected @Nullable VersionStrategy getStrategyForPath(String requestPath) {
+<span class="fc" id="L221">		String path = &quot;/&quot;.concat(requestPath);</span>
+<span class="fc" id="L222">		List&lt;String&gt; matchingPatterns = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L223" title="All 2 branches covered.">		for (String pattern : this.versionStrategyMap.keySet()) {</span>
+<span class="fc bfc" id="L224" title="All 2 branches covered.">			if (this.pathMatcher.match(pattern, path)) {</span>
+<span class="fc" id="L225">				matchingPatterns.add(pattern);</span>
+			}
+<span class="fc" id="L227">		}</span>
+<span class="fc bfc" id="L228" title="All 2 branches covered.">		if (!matchingPatterns.isEmpty()) {</span>
+<span class="fc" id="L229">			Comparator&lt;String&gt; comparator = this.pathMatcher.getPatternComparator(path);</span>
+<span class="fc" id="L230">			matchingPatterns.sort(comparator);</span>
+<span class="fc" id="L231">			return this.versionStrategyMap.get(matchingPatterns.get(0));</span>
+		}
+<span class="fc" id="L233">		return null;</span>
+	}
+
+
+	private static class FileNameVersionedResource extends AbstractResource implements HttpResource {
+
+		private final Resource original;
+
+		private final String version;
+
+<span class="fc" id="L243">		public FileNameVersionedResource(Resource original, String version) {</span>
+<span class="fc" id="L244">			this.original = original;</span>
+<span class="fc" id="L245">			this.version = version;</span>
+<span class="fc" id="L246">		}</span>
+
+		@Override
+		public boolean exists() {
+<span class="nc" id="L250">			return this.original.exists();</span>
+		}
+
+		@Override
+		public boolean isReadable() {
+<span class="nc" id="L255">			return this.original.isReadable();</span>
+		}
+
+		@Override
+		public boolean isOpen() {
+<span class="nc" id="L260">			return this.original.isOpen();</span>
+		}
+
+		@Override
+		public boolean isFile() {
+<span class="nc" id="L265">			return this.original.isFile();</span>
+		}
+
+		@Override
+		public URL getURL() throws IOException {
+<span class="nc" id="L270">			return this.original.getURL();</span>
+		}
+
+		@Override
+		public URI getURI() throws IOException {
+<span class="nc" id="L275">			return this.original.getURI();</span>
+		}
+
+		@Override
+		public File getFile() throws IOException {
+<span class="nc" id="L280">			return this.original.getFile();</span>
+		}
+
+		@Override
+		public Path getFilePath() throws IOException {
+<span class="nc" id="L285">			return this.original.getFilePath();</span>
+		}
+
+		@Override
+		public InputStream getInputStream() throws IOException {
+<span class="fc" id="L290">			return this.original.getInputStream();</span>
+		}
+
+		@Override
+		public ReadableByteChannel readableChannel() throws IOException {
+<span class="nc" id="L295">			return this.original.readableChannel();</span>
+		}
+
+		@Override
+		public byte[] getContentAsByteArray() throws IOException {
+<span class="nc" id="L300">			return this.original.getContentAsByteArray();</span>
+		}
+
+		@Override
+		public String getContentAsString(Charset charset) throws IOException {
+<span class="nc" id="L305">			return this.original.getContentAsString(charset);</span>
+		}
+
+		@Override
+		public long contentLength() throws IOException {
+<span class="fc" id="L310">			return this.original.contentLength();</span>
+		}
+
+		@Override
+		public long lastModified() throws IOException {
+<span class="fc" id="L315">			return this.original.lastModified();</span>
+		}
+
+		@Override
+		public Resource createRelative(String relativePath) throws IOException {
+<span class="fc" id="L320">			return this.original.createRelative(relativePath);</span>
+		}
+
+		@Override
+		public @Nullable String getFilename() {
+<span class="fc" id="L325">			return this.original.getFilename();</span>
+		}
+
+		@Override
+		public String getDescription() {
+<span class="nc" id="L330">			return this.original.getDescription();</span>
+		}
+
+		@Override
+		public HttpHeaders getResponseHeaders() {
+<span class="pc bpc" id="L335" title="1 of 2 branches missed.">			HttpHeaders headers = (this.original instanceof HttpResource httpResource ?</span>
+<span class="pc" id="L336">					httpResource.getResponseHeaders() : new HttpHeaders());</span>
+<span class="fc" id="L337">			headers.setETag(&quot;W/\&quot;&quot; + this.version + &quot;\&quot;&quot;);</span>
+<span class="fc" id="L338">			return headers;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

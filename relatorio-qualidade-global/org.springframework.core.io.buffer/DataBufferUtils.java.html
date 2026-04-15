@@ -1,0 +1,1312 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DataBufferUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.io.buffer</a> &gt; <span class="el_source">DataBufferUtils.java</span></div><h1>DataBufferUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.io.buffer;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.nio.ByteBuffer;
+import java.nio.channels.AsynchronousFileChannel;
+import java.nio.channels.Channel;
+import java.nio.channels.Channels;
+import java.nio.channels.CompletionHandler;
+import java.nio.channels.ReadableByteChannel;
+import java.nio.channels.WritableByteChannel;
+import java.nio.file.OpenOption;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.Set;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Flow;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+import reactor.core.publisher.BaseSubscriber;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.FluxSink;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.SynchronousSink;
+import reactor.util.context.Context;
+
+import org.springframework.core.io.Resource;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+
+/**
+ * Utility class for working with {@link DataBuffer DataBuffers}.
+ *
+ * @author Arjen Poutsma
+ * @author Brian Clozel
+ * @since 5.0
+ */
+<span class="nc" id="L65">public abstract class DataBufferUtils {</span>
+
+<span class="fc" id="L67">	private static final Log logger = LogFactory.getLog(DataBufferUtils.class);</span>
+
+<span class="fc" id="L69">	private static final Consumer&lt;DataBuffer&gt; RELEASE_CONSUMER = DataBufferUtils::release;</span>
+
+
+	//---------------------------------------------------------------------
+	// Reading
+	//---------------------------------------------------------------------
+
+	/**
+	 * Obtain an {@link InputStream} from the given supplier, and read it into a
+	 * {@code Flux} of {@code DataBuffer}s. Closes the input stream when the
+	 * Flux is terminated.
+	 * @param inputStreamSupplier the supplier for the input stream to read from
+	 * @param bufferFactory the factory to create data buffers with
+	 * @param bufferSize the maximum size of the data buffers
+	 * @return a Flux of data buffers read from the given channel
+	 */
+	public static Flux&lt;DataBuffer&gt; readInputStream(
+			Callable&lt;InputStream&gt; inputStreamSupplier, DataBufferFactory bufferFactory, int bufferSize) {
+
+<span class="nc" id="L88">		Assert.notNull(inputStreamSupplier, &quot;'inputStreamSupplier' must not be null&quot;);</span>
+<span class="nc" id="L89">		return readByteChannel(() -&gt; Channels.newChannel(inputStreamSupplier.call()), bufferFactory, bufferSize);</span>
+	}
+
+	/**
+	 * Obtain a {@link ReadableByteChannel} from the given supplier, and read
+	 * it into a {@code Flux} of {@code DataBuffer}s. Closes the channel when
+	 * the Flux is terminated.
+	 * @param channelSupplier the supplier for the channel to read from
+	 * @param bufferFactory the factory to create data buffers with
+	 * @param bufferSize the maximum size of the data buffers
+	 * @return a Flux of data buffers read from the given channel
+	 */
+	public static Flux&lt;DataBuffer&gt; readByteChannel(
+			Callable&lt;ReadableByteChannel&gt; channelSupplier, DataBufferFactory bufferFactory, int bufferSize) {
+
+<span class="fc" id="L104">		Assert.notNull(channelSupplier, &quot;'channelSupplier' must not be null&quot;);</span>
+<span class="fc" id="L105">		Assert.notNull(bufferFactory, &quot;'bufferFactory' must not be null&quot;);</span>
+<span class="pc bpc" id="L106" title="1 of 2 branches missed.">		Assert.isTrue(bufferSize &gt; 0, &quot;'bufferSize' must be &gt; 0&quot;);</span>
+
+<span class="fc" id="L108">		return Flux.using(channelSupplier,</span>
+<span class="fc" id="L109">				channel -&gt; Flux.generate(new ReadableByteChannelGenerator(channel, bufferFactory, bufferSize)),</span>
+				DataBufferUtils::closeChannel);
+
+		// No doOnDiscard as operators used do not cache
+	}
+
+	/**
+	 * Obtain a {@code AsynchronousFileChannel} from the given supplier, and read
+	 * it into a {@code Flux} of {@code DataBuffer}s. Closes the channel when
+	 * the Flux is terminated.
+	 * @param channelSupplier the supplier for the channel to read from
+	 * @param bufferFactory the factory to create data buffers with
+	 * @param bufferSize the maximum size of the data buffers
+	 * @return a Flux of data buffers read from the given channel
+	 */
+	public static Flux&lt;DataBuffer&gt; readAsynchronousFileChannel(
+			Callable&lt;AsynchronousFileChannel&gt; channelSupplier, DataBufferFactory bufferFactory, int bufferSize) {
+
+<span class="fc" id="L127">		return readAsynchronousFileChannel(channelSupplier, 0, bufferFactory, bufferSize);</span>
+	}
+
+	/**
+	 * Obtain an {@code AsynchronousFileChannel} from the given supplier, and
+	 * read it into a {@code Flux} of {@code DataBuffer}s, starting at the given
+	 * position. Closes the channel when the Flux is terminated.
+	 * @param channelSupplier the supplier for the channel to read from
+	 * @param position the position to start reading from
+	 * @param bufferFactory the factory to create data buffers with
+	 * @param bufferSize the maximum size of the data buffers
+	 * @return a Flux of data buffers read from the given channel
+	 */
+	public static Flux&lt;DataBuffer&gt; readAsynchronousFileChannel(
+			Callable&lt;AsynchronousFileChannel&gt; channelSupplier, long position,
+			DataBufferFactory bufferFactory, int bufferSize) {
+
+<span class="fc" id="L144">		Assert.notNull(channelSupplier, &quot;'channelSupplier' must not be null&quot;);</span>
+<span class="fc" id="L145">		Assert.notNull(bufferFactory, &quot;'bufferFactory' must not be null&quot;);</span>
+<span class="pc bpc" id="L146" title="1 of 2 branches missed.">		Assert.isTrue(position &gt;= 0, &quot;'position' must be &gt;= 0&quot;);</span>
+<span class="pc bpc" id="L147" title="1 of 2 branches missed.">		Assert.isTrue(bufferSize &gt; 0, &quot;'bufferSize' must be &gt; 0&quot;);</span>
+
+<span class="fc" id="L149">		Flux&lt;DataBuffer&gt; flux = Flux.using(channelSupplier,</span>
+<span class="fc" id="L150">				channel -&gt; Flux.create(sink -&gt; {</span>
+<span class="fc" id="L151">					ReadCompletionHandler handler =</span>
+							new ReadCompletionHandler(channel, sink, position, bufferFactory, bufferSize);
+<span class="fc" id="L153">					sink.onCancel(handler::cancel);</span>
+<span class="fc" id="L154">					sink.onRequest(handler::request);</span>
+<span class="fc" id="L155">				}),</span>
+				channel -&gt; {
+					// Do not close channel from here, rather wait for the current read callback
+					// and then complete after releasing the DataBuffer.
+<span class="fc" id="L159">				});</span>
+
+<span class="fc" id="L161">		return flux.doOnDiscard(DataBuffer.class, DataBufferUtils::release);</span>
+	}
+
+	/**
+	 * Read bytes from the given file {@code Path} into a {@code Flux} of {@code DataBuffer}s.
+	 * The method ensures that the file is closed when the flux is terminated.
+	 * @param path the path to read bytes from
+	 * @param bufferFactory the factory to create data buffers with
+	 * @param bufferSize the maximum size of the data buffers
+	 * @return a Flux of data buffers read from the given channel
+	 * @since 5.2
+	 */
+	public static Flux&lt;DataBuffer&gt; read(
+			Path path, DataBufferFactory bufferFactory, int bufferSize, OpenOption... options) {
+
+<span class="fc" id="L176">		Assert.notNull(path, &quot;Path must not be null&quot;);</span>
+<span class="fc" id="L177">		Assert.notNull(bufferFactory, &quot;DataBufferFactory must not be null&quot;);</span>
+<span class="pc bpc" id="L178" title="1 of 2 branches missed.">		Assert.isTrue(bufferSize &gt; 0, &quot;'bufferSize' must be &gt; 0&quot;);</span>
+<span class="pc bpc" id="L179" title="1 of 2 branches missed.">		if (options.length &gt; 0) {</span>
+<span class="nc bnc" id="L180" title="All 2 branches missed.">			for (OpenOption option : options) {</span>
+<span class="nc bnc" id="L181" title="All 4 branches missed.">				Assert.isTrue(!(option == StandardOpenOption.APPEND || option == StandardOpenOption.WRITE),</span>
+<span class="nc" id="L182">						() -&gt; &quot;'&quot; + option + &quot;' not allowed&quot;);</span>
+			}
+		}
+
+<span class="fc" id="L186">		return readAsynchronousFileChannel(() -&gt; AsynchronousFileChannel.open(path, options),</span>
+				bufferFactory, bufferSize);
+	}
+
+	/**
+	 * Read the given {@code Resource} into a {@code Flux} of {@code DataBuffer}s.
+	 * &lt;p&gt;If the resource is a file, it is read into an
+	 * {@code AsynchronousFileChannel} and turned to {@code Flux} via
+	 * {@link #readAsynchronousFileChannel(Callable, DataBufferFactory, int)} or else
+	 * fall back to {@link #readByteChannel(Callable, DataBufferFactory, int)}.
+	 * Closes the channel when the flux is terminated.
+	 * @param resource the resource to read from
+	 * @param bufferFactory the factory to create data buffers with
+	 * @param bufferSize the maximum size of the data buffers
+	 * @return a Flux of data buffers read from the given channel
+	 */
+	public static Flux&lt;DataBuffer&gt; read(Resource resource, DataBufferFactory bufferFactory, int bufferSize) {
+<span class="fc" id="L203">		return read(resource, 0, bufferFactory, bufferSize);</span>
+	}
+
+	/**
+	 * Read the given {@code Resource} into a {@code Flux} of {@code DataBuffer}s
+	 * starting at the given position.
+	 * &lt;p&gt;If the resource is a file, it is read into an
+	 * {@code AsynchronousFileChannel} and turned to {@code Flux} via
+	 * {@link #readAsynchronousFileChannel(Callable, DataBufferFactory, int)} or else
+	 * fall back on {@link #readByteChannel(Callable, DataBufferFactory, int)}.
+	 * Closes the channel when the flux is terminated.
+	 * @param resource the resource to read from
+	 * @param position the position to start reading from
+	 * @param bufferFactory the factory to create data buffers with
+	 * @param bufferSize the maximum size of the data buffers
+	 * @return a Flux of data buffers read from the given channel
+	 */
+	public static Flux&lt;DataBuffer&gt; read(
+			Resource resource, long position, DataBufferFactory bufferFactory, int bufferSize) {
+
+		try {
+<span class="fc bfc" id="L224" title="All 2 branches covered.">			if (resource.isFile()) {</span>
+<span class="fc" id="L225">				Path filePath = resource.getFilePath();</span>
+<span class="fc" id="L226">				return readAsynchronousFileChannel(</span>
+<span class="fc" id="L227">						() -&gt; AsynchronousFileChannel.open(filePath, StandardOpenOption.READ),</span>
+						position, bufferFactory, bufferSize);
+			}
+		}
+<span class="nc" id="L231">		catch (IOException ignore) {</span>
+			// fallback to resource.readableChannel(), below
+<span class="fc" id="L233">		}</span>
+<span class="fc" id="L234">		Flux&lt;DataBuffer&gt; result = readByteChannel(resource::readableChannel, bufferFactory, bufferSize);</span>
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">		return (position == 0 ? result : skipUntilByteCount(result, position));</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Writing
+	//---------------------------------------------------------------------
+
+	/**
+	 * Write the given stream of {@link DataBuffer DataBuffers} to the given
+	 * {@code OutputStream}. Does &lt;strong&gt;not&lt;/strong&gt; close the output stream
+	 * when the flux is terminated, and does &lt;strong&gt;not&lt;/strong&gt;
+	 * {@linkplain #release(DataBuffer) release} the data buffers in the source.
+	 * If releasing is required, then subscribe to the returned {@code Flux}
+	 * with a {@link #releaseConsumer()}.
+	 * &lt;p&gt;Note that the writing process does not start until the returned
+	 * {@code Flux} is subscribed to.
+	 * @param source the stream of data buffers to be written
+	 * @param outputStream the output stream to write to
+	 * @return a Flux containing the same buffers as in {@code source}, that
+	 * starts the writing process when subscribed to, and that publishes any
+	 * writing errors and the completion signal
+	 */
+	public static Flux&lt;DataBuffer&gt; write(Publisher&lt;DataBuffer&gt; source, OutputStream outputStream) {
+<span class="nc" id="L259">		Assert.notNull(source, &quot;'source' must not be null&quot;);</span>
+<span class="nc" id="L260">		Assert.notNull(outputStream, &quot;'outputStream' must not be null&quot;);</span>
+
+<span class="nc" id="L262">		WritableByteChannel channel = Channels.newChannel(outputStream);</span>
+<span class="nc" id="L263">		return write(source, channel);</span>
+	}
+
+	/**
+	 * Write the given stream of {@link DataBuffer DataBuffers} to the given
+	 * {@code WritableByteChannel}. Does &lt;strong&gt;not&lt;/strong&gt; close the channel
+	 * when the flux is terminated, and does &lt;strong&gt;not&lt;/strong&gt;
+	 * {@linkplain #release(DataBuffer) release} the data buffers in the source.
+	 * If releasing is required, then subscribe to the returned {@code Flux}
+	 * with a {@link #releaseConsumer()}.
+	 * &lt;p&gt;Note that the writing process does not start until the returned
+	 * {@code Flux} is subscribed to.
+	 * @param source the stream of data buffers to be written
+	 * @param channel the channel to write to
+	 * @return a Flux containing the same buffers as in {@code source}, that
+	 * starts the writing process when subscribed to, and that publishes any
+	 * writing errors and the completion signal
+	 */
+	public static Flux&lt;DataBuffer&gt; write(Publisher&lt;DataBuffer&gt; source, WritableByteChannel channel) {
+<span class="nc" id="L282">		Assert.notNull(source, &quot;'source' must not be null&quot;);</span>
+<span class="nc" id="L283">		Assert.notNull(channel, &quot;'channel' must not be null&quot;);</span>
+
+<span class="nc" id="L285">		Flux&lt;DataBuffer&gt; flux = Flux.from(source);</span>
+<span class="nc" id="L286">		return Flux.create(sink -&gt; {</span>
+<span class="nc" id="L287">			WritableByteChannelSubscriber subscriber = new WritableByteChannelSubscriber(sink, channel);</span>
+<span class="nc" id="L288">			sink.onDispose(subscriber);</span>
+<span class="nc" id="L289">			flux.subscribe(subscriber);</span>
+<span class="nc" id="L290">		});</span>
+	}
+
+	/**
+	 * Write the given stream of {@link DataBuffer DataBuffers} to the given
+	 * {@code AsynchronousFileChannel}. Does &lt;strong&gt;not&lt;/strong&gt; close the
+	 * channel when the flux is terminated, and does &lt;strong&gt;not&lt;/strong&gt;
+	 * {@linkplain #release(DataBuffer) release} the data buffers in the source.
+	 * If releasing is required, then subscribe to the returned {@code Flux}
+	 * with a {@link #releaseConsumer()}.
+	 * &lt;p&gt;Note that the writing process does not start until the returned
+	 * {@code Flux} is subscribed to.
+	 * @param source the stream of data buffers to be written
+	 * @param channel the channel to write to
+	 * @return a Flux containing the same buffers as in {@code source}, that
+	 * starts the writing process when subscribed to, and that publishes any
+	 * writing errors and the completion signal
+	 * @since 5.0.10
+	 */
+	public static Flux&lt;DataBuffer&gt; write(Publisher&lt;DataBuffer&gt; source, AsynchronousFileChannel channel) {
+<span class="fc" id="L310">		return write(source, channel, 0);</span>
+	}
+
+	/**
+	 * Write the given stream of {@link DataBuffer DataBuffers} to the given
+	 * {@code AsynchronousFileChannel}. Does &lt;strong&gt;not&lt;/strong&gt; close the channel
+	 * when the flux is terminated, and does &lt;strong&gt;not&lt;/strong&gt;
+	 * {@linkplain #release(DataBuffer) release} the data buffers in the source.
+	 * If releasing is required, then subscribe to the returned {@code Flux} with a
+	 * {@link #releaseConsumer()}.
+	 * &lt;p&gt;Note that the writing process does not start until the returned
+	 * {@code Flux} is subscribed to.
+	 * @param source the stream of data buffers to be written
+	 * @param channel the channel to write to
+	 * @param position the file position where writing is to begin; must be non-negative
+	 * @return a flux containing the same buffers as in {@code source}, that
+	 * starts the writing process when subscribed to, and that publishes any
+	 * writing errors and the completion signal
+	 */
+	public static Flux&lt;DataBuffer&gt; write(
+			Publisher&lt;? extends DataBuffer&gt; source, AsynchronousFileChannel channel, long position) {
+
+<span class="fc" id="L332">		Assert.notNull(source, &quot;'source' must not be null&quot;);</span>
+<span class="fc" id="L333">		Assert.notNull(channel, &quot;'channel' must not be null&quot;);</span>
+<span class="pc bpc" id="L334" title="1 of 2 branches missed.">		Assert.isTrue(position &gt;= 0, &quot;'position' must be &gt;= 0&quot;);</span>
+
+<span class="fc" id="L336">		Flux&lt;DataBuffer&gt; flux = Flux.from(source);</span>
+<span class="fc" id="L337">		return Flux.create(sink -&gt; {</span>
+<span class="fc" id="L338">			WriteCompletionHandler handler = new WriteCompletionHandler(sink, channel, position);</span>
+<span class="fc" id="L339">			sink.onDispose(handler);</span>
+<span class="fc" id="L340">			flux.subscribe(handler);</span>
+<span class="fc" id="L341">		});</span>
+
+
+	}
+
+	/**
+	 * Write the given stream of {@link DataBuffer DataBuffers} to the given
+	 * file {@link Path}. The optional {@code options} parameter specifies
+	 * how the file is created or opened (defaults to
+	 * {@link StandardOpenOption#CREATE CREATE},
+	 * {@link StandardOpenOption#TRUNCATE_EXISTING TRUNCATE_EXISTING}, and
+	 * {@link StandardOpenOption#WRITE WRITE}).
+	 * @param source the stream of data buffers to be written
+	 * @param destination the path to the file
+	 * @param options the options specifying how the file is opened
+	 * @return a {@link Mono} that indicates completion or error
+	 * @since 5.2
+	 */
+	public static Mono&lt;Void&gt; write(Publisher&lt;DataBuffer&gt; source, Path destination, OpenOption... options) {
+<span class="fc" id="L360">		Assert.notNull(source, &quot;Source must not be null&quot;);</span>
+<span class="fc" id="L361">		Assert.notNull(destination, &quot;Destination must not be null&quot;);</span>
+
+<span class="fc" id="L363">		Set&lt;OpenOption&gt; optionSet = checkWriteOptions(options);</span>
+
+<span class="fc" id="L365">		return Mono.create(sink -&gt; {</span>
+			try {
+<span class="fc" id="L367">				AsynchronousFileChannel channel = AsynchronousFileChannel.open(destination, optionSet, null);</span>
+<span class="fc" id="L368">				sink.onDispose(() -&gt; closeChannel(channel));</span>
+<span class="fc" id="L369">				write(source, channel).subscribe(DataBufferUtils::release,</span>
+<span class="fc" id="L370">						sink::error,</span>
+<span class="fc" id="L371">						sink::success,</span>
+<span class="fc" id="L372">						Context.of(sink.contextView()));</span>
+			}
+<span class="nc" id="L374">			catch (IOException ex) {</span>
+<span class="nc" id="L375">				sink.error(ex);</span>
+<span class="fc" id="L376">			}</span>
+<span class="fc" id="L377">		});</span>
+	}
+
+	private static Set&lt;OpenOption&gt; checkWriteOptions(OpenOption[] options) {
+<span class="fc" id="L381">		int length = options.length;</span>
+<span class="pc bpc" id="L382" title="1 of 2 branches missed.">		Set&lt;OpenOption&gt; result = CollectionUtils.newHashSet(length &gt; 0 ? length : 2);</span>
+<span class="pc bpc" id="L383" title="1 of 2 branches missed.">		if (length == 0) {</span>
+<span class="fc" id="L384">			result.add(StandardOpenOption.CREATE);</span>
+<span class="fc" id="L385">			result.add(StandardOpenOption.TRUNCATE_EXISTING);</span>
+		}
+		else {
+<span class="nc bnc" id="L388" title="All 2 branches missed.">			for (OpenOption opt : options) {</span>
+<span class="nc bnc" id="L389" title="All 2 branches missed.">				if (opt == StandardOpenOption.READ) {</span>
+<span class="nc" id="L390">					throw new IllegalArgumentException(&quot;READ not allowed&quot;);</span>
+				}
+<span class="nc" id="L392">				result.add(opt);</span>
+			}
+		}
+<span class="fc" id="L395">		result.add(StandardOpenOption.WRITE);</span>
+<span class="fc" id="L396">		return result;</span>
+	}
+
+	static void closeChannel(@Nullable Channel channel) {
+<span class="pc bpc" id="L400" title="1 of 4 branches missed.">		if (channel != null &amp;&amp; channel.isOpen()) {</span>
+			try {
+<span class="fc" id="L402">				channel.close();</span>
+			}
+<span class="nc" id="L404">			catch (IOException ignored) {</span>
+<span class="fc" id="L405">			}</span>
+		}
+<span class="fc" id="L407">	}</span>
+
+
+	/**
+	 * Create a new {@code Publisher&lt;DataBuffer&gt;} based on bytes written to a
+	 * {@code OutputStream}.
+	 * &lt;ul&gt;
+	 * &lt;li&gt;The parameter {@code outputStreamConsumer} is invoked once per
+	 * subscription of the returned {@code Publisher}, when the first
+	 * item is
+	 * {@linkplain Subscription#request(long) requested}.&lt;/li&gt;
+	 * &lt;li&gt;{@link OutputStream#write(byte[], int, int) OutputStream.write()}
+	 * invocations made by {@code outputStreamConsumer} are buffered until they
+	 * exceed the default chunk size of 1024, or when the stream is
+	 * {@linkplain OutputStream#flush() flushed} and then result in a
+	 * {@linkplain Subscriber#onNext(Object) published} item
+	 * if there is {@linkplain Subscription#request(long) demand}.&lt;/li&gt;
+	 * &lt;li&gt;If there is &lt;em&gt;no demand&lt;/em&gt;, {@code OutputStream.write()} will block
+	 * until there is.&lt;/li&gt;
+	 * &lt;li&gt;If the subscription is {@linkplain Subscription#cancel() cancelled},
+	 * {@code OutputStream.write()} will throw a {@code IOException}.&lt;/li&gt;
+	 * &lt;li&gt;The subscription is
+	 * {@linkplain Subscriber#onComplete() completed} when
+	 * {@code outputStreamHandler} completes.&lt;/li&gt;
+	 * &lt;li&gt;Any exceptions thrown from {@code outputStreamHandler} will
+	 * be dispatched to the {@linkplain Subscriber#onError(Throwable) Subscriber}.
+	 * &lt;/ul&gt;
+	 * @param consumer invoked when the first buffer is requested
+	 * @param executor used to invoke the {@code outputStreamHandler}
+	 * @return a {@code Publisher&lt;DataBuffer&gt;} based on bytes written by
+	 * {@code outputStreamHandler}
+	 * @since 6.1
+	 */
+	public static Publisher&lt;DataBuffer&gt; outputStreamPublisher(
+			Consumer&lt;OutputStream&gt; consumer, DataBufferFactory bufferFactory, Executor executor) {
+
+<span class="nc" id="L443">		return new OutputStreamPublisher&lt;&gt;(</span>
+<span class="nc" id="L444">				consumer::accept, new DataBufferMapper(bufferFactory), executor, null);</span>
+	}
+
+	/**
+	 * Variant of {@link #outputStreamPublisher(Consumer, DataBufferFactory, Executor)}
+	 * providing control over the chunk sizes to be produced by the publisher.
+	 * @since 6.1
+	 */
+	public static Publisher&lt;DataBuffer&gt; outputStreamPublisher(
+			Consumer&lt;OutputStream&gt; consumer, DataBufferFactory bufferFactory, Executor executor, int chunkSize) {
+
+<span class="nc" id="L455">		return new OutputStreamPublisher&lt;&gt;(</span>
+<span class="nc" id="L456">				consumer::accept, new DataBufferMapper(bufferFactory), executor, chunkSize);</span>
+	}
+
+	/**
+	 * Subscribe to given {@link Publisher} of {@code DataBuffer}s, and return an
+	 * {@link InputStream} to consume the byte content with.
+	 * &lt;p&gt;Byte buffers are stored in a queue. The {@code demand} constructor value
+	 * determines the number of buffers requested initially. When storage falls
+	 * below a {@code (demand - (demand &gt;&gt; 2))} limit, a request is made to refill
+	 * the queue.
+	 * &lt;p&gt;The {@code InputStream} terminates after an onError or onComplete signal,
+	 * and stored buffers are read. If the {@code InputStream} is closed,
+	 * the {@link Flow.Subscription} is cancelled, and stored buffers released.
+	 * @param publisher the source of {@code DataBuffer}s
+	 * @param demand the number of buffers to request initially, and buffer
+	 * internally on an ongoing basis.
+	 * @return an {@link InputStream} backed by the {@link Publisher}
+	 */
+	public static &lt;T extends DataBuffer&gt; InputStream subscriberInputStream(Publisher&lt;T&gt; publisher, int demand) {
+<span class="nc" id="L475">		Assert.notNull(publisher, &quot;Publisher must not be null&quot;);</span>
+<span class="nc bnc" id="L476" title="All 2 branches missed.">		Assert.isTrue(demand &gt; 0, &quot;maxBufferCount must be &gt; 0&quot;);</span>
+
+<span class="nc" id="L478">		SubscriberInputStream subscriber = new SubscriberInputStream(demand);</span>
+<span class="nc" id="L479">		publisher.subscribe(subscriber);</span>
+<span class="nc" id="L480">		return subscriber;</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Various
+	//---------------------------------------------------------------------
+
+	/**
+	 * Relay buffers from the given {@link Publisher} until the total
+	 * {@linkplain DataBuffer#readableByteCount() byte count} reaches
+	 * the given maximum byte count, or until the publisher is complete.
+	 * @param publisher the publisher to filter
+	 * @param maxByteCount the maximum byte count
+	 * @return a flux whose maximum byte count is {@code maxByteCount}
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public static &lt;T extends DataBuffer&gt; Flux&lt;T&gt; takeUntilByteCount(Publisher&lt;T&gt; publisher, long maxByteCount) {
+<span class="fc" id="L498">		Assert.notNull(publisher, &quot;Publisher must not be null&quot;);</span>
+<span class="pc bpc" id="L499" title="1 of 2 branches missed.">		Assert.isTrue(maxByteCount &gt;= 0, &quot;'maxByteCount' must be &gt;= 0&quot;);</span>
+
+<span class="fc" id="L501">		return Flux.defer(() -&gt; {</span>
+<span class="fc" id="L502">			AtomicLong countDown = new AtomicLong(maxByteCount);</span>
+<span class="fc" id="L503">			return Flux.from(publisher)</span>
+<span class="fc" id="L504">					.map(buffer -&gt; {</span>
+<span class="fc" id="L505">						long remainder = countDown.addAndGet(-buffer.readableByteCount());</span>
+<span class="pc bpc" id="L506" title="1 of 2 branches missed.">						if (remainder &lt; 0) {</span>
+<span class="nc" id="L507">							int index = buffer.readableByteCount() + (int) remainder;</span>
+<span class="nc" id="L508">							DataBuffer split = buffer.split(index);</span>
+<span class="nc" id="L509">							release(buffer);</span>
+<span class="nc" id="L510">							return (T)split;</span>
+						}
+						else {
+<span class="fc" id="L513">							return buffer;</span>
+						}
+					})
+<span class="pc bpc" id="L516" title="1 of 2 branches missed.">					.takeUntil(buffer -&gt; countDown.get() &lt;= 0);</span>
+		});
+
+		// No doOnDiscard as operators used do not cache (and drop) buffers
+	}
+
+	/**
+	 * Skip buffers from the given {@link Publisher} until the total
+	 * {@linkplain DataBuffer#readableByteCount() byte count} reaches
+	 * the given maximum byte count, or until the publisher is complete.
+	 * @param publisher the publisher to filter
+	 * @param maxByteCount the maximum byte count
+	 * @return a flux with the remaining part of the given publisher
+	 */
+	public static &lt;T extends DataBuffer&gt; Flux&lt;T&gt; skipUntilByteCount(Publisher&lt;T&gt; publisher, long maxByteCount) {
+<span class="nc" id="L531">		Assert.notNull(publisher, &quot;Publisher must not be null&quot;);</span>
+<span class="nc bnc" id="L532" title="All 2 branches missed.">		Assert.isTrue(maxByteCount &gt;= 0, &quot;'maxByteCount' must be &gt;= 0&quot;);</span>
+
+<span class="nc" id="L534">		return Flux.defer(() -&gt; {</span>
+<span class="nc" id="L535">			AtomicLong countDown = new AtomicLong(maxByteCount);</span>
+<span class="nc" id="L536">			return Flux.from(publisher)</span>
+<span class="nc" id="L537">					.skipUntil(buffer -&gt; {</span>
+<span class="nc" id="L538">						long remainder = countDown.addAndGet(-buffer.readableByteCount());</span>
+<span class="nc bnc" id="L539" title="All 2 branches missed.">						return remainder &lt; 0;</span>
+					})
+<span class="nc" id="L541">					.map(buffer -&gt; {</span>
+<span class="nc" id="L542">						long remainder = countDown.get();</span>
+<span class="nc bnc" id="L543" title="All 2 branches missed.">						if (remainder &lt; 0) {</span>
+<span class="nc" id="L544">							countDown.set(0);</span>
+<span class="nc" id="L545">							int start = buffer.readableByteCount() + (int)remainder;</span>
+<span class="nc" id="L546">							DataBuffer split = buffer.split(start);</span>
+<span class="nc" id="L547">							release(split);</span>
+<span class="nc" id="L548">							return buffer;</span>
+						}
+						else {
+<span class="nc" id="L551">							return buffer;</span>
+						}
+					});
+<span class="nc" id="L554">		}).doOnDiscard(DataBuffer.class, DataBufferUtils::release);</span>
+	}
+
+	/**
+	 * Retain the given data buffer, if it is a {@link PooledDataBuffer}.
+	 * @param dataBuffer the data buffer to retain
+	 * @return the retained buffer
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public static &lt;T extends DataBuffer&gt; T retain(T dataBuffer) {
+<span class="fc bfc" id="L564" title="All 2 branches covered.">		if (dataBuffer instanceof PooledDataBuffer pooledDataBuffer) {</span>
+<span class="fc" id="L565">			return (T) pooledDataBuffer.retain();</span>
+		}
+		else {
+<span class="fc" id="L568">			return dataBuffer;</span>
+		}
+	}
+
+	/**
+	 * Associate the given hint with the data buffer if it is a pooled buffer
+	 * and supports leak tracking.
+	 * @param dataBuffer the data buffer to attach the hint to
+	 * @param hint the hint to attach
+	 * @return the input buffer
+	 * @since 5.3.2
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public static &lt;T extends DataBuffer&gt; T touch(T dataBuffer, Object hint) {
+<span class="fc bfc" id="L582" title="All 2 branches covered.">		if (dataBuffer instanceof TouchableDataBuffer touchableDataBuffer) {</span>
+<span class="fc" id="L583">			return (T) touchableDataBuffer.touch(hint);</span>
+		}
+		else {
+<span class="fc" id="L586">			return dataBuffer;</span>
+		}
+	}
+
+	/**
+	 * Release the given data buffer. If it is a {@link PooledDataBuffer} and
+	 * has been {@linkplain PooledDataBuffer#isAllocated() allocated}, this
+	 * method will call {@link PooledDataBuffer#release()}. If it is a
+	 * {@link CloseableDataBuffer}, this method will call
+	 * {@link CloseableDataBuffer#close()}.
+	 * @param dataBuffer the data buffer to release
+	 * @return {@code true} if the buffer was released; {@code false} otherwise.
+	 */
+	public static boolean release(@Nullable DataBuffer dataBuffer) {
+<span class="fc bfc" id="L600" title="All 2 branches covered.">		if (dataBuffer instanceof PooledDataBuffer pooledDataBuffer) {</span>
+<span class="fc bfc" id="L601" title="All 2 branches covered.">			if (pooledDataBuffer.isAllocated()) {</span>
+				try {
+<span class="fc" id="L603">					return pooledDataBuffer.release();</span>
+				}
+<span class="nc" id="L605">				catch (IllegalStateException ex) {</span>
+<span class="nc bnc" id="L606" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L607">						logger.debug(&quot;Failed to release PooledDataBuffer: &quot; + dataBuffer, ex);</span>
+					}
+<span class="nc" id="L609">					return false;</span>
+				}
+			}
+		}
+<span class="pc bpc" id="L613" title="1 of 2 branches missed.">		else if (dataBuffer instanceof CloseableDataBuffer closeableDataBuffer) {</span>
+			try {
+<span class="nc" id="L615">				closeableDataBuffer.close();</span>
+<span class="nc" id="L616">				return true;</span>
+			}
+<span class="nc" id="L618">			catch (IllegalStateException ex) {</span>
+<span class="nc bnc" id="L619" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L620">					logger.debug(&quot;Failed to release CloseableDataBuffer &quot; + dataBuffer, ex);</span>
+				}
+<span class="nc" id="L622">				return false;</span>
+
+			}
+		}
+<span class="fc" id="L626">		return false;</span>
+	}
+
+	/**
+	 * Return a consumer that calls {@link #release(DataBuffer)} on all
+	 * passed data buffers.
+	 */
+	public static Consumer&lt;DataBuffer&gt; releaseConsumer() {
+<span class="fc" id="L634">		return RELEASE_CONSUMER;</span>
+	}
+
+	/**
+	 * Return a new {@code DataBuffer} composed of joining together the given
+	 * {@code dataBuffers} elements. Depending on the {@link DataBuffer} type,
+	 * the returned buffer may be a single buffer containing all data of the
+	 * provided buffers, or it may be a zero-copy, composite with references to
+	 * the given buffers.
+	 * &lt;p&gt;If {@code dataBuffers} produces an error or if there is a cancel
+	 * signal, then all accumulated buffers will be
+	 * {@linkplain #release(DataBuffer) released}.
+	 * &lt;p&gt;Note that the given data buffers do &lt;strong&gt;not&lt;/strong&gt; have to be
+	 * released. They will be released as part of the returned composite.
+	 * @param dataBuffers the data buffers that are to be composed
+	 * @return a buffer that is composed of the {@code dataBuffers} argument
+	 * @since 5.0.3
+	 */
+	public static Mono&lt;DataBuffer&gt; join(Publisher&lt;? extends DataBuffer&gt; dataBuffers) {
+<span class="fc" id="L653">		return join(dataBuffers, -1);</span>
+	}
+
+	/**
+	 * Variant of {@link #join(Publisher)} that behaves the same way up until
+	 * the specified max number of bytes to buffer. Once the limit is exceeded,
+	 * {@link DataBufferLimitException} is raised.
+	 * @param buffers the data buffers that are to be composed
+	 * @param maxByteCount the max number of bytes to buffer, or -1 for unlimited
+	 * @return a buffer with the aggregated content, possibly an empty Mono if
+	 * the max number of bytes to buffer is exceeded.
+	 * @throws DataBufferLimitException if maxByteCount is exceeded
+	 * @since 5.1.11
+	 */
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;})
+	public static Mono&lt;DataBuffer&gt; join(Publisher&lt;? extends DataBuffer&gt; buffers, int maxByteCount) {
+<span class="fc" id="L669">		Assert.notNull(buffers, &quot;'buffers' must not be null&quot;);</span>
+
+<span class="pc bpc" id="L671" title="1 of 2 branches missed.">		if (buffers instanceof Mono mono) {</span>
+<span class="nc" id="L672">			return mono;</span>
+		}
+
+<span class="fc" id="L675">		return Flux.from(buffers)</span>
+<span class="fc" id="L676">				.collect(() -&gt; new LimitedDataBufferList(maxByteCount), LimitedDataBufferList::add)</span>
+<span class="fc bfc" id="L677" title="All 2 branches covered.">				.filter(list -&gt; !list.isEmpty())</span>
+<span class="fc" id="L678">				.map(list -&gt; list.get(0).factory().join(list))</span>
+<span class="fc" id="L679">				.doOnDiscard(DataBuffer.class, DataBufferUtils::release);</span>
+	}
+
+	/**
+	 * Return a {@link Matcher} for the given delimiter.
+	 * The matcher can be used to find the delimiters in a stream of data buffers.
+	 * @param delimiter the delimiter bytes to find
+	 * @return the matcher
+	 * @since 5.2
+	 */
+	public static Matcher matcher(byte[] delimiter) {
+<span class="fc" id="L690">		return createMatcher(delimiter);</span>
+	}
+
+	/**
+	 * Return a {@link Matcher} for the given delimiters.
+	 * The matcher can be used to find the delimiters in a stream of data buffers.
+	 * @param delimiters the delimiters bytes to find
+	 * @return the matcher
+	 * @since 5.2
+	 */
+	public static Matcher matcher(byte[]... delimiters) {
+<span class="pc bpc" id="L701" title="1 of 2 branches missed.">		Assert.isTrue(delimiters.length &gt; 0, &quot;Delimiters must not be empty&quot;);</span>
+<span class="pc bpc" id="L702" title="1 of 2 branches missed.">		return (delimiters.length == 1 ? createMatcher(delimiters[0]) : new CompositeMatcher(delimiters));</span>
+	}
+
+	private static NestedMatcher createMatcher(byte[] delimiter) {
+		// extract length due to Eclipse IDE compiler error in switch expression
+<span class="fc" id="L707">		int length = delimiter.length;</span>
+<span class="pc bpc" id="L708" title="1 of 2 branches missed.">		Assert.isTrue(length &gt; 0, &quot;Delimiter must not be empty&quot;);</span>
+<span class="fc bfc" id="L709" title="All 3 branches covered.">		return switch (length) {</span>
+<span class="pc bpc" id="L710" title="1 of 2 branches missed.">			case 1 -&gt; (delimiter[0] == 10 ? SingleByteMatcher.NEWLINE_MATCHER : new SingleByteMatcher(delimiter));</span>
+<span class="fc" id="L711">			case 2 -&gt; new TwoByteMatcher(delimiter);</span>
+<span class="fc" id="L712">			default -&gt; new KnuthMorrisPrattMatcher(delimiter);</span>
+		};
+	}
+
+
+	/**
+	 * Contract to find delimiter(s) against one or more data buffers that can
+	 * be passed one at a time to the {@link #match(DataBuffer)} method.
+	 *
+	 * @since 5.2
+	 * @see #match(DataBuffer)
+	 */
+	public interface Matcher {
+
+		/**
+		 * Find the first matching delimiter and return the index of the last
+		 * byte of the delimiter, or {@code -1} if not found.
+		 */
+		int match(DataBuffer dataBuffer);
+
+		/**
+		 * Return the delimiter from the last invocation of {@link #match(DataBuffer)}.
+		 */
+		byte[] delimiter();
+
+		/**
+		 * Reset the state of this matcher.
+		 */
+		void reset();
+	}
+
+
+	/**
+	 * Matcher that supports searching for multiple delimiters.
+	 */
+	private static class CompositeMatcher implements Matcher {
+
+<span class="fc" id="L749">		private static final byte[] NO_DELIMITER = new byte[0];</span>
+
+
+		private final NestedMatcher[] matchers;
+
+<span class="fc" id="L754">		byte[] longestDelimiter = NO_DELIMITER;</span>
+
+<span class="fc" id="L756">		CompositeMatcher(byte[][] delimiters) {</span>
+<span class="fc" id="L757">			this.matchers = initMatchers(delimiters);</span>
+<span class="fc" id="L758">		}</span>
+
+		private static NestedMatcher[] initMatchers(byte[][] delimiters) {
+<span class="fc" id="L761">			NestedMatcher[] matchers = new NestedMatcher[delimiters.length];</span>
+<span class="fc bfc" id="L762" title="All 2 branches covered.">			for (int i = 0; i &lt; delimiters.length; i++) {</span>
+<span class="fc" id="L763">				matchers[i] = createMatcher(delimiters[i]);</span>
+			}
+<span class="fc" id="L765">			return matchers;</span>
+		}
+
+		@Override
+		public int match(DataBuffer dataBuffer) {
+<span class="fc" id="L770">			this.longestDelimiter = NO_DELIMITER;</span>
+
+<span class="fc bfc" id="L772" title="All 2 branches covered.">			for (int pos = dataBuffer.readPosition(); pos &lt; dataBuffer.writePosition(); pos++) {</span>
+<span class="fc" id="L773">				byte b = dataBuffer.getByte(pos);</span>
+
+<span class="fc bfc" id="L775" title="All 2 branches covered.">				for (NestedMatcher matcher : this.matchers) {</span>
+<span class="pc bpc" id="L776" title="1 of 4 branches missed.">					if (matcher.match(b) &amp;&amp; matcher.delimiter().length &gt; this.longestDelimiter.length) {</span>
+<span class="fc" id="L777">						this.longestDelimiter = matcher.delimiter();</span>
+					}
+				}
+
+<span class="fc bfc" id="L781" title="All 2 branches covered.">				if (this.longestDelimiter != NO_DELIMITER) {</span>
+<span class="fc" id="L782">					reset();</span>
+<span class="fc" id="L783">					return pos;</span>
+				}
+			}
+<span class="fc" id="L786">			return -1;</span>
+		}
+
+		@Override
+		public byte[] delimiter() {
+<span class="pc bpc" id="L791" title="1 of 2 branches missed.">			Assert.state(this.longestDelimiter != NO_DELIMITER, &quot;'delimiter' not set&quot;);</span>
+<span class="fc" id="L792">			return this.longestDelimiter;</span>
+		}
+
+		@Override
+		public void reset() {
+<span class="fc bfc" id="L797" title="All 2 branches covered.">			for (NestedMatcher matcher : this.matchers) {</span>
+<span class="fc" id="L798">				matcher.reset();</span>
+			}
+<span class="fc" id="L800">		}</span>
+	}
+
+
+	/**
+	 * Matcher that can be nested within {@link CompositeMatcher} where multiple
+	 * matchers advance together using the same index, one byte at a time.
+	 */
+	private interface NestedMatcher extends Matcher {
+
+		/**
+		 * Perform a match against the next byte of the stream and return true
+		 * if the delimiter is fully matched.
+		 */
+		boolean match(byte b);
+
+	}
+
+
+	/**
+	 * Matcher for a single byte delimiter.
+	 */
+	private static class SingleByteMatcher implements NestedMatcher {
+
+<span class="fc" id="L824">		static final SingleByteMatcher NEWLINE_MATCHER = new SingleByteMatcher(new byte[] {10});</span>
+
+		private final byte[] delimiter;
+
+<span class="fc" id="L828">		SingleByteMatcher(byte[] delimiter) {</span>
+<span class="pc bpc" id="L829" title="1 of 2 branches missed.">			Assert.isTrue(delimiter.length == 1, &quot;Expected a 1 byte delimiter&quot;);</span>
+<span class="fc" id="L830">			this.delimiter = delimiter;</span>
+<span class="fc" id="L831">		}</span>
+
+		@Override
+		public int match(DataBuffer dataBuffer) {
+<span class="nc" id="L835">			int start = dataBuffer.readPosition();</span>
+<span class="nc" id="L836">			int end = dataBuffer.writePosition();</span>
+<span class="nc bnc" id="L837" title="All 2 branches missed.">			return dataBuffer.forEachByte(start, end - start, b -&gt; !this.match(b));</span>
+		}
+
+		@Override
+		public boolean match(byte b) {
+<span class="fc bfc" id="L842" title="All 2 branches covered.">			return this.delimiter[0] == b;</span>
+		}
+
+		@Override
+		public byte[] delimiter() {
+<span class="fc" id="L847">			return this.delimiter;</span>
+		}
+
+		@Override
+		public void reset() {
+<span class="fc" id="L852">		}</span>
+	}
+
+
+	/**
+	 * Base class for a {@link NestedMatcher}.
+	 */
+	private abstract static class AbstractNestedMatcher implements NestedMatcher {
+
+		private final byte[] delimiter;
+
+<span class="fc" id="L863">		private int matches = 0;</span>
+
+
+<span class="fc" id="L866">		protected AbstractNestedMatcher(byte[] delimiter) {</span>
+<span class="fc" id="L867">			this.delimiter = delimiter;</span>
+<span class="fc" id="L868">		}</span>
+
+		protected void setMatches(int index) {
+<span class="fc" id="L871">			this.matches = index;</span>
+<span class="fc" id="L872">		}</span>
+
+		protected int getMatches() {
+<span class="fc" id="L875">			return this.matches;</span>
+		}
+
+		@Override
+		public int match(DataBuffer dataBuffer) {
+<span class="fc" id="L880">			int start = dataBuffer.readPosition();</span>
+<span class="fc" id="L881">			int end = dataBuffer.writePosition();</span>
+<span class="fc bfc" id="L882" title="All 2 branches covered.">			int matchPosition = dataBuffer.forEachByte(start, end - start, b -&gt; !this.match(b));</span>
+<span class="fc bfc" id="L883" title="All 2 branches covered.">			if (matchPosition != -1) {</span>
+<span class="fc" id="L884">				reset();</span>
+			}
+<span class="fc" id="L886">			return matchPosition;</span>
+		}
+
+		@Override
+		public boolean match(byte b) {
+<span class="fc bfc" id="L891" title="All 2 branches covered.">			if (b == this.delimiter[this.matches]) {</span>
+<span class="fc" id="L892">				this.matches++;</span>
+<span class="fc bfc" id="L893" title="All 2 branches covered.">				return (this.matches == delimiter().length);</span>
+			}
+<span class="fc" id="L895">			return false;</span>
+		}
+
+		@Override
+		public byte[] delimiter() {
+<span class="fc" id="L900">			return this.delimiter;</span>
+		}
+
+		@Override
+		public void reset() {
+<span class="fc" id="L905">			this.matches = 0;</span>
+<span class="fc" id="L906">		}</span>
+	}
+
+
+	/**
+	 * Matcher with a 2 byte delimiter that does not benefit from a
+	 * Knuth-Morris-Pratt suffix-prefix table.
+	 */
+	private static class TwoByteMatcher extends AbstractNestedMatcher {
+
+		protected TwoByteMatcher(byte[] delimiter) {
+<span class="fc" id="L917">			super(delimiter);</span>
+<span class="pc bpc" id="L918" title="1 of 2 branches missed.">			Assert.isTrue(delimiter.length == 2, &quot;Expected a 2-byte delimiter&quot;);</span>
+<span class="fc" id="L919">		}</span>
+	}
+
+
+	/**
+	 * Implementation of {@link Matcher} that uses the Knuth-Morris-Pratt algorithm.
+	 * @see &lt;a href=&quot;https://www.nayuki.io/page/knuth-morris-pratt-string-matching&quot;&gt;Knuth-Morris-Pratt string matching&lt;/a&gt;
+	 */
+	private static class KnuthMorrisPrattMatcher extends AbstractNestedMatcher {
+
+		private final int[] table;
+
+		public KnuthMorrisPrattMatcher(byte[] delimiter) {
+<span class="fc" id="L932">			super(delimiter);</span>
+<span class="fc" id="L933">			this.table = longestSuffixPrefixTable(delimiter);</span>
+<span class="fc" id="L934">		}</span>
+
+		private static int[] longestSuffixPrefixTable(byte[] delimiter) {
+<span class="fc" id="L937">			int[] result = new int[delimiter.length];</span>
+<span class="fc" id="L938">			result[0] = 0;</span>
+<span class="fc bfc" id="L939" title="All 2 branches covered.">			for (int i = 1; i &lt; delimiter.length; i++) {</span>
+<span class="fc" id="L940">				int j = result[i - 1];</span>
+<span class="fc bfc" id="L941" title="All 4 branches covered.">				while (j &gt; 0 &amp;&amp; delimiter[i] != delimiter[j]) {</span>
+<span class="fc" id="L942">					j = result[j - 1];</span>
+				}
+<span class="fc bfc" id="L944" title="All 2 branches covered.">				if (delimiter[i] == delimiter[j]) {</span>
+<span class="fc" id="L945">					j++;</span>
+				}
+<span class="fc" id="L947">				result[i] = j;</span>
+			}
+<span class="fc" id="L949">			return result;</span>
+		}
+
+		@Override
+		public boolean match(byte b) {
+<span class="fc bfc" id="L954" title="All 4 branches covered.">			while (getMatches() &gt; 0 &amp;&amp; b != delimiter()[getMatches()]) {</span>
+<span class="fc" id="L955">				setMatches(this.table[getMatches() - 1]);</span>
+			}
+<span class="fc" id="L957">			return super.match(b);</span>
+		}
+	}
+
+
+	private static class ReadableByteChannelGenerator implements Consumer&lt;SynchronousSink&lt;DataBuffer&gt;&gt; {
+
+		private final ReadableByteChannel channel;
+
+		private final DataBufferFactory dataBufferFactory;
+
+		private final int bufferSize;
+
+		public ReadableByteChannelGenerator(
+<span class="fc" id="L971">				ReadableByteChannel channel, DataBufferFactory dataBufferFactory, int bufferSize) {</span>
+
+<span class="fc" id="L973">			this.channel = channel;</span>
+<span class="fc" id="L974">			this.dataBufferFactory = dataBufferFactory;</span>
+<span class="fc" id="L975">			this.bufferSize = bufferSize;</span>
+<span class="fc" id="L976">		}</span>
+
+		@Override
+		public void accept(SynchronousSink&lt;DataBuffer&gt; sink) {
+<span class="fc" id="L980">			int read = -1;</span>
+<span class="fc" id="L981">			DataBuffer dataBuffer = this.dataBufferFactory.allocateBuffer(this.bufferSize);</span>
+			try {
+<span class="fc" id="L983">				try (DataBuffer.ByteBufferIterator iterator = dataBuffer.writableByteBuffers()) {</span>
+<span class="fc" id="L984">					Assert.state(iterator.hasNext(), &quot;No ByteBuffer available&quot;);</span>
+<span class="fc" id="L985">					ByteBuffer byteBuffer = iterator.next();</span>
+<span class="fc" id="L986">					read = this.channel.read(byteBuffer);</span>
+				}
+<span class="fc bfc" id="L988" title="All 2 branches covered.">				if (read &gt;= 0) {</span>
+<span class="fc" id="L989">					dataBuffer.writePosition(read);</span>
+<span class="fc" id="L990">					sink.next(dataBuffer);</span>
+				}
+				else {
+<span class="fc" id="L993">					sink.complete();</span>
+				}
+			}
+<span class="nc" id="L996">			catch (IOException ex) {</span>
+<span class="nc" id="L997">				sink.error(ex);</span>
+			}
+			finally {
+<span class="fc bfc" id="L1000" title="All 2 branches covered.">				if (read == -1) {</span>
+<span class="fc" id="L1001">					release(dataBuffer);</span>
+				}
+			}
+<span class="fc" id="L1004">		}</span>
+	}
+
+
+	private static class ReadCompletionHandler implements CompletionHandler&lt;Integer, ReadCompletionHandler.Attachment&gt; {
+
+		private final AsynchronousFileChannel channel;
+
+		private final FluxSink&lt;DataBuffer&gt; sink;
+
+		private final DataBufferFactory dataBufferFactory;
+
+		private final int bufferSize;
+
+		private final AtomicLong position;
+
+<span class="fc" id="L1020">		private final AtomicReference&lt;State&gt; state = new AtomicReference&lt;&gt;(State.IDLE);</span>
+
+		public ReadCompletionHandler(AsynchronousFileChannel channel,
+<span class="fc" id="L1023">				FluxSink&lt;DataBuffer&gt; sink, long position, DataBufferFactory dataBufferFactory, int bufferSize) {</span>
+
+<span class="fc" id="L1025">			this.channel = channel;</span>
+<span class="fc" id="L1026">			this.sink = sink;</span>
+<span class="fc" id="L1027">			this.position = new AtomicLong(position);</span>
+<span class="fc" id="L1028">			this.dataBufferFactory = dataBufferFactory;</span>
+<span class="fc" id="L1029">			this.bufferSize = bufferSize;</span>
+<span class="fc" id="L1030">		}</span>
+
+		/**
+		 * Invoked when Reactive Streams consumer signals demand.
+		 */
+		public void request(long n) {
+<span class="fc" id="L1036">			tryRead();</span>
+<span class="fc" id="L1037">		}</span>
+
+		/**
+		 * Invoked when Reactive Streams consumer cancels.
+		 */
+		public void cancel() {
+<span class="fc" id="L1043">			this.state.getAndSet(State.DISPOSED);</span>
+
+			// According java.nio.channels.AsynchronousChannel &quot;if an I/O operation is outstanding
+			// on the channel and the channel's close method is invoked, then the I/O operation
+			// fails with the exception AsynchronousCloseException&quot;. That should invoke the failed
+			// callback below and the current DataBuffer should be released.
+
+<span class="fc" id="L1050">			closeChannel(this.channel);</span>
+<span class="fc" id="L1051">		}</span>
+
+		private void tryRead() {
+<span class="fc bfc" id="L1054" title="All 4 branches covered.">			if (this.sink.requestedFromDownstream() &gt; 0 &amp;&amp; this.state.compareAndSet(State.IDLE, State.READING)) {</span>
+<span class="fc" id="L1055">				read();</span>
+			}
+<span class="fc" id="L1057">		}</span>
+
+		private void read() {
+<span class="fc" id="L1060">			DataBuffer dataBuffer = this.dataBufferFactory.allocateBuffer(this.bufferSize);</span>
+<span class="fc" id="L1061">			DataBuffer.ByteBufferIterator iterator = dataBuffer.writableByteBuffers();</span>
+<span class="fc" id="L1062">			Assert.state(iterator.hasNext(), &quot;No ByteBuffer available&quot;);</span>
+<span class="fc" id="L1063">			ByteBuffer byteBuffer = iterator.next();</span>
+<span class="fc" id="L1064">			Attachment attachment = new Attachment(dataBuffer, iterator);</span>
+<span class="fc" id="L1065">			this.channel.read(byteBuffer, this.position.get(), attachment, this);</span>
+<span class="fc" id="L1066">		}</span>
+
+		@Override
+		public void completed(Integer read, Attachment attachment) {
+<span class="fc" id="L1070">			attachment.iterator().close();</span>
+<span class="fc" id="L1071">			DataBuffer dataBuffer = attachment.dataBuffer();</span>
+
+<span class="pc bpc" id="L1073" title="1 of 2 branches missed.">			if (this.state.get() == State.DISPOSED) {</span>
+<span class="nc" id="L1074">				release(dataBuffer);</span>
+<span class="nc" id="L1075">				closeChannel(this.channel);</span>
+<span class="nc" id="L1076">				return;</span>
+			}
+
+<span class="fc bfc" id="L1079" title="All 2 branches covered.">			if (read == -1) {</span>
+<span class="fc" id="L1080">				release(dataBuffer);</span>
+<span class="fc" id="L1081">				closeChannel(this.channel);</span>
+<span class="fc" id="L1082">				this.state.set(State.DISPOSED);</span>
+<span class="fc" id="L1083">				this.sink.complete();</span>
+<span class="fc" id="L1084">				return;</span>
+			}
+
+<span class="fc" id="L1087">			this.position.addAndGet(read);</span>
+<span class="fc" id="L1088">			dataBuffer.writePosition(read);</span>
+<span class="fc" id="L1089">			this.sink.next(dataBuffer);</span>
+
+			// Stay in READING mode if there is demand
+<span class="fc bfc" id="L1092" title="All 2 branches covered.">			if (this.sink.requestedFromDownstream() &gt; 0) {</span>
+<span class="fc" id="L1093">				read();</span>
+<span class="fc" id="L1094">				return;</span>
+			}
+
+			// Release READING mode and then try again in case of concurrent &quot;request&quot;
+<span class="pc bpc" id="L1098" title="1 of 2 branches missed.">			if (this.state.compareAndSet(State.READING, State.IDLE)) {</span>
+<span class="fc" id="L1099">				tryRead();</span>
+			}
+<span class="fc" id="L1101">		}</span>
+
+		@Override
+		public void failed(Throwable ex, Attachment attachment) {
+<span class="fc" id="L1105">			attachment.iterator().close();</span>
+<span class="fc" id="L1106">			release(attachment.dataBuffer());</span>
+
+<span class="fc" id="L1108">			closeChannel(this.channel);</span>
+<span class="fc" id="L1109">			this.state.set(State.DISPOSED);</span>
+<span class="fc" id="L1110">			this.sink.error(ex);</span>
+<span class="fc" id="L1111">		}</span>
+
+<span class="fc" id="L1113">		private enum State {</span>
+<span class="fc" id="L1114">			IDLE, READING, DISPOSED</span>
+		}
+
+<span class="fc" id="L1117">		private record Attachment(DataBuffer dataBuffer, DataBuffer.ByteBufferIterator iterator) {}</span>
+	}
+
+
+	private static class WritableByteChannelSubscriber extends BaseSubscriber&lt;DataBuffer&gt; {
+
+		private final FluxSink&lt;DataBuffer&gt; sink;
+
+		private final WritableByteChannel channel;
+
+<span class="nc" id="L1127">		public WritableByteChannelSubscriber(FluxSink&lt;DataBuffer&gt; sink, WritableByteChannel channel) {</span>
+<span class="nc" id="L1128">			this.sink = sink;</span>
+<span class="nc" id="L1129">			this.channel = channel;</span>
+<span class="nc" id="L1130">		}</span>
+
+		@Override
+		protected void hookOnSubscribe(Subscription subscription) {
+<span class="nc" id="L1134">			request(1);</span>
+<span class="nc" id="L1135">		}</span>
+
+		@Override
+		protected void hookOnNext(DataBuffer dataBuffer) {
+			try {
+<span class="nc" id="L1140">				try (DataBuffer.ByteBufferIterator iterator = dataBuffer.readableByteBuffers()) {</span>
+<span class="nc" id="L1141">					ByteBuffer byteBuffer = iterator.next();</span>
+<span class="nc bnc" id="L1142" title="All 2 branches missed.">					while (byteBuffer.hasRemaining()) {</span>
+<span class="nc" id="L1143">						this.channel.write(byteBuffer);</span>
+					}
+				}
+<span class="nc" id="L1146">				this.sink.next(dataBuffer);</span>
+<span class="nc" id="L1147">				request(1);</span>
+			}
+<span class="nc" id="L1149">			catch (IOException ex) {</span>
+<span class="nc" id="L1150">				this.sink.next(dataBuffer);</span>
+<span class="nc" id="L1151">				this.sink.error(ex);</span>
+<span class="nc" id="L1152">			}</span>
+<span class="nc" id="L1153">		}</span>
+
+		@Override
+		protected void hookOnError(Throwable throwable) {
+<span class="nc" id="L1157">			this.sink.error(throwable);</span>
+<span class="nc" id="L1158">		}</span>
+
+		@Override
+		protected void hookOnComplete() {
+<span class="nc" id="L1162">			this.sink.complete();</span>
+<span class="nc" id="L1163">		}</span>
+
+		@Override
+		public Context currentContext() {
+<span class="nc" id="L1167">			return Context.of(this.sink.contextView());</span>
+		}
+	}
+
+
+	private static class WriteCompletionHandler extends BaseSubscriber&lt;DataBuffer&gt;
+			implements CompletionHandler&lt;Integer, WriteCompletionHandler.Attachment&gt; {
+
+		private final FluxSink&lt;DataBuffer&gt; sink;
+
+		private final AsynchronousFileChannel channel;
+
+<span class="fc" id="L1179">		private final AtomicBoolean writing = new AtomicBoolean();</span>
+
+<span class="fc" id="L1181">		private final AtomicBoolean completed = new AtomicBoolean();</span>
+
+<span class="fc" id="L1183">		private final AtomicReference&lt;Throwable&gt; error = new AtomicReference&lt;&gt;();</span>
+
+		private final AtomicLong position;
+
+		public WriteCompletionHandler(
+<span class="fc" id="L1188">				FluxSink&lt;DataBuffer&gt; sink, AsynchronousFileChannel channel, long position) {</span>
+
+<span class="fc" id="L1190">			this.sink = sink;</span>
+<span class="fc" id="L1191">			this.channel = channel;</span>
+<span class="fc" id="L1192">			this.position = new AtomicLong(position);</span>
+<span class="fc" id="L1193">		}</span>
+
+		@Override
+		protected void hookOnSubscribe(Subscription subscription) {
+<span class="fc" id="L1197">			request(1);</span>
+<span class="fc" id="L1198">		}</span>
+
+		@Override
+		protected void hookOnNext(DataBuffer dataBuffer) {
+<span class="fc" id="L1202">			DataBuffer.ByteBufferIterator iterator = dataBuffer.readableByteBuffers();</span>
+<span class="pc bpc" id="L1203" title="1 of 2 branches missed.">			if (iterator.hasNext()) {</span>
+<span class="fc" id="L1204">				ByteBuffer byteBuffer = iterator.next();</span>
+<span class="fc" id="L1205">				long pos = this.position.get();</span>
+<span class="fc" id="L1206">				Attachment attachment = new Attachment(byteBuffer, dataBuffer, iterator);</span>
+<span class="fc" id="L1207">				this.writing.set(true);</span>
+				try {
+<span class="fc" id="L1209">					this.channel.write(byteBuffer, pos, attachment, this);</span>
+				}
+<span class="nc" id="L1211">				catch (RuntimeException ex) {</span>
+					// If the exception escapes, route it to the failure handler
+<span class="nc" id="L1213">					failed(ex, attachment);</span>
+<span class="fc" id="L1214">				}</span>
+			}
+<span class="fc" id="L1216">		}</span>
+
+		@Override
+		protected void hookOnError(Throwable throwable) {
+<span class="nc" id="L1220">			this.error.set(throwable);</span>
+
+<span class="nc bnc" id="L1222" title="All 2 branches missed.">			if (!this.writing.get()) {</span>
+<span class="nc" id="L1223">				this.sink.error(throwable);</span>
+			}
+<span class="nc" id="L1225">		}</span>
+
+		@Override
+		protected void hookOnComplete() {
+<span class="fc" id="L1229">			this.completed.set(true);</span>
+
+<span class="fc bfc" id="L1231" title="All 2 branches covered.">			if (!this.writing.get()) {</span>
+<span class="fc" id="L1232">				this.sink.complete();</span>
+			}
+<span class="fc" id="L1234">		}</span>
+
+		@Override
+		public void completed(Integer written, Attachment attachment) {
+<span class="fc" id="L1238">			DataBuffer.ByteBufferIterator iterator = attachment.iterator();</span>
+<span class="fc" id="L1239">			iterator.close();</span>
+
+<span class="fc" id="L1241">			long pos = this.position.addAndGet(written);</span>
+<span class="fc" id="L1242">			ByteBuffer byteBuffer = attachment.byteBuffer();</span>
+
+<span class="pc bpc" id="L1244" title="1 of 2 branches missed.">			if (byteBuffer.hasRemaining()) {</span>
+<span class="nc" id="L1245">				this.channel.write(byteBuffer, pos, attachment, this);</span>
+			}
+<span class="pc bpc" id="L1247" title="1 of 2 branches missed.">			else if (iterator.hasNext()) {</span>
+<span class="nc" id="L1248">				ByteBuffer next = iterator.next();</span>
+<span class="nc" id="L1249">				this.channel.write(next, pos, attachment, this);</span>
+<span class="nc" id="L1250">			}</span>
+			else {
+<span class="fc" id="L1252">				this.sink.next(attachment.dataBuffer());</span>
+<span class="fc" id="L1253">				this.writing.set(false);</span>
+
+<span class="fc" id="L1255">				Throwable throwable = this.error.get();</span>
+<span class="pc bpc" id="L1256" title="1 of 2 branches missed.">				if (throwable != null) {</span>
+<span class="nc" id="L1257">					this.sink.error(throwable);</span>
+				}
+<span class="fc bfc" id="L1259" title="All 2 branches covered.">				else if (this.completed.get()) {</span>
+<span class="fc" id="L1260">					this.sink.complete();</span>
+				}
+				else {
+<span class="fc" id="L1263">					request(1);</span>
+				}
+			}
+<span class="fc" id="L1266">		}</span>
+
+		@Override
+		public void failed(Throwable ex, Attachment attachment) {
+<span class="nc" id="L1270">			attachment.iterator().close();</span>
+
+<span class="nc" id="L1272">			this.sink.next(attachment.dataBuffer());</span>
+<span class="nc" id="L1273">			this.writing.set(false);</span>
+
+<span class="nc" id="L1275">			this.sink.error(ex);</span>
+<span class="nc" id="L1276">		}</span>
+
+		@Override
+		public Context currentContext() {
+<span class="nc" id="L1280">			return Context.of(this.sink.contextView());</span>
+		}
+
+<span class="fc" id="L1283">		private record Attachment(ByteBuffer byteBuffer, DataBuffer dataBuffer, DataBuffer.ByteBufferIterator iterator) {}</span>
+	}
+
+
+	private static final class DataBufferMapper implements OutputStreamPublisher.ByteMapper&lt;DataBuffer&gt; {
+
+		private final DataBufferFactory bufferFactory;
+
+<span class="nc" id="L1291">		private DataBufferMapper(DataBufferFactory bufferFactory) {</span>
+<span class="nc" id="L1292">			this.bufferFactory = bufferFactory;</span>
+<span class="nc" id="L1293">		}</span>
+
+		@Override
+		public DataBuffer map(int b) {
+<span class="nc" id="L1297">			DataBuffer buffer = this.bufferFactory.allocateBuffer(1);</span>
+<span class="nc" id="L1298">			buffer.write((byte) b);</span>
+<span class="nc" id="L1299">			return buffer;</span>
+		}
+
+		@Override
+		public DataBuffer map(byte[] b, int off, int len) {
+<span class="nc" id="L1304">			DataBuffer buffer = this.bufferFactory.allocateBuffer(len);</span>
+<span class="nc" id="L1305">			buffer.write(b, off, len);</span>
+<span class="nc" id="L1306">			return buffer;</span>
+		}
+
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

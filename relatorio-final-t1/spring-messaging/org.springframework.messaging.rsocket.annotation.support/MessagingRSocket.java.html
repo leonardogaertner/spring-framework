@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>MessagingRSocket.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-messaging</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.rsocket.annotation.support</a> &gt; <span class="el_source">MessagingRSocket.java</span></div><h1>MessagingRSocket.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.rsocket.annotation.support;
+
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+
+import io.rsocket.ConnectionSetupPayload;
+import io.rsocket.Payload;
+import io.rsocket.RSocket;
+import io.rsocket.frame.FrameType;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.NettyDataBuffer;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageHeaders;
+import org.springframework.messaging.ReactiveMessageHandler;
+import org.springframework.messaging.handler.DestinationPatternsMessageCondition;
+import org.springframework.messaging.handler.invocation.reactive.HandlerMethodReturnValueHandler;
+import org.springframework.messaging.rsocket.MetadataExtractor;
+import org.springframework.messaging.rsocket.PayloadUtils;
+import org.springframework.messaging.rsocket.RSocketRequester;
+import org.springframework.messaging.rsocket.RSocketStrategies;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.util.Assert;
+import org.springframework.util.MimeType;
+import org.springframework.util.RouteMatcher;
+
+/**
+ * Responder {@link RSocket} that wraps the payload and metadata of incoming
+ * requests as a {@link Message} and then delegates to the configured
+ * {@link RSocketMessageHandler} to handle it. The response, if applicable, is
+ * obtained from the {@link RSocketPayloadReturnValueHandler#RESPONSE_HEADER
+ * &quot;rsocketResponse&quot;} header.
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.2
+ */
+class MessagingRSocket implements RSocket {
+
+	private final MimeType dataMimeType;
+
+	private final MimeType metadataMimeType;
+
+	private final MetadataExtractor metadataExtractor;
+
+	private final ReactiveMessageHandler messageHandler;
+
+	private final RouteMatcher routeMatcher;
+
+	private final RSocketRequester requester;
+
+	private final RSocketStrategies strategies;
+
+
+	MessagingRSocket(MimeType dataMimeType, MimeType metadataMimeType, MetadataExtractor metadataExtractor,
+			RSocketRequester requester, ReactiveMessageHandler messageHandler, RouteMatcher routeMatcher,
+<span class="fc" id="L79">			RSocketStrategies strategies) {</span>
+
+<span class="fc" id="L81">		Assert.notNull(dataMimeType, &quot;'dataMimeType' is required&quot;);</span>
+<span class="fc" id="L82">		Assert.notNull(metadataMimeType, &quot;'metadataMimeType' is required&quot;);</span>
+<span class="fc" id="L83">		Assert.notNull(metadataExtractor, &quot;MetadataExtractor is required&quot;);</span>
+<span class="fc" id="L84">		Assert.notNull(requester, &quot;RSocketRequester is required&quot;);</span>
+<span class="fc" id="L85">		Assert.notNull(messageHandler, &quot;ReactiveMessageHandler is required&quot;);</span>
+<span class="fc" id="L86">		Assert.notNull(routeMatcher, &quot;RouteMatcher is required&quot;);</span>
+<span class="fc" id="L87">		Assert.notNull(strategies, &quot;RSocketStrategies is required&quot;);</span>
+
+<span class="fc" id="L89">		this.dataMimeType = dataMimeType;</span>
+<span class="fc" id="L90">		this.metadataMimeType = metadataMimeType;</span>
+<span class="fc" id="L91">		this.metadataExtractor = metadataExtractor;</span>
+<span class="fc" id="L92">		this.requester = requester;</span>
+<span class="fc" id="L93">		this.messageHandler = messageHandler;</span>
+<span class="fc" id="L94">		this.routeMatcher = routeMatcher;</span>
+<span class="fc" id="L95">		this.strategies = strategies;</span>
+<span class="fc" id="L96">	}</span>
+
+
+	/**
+	 * Wrap the {@link ConnectionSetupPayload} with a {@link Message} and
+	 * delegate to {@link #handle(Payload, FrameType)} for handling.
+	 * @param payload the connection payload
+	 * @return completion handle for success or error
+	 */
+	public Mono&lt;Void&gt; handleConnectionSetupPayload(ConnectionSetupPayload payload) {
+		// frameDecoder does not apply to connectionSetupPayload
+		// so retain here since handle expects it.
+<span class="fc" id="L108">		payload.retain();</span>
+<span class="fc" id="L109">		return handle(payload, FrameType.SETUP);</span>
+	}
+
+
+	@Override
+	public Mono&lt;Void&gt; fireAndForget(Payload payload) {
+<span class="fc" id="L115">		return handle(payload, FrameType.REQUEST_FNF);</span>
+	}
+
+	@Override
+	public Mono&lt;Payload&gt; requestResponse(Payload payload) {
+<span class="fc" id="L120">		return handleAndReply(payload, FrameType.REQUEST_RESPONSE, Flux.just(payload)).next();</span>
+	}
+
+	@Override
+	public Flux&lt;Payload&gt; requestStream(Payload payload) {
+<span class="fc" id="L125">		return handleAndReply(payload, FrameType.REQUEST_STREAM, Flux.just(payload));</span>
+	}
+
+	@Override
+	public Flux&lt;Payload&gt; requestChannel(Publisher&lt;Payload&gt; payloads) {
+<span class="fc" id="L130">		return Flux.from(payloads)</span>
+<span class="fc" id="L131">				.switchOnFirst((signal, innerFlux) -&gt; {</span>
+<span class="fc" id="L132">					Payload firstPayload = signal.get();</span>
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">					return firstPayload == null ? innerFlux :</span>
+<span class="fc" id="L134">							handleAndReply(firstPayload, FrameType.REQUEST_CHANNEL, innerFlux);</span>
+				});
+	}
+
+	@Override
+	public Mono&lt;Void&gt; metadataPush(Payload payload) {
+		// Not very useful until createHeaders does more with metadata
+<span class="fc" id="L141">		return handle(payload, FrameType.METADATA_PUSH);</span>
+	}
+
+
+	private Mono&lt;Void&gt; handle(Payload payload, FrameType frameType) {
+<span class="fc" id="L146">		MessageHeaders headers = createHeaders(payload, frameType, null);</span>
+<span class="fc" id="L147">		DataBuffer dataBuffer = retainDataAndReleasePayload(payload);</span>
+<span class="fc" id="L148">		int refCount = refCount(dataBuffer);</span>
+<span class="fc" id="L149">		Message&lt;?&gt; message = MessageBuilder.createMessage(dataBuffer, headers);</span>
+<span class="fc" id="L150">		return Mono.defer(() -&gt; this.messageHandler.handleMessage(message))</span>
+<span class="fc" id="L151">				.doFinally(s -&gt; {</span>
+<span class="fc bfc" id="L152" title="All 2 branches covered.">					if (refCount(dataBuffer) == refCount) {</span>
+<span class="fc" id="L153">						DataBufferUtils.release(dataBuffer);</span>
+					}
+<span class="fc" id="L155">				});</span>
+	}
+
+	private int refCount(DataBuffer dataBuffer) {
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">		return dataBuffer instanceof NettyDataBuffer nettyDataBuffer ?</span>
+<span class="pc" id="L160">				nettyDataBuffer.getNativeBuffer().refCnt() : 1;</span>
+	}
+
+	@SuppressWarnings(&quot;deprecation&quot;)
+	private Flux&lt;Payload&gt; handleAndReply(Payload firstPayload, FrameType frameType, Flux&lt;Payload&gt; payloads) {
+<span class="fc" id="L165">		AtomicReference&lt;Flux&lt;Payload&gt;&gt; responseRef = new AtomicReference&lt;&gt;();</span>
+<span class="fc" id="L166">		MessageHeaders headers = createHeaders(firstPayload, frameType, responseRef);</span>
+
+<span class="fc" id="L168">		AtomicBoolean read = new AtomicBoolean();</span>
+<span class="fc" id="L169">		Flux&lt;DataBuffer&gt; buffers = payloads.map(this::retainDataAndReleasePayload).doOnSubscribe(s -&gt; read.set(true));</span>
+<span class="fc" id="L170">		Message&lt;Flux&lt;DataBuffer&gt;&gt; message = MessageBuilder.createMessage(buffers, headers);</span>
+
+<span class="fc" id="L172">		return Mono.defer(() -&gt; this.messageHandler.handleMessage(message))</span>
+<span class="fc" id="L173">				.doFinally(s -&gt; {</span>
+					// Subscription should have happened by now due to ChannelSendOperator
+<span class="fc bfc" id="L175" title="All 2 branches covered.">					if (!read.get()) {</span>
+<span class="fc" id="L176">						firstPayload.release();</span>
+					}
+<span class="fc" id="L178">				})</span>
+<span class="pc bpc" id="L179" title="1 of 2 branches missed.">				.thenMany(Flux.defer(() -&gt; responseRef.get() != null ?</span>
+<span class="pc" id="L180">						responseRef.get() : Mono.error(new IllegalStateException(&quot;Expected response&quot;))));</span>
+	}
+
+	private DataBuffer retainDataAndReleasePayload(Payload payload) {
+<span class="fc" id="L184">		return PayloadUtils.retainDataAndReleasePayload(payload, this.strategies.dataBufferFactory());</span>
+	}
+
+	private MessageHeaders createHeaders(
+			Payload payload, FrameType frameType, @Nullable AtomicReference&lt;Flux&lt;Payload&gt;&gt; responseRef) {
+
+<span class="fc" id="L190">		MessageHeaderAccessor headers = new MessageHeaderAccessor();</span>
+<span class="fc" id="L191">		headers.setLeaveMutable(true);</span>
+
+<span class="fc" id="L193">		Map&lt;String, Object&gt; metadataValues = this.metadataExtractor.extract(payload, this.metadataMimeType);</span>
+
+<span class="fc" id="L195">		metadataValues.putIfAbsent(MetadataExtractor.ROUTE_KEY, &quot;&quot;);</span>
+<span class="fc bfc" id="L196" title="All 2 branches covered.">		for (Map.Entry&lt;String, Object&gt; entry : metadataValues.entrySet()) {</span>
+<span class="fc bfc" id="L197" title="All 2 branches covered.">			if (entry.getKey().equals(MetadataExtractor.ROUTE_KEY)) {</span>
+<span class="fc" id="L198">				RouteMatcher.Route route = this.routeMatcher.parseRoute((String) entry.getValue());</span>
+<span class="fc" id="L199">				headers.setHeader(DestinationPatternsMessageCondition.LOOKUP_DESTINATION_HEADER, route);</span>
+<span class="fc" id="L200">			}</span>
+			else {
+<span class="fc" id="L202">				headers.setHeader(entry.getKey(), entry.getValue());</span>
+			}
+<span class="fc" id="L204">		}</span>
+
+<span class="fc" id="L206">		headers.setContentType(this.dataMimeType);</span>
+<span class="fc" id="L207">		headers.setHeader(RSocketFrameTypeMessageCondition.FRAME_TYPE_HEADER, frameType);</span>
+<span class="fc" id="L208">		headers.setHeader(RSocketRequesterMethodArgumentResolver.RSOCKET_REQUESTER_HEADER, this.requester);</span>
+<span class="fc bfc" id="L209" title="All 2 branches covered.">		if (responseRef != null) {</span>
+<span class="fc" id="L210">			headers.setHeader(RSocketPayloadReturnValueHandler.RESPONSE_HEADER, responseRef);</span>
+		}
+<span class="fc" id="L212">		headers.setHeader(HandlerMethodReturnValueHandler.DATA_BUFFER_FACTORY_HEADER,</span>
+<span class="fc" id="L213">				this.strategies.dataBufferFactory());</span>
+
+<span class="fc" id="L215">		return headers.getMessageHeaders();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

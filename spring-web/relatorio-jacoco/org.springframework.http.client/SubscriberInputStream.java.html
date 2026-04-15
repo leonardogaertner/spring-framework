@@ -1,0 +1,434 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SubscriberInputStream.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.client</a> &gt; <span class="el_source">SubscriberInputStream.java</span></div><h1>SubscriberInputStream.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.client;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.util.ConcurrentModificationException;
+import java.util.Objects;
+import java.util.Queue;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Flow;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
+import java.util.concurrent.locks.ReentrantLock;
+import java.util.function.Consumer;
+import java.util.function.Function;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import reactor.core.Exceptions;
+
+import org.springframework.util.Assert;
+
+/**
+ * An {@link InputStream} backed by {@link Flow.Subscriber Flow.Subscriber}
+ * receiving byte buffers from a {@link Flow.Publisher} source.
+ *
+ * &lt;p&gt;Byte buffers are stored in a queue. The {@code demand} constructor value
+ * determines the number of buffers requested initially. When storage falls
+ * below a {@code (demand - (demand &gt;&gt; 2))} limit, a request is made to refill
+ * the queue.
+ *
+ * &lt;p&gt;The {@code InputStream} terminates after an onError or onComplete signal,
+ * and stored buffers are read. If the {@code InputStream} is closed,
+ * the {@link Flow.Subscription} is cancelled, and stored buffers released.
+ *
+ * &lt;p&gt;Note that this class has a near duplicate in
+ * {@link org.springframework.core.io.buffer.SubscriberInputStream}.
+ *
+ * @author Oleh Dokuka
+ * @author Rossen Stoyanchev
+ * @since 6.2
+ * @param &lt;T&gt; the publisher byte buffer type
+ */
+final class SubscriberInputStream&lt;T&gt; extends InputStream implements Flow.Subscriber&lt;T&gt; {
+
+<span class="nc" id="L63">	private static final Log logger = LogFactory.getLog(SubscriberInputStream.class);</span>
+
+<span class="nc" id="L65">	private static final Object READY = new Object();</span>
+
+<span class="nc" id="L67">	private static final byte[] DONE = new byte[0];</span>
+
+<span class="nc" id="L69">	private static final byte[] CLOSED = new byte[0];</span>
+
+
+	private final Function&lt;T, byte[]&gt; mapper;
+
+	private final Consumer&lt;T&gt; onDiscardHandler;
+
+	private final int prefetch;
+
+	private final int limit;
+
+	private final ReentrantLock lock;
+
+	private final Queue&lt;T&gt; queue;
+
+<span class="nc" id="L84">	private final AtomicReference&lt;@Nullable Object&gt; parkedThread = new AtomicReference&lt;&gt;();</span>
+
+<span class="nc" id="L86">	private final AtomicInteger workAmount = new AtomicInteger();</span>
+
+	volatile boolean closed;
+
+	private int consumed;
+
+	private byte @Nullable [] available;
+
+	private int position;
+
+	private Flow.@Nullable Subscription subscription;
+
+	private boolean done;
+
+	private @Nullable Throwable error;
+
+
+	/**
+	 * Create an instance.
+	 * @param mapper function to transform byte buffers to {@code byte[]};
+	 * the function should also release the byte buffer if necessary.
+	 * @param onDiscardHandler a callback to release byte buffers if the
+	 * {@link InputStream} is closed prematurely.
+	 * @param demand the number of buffers to request initially, and buffer
+	 * internally on an ongoing basis.
+	 */
+<span class="nc" id="L112">	SubscriberInputStream(Function&lt;T, byte[]&gt; mapper, Consumer&lt;T&gt; onDiscardHandler, int demand) {</span>
+<span class="nc" id="L113">		Assert.notNull(mapper, &quot;mapper must not be null&quot;);</span>
+<span class="nc" id="L114">		Assert.notNull(onDiscardHandler, &quot;onDiscardHandler must not be null&quot;);</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">		Assert.isTrue(demand &gt; 0, &quot;demand must be greater than 0&quot;);</span>
+
+<span class="nc" id="L117">		this.mapper = mapper;</span>
+<span class="nc" id="L118">		this.onDiscardHandler = onDiscardHandler;</span>
+<span class="nc" id="L119">		this.prefetch = demand;</span>
+<span class="nc bnc" id="L120" title="All 2 branches missed.">		this.limit = (demand == Integer.MAX_VALUE ? Integer.MAX_VALUE : demand - (demand &gt;&gt; 2));</span>
+<span class="nc" id="L121">		this.queue = new ArrayBlockingQueue&lt;&gt;(demand);</span>
+<span class="nc" id="L122">		this.lock = new ReentrantLock(false);</span>
+<span class="nc" id="L123">	}</span>
+
+
+	@Override
+	public void onSubscribe(Flow.Subscription subscription) {
+<span class="nc bnc" id="L128" title="All 2 branches missed.">		if (this.subscription != null) {</span>
+<span class="nc" id="L129">			subscription.cancel();</span>
+<span class="nc" id="L130">			return;</span>
+		}
+
+<span class="nc" id="L133">		this.subscription = subscription;</span>
+<span class="nc bnc" id="L134" title="All 2 branches missed.">		subscription.request(this.prefetch == Integer.MAX_VALUE ? Long.MAX_VALUE : this.prefetch);</span>
+<span class="nc" id="L135">	}</span>
+
+	@Override
+	public void onNext(T buffer) {
+<span class="nc" id="L139">		Assert.notNull(buffer, &quot;Buffer must not be null&quot;);</span>
+
+<span class="nc bnc" id="L141" title="All 2 branches missed.">		if (this.done) {</span>
+<span class="nc" id="L142">			discard(buffer);</span>
+<span class="nc" id="L143">			return;</span>
+		}
+
+<span class="nc bnc" id="L146" title="All 2 branches missed.">		if (!this.queue.offer(buffer)) {</span>
+<span class="nc" id="L147">			discard(buffer);</span>
+<span class="nc" id="L148">			this.error = new RuntimeException(&quot;Buffer overflow&quot;);</span>
+<span class="nc" id="L149">			this.done = true;</span>
+		}
+
+<span class="nc" id="L152">		int previousWorkState = addWork();</span>
+<span class="nc bnc" id="L153" title="All 2 branches missed.">		if (previousWorkState == Integer.MIN_VALUE) {</span>
+<span class="nc" id="L154">			T value = this.queue.poll();</span>
+<span class="nc bnc" id="L155" title="All 2 branches missed.">			if (value != null) {</span>
+<span class="nc" id="L156">				discard(value);</span>
+			}
+<span class="nc" id="L158">			return;</span>
+		}
+
+<span class="nc bnc" id="L161" title="All 2 branches missed.">		if (previousWorkState == 0) {</span>
+<span class="nc" id="L162">			resume();</span>
+		}
+<span class="nc" id="L164">	}</span>
+
+	@Override
+	public void onError(Throwable throwable) {
+<span class="nc bnc" id="L168" title="All 2 branches missed.">		if (this.done) {</span>
+<span class="nc" id="L169">			return;</span>
+		}
+<span class="nc" id="L171">		this.error = throwable;</span>
+<span class="nc" id="L172">		this.done = true;</span>
+
+<span class="nc bnc" id="L174" title="All 2 branches missed.">		if (addWork() == 0) {</span>
+<span class="nc" id="L175">			resume();</span>
+		}
+<span class="nc" id="L177">	}</span>
+
+	@Override
+	public void onComplete() {
+<span class="nc bnc" id="L181" title="All 2 branches missed.">		if (this.done) {</span>
+<span class="nc" id="L182">			return;</span>
+		}
+
+<span class="nc" id="L185">		this.done = true;</span>
+
+<span class="nc bnc" id="L187" title="All 2 branches missed.">		if (addWork() == 0) {</span>
+<span class="nc" id="L188">			resume();</span>
+		}
+<span class="nc" id="L190">	}</span>
+
+	int addWork() {
+		for (;;) {
+<span class="nc" id="L194">			int produced = this.workAmount.getPlain();</span>
+
+<span class="nc bnc" id="L196" title="All 2 branches missed.">			if (produced == Integer.MIN_VALUE) {</span>
+<span class="nc" id="L197">				return Integer.MIN_VALUE;</span>
+			}
+
+<span class="nc bnc" id="L200" title="All 2 branches missed.">			int nextProduced = (produced == Integer.MAX_VALUE ? 1 : produced + 1);</span>
+
+<span class="nc bnc" id="L202" title="All 2 branches missed.">			if (this.workAmount.weakCompareAndSetRelease(produced, nextProduced)) {</span>
+<span class="nc" id="L203">				return produced;</span>
+			}
+<span class="nc" id="L205">		}</span>
+	}
+
+	private void resume() {
+<span class="nc bnc" id="L209" title="All 2 branches missed.">		if (this.parkedThread.get() != READY) {</span>
+<span class="nc" id="L210">			Object old = this.parkedThread.getAndSet(READY);</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">			if (old != READY) {</span>
+<span class="nc" id="L212">				LockSupport.unpark((Thread) old);</span>
+			}
+		}
+<span class="nc" id="L215">	}</span>
+
+	/* InputStream implementation */
+
+	@Override
+	public int read() throws IOException {
+<span class="nc bnc" id="L221" title="All 2 branches missed.">		if (!this.lock.tryLock()) {</span>
+<span class="nc bnc" id="L222" title="All 2 branches missed.">			if (this.closed) {</span>
+<span class="nc" id="L223">				return -1;</span>
+			}
+<span class="nc" id="L225">			throw new ConcurrentModificationException(&quot;Concurrent access is not allowed&quot;);</span>
+		}
+
+		try {
+<span class="nc" id="L229">			byte[] next = getNextOrAwait();</span>
+
+<span class="nc bnc" id="L231" title="All 2 branches missed.">			if (next == DONE) {</span>
+<span class="nc" id="L232">				this.closed = true;</span>
+<span class="nc" id="L233">				cleanAndFinalize();</span>
+<span class="nc bnc" id="L234" title="All 2 branches missed.">				if (this.error == null) {</span>
+<span class="nc" id="L235">					return -1;</span>
+				}
+				else {
+<span class="nc" id="L238">					throw Exceptions.propagate(this.error);</span>
+				}
+			}
+<span class="nc bnc" id="L241" title="All 2 branches missed.">			else if (next == CLOSED) {</span>
+<span class="nc" id="L242">				cleanAndFinalize();</span>
+<span class="nc" id="L243">				return -1;</span>
+			}
+
+<span class="nc" id="L246">			return next[this.position++] &amp; 0xFF;</span>
+		}
+<span class="nc" id="L248">		catch (Throwable ex) {</span>
+<span class="nc" id="L249">			this.closed = true;</span>
+<span class="nc" id="L250">			requiredSubscriber().cancel();</span>
+<span class="nc" id="L251">			cleanAndFinalize();</span>
+<span class="nc" id="L252">			throw Exceptions.propagate(ex);</span>
+		}
+		finally {
+<span class="nc" id="L255">			this.lock.unlock();</span>
+		}
+	}
+
+	@Override
+	public int read(byte[] b, int off, int len) throws IOException {
+<span class="nc" id="L261">		Objects.checkFromIndexSize(off, len, b.length);</span>
+<span class="nc bnc" id="L262" title="All 2 branches missed.">		if (len == 0) {</span>
+<span class="nc" id="L263">			return 0;</span>
+		}
+
+<span class="nc bnc" id="L266" title="All 2 branches missed.">		if (!this.lock.tryLock()) {</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">			if (this.closed) {</span>
+<span class="nc" id="L268">				return -1;</span>
+			}
+<span class="nc" id="L270">			throw new ConcurrentModificationException(&quot;concurrent access is disallowed&quot;);</span>
+		}
+
+		try {
+<span class="nc bnc" id="L274" title="All 2 branches missed.">			for (int j = 0; j &lt; len;) {</span>
+<span class="nc" id="L275">				byte[] next = getNextOrAwait();</span>
+
+<span class="nc bnc" id="L277" title="All 2 branches missed.">				if (next == DONE) {</span>
+<span class="nc" id="L278">					cleanAndFinalize();</span>
+<span class="nc bnc" id="L279" title="All 2 branches missed.">					if (this.error == null) {</span>
+<span class="nc" id="L280">						this.closed = true;</span>
+<span class="nc bnc" id="L281" title="All 2 branches missed.">						return j == 0 ? -1 : j;</span>
+					}
+					else {
+<span class="nc bnc" id="L284" title="All 2 branches missed.">						if (j == 0) {</span>
+<span class="nc" id="L285">							this.closed = true;</span>
+<span class="nc" id="L286">							throw Exceptions.propagate(this.error);</span>
+						}
+
+<span class="nc" id="L289">						return j;</span>
+					}
+				}
+<span class="nc bnc" id="L292" title="All 2 branches missed.">				else if (next == CLOSED) {</span>
+<span class="nc" id="L293">					requiredSubscriber().cancel();</span>
+<span class="nc" id="L294">					cleanAndFinalize();</span>
+<span class="nc" id="L295">					return -1;</span>
+				}
+<span class="nc" id="L297">				int i = this.position;</span>
+<span class="nc bnc" id="L298" title="All 4 branches missed.">				for (; i &lt; next.length &amp;&amp; j &lt; len; i++, j++) {</span>
+<span class="nc" id="L299">					b[off + j] = next[i];</span>
+				}
+<span class="nc" id="L301">				this.position = i;</span>
+<span class="nc" id="L302">			}</span>
+
+<span class="nc" id="L304">			return len;</span>
+		}
+<span class="nc" id="L306">		catch (Throwable ex) {</span>
+<span class="nc" id="L307">			this.closed = true;</span>
+<span class="nc" id="L308">			requiredSubscriber().cancel();</span>
+<span class="nc" id="L309">			cleanAndFinalize();</span>
+<span class="nc" id="L310">			throw Exceptions.propagate(ex);</span>
+		}
+		finally {
+<span class="nc" id="L313">			this.lock.unlock();</span>
+		}
+	}
+
+	byte[] getNextOrAwait() {
+<span class="nc bnc" id="L318" title="All 4 branches missed.">		if (this.available == null || this.available.length - this.position == 0) {</span>
+<span class="nc" id="L319">			this.available = null;</span>
+
+<span class="nc" id="L321">			int actualWorkAmount = this.workAmount.getAcquire();</span>
+			for (;;) {
+<span class="nc bnc" id="L323" title="All 2 branches missed.">				if (this.closed) {</span>
+<span class="nc" id="L324">					return CLOSED;</span>
+				}
+
+<span class="nc" id="L327">				boolean done = this.done;</span>
+<span class="nc" id="L328">				T buffer = this.queue.poll();</span>
+<span class="nc bnc" id="L329" title="All 2 branches missed.">				if (buffer != null) {</span>
+<span class="nc" id="L330">					int consumed = ++this.consumed;</span>
+<span class="nc" id="L331">					this.position = 0;</span>
+<span class="nc" id="L332">					this.available = Objects.requireNonNull(this.mapper.apply(buffer));</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">					if (consumed == this.limit) {</span>
+<span class="nc" id="L334">						this.consumed = 0;</span>
+<span class="nc" id="L335">						requiredSubscriber().request(this.limit);</span>
+					}
+					break;
+				}
+
+<span class="nc bnc" id="L340" title="All 2 branches missed.">				if (done) {</span>
+<span class="nc" id="L341">					return DONE;</span>
+				}
+
+<span class="nc" id="L344">				actualWorkAmount = this.workAmount.addAndGet(-actualWorkAmount);</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">				if (actualWorkAmount == 0) {</span>
+<span class="nc" id="L346">					await();</span>
+				}
+<span class="nc" id="L348">			}</span>
+		}
+
+<span class="nc" id="L351">		return this.available;</span>
+	}
+
+	void cleanAndFinalize() {
+<span class="nc" id="L355">		this.available = null;</span>
+
+		for (;;) {
+<span class="nc" id="L358">			int workAmount = this.workAmount.getPlain();</span>
+			T value;
+<span class="nc bnc" id="L360" title="All 2 branches missed.">			while ((value = this.queue.poll()) != null) {</span>
+<span class="nc" id="L361">				discard(value);</span>
+			}
+
+<span class="nc bnc" id="L364" title="All 2 branches missed.">			if (this.workAmount.weakCompareAndSetPlain(workAmount, Integer.MIN_VALUE)) {</span>
+<span class="nc" id="L365">				return;</span>
+			}
+<span class="nc" id="L367">		}</span>
+	}
+
+	@Override
+	public void close() throws IOException {
+<span class="nc bnc" id="L372" title="All 2 branches missed.">		if (this.closed) {</span>
+<span class="nc" id="L373">			return;</span>
+		}
+
+<span class="nc" id="L376">		this.closed = true;</span>
+
+<span class="nc bnc" id="L378" title="All 2 branches missed.">		if (!this.lock.tryLock()) {</span>
+<span class="nc bnc" id="L379" title="All 2 branches missed.">			if (addWork() == 0) {</span>
+<span class="nc" id="L380">				resume();</span>
+			}
+<span class="nc" id="L382">			return;</span>
+		}
+
+		try {
+<span class="nc" id="L386">			requiredSubscriber().cancel();</span>
+<span class="nc" id="L387">			cleanAndFinalize();</span>
+		}
+		finally {
+<span class="nc" id="L390">			this.lock.unlock();</span>
+		}
+<span class="nc" id="L392">	}</span>
+
+	private Flow.Subscription requiredSubscriber() {
+<span class="nc bnc" id="L395" title="All 2 branches missed.">		Assert.state(this.subscription != null, &quot;Subscriber must be subscribed to use InputStream&quot;);</span>
+<span class="nc" id="L396">		return this.subscription;</span>
+	}
+
+	void discard(T buffer) {
+		try {
+<span class="nc" id="L401">			this.onDiscardHandler.accept(buffer);</span>
+		}
+<span class="nc" id="L403">		catch (Throwable ex) {</span>
+<span class="nc bnc" id="L404" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L405">				logger.debug(&quot;Failed to release &quot; + buffer.getClass().getSimpleName() + &quot;: &quot; + buffer, ex);</span>
+			}
+<span class="nc" id="L407">		}</span>
+<span class="nc" id="L408">	}</span>
+
+	private void await() {
+<span class="nc" id="L411">		Thread toUnpark = Thread.currentThread();</span>
+
+		while (true) {
+<span class="nc" id="L414">			Object current = this.parkedThread.get();</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">			if (current == READY) {</span>
+<span class="nc" id="L416">				break;</span>
+			}
+
+<span class="nc bnc" id="L419" title="All 4 branches missed.">			if (current != null &amp;&amp; current != toUnpark) {</span>
+<span class="nc" id="L420">				throw new IllegalStateException(&quot;Only one (Virtual)Thread can await!&quot;);</span>
+			}
+
+<span class="nc bnc" id="L423" title="All 2 branches missed.">			if (this.parkedThread.compareAndSet( null, toUnpark)) {</span>
+<span class="nc" id="L424">				LockSupport.park();</span>
+				// we don't just break here because park() can wake up spuriously
+				// if we got a proper resume, get() == READY and the loop will quit above
+			}
+<span class="nc" id="L428">		}</span>
+		// clear the resume indicator so that the next await call will park without a resume()
+<span class="nc" id="L430">		this.parkedThread.lazySet(null);</span>
+<span class="nc" id="L431">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

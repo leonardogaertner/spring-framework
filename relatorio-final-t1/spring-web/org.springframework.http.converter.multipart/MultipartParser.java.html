@@ -1,0 +1,554 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>MultipartParser.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.converter.multipart</a> &gt; <span class="el_source">MultipartParser.java</span></div><h1>MultipartParser.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2026-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.converter.multipart;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.Iterator;
+import java.util.List;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferLimitException;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.converter.HttpMessageConversionException;
+
+/**
+ * Read a Multipart message as a byte stream and parse its content
+ * and signals them to the {@link PartListener}.
+ *
+ * @author Brian Clozel
+ * @author Arjen Poutsma
+ */
+final class MultipartParser {
+
+<span class="fc" id="L49">	private static final Log logger = LogFactory.getLog(MultipartParser.class);</span>
+
+	private final int maxHeadersSize;
+
+	private final int bufferSize;
+
+	/**
+	 * Create a new multipart parser instance.
+	 *
+	 * @param maxHeadersSize the maximum buffered header size
+	 * @param bufferSize     the size of the reading buffer
+	 */
+<span class="fc" id="L61">	MultipartParser(int maxHeadersSize, int bufferSize) {</span>
+<span class="fc" id="L62">		this.maxHeadersSize = maxHeadersSize;</span>
+<span class="fc" id="L63">		this.bufferSize = bufferSize;</span>
+<span class="fc" id="L64">	}</span>
+
+	/**
+	 * Parses the given stream of bytes into events published to the {@link PartListener}.
+	 * @param input          the input stream
+	 * @param boundary       the multipart boundary, as found in the {@code Content-Type} header
+	 * @param headersCharset the charset to use for decoding headers
+	 * @param listener       a listener for parsed tokens
+	 */
+	public void parse(InputStream input, byte[] boundary, Charset headersCharset, PartListener listener) {
+
+<span class="fc" id="L75">		InternalParser internalParser = new InternalParser(boundary, headersCharset, listener);</span>
+		try {
+			while (true) {
+<span class="fc" id="L78">				byte[] read = input.readNBytes(this.bufferSize);</span>
+<span class="fc bfc" id="L79" title="All 2 branches covered.">				if (read.length == 0) {</span>
+<span class="fc" id="L80">					break;</span>
+				}
+<span class="fc" id="L82">				internalParser.state.data(DefaultDataBufferFactory.sharedInstance.wrap(read));</span>
+<span class="fc" id="L83">			}</span>
+<span class="fc" id="L84">			internalParser.state.complete();</span>
+		}
+<span class="nc" id="L86">		catch (IOException ex) {</span>
+<span class="nc" id="L87">			internalParser.state.dispose();</span>
+<span class="nc" id="L88">			listener.onError(new HttpMessageConversionException(&quot;Could not decode multipart message&quot;, ex));</span>
+<span class="fc" id="L89">		}</span>
+<span class="fc" id="L90">	}</span>
+
+	private final class InternalParser {
+
+		private final byte[] boundary;
+
+		private final Charset headersCharset;
+
+		private final PartListener listener;
+
+		private State state;
+
+<span class="fc" id="L102">		InternalParser(byte[] boundary, Charset headersCharset, PartListener listener) {</span>
+<span class="fc" id="L103">			this.boundary = boundary;</span>
+<span class="fc" id="L104">			this.headersCharset = headersCharset;</span>
+<span class="fc" id="L105">			this.listener = listener;</span>
+<span class="fc" id="L106">			this.state = new PreambleState();</span>
+<span class="fc" id="L107">		}</span>
+
+		void changeState(State newState, @Nullable DataBuffer remainder) {
+<span class="pc bpc" id="L110" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L111">				logger.trace(&quot;Changed state: &quot; + this.state + &quot; -&gt; &quot; + newState);</span>
+			}
+<span class="fc" id="L113">			this.state.dispose();</span>
+<span class="fc" id="L114">			this.state = newState;</span>
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">			if (remainder != null) {</span>
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">				if (remainder.readableByteCount() &gt; 0) {</span>
+<span class="fc" id="L117">					newState.data(remainder);</span>
+				}
+				else {
+<span class="nc" id="L120">					DataBufferUtils.release(remainder);</span>
+				}
+			}
+<span class="fc" id="L123">		}</span>
+
+		/**
+		 * Concatenates the given array of byte arrays.
+		 */
+		private static byte[] concat(byte[]... byteArrays) {
+<span class="fc" id="L129">			int len = 0;</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">			for (byte[] byteArray : byteArrays) {</span>
+<span class="fc" id="L131">				len += byteArray.length;</span>
+			}
+<span class="fc" id="L133">			byte[] result = new byte[len];</span>
+<span class="fc" id="L134">			len = 0;</span>
+<span class="fc bfc" id="L135" title="All 2 branches covered.">			for (byte[] byteArray : byteArrays) {</span>
+<span class="fc" id="L136">				System.arraycopy(byteArray, 0, result, len, byteArray.length);</span>
+<span class="fc" id="L137">				len += byteArray.length;</span>
+			}
+<span class="fc" id="L139">			return result;</span>
+		}
+
+		/**
+		 * Represents the internal state of the {@link MultipartParser}.
+		 * The flow for well-formed multipart messages is shown below:
+		 * &lt;p&gt;&lt;pre&gt;
+		 *     PREAMBLE
+		 *         |
+		 *         v
+		 *  +--&gt;HEADERS---&gt;DISPOSED
+		 *  |      |
+		 *  |      v
+		 *  +----BODY
+		 *  &lt;/pre&gt;
+		 * For malformed messages the flow ends in DISPOSED.
+		 */
+		private interface State {
+
+<span class="fc" id="L158">			byte[] CR_LF = {'\r', '\n'};</span>
+
+			byte HYPHEN = '-';
+
+<span class="fc" id="L162">			byte[] TWO_HYPHENS = {HYPHEN, HYPHEN};</span>
+
+			String HEADER_ENTRY_SEPARATOR = &quot;\\r\\n&quot;;
+
+			void data(DataBuffer buf);
+
+			void complete();
+
+			default void dispose() {
+<span class="fc" id="L171">			}</span>
+		}
+
+		/**
+		 * The initial state of the parser. Looks for the first boundary of the
+		 * multipart message. Note that the first boundary is not necessarily
+		 * prefixed with {@code CR LF}; only the prefix {@code --} is required.
+		 */
+		private final class PreambleState implements State {
+
+			private final DataBufferUtils.Matcher firstBoundary;
+
+
+<span class="fc" id="L184">			PreambleState() {</span>
+<span class="fc" id="L185">				this.firstBoundary = DataBufferUtils.matcher(concat(TWO_HYPHENS, InternalParser.this.boundary));</span>
+<span class="fc" id="L186">			}</span>
+
+			/**
+			 * Looks for the first boundary in the given buffer. If found, changes
+			 * state to {@link HeadersState}, and passes on the remainder of the
+			 * buffer.
+			 */
+			@Override
+			public void data(DataBuffer buf) {
+<span class="fc" id="L195">				int endIdx = this.firstBoundary.match(buf);</span>
+<span class="pc bpc" id="L196" title="1 of 2 branches missed.">				if (endIdx != -1) {</span>
+<span class="pc bpc" id="L197" title="1 of 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L198">						logger.trace(&quot;First boundary found @&quot; + endIdx + &quot; in &quot; + buf);</span>
+					}
+<span class="fc" id="L200">					DataBuffer preambleBuffer = buf.split(endIdx + 1);</span>
+<span class="fc" id="L201">					DataBufferUtils.release(preambleBuffer);</span>
+<span class="fc" id="L202">					changeState(new HeadersState(), buf);</span>
+<span class="fc" id="L203">				}</span>
+				else {
+<span class="nc" id="L205">					DataBufferUtils.release(buf);</span>
+				}
+<span class="fc" id="L207">			}</span>
+
+			@Override
+			public void complete() {
+<span class="nc" id="L211">				changeState(DisposedState.INSTANCE, null);</span>
+<span class="nc" id="L212">				InternalParser.this.listener.onError(new HttpMessageConversionException(&quot;Could not find first boundary&quot;));</span>
+<span class="nc" id="L213">			}</span>
+
+			@Override
+			public String toString() {
+<span class="nc" id="L217">				return &quot;PREAMBLE&quot;;</span>
+			}
+
+		}
+
+		/**
+		 * The state of the parser dealing with part headers. Parses header
+		 * buffers into a {@link HttpHeaders} instance, making sure that
+		 * the amount does not exceed {@link #maxHeadersSize}.
+		 */
+<span class="fc" id="L227">		private final class HeadersState implements State {</span>
+
+<span class="fc" id="L229">			private final DataBufferUtils.Matcher endHeaders = DataBufferUtils.matcher(concat(CR_LF, CR_LF));</span>
+
+<span class="fc" id="L231">			private final List&lt;DataBuffer&gt; buffers = new ArrayList&lt;&gt;();</span>
+
+			private int byteCount;
+
+
+			/**
+			 * First checks whether the multipart boundary leading to this state
+			 * was the final boundary. Then looks for the header-body boundary
+			 * ({@code CR LF CR LF}) in the given buffer. If found, checks whether
+			 * the size of all header buffers does not exceed {@link #maxHeadersSize},
+			 * converts all buffers collected so far into a {@link HttpHeaders} object
+			 * and changes to {@link BodyState}, passing the remainder of the
+			 * buffer. If the boundary is not found, the buffer is collected if
+			 * its size does not exceed {@link #maxHeadersSize}.
+			 */
+			@Override
+			public void data(DataBuffer buf) {
+<span class="fc bfc" id="L248" title="All 2 branches covered.">				if (isLastBoundary(buf)) {</span>
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L250">						logger.trace(&quot;Last boundary found in &quot; + buf);</span>
+					}
+<span class="fc" id="L252">					changeState(DisposedState.INSTANCE, buf);</span>
+<span class="fc" id="L253">					InternalParser.this.listener.onComplete();</span>
+<span class="fc" id="L254">					return;</span>
+				}
+<span class="fc" id="L256">				int endIdx = this.endHeaders.match(buf);</span>
+<span class="pc bpc" id="L257" title="1 of 2 branches missed.">				if (endIdx != -1) {</span>
+<span class="pc bpc" id="L258" title="1 of 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L259">						logger.trace(&quot;End of headers found @&quot; + endIdx + &quot; in &quot; + buf);</span>
+					}
+<span class="fc" id="L261">					this.byteCount += endIdx;</span>
+<span class="pc bpc" id="L262" title="1 of 2 branches missed.">					if (belowMaxHeaderSize(this.byteCount)) {</span>
+<span class="fc" id="L263">						DataBuffer headerBuf = buf.split(endIdx + 1);</span>
+<span class="fc" id="L264">						this.buffers.add(headerBuf);</span>
+<span class="fc" id="L265">						emitHeaders();</span>
+<span class="fc" id="L266">						changeState(new BodyState(), buf);</span>
+<span class="fc" id="L267">					}</span>
+				}
+				else {
+<span class="nc" id="L270">					this.byteCount += buf.readableByteCount();</span>
+<span class="nc bnc" id="L271" title="All 2 branches missed.">					if (belowMaxHeaderSize(this.byteCount)) {</span>
+<span class="nc" id="L272">						this.buffers.add(buf);</span>
+					}
+				}
+<span class="fc" id="L275">			}</span>
+
+			private void emitHeaders() {
+<span class="fc" id="L278">				HttpHeaders headers = parseHeaders();</span>
+<span class="pc bpc" id="L279" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L280">					logger.trace(&quot;Emitting headers: &quot; + headers);</span>
+				}
+<span class="fc" id="L282">				InternalParser.this.listener.onHeaders(headers);</span>
+<span class="fc" id="L283">			}</span>
+
+			/**
+			 * If the given buffer is the first buffer, check whether it starts with {@code --}.
+			 * If it is the second buffer, check whether it makes up {@code --} together with the first buffer.
+			 */
+			private boolean isLastBoundary(DataBuffer buf) {
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">				return (this.buffers.isEmpty() &amp;&amp;</span>
+<span class="pc bpc" id="L291" title="1 of 2 branches missed.">						buf.readableByteCount() &gt;= 2 &amp;&amp;</span>
+<span class="pc bpc" id="L292" title="1 of 4 branches missed.">						buf.getByte(0) == HYPHEN &amp;&amp; buf.getByte(1) == HYPHEN) ||</span>
+<span class="pc bpc" id="L293" title="1 of 2 branches missed.">						(this.buffers.size() == 1 &amp;&amp;</span>
+<span class="nc bnc" id="L294" title="All 2 branches missed.">								this.buffers.get(0).readableByteCount() == 1 &amp;&amp;</span>
+<span class="nc bnc" id="L295" title="All 2 branches missed.">								this.buffers.get(0).getByte(0) == HYPHEN &amp;&amp;</span>
+<span class="nc bnc" id="L296" title="All 2 branches missed.">								buf.readableByteCount() &gt;= 1 &amp;&amp;</span>
+<span class="pc bnc" id="L297" title="All 2 branches missed.">								buf.getByte(0) == HYPHEN);</span>
+			}
+
+			/**
+			 * Checks whether the given {@code count} is below or equal to {@link #maxHeadersSize}
+			 * and throws a {@link DataBufferLimitException} if not.
+			 */
+			private boolean belowMaxHeaderSize(long count) {
+<span class="pc bpc" id="L305" title="1 of 2 branches missed.">				if (count &lt;= MultipartParser.this.maxHeadersSize) {</span>
+<span class="fc" id="L306">					return true;</span>
+				}
+				else {
+<span class="nc" id="L309">					InternalParser.this.listener.onError(</span>
+							new HttpMessageConversionException(&quot;Part headers exceeded the memory usage limit of &quot; +
+									MultipartParser.this.maxHeadersSize + &quot; bytes&quot;));
+<span class="nc" id="L312">					return false;</span>
+				}
+			}
+
+			/**
+			 * Parses the list of buffers into a {@link HttpHeaders} instance.
+			 * Converts the joined buffers into a string using ISO=8859-1, and parses
+			 * that string into key and values.
+			 */
+			private HttpHeaders parseHeaders() {
+<span class="pc bpc" id="L322" title="1 of 2 branches missed.">				if (this.buffers.isEmpty()) {</span>
+<span class="nc" id="L323">					return HttpHeaders.EMPTY;</span>
+				}
+<span class="fc" id="L325">				DataBuffer joined = this.buffers.get(0).factory().join(this.buffers);</span>
+<span class="fc" id="L326">				this.buffers.clear();</span>
+<span class="fc" id="L327">				String string = joined.toString(InternalParser.this.headersCharset);</span>
+<span class="fc" id="L328">				DataBufferUtils.release(joined);</span>
+<span class="fc" id="L329">				String[] lines = string.split(HEADER_ENTRY_SEPARATOR);</span>
+<span class="fc" id="L330">				HttpHeaders result = new HttpHeaders();</span>
+<span class="fc bfc" id="L331" title="All 2 branches covered.">				for (String line : lines) {</span>
+<span class="fc" id="L332">					int idx = line.indexOf(':');</span>
+<span class="fc bfc" id="L333" title="All 2 branches covered.">					if (idx != -1) {</span>
+<span class="fc" id="L334">						String name = line.substring(0, idx);</span>
+<span class="fc" id="L335">						String value = line.substring(idx + 1);</span>
+<span class="fc bfc" id="L336" title="All 2 branches covered.">						while (value.startsWith(&quot; &quot;)) {</span>
+<span class="fc" id="L337">							value = value.substring(1);</span>
+						}
+<span class="fc" id="L339">						result.add(name, value);</span>
+					}
+				}
+<span class="fc" id="L342">				return result;</span>
+			}
+
+			@Override
+			public void complete() {
+<span class="nc" id="L347">				changeState(DisposedState.INSTANCE, null);</span>
+<span class="nc" id="L348">				InternalParser.this.listener.onError(new HttpMessageConversionException(&quot;Could not find end of headers&quot;));</span>
+<span class="nc" id="L349">			}</span>
+
+			@Override
+			public void dispose() {
+<span class="fc" id="L353">				this.buffers.forEach(DataBufferUtils::release);</span>
+<span class="fc" id="L354">			}</span>
+
+			@Override
+			public String toString() {
+<span class="nc" id="L358">				return &quot;HEADERS&quot;;</span>
+			}
+
+		}
+
+		/**
+		 * The state of the parser dealing with multipart bodies. Relays
+		 * data buffers as {@link PartListener#onBody(DataBuffer, boolean)}
+		 * until the boundary is found (or rather: {@code CR LF - - boundary}).
+		 */
+		private final class BodyState implements State {
+
+			private final DataBufferUtils.Matcher boundaryMatcher;
+
+			private final int boundaryLength;
+
+<span class="fc" id="L374">			private final Deque&lt;DataBuffer&gt; queue = new ArrayDeque&lt;&gt;();</span>
+
+<span class="fc" id="L376">			public BodyState() {</span>
+<span class="fc" id="L377">				byte[] delimiter = concat(CR_LF, TWO_HYPHENS, InternalParser.this.boundary);</span>
+<span class="fc" id="L378">				this.boundaryMatcher = DataBufferUtils.matcher(delimiter);</span>
+<span class="fc" id="L379">				this.boundaryLength = delimiter.length;</span>
+<span class="fc" id="L380">			}</span>
+
+			/**
+			 * Checks whether the (end of the) needle {@code CR LF - - boundary}
+			 * can be found in {@code buffer}. If found, the needle can overflow into the
+			 * previous buffer, so we calculate the length and slice the current
+			 * and previous buffers accordingly. We then change to {@link HeadersState}
+			 * and pass on the remainder of {@code buffer}. If the needle is not found, we
+			 * enqueue {@code buffer}.
+			 */
+			@Override
+			public void data(DataBuffer buffer) {
+<span class="fc" id="L392">				int endIdx = this.boundaryMatcher.match(buffer);</span>
+<span class="pc bpc" id="L393" title="1 of 2 branches missed.">				if (endIdx != -1) {</span>
+<span class="fc" id="L394">					DataBuffer boundaryBuffer = buffer.split(endIdx + 1);</span>
+<span class="pc bpc" id="L395" title="1 of 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L396">						logger.trace(&quot;Boundary found @&quot; + endIdx + &quot; in &quot; + buffer);</span>
+					}
+<span class="fc" id="L398">					int len = endIdx - this.boundaryLength + 1 - boundaryBuffer.readPosition();</span>
+<span class="pc bpc" id="L399" title="1 of 2 branches missed.">					if (len &gt; 0) {</span>
+						// whole boundary in buffer.
+						// slice off the body part, and flush
+<span class="fc" id="L402">						DataBuffer body = boundaryBuffer.split(len);</span>
+<span class="fc" id="L403">						DataBufferUtils.release(boundaryBuffer);</span>
+<span class="fc" id="L404">						enqueue(body);</span>
+<span class="fc" id="L405">						flush();</span>
+<span class="fc" id="L406">					}</span>
+<span class="nc bnc" id="L407" title="All 2 branches missed.">					else if (len &lt; 0) {</span>
+						// boundary spans multiple buffers, and we've just found the end
+						// iterate over buffers in reverse order
+<span class="nc" id="L410">						DataBufferUtils.release(boundaryBuffer);</span>
+						DataBuffer prev;
+<span class="nc bnc" id="L412" title="All 2 branches missed.">						while ((prev = this.queue.pollLast()) != null) {</span>
+<span class="nc" id="L413">							int prevByteCount = prev.readableByteCount();</span>
+<span class="nc" id="L414">							int prevLen = prevByteCount + len;</span>
+<span class="nc bnc" id="L415" title="All 2 branches missed.">							if (prevLen &gt;= 0) {</span>
+								// slice body part of previous buffer, and flush it
+<span class="nc" id="L417">								DataBuffer body = prev.split(prevLen + prev.readPosition());</span>
+<span class="nc" id="L418">								DataBufferUtils.release(prev);</span>
+<span class="nc" id="L419">								enqueue(body);</span>
+<span class="nc" id="L420">								flush();</span>
+<span class="nc" id="L421">								break;</span>
+							}
+							else {
+								// previous buffer only contains boundary bytes
+<span class="nc" id="L425">								DataBufferUtils.release(prev);</span>
+<span class="nc" id="L426">								len += prevByteCount;</span>
+							}
+<span class="nc" id="L428">						}</span>
+<span class="nc" id="L429">					}</span>
+					else /* if (len == 0) */ {
+						// buffer starts with complete delimiter, flush out the previous buffers
+<span class="nc" id="L432">						DataBufferUtils.release(boundaryBuffer);</span>
+<span class="nc" id="L433">						flush();</span>
+					}
+
+<span class="fc" id="L436">					changeState(new HeadersState(), buffer);</span>
+<span class="fc" id="L437">				}</span>
+				else {
+<span class="nc" id="L439">					enqueue(buffer);</span>
+				}
+<span class="fc" id="L441">			}</span>
+
+			/**
+			 * Store the given buffer. Emit buffers that cannot contain boundary bytes,
+			 * by iterating over the queue in reverse order, and summing buffer sizes.
+			 * The first buffer that passes the boundary length and subsequent buffers
+			 * are emitted (in the correct, non-reverse order).
+			 */
+			private void enqueue(DataBuffer buf) {
+<span class="fc" id="L450">				this.queue.add(buf);</span>
+
+<span class="fc" id="L452">				int len = 0;</span>
+<span class="fc" id="L453">				Deque&lt;DataBuffer&gt; emit = new ArrayDeque&lt;&gt;();</span>
+<span class="fc bfc" id="L454" title="All 2 branches covered.">				for (Iterator&lt;DataBuffer&gt; iterator = this.queue.descendingIterator(); iterator.hasNext(); ) {</span>
+<span class="fc" id="L455">					DataBuffer previous = iterator.next();</span>
+<span class="pc bpc" id="L456" title="1 of 2 branches missed.">					if (len &gt; this.boundaryLength) {</span>
+						// addFirst to negate iterating in reverse order
+<span class="nc" id="L458">						emit.addFirst(previous);</span>
+<span class="nc" id="L459">						iterator.remove();</span>
+					}
+<span class="fc" id="L461">					len += previous.readableByteCount();</span>
+<span class="fc" id="L462">				}</span>
+<span class="pc" id="L463">				emit.forEach(buffer -&gt; InternalParser.this.listener.onBody(buffer, false));</span>
+<span class="fc" id="L464">			}</span>
+
+			private void flush() {
+<span class="fc bfc" id="L467" title="All 2 branches covered.">				for (Iterator&lt;DataBuffer&gt; iterator = this.queue.iterator(); iterator.hasNext(); ) {</span>
+<span class="fc" id="L468">					DataBuffer buffer = iterator.next();</span>
+<span class="pc bpc" id="L469" title="1 of 2 branches missed.">					boolean last = !iterator.hasNext();</span>
+<span class="fc" id="L470">					InternalParser.this.listener.onBody(buffer, last);</span>
+<span class="fc" id="L471">				}</span>
+<span class="fc" id="L472">				this.queue.clear();</span>
+<span class="fc" id="L473">			}</span>
+
+			@Override
+			public void complete() {
+<span class="nc" id="L477">				changeState(DisposedState.INSTANCE, null);</span>
+<span class="nc" id="L478">				String msg = &quot;Could not find end of body (␍␊--&quot; +</span>
+						new String(InternalParser.this.boundary, StandardCharsets.UTF_8) +
+						&quot;)&quot;;
+<span class="nc" id="L481">				InternalParser.this.listener.onError(new HttpMessageConversionException(msg));</span>
+<span class="nc" id="L482">			}</span>
+
+			@Override
+			public void dispose() {
+<span class="fc" id="L486">				this.queue.forEach(DataBufferUtils::release);</span>
+<span class="fc" id="L487">				this.queue.clear();</span>
+<span class="fc" id="L488">			}</span>
+
+			@Override
+			public String toString() {
+<span class="nc" id="L492">				return &quot;BODY&quot;;</span>
+			}
+		}
+
+		/**
+		 * The state of the parser when finished, either due to seeing the final
+		 * boundary or to a malformed message. Releases all incoming buffers.
+		 */
+		private static final class DisposedState implements State {
+
+<span class="fc" id="L502">			public static final DisposedState INSTANCE = new DisposedState();</span>
+
+			private DisposedState() {
+			}
+
+			@Override
+			public void data(DataBuffer buf) {
+<span class="fc" id="L509">				DataBufferUtils.release(buf);</span>
+<span class="fc" id="L510">			}</span>
+
+			@Override
+			public void complete() {
+<span class="fc" id="L514">			}</span>
+
+			@Override
+			public String toString() {
+<span class="nc" id="L518">				return &quot;DISPOSED&quot;;</span>
+			}
+		}
+
+	}
+
+
+	/**
+	 * Listen for part events while parsing the inbound stream of data.
+	 */
+	interface PartListener {
+
+		/**
+		 * Handle {@link HttpHeaders} for a part.
+		 */
+		void onHeaders(HttpHeaders headers);
+
+		/**
+		 * Handle a piece of data for a body part.
+		 * @param buffer a chunk of body
+		 * @param last   whether this is the last chunk for the part
+		 */
+		void onBody(DataBuffer buffer, boolean last);
+
+		/**
+		 * Handle the completion event for the Multipart message.
+		 */
+		void onComplete();
+
+		/**
+		 * Handle any error thrown during the parsing phase.
+		 */
+		void onError(Throwable error);
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

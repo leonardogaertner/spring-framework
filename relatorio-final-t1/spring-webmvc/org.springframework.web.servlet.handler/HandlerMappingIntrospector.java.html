@@ -1,0 +1,632 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>HandlerMappingIntrospector.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-webmvc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.servlet.handler</a> &gt; <span class="el_source">HandlerMappingIntrospector.java</span></div><h1>HandlerMappingIntrospector.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.servlet.handler;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiFunction;
+import java.util.stream.Collectors;
+
+import jakarta.servlet.DispatcherType;
+import jakarta.servlet.Filter;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
+import jakarta.servlet.http.HttpServletResponse;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.factory.BeanFactoryUtils;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.core.io.ClassPathResource;
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.support.PropertiesLoaderUtils;
+import org.springframework.http.server.RequestPath;
+import org.springframework.http.server.ServletServerHttpRequest;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.CorsConfigurationSource;
+import org.springframework.web.cors.CorsUtils;
+import org.springframework.web.cors.PreFlightRequestHandler;
+import org.springframework.web.servlet.DispatcherServlet;
+import org.springframework.web.servlet.HandlerExecutionChain;
+import org.springframework.web.servlet.HandlerInterceptor;
+import org.springframework.web.servlet.HandlerMapping;
+import org.springframework.web.servlet.NoHandlerFoundException;
+import org.springframework.web.util.ServletRequestPathUtils;
+import org.springframework.web.util.UrlPathHelper;
+import org.springframework.web.util.pattern.PathPatternParser;
+
+/**
+ * Helper class to get information from the {@code HandlerMapping} that would
+ * serve a specific request.
+ *
+ * &lt;p&gt;Provides the following methods:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@link #getMatchableHandlerMapping} &amp;mdash; obtain a {@code HandlerMapping}
+ * to check request-matching criteria against.
+ * &lt;li&gt;{@link #getCorsConfiguration} &amp;mdash; obtain the CORS configuration for the
+ * request.
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;Note that this is primarily an SPI to allow Spring Security
+ * to align its pattern matching with the same pattern matching that would be
+ * used in Spring MVC for a given request, in order to avoid security issues.
+ *
+ * &lt;p&gt;Use of this component incurs the performance overhead of mapping the
+ * request, and should not be repeated multiple times per request.
+ * {@link #createCacheFilter()} exposes a Filter to cache the results.
+ * Applications that rely on Spring Security don't need to deploy this Filter
+ * since Spring Security doe that. However, other custom security layers, used
+ * in place of Spring Security that use this component should deploy the cache
+ * Filter with requirements described in the Javadoc for the method.
+ *
+ * @author Rossen Stoyanchev
+ * @since 4.3.1
+ * @deprecated in favor of using just {@link PathPatternParser}; when
+ * {@link #allHandlerMappingsUsePathPatternParser} returns true, it is sufficient
+ * to use that to align with handler mappings.
+ */
+@SuppressWarnings(&quot;removal&quot;)
+@Deprecated(since = &quot;7.0&quot;, forRemoval = true)
+<span class="fc" id="L99">public class HandlerMappingIntrospector</span>
+		implements CorsConfigurationSource, PreFlightRequestHandler, ApplicationContextAware, InitializingBean {
+
+<span class="fc" id="L102">	private static final Log logger = LogFactory.getLog(HandlerMappingIntrospector.class.getName());</span>
+
+<span class="fc" id="L104">	private static final String CACHED_RESULT_ATTRIBUTE =</span>
+<span class="fc" id="L105">			HandlerMappingIntrospector.class.getName() + &quot;.CachedResult&quot;;</span>
+
+	private static final int DEFAULT_CACHE_LIMIT = 2048;
+
+
+	private @Nullable ApplicationContext applicationContext;
+
+	private @Nullable List&lt;HandlerMapping&gt; handlerMappings;
+
+<span class="fc" id="L114">	private Map&lt;HandlerMapping, PathPatternMatchableHandlerMapping&gt; pathPatternMappings = Collections.emptyMap();</span>
+
+<span class="fc" id="L116">	private int patternCacheLimit = DEFAULT_CACHE_LIMIT;</span>
+
+<span class="fc" id="L118">	private final CacheResultLogHelper cacheLogHelper = new CacheResultLogHelper();</span>
+
+
+	/**
+	 * Set a limit on the maximum number of security patterns passed into
+	 * {@link MatchableHandlerMapping#match} at runtime to cache.
+	 * &lt;p&gt;By default, this is set to 2048.
+	 * @param patternCacheLimit the limit to use
+	 * @since 6.2.8
+	 */
+	public void setPatternCacheLimit(int patternCacheLimit) {
+<span class="nc" id="L129">		this.patternCacheLimit = patternCacheLimit;</span>
+<span class="nc" id="L130">	}</span>
+
+	/**
+	 * Return the configured limit on security patterns to cache.
+	 * @since 6.2.8
+	 */
+	public int getPatternCacheLimit() {
+<span class="fc" id="L137">		return this.patternCacheLimit;</span>
+	}
+
+	@Override
+	public void setApplicationContext(ApplicationContext applicationContext) {
+<span class="fc" id="L142">		this.applicationContext = applicationContext;</span>
+<span class="fc" id="L143">	}</span>
+
+	@Override
+	public void afterPropertiesSet() {
+<span class="pc bpc" id="L147" title="1 of 2 branches missed.">		if (this.handlerMappings == null) {</span>
+<span class="fc" id="L148">			Assert.notNull(this.applicationContext, &quot;No ApplicationContext&quot;);</span>
+<span class="fc" id="L149">			this.handlerMappings = initHandlerMappings(this.applicationContext);</span>
+
+<span class="fc" id="L151">			this.pathPatternMappings = this.handlerMappings.stream()</span>
+<span class="fc bfc" id="L152" title="All 4 branches covered.">					.filter(m -&gt; m instanceof MatchableHandlerMapping hm &amp;&amp; hm.getPatternParser() != null)</span>
+<span class="fc" id="L153">					.map(hm -&gt; (MatchableHandlerMapping) hm)</span>
+<span class="fc" id="L154">					.collect(Collectors.toMap(hm -&gt; hm, (MatchableHandlerMapping delegate) -&gt;</span>
+<span class="fc" id="L155">							new PathPatternMatchableHandlerMapping(delegate, getPatternCacheLimit())));</span>
+		}
+<span class="fc" id="L157">	}</span>
+
+	private static List&lt;HandlerMapping&gt; initHandlerMappings(ApplicationContext context) {
+
+<span class="fc" id="L161">		Map&lt;String, HandlerMapping&gt; beans =</span>
+<span class="fc" id="L162">				BeanFactoryUtils.beansOfTypeIncludingAncestors(context, HandlerMapping.class, true, false);</span>
+
+<span class="pc bpc" id="L164" title="1 of 2 branches missed.">		if (!beans.isEmpty()) {</span>
+<span class="fc" id="L165">			List&lt;HandlerMapping&gt; mappings = new ArrayList&lt;&gt;(beans.values());</span>
+<span class="fc" id="L166">			AnnotationAwareOrderComparator.sort(mappings);</span>
+<span class="fc" id="L167">			return Collections.unmodifiableList(mappings);</span>
+		}
+
+<span class="nc" id="L170">		return Collections.unmodifiableList(initFallback(context));</span>
+	}
+
+	private static List&lt;HandlerMapping&gt; initFallback(ApplicationContext applicationContext) {
+		Properties properties;
+		try {
+<span class="nc" id="L176">			Resource resource = new ClassPathResource(&quot;DispatcherServlet.properties&quot;, DispatcherServlet.class);</span>
+<span class="nc" id="L177">			properties = PropertiesLoaderUtils.loadProperties(resource);</span>
+		}
+<span class="nc" id="L179">		catch (IOException ex) {</span>
+<span class="nc" id="L180">			throw new IllegalStateException(&quot;Could not load DispatcherServlet.properties: &quot; + ex.getMessage());</span>
+<span class="nc" id="L181">		}</span>
+
+<span class="nc" id="L183">		String value = properties.getProperty(HandlerMapping.class.getName());</span>
+<span class="nc" id="L184">		String[] names = StringUtils.commaDelimitedListToStringArray(value);</span>
+<span class="nc" id="L185">		List&lt;HandlerMapping&gt; result = new ArrayList&lt;&gt;(names.length);</span>
+<span class="nc bnc" id="L186" title="All 2 branches missed.">		for (String name : names) {</span>
+			try {
+<span class="nc" id="L188">				Class&lt;?&gt; clazz = ClassUtils.forName(name, DispatcherServlet.class.getClassLoader());</span>
+<span class="nc" id="L189">				Object mapping = applicationContext.getAutowireCapableBeanFactory().createBean(clazz);</span>
+<span class="nc" id="L190">				result.add((HandlerMapping) mapping);</span>
+			}
+<span class="nc" id="L192">			catch (ClassNotFoundException ex) {</span>
+<span class="nc" id="L193">				throw new IllegalStateException(&quot;Could not find default HandlerMapping [&quot; + name + &quot;]&quot;);</span>
+<span class="nc" id="L194">			}</span>
+		}
+<span class="nc" id="L196">		return result;</span>
+	}
+
+
+	/**
+	 * Return the configured or detected {@code HandlerMapping}s.
+	 */
+	public List&lt;HandlerMapping&gt; getHandlerMappings() {
+<span class="pc bpc" id="L204" title="1 of 2 branches missed.">		return (this.handlerMappings != null ? this.handlerMappings : Collections.emptyList());</span>
+	}
+
+	/**
+	 * Return {@code true} if all {@link HandlerMapping} beans
+	 * {@link HandlerMapping#usesPathPatterns() use parsed PathPatterns},
+	 * and {@code false} if any don't.
+	 * @since 6.2
+	 */
+	public boolean allHandlerMappingsUsePathPatternParser() {
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">		Assert.state(this.handlerMappings != null, &quot;Not yet initialized via afterPropertiesSet.&quot;);</span>
+<span class="fc" id="L215">		return getHandlerMappings().stream().allMatch(HandlerMapping::usesPathPatterns);</span>
+	}
+
+
+	/**
+	 * Find the matching {@link HandlerMapping} for the request, and invoke the
+	 * handler it returns as a {@link PreFlightRequestHandler}.
+	 * @throws NoHandlerFoundException if no handler matches the request
+	 * @since 6.2
+	 */
+	@Override
+	public void handlePreFlight(HttpServletRequest request, HttpServletResponse response) throws Exception {
+<span class="pc bpc" id="L227" title="1 of 2 branches missed.">		Assert.state(this.handlerMappings != null, &quot;Not yet initialized via afterPropertiesSet.&quot;);</span>
+<span class="fc" id="L228">		Assert.state(CorsUtils.isPreFlightRequest(request), &quot;Not a pre-flight request.&quot;);</span>
+<span class="fc" id="L229">		RequestPath previousPath = (RequestPath) request.getAttribute(ServletRequestPathUtils.PATH_ATTRIBUTE);</span>
+		try {
+<span class="fc" id="L231">			ServletRequestPathUtils.parseAndCache(request);</span>
+<span class="fc bfc" id="L232" title="All 2 branches covered.">			for (HandlerMapping mapping : this.handlerMappings) {</span>
+<span class="fc" id="L233">				HandlerExecutionChain chain = mapping.getHandler(request);</span>
+<span class="fc bfc" id="L234" title="All 2 branches covered.">				if (chain != null) {</span>
+<span class="fc" id="L235">					Object handler = chain.getHandler();</span>
+<span class="pc bpc" id="L236" title="1 of 2 branches missed.">					if (handler instanceof PreFlightRequestHandler preFlightHandler) {</span>
+<span class="fc" id="L237">						preFlightHandler.handlePreFlight(request, response);</span>
+<span class="fc" id="L238">						return;</span>
+					}
+<span class="nc" id="L240">					throw new IllegalStateException(&quot;Expected PreFlightRequestHandler: &quot; + handler.getClass());</span>
+				}
+<span class="fc" id="L242">			}</span>
+<span class="fc" id="L243">			throw new NoHandlerFoundException(</span>
+<span class="fc" id="L244">					request.getMethod(), request.getRequestURI(), new ServletServerHttpRequest(request).getHeaders());</span>
+		}
+		finally {
+<span class="fc" id="L247">			ServletRequestPathUtils.setParsedRequestPath(previousPath, request);</span>
+		}
+	}
+
+
+	/**
+	 * {@link Filter} that looks up the {@code MatchableHandlerMapping} and
+	 * {@link CorsConfiguration} for the request proactively before delegating
+	 * to the rest of the chain, caching the result in a request attribute, and
+	 * restoring it after the chain returns.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; Applications that rely on Spring Security do
+	 * not use this component directly and should not deploy the filter instead
+	 * allowing Spring Security to do it. Other custom security layers used in
+	 * place of Spring Security that also rely on {@code HandlerMappingIntrospector}
+	 * should deploy this filter ahead of other filters where lookups are
+	 * performed, and should also make sure the filter is configured to handle
+	 * all dispatcher types.
+	 * @return the Filter instance to use
+	 * @since 6.0.14
+	 */
+	public Filter createCacheFilter() {
+<span class="fc" id="L268">		return (request, response, chain) -&gt; {</span>
+<span class="fc" id="L269">			CachedResult previous = setCache((HttpServletRequest) request);</span>
+			try {
+<span class="fc" id="L271">				chain.doFilter(request, response);</span>
+			}
+			finally {
+<span class="fc" id="L274">				resetCache(request, previous);</span>
+			}
+<span class="fc" id="L276">		};</span>
+	}
+
+	/**
+	 * Perform a lookup and save the {@link CachedResult} as a request attribute.
+	 * This method can be invoked from a filter before subsequent calls to
+	 * {@link #getMatchableHandlerMapping(HttpServletRequest)} and
+	 * {@link #getCorsConfiguration(HttpServletRequest)} to avoid repeated lookups.
+	 * @param request the current request
+	 * @return the previous {@link CachedResult}, if there is one from a parent dispatch
+	 * @since 6.0.14
+	 */
+	public @Nullable CachedResult setCache(HttpServletRequest request) {
+<span class="fc" id="L289">		CachedResult previous = (CachedResult) request.getAttribute(CACHED_RESULT_ATTRIBUTE);</span>
+<span class="pc bpc" id="L290" title="3 of 4 branches missed.">		if (previous == null || !previous.matches(request)) {</span>
+<span class="fc" id="L291">			HttpServletRequest wrapped = new AttributesPreservingRequest(request);</span>
+			CachedResult result;
+			try {
+				// Try to get both in one lookup (with ignoringException=false)
+<span class="fc" id="L295">				result = doWithHandlerMapping(wrapped, false, (mapping, executionChain) -&gt; {</span>
+<span class="fc" id="L296">					MatchableHandlerMapping matchableMapping = createMatchableHandlerMapping(mapping, wrapped);</span>
+<span class="fc" id="L297">					CorsConfiguration corsConfig = getCorsConfiguration(executionChain, wrapped);</span>
+<span class="fc" id="L298">					return new CachedResult(request, matchableMapping, corsConfig, null, null);</span>
+				});
+			}
+<span class="nc" id="L301">			catch (Exception ex) {</span>
+				try {
+					// Try CorsConfiguration at least with ignoreException=true
+<span class="nc" id="L304">					AttributesPreservingRequest requestToUse = new AttributesPreservingRequest(request);</span>
+<span class="nc" id="L305">					result = doWithHandlerMapping(requestToUse, true, (mapping, executionChain) -&gt; {</span>
+<span class="nc" id="L306">						CorsConfiguration corsConfig = getCorsConfiguration(executionChain, wrapped);</span>
+<span class="nc" id="L307">						return new CachedResult(request, null, corsConfig, ex, null);</span>
+					});
+				}
+<span class="nc" id="L310">				catch (Exception ex2) {</span>
+<span class="nc" id="L311">					result = new CachedResult(request, null, null, ex, new IllegalStateException(ex2));</span>
+<span class="nc" id="L312">				}</span>
+<span class="fc" id="L313">			}</span>
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">			if (result == null) {</span>
+<span class="nc" id="L315">				result = new CachedResult(request, null, null, null, null);</span>
+			}
+<span class="fc" id="L317">			request.setAttribute(CACHED_RESULT_ATTRIBUTE, result);</span>
+		}
+<span class="fc" id="L319">		return previous;</span>
+	}
+
+	/**
+	 * Restore a previous {@link CachedResult}. This method can be invoked from
+	 * a filter after delegating to the rest of the chain.
+	 * @since 6.0.14
+	 */
+	public void resetCache(ServletRequest request, @Nullable CachedResult cachedResult) {
+<span class="fc" id="L328">		request.setAttribute(CACHED_RESULT_ATTRIBUTE, cachedResult);</span>
+<span class="fc" id="L329">	}</span>
+
+	/**
+	 * Find the {@link HandlerMapping} that would handle the given request and
+	 * return a {@link MatchableHandlerMapping} to use for path matching.
+	 * @param request the current request
+	 * @return the resolved {@code MatchableHandlerMapping}, or {@code null}
+	 * @throws IllegalStateException if the matching HandlerMapping is not an
+	 * instance of {@link MatchableHandlerMapping}
+	 * @throws Exception if any of the HandlerMapping's raise an exception
+	 */
+	public @Nullable MatchableHandlerMapping getMatchableHandlerMapping(HttpServletRequest request) throws Exception {
+<span class="fc" id="L341">		CachedResult result = CachedResult.getResultFor(request);</span>
+<span class="fc bfc" id="L342" title="All 2 branches covered.">		if (result != null) {</span>
+<span class="fc" id="L343">			return result.getHandlerMapping();</span>
+		}
+<span class="fc" id="L345">		this.cacheLogHelper.logHandlerMappingCacheMiss(request);</span>
+<span class="fc" id="L346">		HttpServletRequest requestToUse = new AttributesPreservingRequest(request);</span>
+<span class="fc" id="L347">		return doWithHandlerMapping(requestToUse, false,</span>
+<span class="fc" id="L348">				(mapping, executionChain) -&gt; createMatchableHandlerMapping(mapping, requestToUse));</span>
+	}
+
+	private MatchableHandlerMapping createMatchableHandlerMapping(HandlerMapping mapping, HttpServletRequest request) {
+<span class="fc bfc" id="L352" title="All 2 branches covered.">		if (mapping instanceof MatchableHandlerMapping) {</span>
+<span class="fc" id="L353">			PathPatternMatchableHandlerMapping pathPatternMapping = this.pathPatternMappings.get(mapping);</span>
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">			if (pathPatternMapping != null) {</span>
+<span class="fc" id="L355">				RequestPath requestPath = ServletRequestPathUtils.getParsedRequestPath(request);</span>
+<span class="fc" id="L356">				return new LookupPathMatchableHandlerMapping(pathPatternMapping, requestPath);</span>
+			}
+			else {
+<span class="nc" id="L359">				String lookupPath = (String) request.getAttribute(UrlPathHelper.PATH_ATTRIBUTE);</span>
+<span class="nc" id="L360">				return new LookupPathMatchableHandlerMapping((MatchableHandlerMapping) mapping, lookupPath);</span>
+			}
+		}
+<span class="fc" id="L363">		throw new IllegalStateException(&quot;HandlerMapping is not a MatchableHandlerMapping&quot;);</span>
+	}
+
+	@Override
+	public @Nullable CorsConfiguration getCorsConfiguration(HttpServletRequest request) {
+<span class="fc" id="L368">		CachedResult result = CachedResult.getResultFor(request);</span>
+<span class="fc bfc" id="L369" title="All 2 branches covered.">		if (result != null) {</span>
+<span class="fc" id="L370">			return result.getCorsConfig();</span>
+		}
+<span class="fc" id="L372">		this.cacheLogHelper.logCorsConfigCacheMiss(request);</span>
+		try {
+<span class="fc" id="L374">			boolean ignoreException = true;</span>
+<span class="fc" id="L375">			AttributesPreservingRequest requestToUse = new AttributesPreservingRequest(request);</span>
+<span class="fc" id="L376">			return doWithHandlerMapping(requestToUse, ignoreException,</span>
+<span class="fc" id="L377">					(handlerMapping, executionChain) -&gt; getCorsConfiguration(executionChain, requestToUse));</span>
+		}
+<span class="nc" id="L379">		catch (Exception ex) {</span>
+			// HandlerMapping exceptions are ignored. More basic error like parsing the request path.
+<span class="nc" id="L381">			throw new IllegalStateException(ex);</span>
+		}
+	}
+
+	private static @Nullable CorsConfiguration getCorsConfiguration(HandlerExecutionChain chain, HttpServletRequest request) {
+<span class="pc bpc" id="L386" title="1 of 2 branches missed.">		for (HandlerInterceptor interceptor : chain.getInterceptorList()) {</span>
+<span class="pc bpc" id="L387" title="1 of 2 branches missed.">			if (interceptor instanceof CorsConfigurationSource source) {</span>
+<span class="fc" id="L388">				return source.getCorsConfiguration(request);</span>
+			}
+<span class="nc" id="L390">		}</span>
+<span class="nc bnc" id="L391" title="All 2 branches missed.">		if (chain.getHandler() instanceof CorsConfigurationSource source) {</span>
+<span class="nc" id="L392">			return source.getCorsConfiguration(request);</span>
+		}
+<span class="nc" id="L394">		return null;</span>
+	}
+
+	private &lt;T&gt; @Nullable T doWithHandlerMapping(
+			HttpServletRequest request, boolean ignoreException,
+			BiFunction&lt;HandlerMapping, HandlerExecutionChain, T&gt; extractor) throws Exception {
+
+<span class="pc bpc" id="L401" title="1 of 2 branches missed.">		Assert.state(this.handlerMappings != null, &quot;HandlerMapping's not initialized&quot;);</span>
+
+<span class="fc bfc" id="L403" title="All 2 branches covered.">		boolean parsePath = !this.pathPatternMappings.isEmpty();</span>
+<span class="fc" id="L404">		RequestPath previousPath = null;</span>
+<span class="fc bfc" id="L405" title="All 2 branches covered.">		if (parsePath) {</span>
+<span class="fc" id="L406">			previousPath = (RequestPath) request.getAttribute(ServletRequestPathUtils.PATH_ATTRIBUTE);</span>
+<span class="fc" id="L407">			ServletRequestPathUtils.parseAndCache(request);</span>
+		}
+		try {
+<span class="pc bpc" id="L410" title="1 of 2 branches missed.">			for (HandlerMapping handlerMapping : this.handlerMappings) {</span>
+<span class="fc" id="L411">				HandlerExecutionChain chain = null;</span>
+				try {
+<span class="fc" id="L413">					chain = handlerMapping.getHandler(request);</span>
+				}
+<span class="nc" id="L415">				catch (Exception ex) {</span>
+<span class="nc bnc" id="L416" title="All 2 branches missed.">					if (!ignoreException) {</span>
+<span class="nc" id="L417">						throw ex;</span>
+					}
+<span class="fc" id="L419">				}</span>
+<span class="fc bfc" id="L420" title="All 2 branches covered.">				if (chain == null) {</span>
+<span class="fc" id="L421">					continue;</span>
+				}
+<span class="fc" id="L423">				return extractor.apply(handlerMapping, chain);</span>
+			}
+		}
+		finally {
+<span class="fc bfc" id="L427" title="All 2 branches covered.">			if (parsePath) {</span>
+<span class="fc" id="L428">				ServletRequestPathUtils.setParsedRequestPath(previousPath, request);</span>
+			}
+		}
+<span class="nc" id="L431">		return null;</span>
+	}
+
+
+	/**
+	 * Container for a {@link MatchableHandlerMapping} and {@link CorsConfiguration}
+	 * for a given request matched by dispatcher type and requestURI.
+	 * @since 6.0.14
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	public static final class CachedResult {
+
+		private final DispatcherType dispatcherType;
+
+		private final String requestURI;
+
+		private final @Nullable MatchableHandlerMapping handlerMapping;
+
+		private final @Nullable CorsConfiguration corsConfig;
+
+		private final @Nullable Exception failure;
+
+		private final @Nullable IllegalStateException corsConfigFailure;
+
+		private CachedResult(HttpServletRequest request,
+				@Nullable MatchableHandlerMapping mapping, @Nullable CorsConfiguration config,
+<span class="fc" id="L457">				@Nullable Exception failure, @Nullable IllegalStateException corsConfigFailure) {</span>
+
+<span class="fc" id="L459">			this.dispatcherType = request.getDispatcherType();</span>
+<span class="fc" id="L460">			this.requestURI = request.getRequestURI();</span>
+<span class="fc" id="L461">			this.handlerMapping = mapping;</span>
+<span class="fc" id="L462">			this.corsConfig = config;</span>
+<span class="fc" id="L463">			this.failure = failure;</span>
+<span class="fc" id="L464">			this.corsConfigFailure = corsConfigFailure;</span>
+<span class="fc" id="L465">		}</span>
+
+		public boolean matches(HttpServletRequest request) {
+<span class="pc bpc" id="L468" title="1 of 2 branches missed.">			return (this.dispatcherType.equals(request.getDispatcherType()) &amp;&amp;</span>
+<span class="pc bpc" id="L469" title="1 of 2 branches missed.">					this.requestURI.equals(request.getRequestURI()));</span>
+		}
+
+		public @Nullable MatchableHandlerMapping getHandlerMapping() throws Exception {
+<span class="pc bpc" id="L473" title="1 of 2 branches missed.">			if (this.failure != null) {</span>
+<span class="nc" id="L474">				throw this.failure;</span>
+			}
+<span class="fc" id="L476">			return this.handlerMapping;</span>
+		}
+
+		public @Nullable CorsConfiguration getCorsConfig() {
+<span class="pc bpc" id="L480" title="1 of 2 branches missed.">			if (this.corsConfigFailure != null) {</span>
+<span class="nc" id="L481">				throw this.corsConfigFailure;</span>
+			}
+<span class="fc" id="L483">			return this.corsConfig;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L488">			return &quot;CachedResult for &quot; + this.dispatcherType + &quot; dispatch to '&quot; + this.requestURI + &quot;'&quot;;</span>
+		}
+
+
+		/**
+		 * Return a {@link CachedResult} that matches the given request.
+		 */
+		public static @Nullable CachedResult getResultFor(HttpServletRequest request) {
+<span class="fc" id="L496">			CachedResult result = (CachedResult) request.getAttribute(CACHED_RESULT_ATTRIBUTE);</span>
+<span class="pc bpc" id="L497" title="1 of 4 branches missed.">			return (result != null &amp;&amp; result.matches(request) ? result : null);</span>
+		}
+	}
+
+
+<span class="fc" id="L502">	private static class CacheResultLogHelper {</span>
+
+<span class="fc" id="L504">		private final Map&lt;String, AtomicInteger&gt; counters =</span>
+<span class="fc" id="L505">				Map.of(&quot;MatchableHandlerMapping&quot;, new AtomicInteger(), &quot;CorsConfiguration&quot;, new AtomicInteger());</span>
+
+		public void logHandlerMappingCacheMiss(HttpServletRequest request) {
+<span class="fc" id="L508">			logCacheMiss(&quot;MatchableHandlerMapping&quot;, request);</span>
+<span class="fc" id="L509">		}</span>
+
+		public void logCorsConfigCacheMiss(HttpServletRequest request) {
+<span class="fc" id="L512">			logCacheMiss(&quot;CorsConfiguration&quot;, request);</span>
+<span class="fc" id="L513">		}</span>
+
+		private void logCacheMiss(String label, HttpServletRequest request) {
+<span class="fc" id="L516">			AtomicInteger counter = this.counters.get(label);</span>
+<span class="fc" id="L517">			Assert.notNull(counter, &quot;Expected '&quot; + label + &quot;' counter.&quot;);</span>
+
+<span class="fc" id="L519">			String message = getLogMessage(label, request);</span>
+
+<span class="pc bpc" id="L521" title="3 of 4 branches missed.">			if (logger.isDebugEnabled() &amp;&amp; counter.getAndIncrement() == 0) {</span>
+<span class="nc" id="L522">				logger.debug(message + &quot; This is logged once only at DEBUG level, and every time at TRACE.&quot;);</span>
+			}
+<span class="pc bpc" id="L524" title="1 of 2 branches missed.">			else if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L525">				logger.trace(&quot;No CachedResult, performing &quot; + label + &quot; lookup instead.&quot;);</span>
+			}
+<span class="fc" id="L527">		}</span>
+
+		private static String getLogMessage(String label, HttpServletRequest request) {
+<span class="fc" id="L530">			return &quot;Cache miss for &quot; + request.getDispatcherType() + &quot; dispatch to '&quot; + request.getRequestURI() + &quot;' &quot; +</span>
+<span class="fc" id="L531">					&quot;(previous &quot; + request.getAttribute(CACHED_RESULT_ATTRIBUTE) + &quot;). &quot; +</span>
+					&quot;Performing &quot; + label + &quot; lookup. If there are repeated lookups per request, &quot; +
+					&quot;consider using HandlerMappingIntrospector#createCacheFilter()&quot; +
+					&quot;to create a Servlet Filter to set the cache for the request.&quot;;
+		}
+	}
+
+
+	/**
+	 * Request wrapper that buffers request attributes in order protect the
+	 * underlying request from attribute changes.
+	 */
+	private static class AttributesPreservingRequest extends HttpServletRequestWrapper {
+
+		private final Map&lt;String, Object&gt; attributes;
+
+		AttributesPreservingRequest(HttpServletRequest request) {
+<span class="fc" id="L548">			super(request);</span>
+<span class="fc" id="L549">			this.attributes = initAttributes(request);</span>
+<span class="fc" id="L550">			this.attributes.put(AbstractHandlerMapping.SUPPRESS_LOGGING_ATTRIBUTE, Boolean.TRUE);</span>
+<span class="fc" id="L551">		}</span>
+
+		private Map&lt;String, Object&gt; initAttributes(HttpServletRequest request) {
+<span class="fc" id="L554">			Map&lt;String, Object&gt; map = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L555">			Enumeration&lt;String&gt; names = request.getAttributeNames();</span>
+<span class="fc bfc" id="L556" title="All 2 branches covered.">			while (names.hasMoreElements()) {</span>
+<span class="fc" id="L557">				String name = names.nextElement();</span>
+<span class="fc" id="L558">				map.put(name, request.getAttribute(name));</span>
+<span class="fc" id="L559">			}</span>
+<span class="fc" id="L560">			return map;</span>
+		}
+
+		@Override
+		public void setAttribute(String name, Object value) {
+<span class="fc" id="L565">			this.attributes.put(name, value);</span>
+<span class="fc" id="L566">		}</span>
+
+		@Override
+		public @Nullable Object getAttribute(String name) {
+<span class="fc" id="L570">			return this.attributes.get(name);</span>
+		}
+
+		@Override
+		public Enumeration&lt;String&gt; getAttributeNames() {
+<span class="nc" id="L575">			return Collections.enumeration(this.attributes.keySet());</span>
+		}
+
+		@Override
+		public void removeAttribute(String name) {
+<span class="fc" id="L580">			this.attributes.remove(name);</span>
+<span class="fc" id="L581">		}</span>
+	}
+
+
+	private static class LookupPathMatchableHandlerMapping implements MatchableHandlerMapping {
+
+		private final MatchableHandlerMapping delegate;
+
+		private final Object lookupPath;
+
+		private final String pathAttributeName;
+
+<span class="fc" id="L593">		LookupPathMatchableHandlerMapping(MatchableHandlerMapping delegate, Object lookupPath) {</span>
+<span class="fc" id="L594">			this.delegate = delegate;</span>
+<span class="fc" id="L595">			this.lookupPath = lookupPath;</span>
+<span class="pc bpc" id="L596" title="1 of 2 branches missed.">			this.pathAttributeName = (lookupPath instanceof RequestPath ?</span>
+<span class="pc" id="L597">					ServletRequestPathUtils.PATH_ATTRIBUTE : UrlPathHelper.PATH_ATTRIBUTE);</span>
+<span class="fc" id="L598">		}</span>
+
+		@Override
+		public @Nullable PathPatternParser getPatternParser() {
+<span class="fc" id="L602">			return this.delegate.getPatternParser();</span>
+		}
+
+		@SuppressWarnings(&quot;removal&quot;)
+		@Deprecated(since = &quot;7.0&quot;, forRemoval = true)
+		@Override
+		public @Nullable RequestMatchResult match(HttpServletRequest request, String pattern) {
+<span class="fc" id="L609">			pattern = initFullPathPattern(pattern);</span>
+<span class="fc" id="L610">			Object previousPath = request.getAttribute(this.pathAttributeName);</span>
+<span class="fc" id="L611">			request.setAttribute(this.pathAttributeName, this.lookupPath);</span>
+			try {
+<span class="fc" id="L613">				return this.delegate.match(request, pattern);</span>
+			}
+			finally {
+<span class="fc" id="L616">				request.setAttribute(this.pathAttributeName, previousPath);</span>
+			}
+		}
+
+		private String initFullPathPattern(String pattern) {
+<span class="pc bpc" id="L621" title="1 of 2 branches missed.">			PathPatternParser parser = (getPatternParser() != null ? getPatternParser() : PathPatternParser.defaultInstance);</span>
+<span class="fc" id="L622">			return parser.initFullPathPattern(pattern);</span>
+		}
+
+		@Override
+		public @Nullable HandlerExecutionChain getHandler(HttpServletRequest request) throws Exception {
+<span class="nc" id="L627">			return this.delegate.getHandler(request);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,598 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>AbstractEnvironment.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.env</a> &gt; <span class="el_source">AbstractEnvironment.java</span></div><h1>AbstractEnvironment.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.env;
+
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.SpringProperties;
+import org.springframework.core.convert.support.ConfigurableConversionService;
+import org.springframework.util.Assert;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Abstract base class for {@link Environment} implementations. Supports the notion of
+ * reserved default profile names and enables specifying active and default profiles
+ * through the {@link #ACTIVE_PROFILES_PROPERTY_NAME} and
+ * {@link #DEFAULT_PROFILES_PROPERTY_NAME} properties.
+ *
+ * &lt;p&gt;Concrete subclasses differ primarily on which {@link PropertySource} objects they
+ * add by default. {@code AbstractEnvironment} adds none. Subclasses should contribute
+ * property sources through the protected {@link #customizePropertySources(MutablePropertySources)}
+ * hook, while clients should customize using {@link ConfigurableEnvironment#getPropertySources()}
+ * and work against the {@link MutablePropertySources} API.
+ * See {@link ConfigurableEnvironment} javadoc for usage examples.
+ *
+ * @author Chris Beams
+ * @author Juergen Hoeller
+ * @author Phillip Webb
+ * @since 3.1
+ * @see ConfigurableEnvironment
+ * @see StandardEnvironment
+ */
+public abstract class AbstractEnvironment implements ConfigurableEnvironment {
+
+	/**
+	 * System property that instructs Spring to ignore system environment variables,
+	 * i.e. to never attempt to retrieve such a variable via {@link System#getenv()}.
+	 * &lt;p&gt;The default is &quot;false&quot;, falling back to system environment variable checks if a
+	 * Spring environment property (for example, a placeholder in a configuration String) isn't
+	 * resolvable otherwise. Consider switching this flag to &quot;true&quot; if you experience
+	 * log warnings from {@code getenv} calls coming from Spring.
+	 * @see #suppressGetenvAccess()
+	 */
+	public static final String IGNORE_GETENV_PROPERTY_NAME = &quot;spring.getenv.ignore&quot;;
+
+	/**
+	 * Name of the property to specify active profiles: {@value}.
+	 * &lt;p&gt;The value may be comma delimited.
+	 * &lt;p&gt;Note that certain shell environments such as Bash disallow the use of the period
+	 * character in variable names. Assuming that Spring's {@link SystemEnvironmentPropertySource}
+	 * is in use, this property may be specified as an environment variable named
+	 * {@code SPRING_PROFILES_ACTIVE}.
+	 * @see ConfigurableEnvironment#setActiveProfiles
+	 */
+	public static final String ACTIVE_PROFILES_PROPERTY_NAME = &quot;spring.profiles.active&quot;;
+
+	/**
+	 * Name of the property to specify profiles that are active by default: {@value}.
+	 * &lt;p&gt;The value may be comma delimited.
+	 * &lt;p&gt;Note that certain shell environments such as Bash disallow the use of the period
+	 * character in variable names. Assuming that Spring's {@link SystemEnvironmentPropertySource}
+	 * is in use, this property may be specified as an environment variable named
+	 * {@code SPRING_PROFILES_DEFAULT}.
+	 * @see ConfigurableEnvironment#setDefaultProfiles
+	 */
+	public static final String DEFAULT_PROFILES_PROPERTY_NAME = &quot;spring.profiles.default&quot;;
+
+	/**
+	 * Name of the reserved default profile name: {@value}.
+	 * &lt;p&gt;If no default profile names are explicitly set and no active profile names
+	 * are explicitly set, this profile will automatically be activated by default.
+	 * @see #getReservedDefaultProfiles
+	 * @see ConfigurableEnvironment#setDefaultProfiles
+	 * @see ConfigurableEnvironment#setActiveProfiles
+	 * @see AbstractEnvironment#DEFAULT_PROFILES_PROPERTY_NAME
+	 * @see AbstractEnvironment#ACTIVE_PROFILES_PROPERTY_NAME
+	 */
+	public static final String RESERVED_DEFAULT_PROFILE_NAME = &quot;default&quot;;
+
+
+<span class="fc" id="L103">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+<span class="fc" id="L105">	private final Set&lt;String&gt; activeProfiles = new LinkedHashSet&lt;&gt;();</span>
+
+<span class="fc" id="L107">	private final Set&lt;String&gt; defaultProfiles = new LinkedHashSet&lt;&gt;(getReservedDefaultProfiles());</span>
+
+	private final MutablePropertySources propertySources;
+
+	private final ConfigurablePropertyResolver propertyResolver;
+
+
+	/**
+	 * Create a new {@code Environment} instance, calling back to
+	 * {@link #customizePropertySources(MutablePropertySources)} during construction to
+	 * allow subclasses to contribute or manipulate {@link PropertySource} instances as
+	 * appropriate.
+	 * @see #customizePropertySources(MutablePropertySources)
+	 */
+	public AbstractEnvironment() {
+<span class="fc" id="L122">		this(new MutablePropertySources());</span>
+<span class="fc" id="L123">	}</span>
+
+	/**
+	 * Create a new {@code Environment} instance with a specific
+	 * {@link MutablePropertySources} instance, calling back to
+	 * {@link #customizePropertySources(MutablePropertySources)} during
+	 * construction to allow subclasses to contribute or manipulate
+	 * {@link PropertySource} instances as appropriate.
+	 * @param propertySources property sources to use
+	 * @since 5.3.4
+	 * @see #customizePropertySources(MutablePropertySources)
+	 */
+<span class="fc" id="L135">	protected AbstractEnvironment(MutablePropertySources propertySources) {</span>
+<span class="fc" id="L136">		this.propertySources = propertySources;</span>
+<span class="fc" id="L137">		this.propertyResolver = createPropertyResolver(propertySources);</span>
+<span class="fc" id="L138">		customizePropertySources(propertySources);</span>
+<span class="fc" id="L139">	}</span>
+
+
+	/**
+	 * Factory method used to create the {@link ConfigurablePropertyResolver}
+	 * used by this {@code Environment}.
+	 * @since 5.3.4
+	 * @see #getPropertyResolver()
+	 */
+	protected ConfigurablePropertyResolver createPropertyResolver(MutablePropertySources propertySources) {
+<span class="fc" id="L149">		return new PropertySourcesPropertyResolver(propertySources);</span>
+	}
+
+	/**
+	 * Return the {@link ConfigurablePropertyResolver} used by the {@code Environment}.
+	 * @since 5.3.4
+	 * @see #createPropertyResolver(MutablePropertySources)
+	 */
+	protected final ConfigurablePropertyResolver getPropertyResolver() {
+<span class="nc" id="L158">		return this.propertyResolver;</span>
+	}
+
+	/**
+	 * Customize the set of {@link PropertySource} objects to be searched by this
+	 * {@code Environment} during calls to {@link #getProperty(String)} and related
+	 * methods.
+	 *
+	 * &lt;p&gt;Subclasses that override this method are encouraged to add property
+	 * sources using {@link MutablePropertySources#addLast(PropertySource)} such that
+	 * further subclasses may call {@code super.customizePropertySources()} with
+	 * predictable results. For example:
+	 *
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * public class Level1Environment extends AbstractEnvironment {
+	 *     &amp;#064;Override
+	 *     protected void customizePropertySources(MutablePropertySources propertySources) {
+	 *         super.customizePropertySources(propertySources); // no-op from base class
+	 *         propertySources.addLast(new PropertySourceA(...));
+	 *         propertySources.addLast(new PropertySourceB(...));
+	 *     }
+	 * }
+	 *
+	 * public class Level2Environment extends Level1Environment {
+	 *     &amp;#064;Override
+	 *     protected void customizePropertySources(MutablePropertySources propertySources) {
+	 *         super.customizePropertySources(propertySources); // add all from superclass
+	 *         propertySources.addLast(new PropertySourceC(...));
+	 *         propertySources.addLast(new PropertySourceD(...));
+	 *     }
+	 * }
+	 * &lt;/pre&gt;
+	 *
+	 * &lt;p&gt;In this arrangement, properties will be resolved against sources A, B, C, D in that
+	 * order. That is to say that property source &quot;A&quot; has precedence over property source
+	 * &quot;D&quot;. If the {@code Level2Environment} subclass wished to give property sources C
+	 * and D higher precedence than A and B, it could simply call
+	 * {@code super.customizePropertySources} after, rather than before adding its own:
+	 *
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * public class Level2Environment extends Level1Environment {
+	 *     &amp;#064;Override
+	 *     protected void customizePropertySources(MutablePropertySources propertySources) {
+	 *         propertySources.addLast(new PropertySourceC(...));
+	 *         propertySources.addLast(new PropertySourceD(...));
+	 *         super.customizePropertySources(propertySources); // add all from superclass
+	 *     }
+	 * }
+	 * &lt;/pre&gt;
+	 *
+	 * &lt;p&gt;The search order is now C, D, A, B as desired.
+	 *
+	 * &lt;p&gt;Beyond these recommendations, subclasses may use any of the {@code add*},
+	 * {@code remove}, or {@code replace} methods exposed by {@link MutablePropertySources}
+	 * in order to create the exact arrangement of property sources desired.
+	 *
+	 * &lt;p&gt;The base implementation registers no property sources.
+	 *
+	 * &lt;p&gt;Note that clients of any {@link ConfigurableEnvironment} may further customize
+	 * property sources via the {@link #getPropertySources()} accessor, typically within
+	 * an {@link org.springframework.context.ApplicationContextInitializer
+	 * ApplicationContextInitializer}. For example:
+	 *
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * ConfigurableEnvironment env = new StandardEnvironment();
+	 * env.getPropertySources().addLast(new PropertySourceX(...));
+	 * &lt;/pre&gt;
+	 *
+	 * &lt;h2&gt;A warning about instance variable access&lt;/h2&gt;
+	 * &lt;p&gt;Instance variables declared in subclasses and having default initial values should
+	 * &lt;em&gt;not&lt;/em&gt; be accessed from within this method. Due to Java object creation
+	 * lifecycle constraints, any initial value will not yet be assigned when this
+	 * callback is invoked by the {@link #AbstractEnvironment()} constructor, which may
+	 * lead to a {@code NullPointerException} or other problems. If you need to access
+	 * default values of instance variables, leave this method as a no-op and perform
+	 * property source manipulation and instance variable access directly within the
+	 * subclass constructor. Note that &lt;em&gt;assigning&lt;/em&gt; values to instance variables is
+	 * not problematic; it is only attempting to read default values that must be avoided.
+	 * @see MutablePropertySources
+	 * @see PropertySourcesPropertyResolver
+	 * @see org.springframework.context.ApplicationContextInitializer
+	 */
+	protected void customizePropertySources(MutablePropertySources propertySources) {
+<span class="fc" id="L241">	}</span>
+
+	/**
+	 * Return the set of reserved default profile names. This implementation returns
+	 * {@value #RESERVED_DEFAULT_PROFILE_NAME}. Subclasses may override in order to
+	 * customize the set of reserved names.
+	 * @see #RESERVED_DEFAULT_PROFILE_NAME
+	 * @see #doGetDefaultProfiles()
+	 */
+	protected Set&lt;String&gt; getReservedDefaultProfiles() {
+<span class="fc" id="L251">		return Collections.singleton(RESERVED_DEFAULT_PROFILE_NAME);</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of ConfigurableEnvironment interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public String[] getActiveProfiles() {
+<span class="fc" id="L261">		return StringUtils.toStringArray(doGetActiveProfiles());</span>
+	}
+
+	/**
+	 * Return the set of active profiles as explicitly set through
+	 * {@link #setActiveProfiles} or if the current set of active profiles
+	 * is empty, check for the presence of {@link #doGetActiveProfilesProperty()}
+	 * and assign its value to the set of active profiles.
+	 * @see #getActiveProfiles()
+	 * @see #doGetActiveProfilesProperty()
+	 */
+	protected Set&lt;String&gt; doGetActiveProfiles() {
+<span class="fc" id="L273">		synchronized (this.activeProfiles) {</span>
+<span class="fc bfc" id="L274" title="All 2 branches covered.">			if (this.activeProfiles.isEmpty()) {</span>
+<span class="fc" id="L275">				String profiles = doGetActiveProfilesProperty();</span>
+<span class="fc bfc" id="L276" title="All 2 branches covered.">				if (StringUtils.hasText(profiles)) {</span>
+<span class="fc" id="L277">					setActiveProfiles(StringUtils.commaDelimitedListToStringArray(</span>
+<span class="fc" id="L278">							StringUtils.trimAllWhitespace(profiles)));</span>
+				}
+			}
+<span class="fc" id="L281">			return this.activeProfiles;</span>
+		}
+	}
+
+	/**
+	 * Return the property value for the active profiles.
+	 * @since 5.3.4
+	 * @see #ACTIVE_PROFILES_PROPERTY_NAME
+	 */
+	protected @Nullable String doGetActiveProfilesProperty() {
+<span class="fc" id="L291">		return getProperty(ACTIVE_PROFILES_PROPERTY_NAME);</span>
+	}
+
+	@Override
+	public void setActiveProfiles(String... profiles) {
+<span class="fc" id="L296">		Assert.notNull(profiles, &quot;Profile array must not be null&quot;);</span>
+<span class="fc bfc" id="L297" title="All 2 branches covered.">		if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L298">			logger.debug(&quot;Activating profiles &quot; + Arrays.toString(profiles));</span>
+		}
+<span class="fc" id="L300">		synchronized (this.activeProfiles) {</span>
+<span class="fc" id="L301">			this.activeProfiles.clear();</span>
+<span class="fc bfc" id="L302" title="All 2 branches covered.">			for (String profile : profiles) {</span>
+<span class="fc" id="L303">				validateProfile(profile);</span>
+<span class="fc" id="L304">				this.activeProfiles.add(profile);</span>
+			}
+<span class="fc" id="L306">		}</span>
+<span class="fc" id="L307">	}</span>
+
+	@Override
+	public void addActiveProfile(String profile) {
+<span class="pc bpc" id="L311" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L312">			logger.debug(&quot;Activating profile '&quot; + profile + &quot;'&quot;);</span>
+		}
+<span class="fc" id="L314">		validateProfile(profile);</span>
+<span class="fc" id="L315">		doGetActiveProfiles();</span>
+<span class="fc" id="L316">		synchronized (this.activeProfiles) {</span>
+<span class="fc" id="L317">			this.activeProfiles.add(profile);</span>
+<span class="fc" id="L318">		}</span>
+<span class="fc" id="L319">	}</span>
+
+	@Override
+	public String[] getDefaultProfiles() {
+<span class="fc" id="L323">		return StringUtils.toStringArray(doGetDefaultProfiles());</span>
+	}
+
+	/**
+	 * Return the set of default profiles explicitly set via
+	 * {@link #setDefaultProfiles(String...)}, or if the current set of default profiles
+	 * consists only of {@linkplain #getReservedDefaultProfiles() reserved default
+	 * profiles}, then check for the presence of {@link #doGetDefaultProfilesProperty()}
+	 * and assign its value (if any) to the set of default profiles.
+	 * @see #AbstractEnvironment()
+	 * @see #getDefaultProfiles()
+	 * @see #getReservedDefaultProfiles()
+	 * @see #doGetDefaultProfilesProperty()
+	 */
+	protected Set&lt;String&gt; doGetDefaultProfiles() {
+<span class="fc" id="L338">		synchronized (this.defaultProfiles) {</span>
+<span class="fc bfc" id="L339" title="All 2 branches covered.">			if (this.defaultProfiles.equals(getReservedDefaultProfiles())) {</span>
+<span class="fc" id="L340">				String profiles = doGetDefaultProfilesProperty();</span>
+<span class="pc bpc" id="L341" title="1 of 2 branches missed.">				if (StringUtils.hasText(profiles)) {</span>
+<span class="nc" id="L342">					setDefaultProfiles(StringUtils.commaDelimitedListToStringArray(</span>
+<span class="nc" id="L343">							StringUtils.trimAllWhitespace(profiles)));</span>
+				}
+			}
+<span class="fc" id="L346">			return this.defaultProfiles;</span>
+		}
+	}
+
+	/**
+	 * Return the property value for the default profiles.
+	 * @since 5.3.4
+	 * @see #DEFAULT_PROFILES_PROPERTY_NAME
+	 */
+	protected @Nullable String doGetDefaultProfilesProperty() {
+<span class="fc" id="L356">		return getProperty(DEFAULT_PROFILES_PROPERTY_NAME);</span>
+	}
+
+	/**
+	 * Specify the set of profiles to be made active by default if no other profiles
+	 * are explicitly made active through {@link #setActiveProfiles}.
+	 * &lt;p&gt;Calling this method removes overrides any reserved default profiles
+	 * that may have been added during construction of the environment.
+	 * @see #AbstractEnvironment()
+	 * @see #getReservedDefaultProfiles()
+	 */
+	@Override
+	public void setDefaultProfiles(String... profiles) {
+<span class="fc" id="L369">		Assert.notNull(profiles, &quot;Profile array must not be null&quot;);</span>
+<span class="fc" id="L370">		synchronized (this.defaultProfiles) {</span>
+<span class="fc" id="L371">			this.defaultProfiles.clear();</span>
+<span class="fc bfc" id="L372" title="All 2 branches covered.">			for (String profile : profiles) {</span>
+<span class="fc" id="L373">				validateProfile(profile);</span>
+<span class="fc" id="L374">				this.defaultProfiles.add(profile);</span>
+			}
+<span class="fc" id="L376">		}</span>
+<span class="fc" id="L377">	}</span>
+
+	@Override
+	@Deprecated(since = &quot;5.1&quot;)
+	public boolean acceptsProfiles(String... profiles) {
+<span class="fc" id="L382">		Assert.notEmpty(profiles, &quot;Must specify at least one profile&quot;);</span>
+<span class="fc bfc" id="L383" title="All 2 branches covered.">		for (String profile : profiles) {</span>
+<span class="pc bpc" id="L384" title="1 of 4 branches missed.">			if (StringUtils.hasLength(profile) &amp;&amp; profile.charAt(0) == '!') {</span>
+<span class="fc bfc" id="L385" title="All 2 branches covered.">				if (!isProfileActive(profile.substring(1))) {</span>
+<span class="fc" id="L386">					return true;</span>
+				}
+			}
+<span class="fc bfc" id="L389" title="All 2 branches covered.">			else if (isProfileActive(profile)) {</span>
+<span class="fc" id="L390">				return true;</span>
+			}
+		}
+<span class="fc" id="L393">		return false;</span>
+	}
+
+	@Override
+	public boolean acceptsProfiles(Profiles profiles) {
+<span class="fc" id="L398">		Assert.notNull(profiles, &quot;Profiles must not be null&quot;);</span>
+<span class="fc" id="L399">		return profiles.matches(this::isProfileActive);</span>
+	}
+
+	/**
+	 * Return whether the given profile is active, or if active profiles are empty
+	 * whether the profile should be active by default.
+	 * @throws IllegalArgumentException per {@link #validateProfile(String)}
+	 */
+	protected boolean isProfileActive(String profile) {
+<span class="fc" id="L408">		validateProfile(profile);</span>
+<span class="fc" id="L409">		Set&lt;String&gt; currentActiveProfiles = doGetActiveProfiles();</span>
+<span class="fc bfc" id="L410" title="All 2 branches covered.">		return (currentActiveProfiles.contains(profile) ||</span>
+<span class="fc bfc" id="L411" title="All 4 branches covered.">				(currentActiveProfiles.isEmpty() &amp;&amp; doGetDefaultProfiles().contains(profile)));</span>
+	}
+
+	/**
+	 * Validate the given profile, called internally prior to adding to the set of
+	 * active or default profiles.
+	 * &lt;p&gt;Subclasses may override to impose further restrictions on profile syntax.
+	 * @throws IllegalArgumentException if the profile is null, empty, whitespace-only or
+	 * begins with the profile NOT operator (!)
+	 * @see #acceptsProfiles
+	 * @see #addActiveProfile
+	 * @see #setDefaultProfiles
+	 */
+	protected void validateProfile(String profile) {
+<span class="fc bfc" id="L425" title="All 2 branches covered.">		if (!StringUtils.hasText(profile)) {</span>
+<span class="fc" id="L426">			throw new IllegalArgumentException(&quot;Invalid profile [&quot; + profile + &quot;]: must contain text&quot;);</span>
+		}
+<span class="pc bpc" id="L428" title="1 of 2 branches missed.">		if (profile.charAt(0) == '!') {</span>
+<span class="nc" id="L429">			throw new IllegalArgumentException(&quot;Invalid profile [&quot; + profile + &quot;]: must not begin with ! operator&quot;);</span>
+		}
+<span class="fc" id="L431">	}</span>
+
+	@Override
+	public MutablePropertySources getPropertySources() {
+<span class="fc" id="L435">		return this.propertySources;</span>
+	}
+
+	@Override
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;})
+	public Map&lt;String, Object&gt; getSystemProperties() {
+<span class="fc" id="L441">		return (Map) System.getProperties();</span>
+	}
+
+	@Override
+	@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;})
+	public Map&lt;String, Object&gt; getSystemEnvironment() {
+<span class="pc bpc" id="L447" title="1 of 2 branches missed.">		if (suppressGetenvAccess()) {</span>
+<span class="nc" id="L448">			return Collections.emptyMap();</span>
+		}
+<span class="fc" id="L450">		return (Map) System.getenv();</span>
+	}
+
+	/**
+	 * Determine whether to suppress {@link System#getenv()}/{@link System#getenv(String)}
+	 * access for the purposes of {@link #getSystemEnvironment()}.
+	 * &lt;p&gt;If this method returns {@code true}, an empty dummy Map will be used instead
+	 * of the regular system environment Map, never even trying to call {@code getenv}
+	 * and therefore avoiding security manager warnings (if any).
+	 * &lt;p&gt;The default implementation checks for the &quot;spring.getenv.ignore&quot; system property,
+	 * returning {@code true} if its value equals &quot;true&quot; in any case.
+	 * @see #IGNORE_GETENV_PROPERTY_NAME
+	 * @see SpringProperties#getFlag
+	 */
+	protected boolean suppressGetenvAccess() {
+<span class="fc" id="L465">		return SpringProperties.getFlag(IGNORE_GETENV_PROPERTY_NAME);</span>
+	}
+
+	@Override
+	public void merge(ConfigurableEnvironment parent) {
+<span class="fc bfc" id="L470" title="All 2 branches covered.">		for (PropertySource&lt;?&gt; ps : parent.getPropertySources()) {</span>
+<span class="fc bfc" id="L471" title="All 2 branches covered.">			if (!this.propertySources.contains(ps.getName())) {</span>
+<span class="fc" id="L472">				this.propertySources.addLast(ps);</span>
+			}
+<span class="fc" id="L474">		}</span>
+<span class="fc" id="L475">		String[] parentActiveProfiles = parent.getActiveProfiles();</span>
+<span class="fc bfc" id="L476" title="All 2 branches covered.">		if (!ObjectUtils.isEmpty(parentActiveProfiles)) {</span>
+<span class="fc" id="L477">			synchronized (this.activeProfiles) {</span>
+<span class="fc" id="L478">				Collections.addAll(this.activeProfiles, parentActiveProfiles);</span>
+<span class="fc" id="L479">			}</span>
+		}
+<span class="fc" id="L481">		String[] parentDefaultProfiles = parent.getDefaultProfiles();</span>
+<span class="pc bpc" id="L482" title="1 of 2 branches missed.">		if (!ObjectUtils.isEmpty(parentDefaultProfiles)) {</span>
+<span class="fc" id="L483">			synchronized (this.defaultProfiles) {</span>
+<span class="fc" id="L484">				this.defaultProfiles.remove(RESERVED_DEFAULT_PROFILE_NAME);</span>
+<span class="fc" id="L485">				Collections.addAll(this.defaultProfiles, parentDefaultProfiles);</span>
+<span class="fc" id="L486">			}</span>
+		}
+<span class="fc" id="L488">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Implementation of ConfigurablePropertyResolver interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public ConfigurableConversionService getConversionService() {
+<span class="fc" id="L497">		return this.propertyResolver.getConversionService();</span>
+	}
+
+	@Override
+	public void setConversionService(ConfigurableConversionService conversionService) {
+<span class="fc" id="L502">		this.propertyResolver.setConversionService(conversionService);</span>
+<span class="fc" id="L503">	}</span>
+
+	@Override
+	public void setPlaceholderPrefix(String placeholderPrefix) {
+<span class="nc" id="L507">		this.propertyResolver.setPlaceholderPrefix(placeholderPrefix);</span>
+<span class="nc" id="L508">	}</span>
+
+	@Override
+	public void setPlaceholderSuffix(String placeholderSuffix) {
+<span class="nc" id="L512">		this.propertyResolver.setPlaceholderSuffix(placeholderSuffix);</span>
+<span class="nc" id="L513">	}</span>
+
+	@Override
+	public void setValueSeparator(@Nullable String valueSeparator) {
+<span class="nc" id="L517">		this.propertyResolver.setValueSeparator(valueSeparator);</span>
+<span class="nc" id="L518">	}</span>
+
+	@Override
+	public void setEscapeCharacter(@Nullable Character escapeCharacter) {
+<span class="nc" id="L522">		this.propertyResolver.setEscapeCharacter(escapeCharacter);</span>
+<span class="nc" id="L523">	}</span>
+
+	@Override
+	public void setIgnoreUnresolvableNestedPlaceholders(boolean ignoreUnresolvableNestedPlaceholders) {
+<span class="nc" id="L527">		this.propertyResolver.setIgnoreUnresolvableNestedPlaceholders(ignoreUnresolvableNestedPlaceholders);</span>
+<span class="nc" id="L528">	}</span>
+
+	@Override
+	public void setRequiredProperties(String... requiredProperties) {
+<span class="fc" id="L532">		this.propertyResolver.setRequiredProperties(requiredProperties);</span>
+<span class="fc" id="L533">	}</span>
+
+	@Override
+	public void validateRequiredProperties() throws MissingRequiredPropertiesException {
+<span class="fc" id="L537">		this.propertyResolver.validateRequiredProperties();</span>
+<span class="fc" id="L538">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Implementation of PropertyResolver interface
+	//---------------------------------------------------------------------
+
+	@Override
+	public boolean containsProperty(String key) {
+<span class="fc" id="L547">		return this.propertyResolver.containsProperty(key);</span>
+	}
+
+	@Override
+	public @Nullable String getProperty(String key) {
+<span class="fc" id="L552">		return this.propertyResolver.getProperty(key);</span>
+	}
+
+	@Override
+	public String getProperty(String key, String defaultValue) {
+<span class="nc" id="L557">		return this.propertyResolver.getProperty(key, defaultValue);</span>
+	}
+
+	@Override
+	public &lt;T&gt; @Nullable T getProperty(String key, Class&lt;T&gt; targetType) {
+<span class="fc" id="L562">		return this.propertyResolver.getProperty(key, targetType);</span>
+	}
+
+	@Override
+	public &lt;T&gt; T getProperty(String key, Class&lt;T&gt; targetType, T defaultValue) {
+<span class="nc" id="L567">		return this.propertyResolver.getProperty(key, targetType, defaultValue);</span>
+	}
+
+	@Override
+	public String getRequiredProperty(String key) throws IllegalStateException {
+<span class="fc" id="L572">		return this.propertyResolver.getRequiredProperty(key);</span>
+	}
+
+	@Override
+	public &lt;T&gt; T getRequiredProperty(String key, Class&lt;T&gt; targetType) throws IllegalStateException {
+<span class="nc" id="L577">		return this.propertyResolver.getRequiredProperty(key, targetType);</span>
+	}
+
+	@Override
+	public String resolvePlaceholders(String text) {
+<span class="fc" id="L582">		return this.propertyResolver.resolvePlaceholders(text);</span>
+	}
+
+	@Override
+	public String resolveRequiredPlaceholders(String text) throws IllegalArgumentException {
+<span class="fc" id="L587">		return this.propertyResolver.resolveRequiredPlaceholders(text);</span>
+	}
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L593">		return getClass().getSimpleName() + &quot; {activeProfiles=&quot; + this.activeProfiles +</span>
+				&quot;, defaultProfiles=&quot; + this.defaultProfiles + &quot;, propertySources=&quot; + this.propertySources + &quot;}&quot;;
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,734 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TypeDescriptor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.convert</a> &gt; <span class="el_source">TypeDescriptor.java</span></div><h1>TypeDescriptor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.convert;
+
+import java.io.Serializable;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Field;
+import java.lang.reflect.Type;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.function.Supplier;
+import java.util.stream.Stream;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.annotation.AnnotatedElementAdapter;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.lang.Contract;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+
+/**
+ * Contextual descriptor about a type to convert from or to.
+ *
+ * &lt;p&gt;Capable of representing arrays and generic collection types.
+ *
+ * @author Keith Donald
+ * @author Andy Clement
+ * @author Juergen Hoeller
+ * @author Phillip Webb
+ * @author Sam Brannen
+ * @author Stephane Nicoll
+ * @since 3.0
+ * @see ConversionService#canConvert(TypeDescriptor, TypeDescriptor)
+ * @see ConversionService#convert(Object, TypeDescriptor, TypeDescriptor)
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class TypeDescriptor implements Serializable {
+
+<span class="fc" id="L58">	private static final Map&lt;Class&lt;?&gt;, TypeDescriptor&gt; commonTypesCache = new HashMap&lt;&gt;(32);</span>
+
+<span class="fc" id="L60">	private static final Class&lt;?&gt;[] CACHED_COMMON_TYPES = {</span>
+			boolean.class, Boolean.class, byte.class, Byte.class, char.class, Character.class,
+			double.class, Double.class, float.class, Float.class, int.class, Integer.class,
+			long.class, Long.class, short.class, Short.class, String.class, Object.class};
+
+	static {
+<span class="fc bfc" id="L66" title="All 2 branches covered.">		for (Class&lt;?&gt; preCachedClass : CACHED_COMMON_TYPES) {</span>
+<span class="fc" id="L67">			commonTypesCache.put(preCachedClass, valueOf(preCachedClass));</span>
+		}
+<span class="fc" id="L69">	}</span>
+
+
+	private final Class&lt;?&gt; type;
+
+	private final ResolvableType resolvableType;
+
+	private final AnnotatedElementSupplier annotatedElementSupplier;
+
+	private volatile @Nullable AnnotatedElementAdapter annotatedElement;
+
+
+	/**
+	 * Create a new type descriptor from a {@link MethodParameter}.
+	 * &lt;p&gt;Use this constructor when a source or target conversion point is a
+	 * constructor parameter, method parameter, or method return value.
+	 * @param methodParameter the method parameter
+	 */
+<span class="fc" id="L87">	public TypeDescriptor(MethodParameter methodParameter) {</span>
+<span class="fc" id="L88">		this.resolvableType = ResolvableType.forMethodParameter(methodParameter);</span>
+<span class="fc" id="L89">		this.type = this.resolvableType.resolve(methodParameter.getNestedParameterType());</span>
+<span class="fc bfc" id="L90" title="All 2 branches covered.">		this.annotatedElementSupplier = () -&gt; AnnotatedElementAdapter.from(methodParameter.getParameterIndex() == -1 ?</span>
+<span class="fc" id="L91">				methodParameter.getMethodAnnotations() : methodParameter.getParameterAnnotations());</span>
+<span class="fc" id="L92">	}</span>
+
+	/**
+	 * Create a new type descriptor from a {@link Field}.
+	 * &lt;p&gt;Use this constructor when a source or target conversion point is a field.
+	 * @param field the field
+	 */
+<span class="fc" id="L99">	public TypeDescriptor(Field field) {</span>
+<span class="fc" id="L100">		this.resolvableType = ResolvableType.forField(field);</span>
+<span class="fc" id="L101">		this.type = this.resolvableType.resolve(field.getType());</span>
+<span class="fc" id="L102">		this.annotatedElementSupplier = () -&gt; AnnotatedElementAdapter.from(field.getAnnotations());</span>
+<span class="fc" id="L103">	}</span>
+
+	/**
+	 * Create a new type descriptor from a {@link Property}.
+	 * &lt;p&gt;Use this constructor when a source or target conversion point is a
+	 * property on a Java class.
+	 * @param property the property
+	 */
+<span class="fc" id="L111">	public TypeDescriptor(Property property) {</span>
+<span class="fc" id="L112">		Assert.notNull(property, &quot;Property must not be null&quot;);</span>
+<span class="fc" id="L113">		this.resolvableType = ResolvableType.forMethodParameter(property.getMethodParameter());</span>
+<span class="fc" id="L114">		this.type = this.resolvableType.resolve(property.getType());</span>
+<span class="fc" id="L115">		this.annotatedElementSupplier = () -&gt; AnnotatedElementAdapter.from(property.getAnnotations());</span>
+<span class="fc" id="L116">	}</span>
+
+	/**
+	 * Create a new type descriptor from a {@link ResolvableType}.
+	 * &lt;p&gt;This constructor is used internally and may also be used by subclasses
+	 * that support non-Java languages with extended type systems. It is public
+	 * as of 5.1.4 whereas it was protected before.
+	 * @param resolvableType the resolvable type
+	 * @param type the backing type (or {@code null} if it should get resolved)
+	 * @param annotations the type annotations
+	 * @since 4.0
+	 */
+<span class="fc" id="L128">	public TypeDescriptor(ResolvableType resolvableType, @Nullable Class&lt;?&gt; type, Annotation @Nullable [] annotations) {</span>
+<span class="fc" id="L129">		this.resolvableType = resolvableType;</span>
+<span class="fc bfc" id="L130" title="All 2 branches covered.">		this.type = (type != null ? type : resolvableType.toClass());</span>
+<span class="fc" id="L131">		this.annotatedElementSupplier = () -&gt; AnnotatedElementAdapter.from(annotations);</span>
+<span class="fc" id="L132">	}</span>
+
+
+	/**
+	 * Variation of {@link #getType()} that accounts for a primitive type by
+	 * returning its object wrapper type.
+	 * &lt;p&gt;This is useful for conversion service implementations that wish to
+	 * normalize to object-based types and not work with primitive types directly.
+	 */
+	public Class&lt;?&gt; getObjectType() {
+<span class="fc" id="L142">		return ClassUtils.resolvePrimitiveIfNecessary(getType());</span>
+	}
+
+	/**
+	 * The type of the backing class, method parameter, field, or property
+	 * described by this TypeDescriptor.
+	 * &lt;p&gt;Returns primitive types as-is. See {@link #getObjectType()} for a
+	 * variation of this operation that resolves primitive types to their
+	 * corresponding Object types if necessary.
+	 * @see #getObjectType()
+	 */
+	public Class&lt;?&gt; getType() {
+<span class="fc" id="L154">		return this.type;</span>
+	}
+
+	/**
+	 * Return the underlying {@link ResolvableType}.
+	 * @since 4.0
+	 */
+	public ResolvableType getResolvableType() {
+<span class="fc" id="L162">		return this.resolvableType;</span>
+	}
+
+	/**
+	 * Return the underlying source of the descriptor. Will return a {@link Field},
+	 * {@link MethodParameter} or {@link Type} depending on how the {@link TypeDescriptor}
+	 * was constructed. This method is primarily to provide access to additional
+	 * type information or meta-data that alternative JVM languages may provide.
+	 * @since 4.0
+	 */
+	public Object getSource() {
+<span class="nc" id="L173">		return this.resolvableType.getSource();</span>
+	}
+
+
+	/**
+	 * Create a type descriptor for a nested type declared within this descriptor.
+	 * @param nestingLevel the nesting level of the collection/array element or
+	 * map key/value declaration within the property
+	 * @return the nested type descriptor at the specified nesting level, or
+	 * {@code null} if it could not be obtained
+	 * @since 6.1
+	 */
+	public @Nullable TypeDescriptor nested(int nestingLevel) {
+<span class="fc" id="L186">		ResolvableType nested = this.resolvableType;</span>
+<span class="fc bfc" id="L187" title="All 2 branches covered.">		for (int i = 0; i &lt; nestingLevel; i++) {</span>
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">			if (Object.class == nested.getType()) {</span>
+				// Could be a collection type but we don't know about its element type,
+				// so let's just assume there is an element type of type Object...
+			}
+			else {
+<span class="fc" id="L193">				nested = nested.getNested(2);</span>
+			}
+		}
+<span class="pc bpc" id="L196" title="1 of 2 branches missed.">		if (nested == ResolvableType.NONE) {</span>
+<span class="nc" id="L197">			return null;</span>
+		}
+<span class="fc" id="L199">		return getRelatedIfResolvable(nested);</span>
+	}
+
+	/**
+	 * Narrows this {@link TypeDescriptor} by setting its type to the class of the
+	 * provided value.
+	 * &lt;p&gt;If the value is {@code null}, no narrowing is performed and this TypeDescriptor
+	 * is returned unchanged.
+	 * &lt;p&gt;Designed to be called by binding frameworks when they read property, field,
+	 * or method return values. Allows such frameworks to narrow a TypeDescriptor built
+	 * from a declared property, field, or method return value type. For example, a field
+	 * declared as {@code java.lang.Object} would be narrowed to {@code java.util.HashMap}
+	 * if it was set to a {@code java.util.HashMap} value. The narrowed TypeDescriptor
+	 * can then be used to convert the HashMap to some other type. Annotation and nested
+	 * type context is preserved by the narrowed copy.
+	 * @param value the value to use for narrowing this type descriptor
+	 * @return this TypeDescriptor narrowed (returns a copy with its type updated to the
+	 * class of the provided value)
+	 */
+	public TypeDescriptor narrow(@Nullable Object value) {
+<span class="fc bfc" id="L219" title="All 2 branches covered.">		if (value == null) {</span>
+<span class="fc" id="L220">			return this;</span>
+		}
+<span class="fc" id="L222">		ResolvableType narrowed = ResolvableType.forType(value.getClass(), getResolvableType());</span>
+<span class="fc" id="L223">		return new TypeDescriptor(narrowed, value.getClass(), getAnnotations());</span>
+	}
+
+	/**
+	 * Cast this {@link TypeDescriptor} to a superclass or implemented interface
+	 * preserving annotations and nested type context.
+	 * @param superType the supertype to cast to (can be {@code null})
+	 * @return a new TypeDescriptor for the up-cast type
+	 * @throws IllegalArgumentException if this type is not assignable to the super-type
+	 * @since 3.2
+	 */
+	public @Nullable TypeDescriptor upcast(@Nullable Class&lt;?&gt; superType) {
+<span class="nc bnc" id="L235" title="All 2 branches missed.">		if (superType == null) {</span>
+<span class="nc" id="L236">			return null;</span>
+		}
+<span class="nc" id="L238">		Assert.isAssignable(superType, getType());</span>
+<span class="nc" id="L239">		return new TypeDescriptor(getResolvableType().as(superType), superType, getAnnotations());</span>
+	}
+
+	/**
+	 * Return the name of this type: the fully qualified class name.
+	 */
+	public String getName() {
+<span class="nc" id="L246">		return ClassUtils.getQualifiedName(getType());</span>
+	}
+
+	/**
+	 * Is this type a primitive type?
+	 */
+	public boolean isPrimitive() {
+<span class="fc" id="L253">		return getType().isPrimitive();</span>
+	}
+
+	private AnnotatedElementAdapter getAnnotatedElement() {
+<span class="fc" id="L257">		AnnotatedElementAdapter annotatedElement = this.annotatedElement;</span>
+<span class="fc bfc" id="L258" title="All 2 branches covered.">		if (annotatedElement == null) {</span>
+<span class="fc" id="L259">			annotatedElement = this.annotatedElementSupplier.get();</span>
+<span class="fc" id="L260">			this.annotatedElement = annotatedElement;</span>
+		}
+<span class="fc" id="L262">		return annotatedElement;</span>
+	}
+
+	/**
+	 * Return the annotations associated with this type descriptor, if any.
+	 * @return the annotations, or an empty array if none
+	 */
+	public Annotation[] getAnnotations() {
+<span class="fc" id="L270">		return getAnnotatedElement().getAnnotations();</span>
+	}
+
+	/**
+	 * Determine if this type descriptor has the specified annotation.
+	 * &lt;p&gt;As of Spring Framework 4.2, this method supports arbitrary levels
+	 * of meta-annotations.
+	 * @param annotationType the annotation type
+	 * @return {@code true} if the annotation is present
+	 */
+	public boolean hasAnnotation(Class&lt;? extends Annotation&gt; annotationType) {
+<span class="fc" id="L281">		AnnotatedElementAdapter annotatedElement = getAnnotatedElement();</span>
+<span class="fc bfc" id="L282" title="All 2 branches covered.">		if (annotatedElement.isEmpty()) {</span>
+			// Shortcut: AnnotatedElementUtils would have to expect AnnotatedElement.getAnnotations()
+			// to return a copy of the array, whereas we can do it more efficiently here.
+<span class="fc" id="L285">			return false;</span>
+		}
+<span class="fc" id="L287">		return AnnotatedElementUtils.isAnnotated(annotatedElement, annotationType);</span>
+	}
+
+	/**
+	 * Obtain the annotation of the specified {@code annotationType} that is on this type descriptor.
+	 * &lt;p&gt;As of Spring Framework 4.2, this method supports arbitrary levels of meta-annotations.
+	 * @param annotationType the annotation type
+	 * @return the annotation, or {@code null} if no such annotation exists on this type descriptor
+	 */
+	public &lt;T extends Annotation&gt; @Nullable T getAnnotation(Class&lt;T&gt; annotationType) {
+<span class="fc" id="L297">		AnnotatedElementAdapter annotatedElement = getAnnotatedElement();</span>
+<span class="pc bpc" id="L298" title="1 of 2 branches missed.">		if (annotatedElement.isEmpty()) {</span>
+			// Shortcut: AnnotatedElementUtils would have to expect AnnotatedElement.getAnnotations()
+			// to return a copy of the array, whereas we can do it more efficiently here.
+<span class="nc" id="L301">			return null;</span>
+		}
+<span class="fc" id="L303">		return AnnotatedElementUtils.getMergedAnnotation(annotatedElement, annotationType);</span>
+	}
+
+	/**
+	 * Returns true if an object of this type descriptor can be assigned to the location
+	 * described by the given type descriptor.
+	 * &lt;p&gt;For example, {@code valueOf(String.class).isAssignableTo(valueOf(CharSequence.class))}
+	 * returns {@code true} because a String value can be assigned to a CharSequence variable.
+	 * On the other hand, {@code valueOf(Number.class).isAssignableTo(valueOf(Integer.class))}
+	 * returns {@code false} because, while all Integers are Numbers, not all Numbers are Integers.
+	 * &lt;p&gt;For arrays, collections, and maps, element and key/value types are checked if declared.
+	 * For example, a {@code List&lt;String&gt;} field value is assignable to a {@code Collection&lt;CharSequence&gt;}
+	 * field, but {@code List&lt;Number&gt;} is not assignable to {@code List&lt;Integer&gt;}.
+	 * @return {@code true} if this type is assignable to the type represented by the provided
+	 * type descriptor
+	 * @see #getObjectType()
+	 */
+	public boolean isAssignableTo(TypeDescriptor typeDescriptor) {
+<span class="fc" id="L321">		boolean typesAssignable = typeDescriptor.getObjectType().isAssignableFrom(getObjectType());</span>
+<span class="fc bfc" id="L322" title="All 2 branches covered.">		if (!typesAssignable) {</span>
+<span class="fc" id="L323">			return false;</span>
+		}
+<span class="fc bfc" id="L325" title="All 4 branches covered.">		if (isArray() &amp;&amp; typeDescriptor.isArray()) {</span>
+<span class="fc" id="L326">			return isNestedAssignable(getElementTypeDescriptor(), typeDescriptor.getElementTypeDescriptor());</span>
+		}
+<span class="fc bfc" id="L328" title="All 4 branches covered.">		else if (isCollection() &amp;&amp; typeDescriptor.isCollection()) {</span>
+<span class="fc" id="L329">			return isNestedAssignable(getElementTypeDescriptor(), typeDescriptor.getElementTypeDescriptor());</span>
+		}
+<span class="fc bfc" id="L331" title="All 4 branches covered.">		else if (isMap() &amp;&amp; typeDescriptor.isMap()) {</span>
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">			return isNestedAssignable(getMapKeyTypeDescriptor(), typeDescriptor.getMapKeyTypeDescriptor()) &amp;&amp;</span>
+<span class="pc bpc" id="L333" title="1 of 2 branches missed.">				isNestedAssignable(getMapValueTypeDescriptor(), typeDescriptor.getMapValueTypeDescriptor());</span>
+		}
+		else {
+<span class="fc" id="L336">			return true;</span>
+		}
+	}
+
+	private boolean isNestedAssignable(@Nullable TypeDescriptor nestedTypeDescriptor,
+			@Nullable TypeDescriptor otherNestedTypeDescriptor) {
+
+<span class="pc bpc" id="L343" title="1 of 4 branches missed.">		return (nestedTypeDescriptor == null || otherNestedTypeDescriptor == null ||</span>
+<span class="pc bpc" id="L344" title="1 of 2 branches missed.">				nestedTypeDescriptor.isAssignableTo(otherNestedTypeDescriptor));</span>
+	}
+
+	/**
+	 * Is this type a {@link Collection} type?
+	 */
+	public boolean isCollection() {
+<span class="fc" id="L351">		return Collection.class.isAssignableFrom(getType());</span>
+	}
+
+	/**
+	 * Is this type an array type?
+	 */
+	public boolean isArray() {
+<span class="fc" id="L358">		return getType().isArray();</span>
+	}
+
+	/**
+	 * If this type is an array, returns the array's component type.
+	 * If this type is a {@code Stream}, returns the stream's component type.
+	 * If this type is a {@link Collection} and it is parameterized, returns the Collection's element type.
+	 * If the Collection is not parameterized, returns {@code null} indicating the element type is not declared.
+	 * @return the array component type or Collection element type, or {@code null} if this type is not
+	 * an array type or a {@code java.util.Collection} or if its element type is not parameterized
+	 * @see #elementTypeDescriptor(Object)
+	 */
+	public @Nullable TypeDescriptor getElementTypeDescriptor() {
+<span class="fc bfc" id="L371" title="All 2 branches covered.">		if (getResolvableType().isArray()) {</span>
+<span class="fc" id="L372">			return new TypeDescriptor(getResolvableType().getComponentType(), null, getAnnotations());</span>
+		}
+<span class="pc bpc" id="L374" title="1 of 2 branches missed.">		if (Stream.class.isAssignableFrom(getType())) {</span>
+<span class="nc" id="L375">			return getRelatedIfResolvable(getResolvableType().as(Stream.class).getGeneric(0));</span>
+		}
+<span class="fc" id="L377">		return getRelatedIfResolvable(getResolvableType().asCollection().getGeneric(0));</span>
+	}
+
+	/**
+	 * If this type is a {@link Collection} or an array, creates an element TypeDescriptor
+	 * from the provided collection or array element.
+	 * &lt;p&gt;Narrows the {@link #getElementTypeDescriptor() elementType} property to the class
+	 * of the provided collection or array element. For example, if this describes a
+	 * {@code java.util.List&lt;java.lang.Number&gt;} and the element argument is a
+	 * {@code java.lang.Integer}, the returned TypeDescriptor will be {@code java.lang.Integer}.
+	 * If this describes a {@code java.util.List&lt;?&gt;} and the element argument is a
+	 * {@code java.lang.Integer}, the returned TypeDescriptor will be {@code java.lang.Integer}
+	 * as well.
+	 * &lt;p&gt;Annotation and nested type context will be preserved in the narrowed
+	 * TypeDescriptor that is returned.
+	 * @param element the collection or array element
+	 * @return an element type descriptor, narrowed to the type of the provided element
+	 * @see #getElementTypeDescriptor()
+	 * @see #narrow(Object)
+	 */
+	public @Nullable TypeDescriptor elementTypeDescriptor(Object element) {
+<span class="fc" id="L398">		return narrow(element, getElementTypeDescriptor());</span>
+	}
+
+	/**
+	 * Is this type a {@link Map} type?
+	 */
+	public boolean isMap() {
+<span class="fc" id="L405">		return Map.class.isAssignableFrom(getType());</span>
+	}
+
+	/**
+	 * If this type is a {@link Map} and its key type is parameterized,
+	 * returns the map's key type. If the Map's key type is not parameterized,
+	 * returns {@code null} indicating the key type is not declared.
+	 * @return the Map key type, or {@code null} if this type is a Map
+	 * but its key type is not parameterized
+	 * @throws IllegalStateException if this type is not a {@code java.util.Map}
+	 */
+	public @Nullable TypeDescriptor getMapKeyTypeDescriptor() {
+<span class="fc" id="L417">		Assert.state(isMap(), &quot;Not a [java.util.Map]&quot;);</span>
+<span class="fc" id="L418">		return getRelatedIfResolvable(getResolvableType().asMap().getGeneric(0));</span>
+	}
+
+	/**
+	 * If this type is a {@link Map}, creates a mapKey {@link TypeDescriptor}
+	 * from the provided map key.
+	 * &lt;p&gt;Narrows the {@link #getMapKeyTypeDescriptor() mapKeyType} property
+	 * to the class of the provided map key. For example, if this describes a
+	 * {@code java.util.Map&lt;java.lang.Number, java.lang.String&gt;} and the key
+	 * argument is a {@code java.lang.Integer}, the returned TypeDescriptor will be
+	 * {@code java.lang.Integer}. If this describes a {@code java.util.Map&lt;?, ?&gt;}
+	 * and the key argument is a {@code java.lang.Integer}, the returned
+	 * TypeDescriptor will be {@code java.lang.Integer} as well.
+	 * &lt;p&gt;Annotation and nested type context will be preserved in the narrowed
+	 * TypeDescriptor that is returned.
+	 * @param mapKey the map key
+	 * @return the map key type descriptor
+	 * @throws IllegalStateException if this type is not a {@code java.util.Map}
+	 * @see #narrow(Object)
+	 */
+	public @Nullable TypeDescriptor getMapKeyTypeDescriptor(Object mapKey) {
+<span class="fc" id="L439">		return narrow(mapKey, getMapKeyTypeDescriptor());</span>
+	}
+
+	/**
+	 * If this type is a {@link Map} and its value type is parameterized,
+	 * returns the map's value type.
+	 * &lt;p&gt;If the Map's value type is not parameterized, returns {@code null}
+	 * indicating the value type is not declared.
+	 * @return the Map value type, or {@code null} if this type is a Map
+	 * but its value type is not parameterized
+	 * @throws IllegalStateException if this type is not a {@code java.util.Map}
+	 */
+	public @Nullable TypeDescriptor getMapValueTypeDescriptor() {
+<span class="fc" id="L452">		Assert.state(isMap(), &quot;Not a [java.util.Map]&quot;);</span>
+<span class="fc" id="L453">		return getRelatedIfResolvable(getResolvableType().asMap().getGeneric(1));</span>
+	}
+
+	/**
+	 * If this type is a {@link Map}, creates a mapValue {@link TypeDescriptor}
+	 * from the provided map value.
+	 * &lt;p&gt;Narrows the {@link #getMapValueTypeDescriptor() mapValueType} property
+	 * to the class of the provided map value. For example, if this describes a
+	 * {@code java.util.Map&lt;java.lang.String, java.lang.Number&gt;} and the value
+	 * argument is a {@code java.lang.Integer}, the returned TypeDescriptor will be
+	 * {@code java.lang.Integer}. If this describes a {@code java.util.Map&lt;?, ?&gt;}
+	 * and the value argument is a {@code java.lang.Integer}, the returned
+	 * TypeDescriptor will be {@code java.lang.Integer} as well.
+	 * &lt;p&gt;Annotation and nested type context will be preserved in the narrowed
+	 * TypeDescriptor that is returned.
+	 * @param mapValue the map value
+	 * @return the map value type descriptor
+	 * @throws IllegalStateException if this type is not a {@code java.util.Map}
+	 * @see #narrow(Object)
+	 */
+	public @Nullable TypeDescriptor getMapValueTypeDescriptor(@Nullable Object mapValue) {
+<span class="fc" id="L474">		return narrow(mapValue, getMapValueTypeDescriptor());</span>
+	}
+
+	private @Nullable TypeDescriptor getRelatedIfResolvable(ResolvableType type) {
+<span class="fc bfc" id="L478" title="All 2 branches covered.">		if (type.resolve() == null) {</span>
+<span class="fc" id="L479">			return null;</span>
+		}
+<span class="fc" id="L481">		return new TypeDescriptor(type, null, getAnnotations());</span>
+	}
+
+	private @Nullable TypeDescriptor narrow(@Nullable Object value, @Nullable TypeDescriptor typeDescriptor) {
+<span class="fc bfc" id="L485" title="All 2 branches covered.">		if (typeDescriptor != null) {</span>
+<span class="fc" id="L486">			return typeDescriptor.narrow(value);</span>
+		}
+<span class="fc bfc" id="L488" title="All 2 branches covered.">		if (value != null) {</span>
+<span class="fc" id="L489">			return narrow(value);</span>
+		}
+<span class="fc" id="L491">		return null;</span>
+	}
+
+	@Override
+	public boolean equals(@Nullable Object other) {
+<span class="fc bfc" id="L496" title="All 2 branches covered.">		if (this == other) {</span>
+<span class="fc" id="L497">			return true;</span>
+		}
+<span class="fc bfc" id="L499" title="All 2 branches covered.">		if (!(other instanceof TypeDescriptor otherDesc)) {</span>
+<span class="fc" id="L500">			return false;</span>
+		}
+<span class="fc bfc" id="L502" title="All 2 branches covered.">		if (getType() != otherDesc.getType()) {</span>
+<span class="fc" id="L503">			return false;</span>
+		}
+<span class="fc bfc" id="L505" title="All 2 branches covered.">		if (!annotationsMatch(otherDesc)) {</span>
+<span class="fc" id="L506">			return false;</span>
+		}
+<span class="fc" id="L508">		return Arrays.equals(getResolvableType().getGenerics(), otherDesc.getResolvableType().getGenerics());</span>
+	}
+
+	private boolean annotationsMatch(TypeDescriptor otherDesc) {
+<span class="fc" id="L512">		Annotation[] anns = getAnnotations();</span>
+<span class="fc" id="L513">		Annotation[] otherAnns = otherDesc.getAnnotations();</span>
+<span class="fc bfc" id="L514" title="All 2 branches covered.">		if (anns == otherAnns) {</span>
+<span class="fc" id="L515">			return true;</span>
+		}
+<span class="fc bfc" id="L517" title="All 2 branches covered.">		if (anns.length != otherAnns.length) {</span>
+<span class="fc" id="L518">			return false;</span>
+		}
+<span class="pc bpc" id="L520" title="1 of 2 branches missed.">		if (anns.length &gt; 0) {</span>
+<span class="fc bfc" id="L521" title="All 2 branches covered.">			for (int i = 0; i &lt; anns.length; i++) {</span>
+<span class="fc bfc" id="L522" title="All 2 branches covered.">				if (!annotationEquals(anns[i], otherAnns[i])) {</span>
+<span class="fc" id="L523">					return false;</span>
+				}
+			}
+		}
+<span class="fc" id="L527">		return true;</span>
+	}
+
+	private boolean annotationEquals(Annotation ann, Annotation otherAnn) {
+		// Annotation.equals is reflective and pretty slow, so let's check identity and proxy type first.
+<span class="fc bfc" id="L532" title="All 6 branches covered.">		return (ann == otherAnn || (ann.getClass() == otherAnn.getClass() &amp;&amp; ann.equals(otherAnn)));</span>
+	}
+
+	@Override
+	public int hashCode() {
+<span class="fc" id="L537">		return getType().hashCode();</span>
+	}
+
+	@Override
+	public String toString() {
+<span class="fc" id="L542">		StringBuilder builder = new StringBuilder();</span>
+<span class="fc bfc" id="L543" title="All 2 branches covered.">		for (Annotation ann : getAnnotations()) {</span>
+<span class="fc" id="L544">			builder.append('@').append(ClassUtils.getCanonicalName(ann.annotationType())).append(' ');</span>
+		}
+<span class="fc" id="L546">		builder.append(getResolvableType());</span>
+<span class="fc" id="L547">		return builder.toString();</span>
+	}
+
+
+	/**
+	 * Create a new type descriptor for an object.
+	 * &lt;p&gt;Use this factory method to introspect a source object before asking the
+	 * conversion system to convert it to some other type.
+	 * &lt;p&gt;If the provided object is {@code null}, returns {@code null}, else calls
+	 * {@link #valueOf(Class)} to build a TypeDescriptor from the object's class.
+	 * @param source the source object
+	 * @return the type descriptor
+	 */
+	@Contract(&quot;!null -&gt; !null; null -&gt; null&quot;)
+	public static @Nullable TypeDescriptor forObject(@Nullable Object source) {
+<span class="fc bfc" id="L562" title="All 2 branches covered.">		return (source != null ? valueOf(source.getClass()) : null);</span>
+	}
+
+	/**
+	 * Create a new type descriptor from the given type.
+	 * &lt;p&gt;Use this to instruct the conversion system to convert an object to a
+	 * specific target type, when no type location such as a method parameter or
+	 * field is available to provide additional conversion context.
+	 * &lt;p&gt;Generally prefer use of {@link #forObject(Object)} for constructing type
+	 * descriptors from source objects, as it handles the {@code null} object case.
+	 * @param type the class (may be {@code null} to indicate {@code Object.class})
+	 * @return the corresponding type descriptor
+	 */
+	public static TypeDescriptor valueOf(@Nullable Class&lt;?&gt; type) {
+<span class="fc bfc" id="L576" title="All 2 branches covered.">		if (type == null) {</span>
+<span class="fc" id="L577">			type = Object.class;</span>
+		}
+<span class="fc" id="L579">		TypeDescriptor desc = commonTypesCache.get(type);</span>
+<span class="fc bfc" id="L580" title="All 2 branches covered.">		return (desc != null ? desc : new TypeDescriptor(ResolvableType.forClass(type), null, null));</span>
+	}
+
+	/**
+	 * Create a new type descriptor from a {@link java.util.Collection} type.
+	 * &lt;p&gt;Useful for converting to typed Collections.
+	 * &lt;p&gt;For example, a {@code List&lt;String&gt;} could be converted to a
+	 * {@code List&lt;EmailAddress&gt;} by converting to a targetType built with this method.
+	 * The method call to construct such a {@code TypeDescriptor} would look something
+	 * like: {@code collection(List.class, TypeDescriptor.valueOf(EmailAddress.class));}
+	 * @param collectionType the collection type, which must implement {@link Collection}.
+	 * @param elementTypeDescriptor a descriptor for the collection's element type,
+	 * used to convert collection elements
+	 * @return the collection type descriptor
+	 */
+	public static TypeDescriptor collection(Class&lt;?&gt; collectionType, @Nullable TypeDescriptor elementTypeDescriptor) {
+<span class="nc" id="L596">		Assert.notNull(collectionType, &quot;Collection type must not be null&quot;);</span>
+<span class="nc bnc" id="L597" title="All 2 branches missed.">		if (!Collection.class.isAssignableFrom(collectionType)) {</span>
+<span class="nc" id="L598">			throw new IllegalArgumentException(&quot;Collection type must be a [java.util.Collection]&quot;);</span>
+		}
+<span class="nc bnc" id="L600" title="All 2 branches missed.">		ResolvableType element = (elementTypeDescriptor != null ? elementTypeDescriptor.resolvableType : null);</span>
+<span class="nc" id="L601">		return new TypeDescriptor(ResolvableType.forClassWithGenerics(collectionType, element), null, null);</span>
+	}
+
+	/**
+	 * Create a new type descriptor from a {@link java.util.Map} type.
+	 * &lt;p&gt;Useful for converting to typed Maps.
+	 * &lt;p&gt;For example, a {@code Map&lt;String, String&gt;} could be converted to a {@code Map&lt;Id, EmailAddress&gt;}
+	 * by converting to a targetType built with this method:
+	 * The method call to construct such a TypeDescriptor would look something like:
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * map(Map.class, TypeDescriptor.valueOf(Id.class), TypeDescriptor.valueOf(EmailAddress.class));
+	 * &lt;/pre&gt;
+	 * @param mapType the map type, which must implement {@link Map}
+	 * @param keyTypeDescriptor a descriptor for the map's key type, used to convert map keys
+	 * @param valueTypeDescriptor the map's value type, used to convert map values
+	 * @return the map type descriptor
+	 */
+	public static TypeDescriptor map(Class&lt;?&gt; mapType, @Nullable TypeDescriptor keyTypeDescriptor,
+			@Nullable TypeDescriptor valueTypeDescriptor) {
+
+<span class="nc" id="L621">		Assert.notNull(mapType, &quot;Map type must not be null&quot;);</span>
+<span class="nc bnc" id="L622" title="All 2 branches missed.">		if (!Map.class.isAssignableFrom(mapType)) {</span>
+<span class="nc" id="L623">			throw new IllegalArgumentException(&quot;Map type must be a [java.util.Map]&quot;);</span>
+		}
+<span class="nc bnc" id="L625" title="All 2 branches missed.">		ResolvableType key = (keyTypeDescriptor != null ? keyTypeDescriptor.resolvableType : null);</span>
+<span class="nc bnc" id="L626" title="All 2 branches missed.">		ResolvableType value = (valueTypeDescriptor != null ? valueTypeDescriptor.resolvableType : null);</span>
+<span class="nc" id="L627">		return new TypeDescriptor(ResolvableType.forClassWithGenerics(mapType, key, value), null, null);</span>
+	}
+
+	/**
+	 * Create a new type descriptor as an array of the specified type.
+	 * &lt;p&gt;For example to create a {@code Map&lt;String,String&gt;[]} use:
+	 * &lt;pre class=&quot;code&quot;&gt;
+	 * TypeDescriptor.array(TypeDescriptor.map(Map.class, TypeDescriptor.valueOf(String.class), TypeDescriptor.valueOf(String.class)));
+	 * &lt;/pre&gt;
+	 * @param elementTypeDescriptor the {@link TypeDescriptor} of the array element or {@code null}
+	 * @return an array {@link TypeDescriptor} or {@code null} if {@code elementTypeDescriptor} is {@code null}
+	 * @since 3.2.1
+	 */
+	@Contract(&quot;!null -&gt; !null; null -&gt; null&quot;)
+	public static @Nullable TypeDescriptor array(@Nullable TypeDescriptor elementTypeDescriptor) {
+<span class="pc bpc" id="L642" title="1 of 2 branches missed.">		if (elementTypeDescriptor == null) {</span>
+<span class="nc" id="L643">			return null;</span>
+		}
+<span class="fc" id="L645">		return new TypeDescriptor(ResolvableType.forArrayComponent(elementTypeDescriptor.resolvableType),</span>
+<span class="fc" id="L646">				null, elementTypeDescriptor.getAnnotations());</span>
+	}
+
+	/**
+	 * Create a type descriptor for a nested type declared within the method parameter.
+	 * &lt;p&gt;For example, if the methodParameter is a {@code List&lt;String&gt;} and the
+	 * nesting level is 1, the nested type descriptor will be String.class.
+	 * &lt;p&gt;If the methodParameter is a {@code List&lt;List&lt;String&gt;&gt;} and the nesting
+	 * level is 2, the nested type descriptor will also be a String.class.
+	 * &lt;p&gt;If the methodParameter is a {@code Map&lt;Integer, String&gt;} and the nesting
+	 * level is 1, the nested type descriptor will be String, derived from the map value.
+	 * &lt;p&gt;If the methodParameter is a {@code List&lt;Map&lt;Integer, String&gt;&gt;} and the
+	 * nesting level is 2, the nested type descriptor will be String, derived from the map value.
+	 * &lt;p&gt;Returns {@code null} if a nested type cannot be obtained because it was not declared.
+	 * For example, if the method parameter is a {@code List&lt;?&gt;}, the nested type
+	 * descriptor returned will be {@code null}.
+	 * @param methodParameter the method parameter with a nestingLevel of 1
+	 * @param nestingLevel the nesting level of the collection/array element or
+	 * map key/value declaration within the method parameter
+	 * @return the nested type descriptor at the specified nesting level,
+	 * or {@code null} if it could not be obtained
+	 * @throws IllegalArgumentException if the nesting level of the input
+	 * {@link MethodParameter} argument is not 1, or if the types up to the
+	 * specified nesting level are not of collection, array, or map types
+	 */
+	public static @Nullable TypeDescriptor nested(MethodParameter methodParameter, int nestingLevel) {
+<span class="pc bpc" id="L672" title="1 of 2 branches missed.">		if (methodParameter.getNestingLevel() != 1) {</span>
+<span class="nc" id="L673">			throw new IllegalArgumentException(&quot;MethodParameter nesting level must be 1: &quot; +</span>
+					&quot;use the nestingLevel parameter to specify the desired nestingLevel for nested type traversal&quot;);
+		}
+<span class="fc" id="L676">		return new TypeDescriptor(methodParameter).nested(nestingLevel);</span>
+	}
+
+	/**
+	 * Create a type descriptor for a nested type declared within the field.
+	 * &lt;p&gt;For example, if the field is a {@code List&lt;String&gt;} and the nesting
+	 * level is 1, the nested type descriptor will be {@code String.class}.
+	 * &lt;p&gt;If the field is a {@code List&lt;List&lt;String&gt;&gt;} and the nesting level is
+	 * 2, the nested type descriptor will also be a {@code String.class}.
+	 * &lt;p&gt;If the field is a {@code Map&lt;Integer, String&gt;} and the nesting level
+	 * is 1, the nested type descriptor will be String, derived from the map value.
+	 * &lt;p&gt;If the field is a {@code List&lt;Map&lt;Integer, String&gt;&gt;} and the nesting
+	 * level is 2, the nested type descriptor will be String, derived from the map value.
+	 * &lt;p&gt;Returns {@code null} if a nested type cannot be obtained because it was not
+	 * declared. For example, if the field is a {@code List&lt;?&gt;}, the nested type
+	 * descriptor returned will be {@code null}.
+	 * @param field the field
+	 * @param nestingLevel the nesting level of the collection/array element or
+	 * map key/value declaration within the field
+	 * @return the nested type descriptor at the specified nesting level,
+	 * or {@code null} if it could not be obtained
+	 * @throws IllegalArgumentException if the types up to the specified nesting
+	 * level are not of collection, array, or map types
+	 */
+	public static @Nullable TypeDescriptor nested(Field field, int nestingLevel) {
+<span class="fc" id="L701">		return new TypeDescriptor(field).nested(nestingLevel);</span>
+	}
+
+	/**
+	 * Create a type descriptor for a nested type declared within the property.
+	 * &lt;p&gt;For example, if the property is a {@code List&lt;String&gt;} and the nesting
+	 * level is 1, the nested type descriptor will be {@code String.class}.
+	 * &lt;p&gt;If the property is a {@code List&lt;List&lt;String&gt;&gt;} and the nesting level
+	 * is 2, the nested type descriptor will also be a {@code String.class}.
+	 * &lt;p&gt;If the property is a {@code Map&lt;Integer, String&gt;} and the nesting level
+	 * is 1, the nested type descriptor will be String, derived from the map value.
+	 * &lt;p&gt;If the property is a {@code List&lt;Map&lt;Integer, String&gt;&gt;} and the nesting
+	 * level is 2, the nested type descriptor will be String, derived from the map value.
+	 * &lt;p&gt;Returns {@code null} if a nested type cannot be obtained because it was not
+	 * declared. For example, if the property is a {@code List&lt;?&gt;}, the nested type
+	 * descriptor returned will be {@code null}.
+	 * @param property the property
+	 * @param nestingLevel the nesting level of the collection/array element or
+	 * map key/value declaration within the property
+	 * @return the nested type descriptor at the specified nesting level, or
+	 * {@code null} if it could not be obtained
+	 * @throws IllegalArgumentException if the types up to the specified nesting
+	 * level are not of collection, array, or map types
+	 */
+	public static @Nullable TypeDescriptor nested(Property property, int nestingLevel) {
+<span class="nc" id="L726">		return new TypeDescriptor(property).nested(nestingLevel);</span>
+	}
+
+
+	private interface AnnotatedElementSupplier extends Supplier&lt;AnnotatedElementAdapter&gt;, Serializable {
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

@@ -1,0 +1,578 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ScriptUtils.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-r2dbc</a> &gt; <a href="index.source.html" class="el_package">org.springframework.r2dbc.connection.init</a> &gt; <span class="el_source">ScriptUtils.java</span></div><h1>ScriptUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.r2dbc.connection.init;
+
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.io.LineNumberReader;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.stream.Collectors;
+
+import io.r2dbc.spi.Connection;
+import io.r2dbc.spi.Result;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.io.Resource;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.core.io.support.EncodedResource;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+
+/**
+ * Generic utility methods for working with SQL scripts in conjunction with R2DBC.
+ *
+ * &lt;p&gt;Mainly for internal use within the framework.
+ *
+ * @author Thomas Risberg
+ * @author Sam Brannen
+ * @author Juergen Hoeller
+ * @author Keith Donald
+ * @author Dave Syer
+ * @author Chris Beams
+ * @author Oliver Gierke
+ * @author Chris Baldwin
+ * @author Nicolas Debeissat
+ * @author Phillip Webb
+ * @author Mark Paluch
+ * @since 5.3
+ * @see org.springframework.jdbc.datasource.init.ScriptUtils
+ */
+<span class="nc" id="L64">public abstract class ScriptUtils {</span>
+
+	/**
+	 * Default statement separator within SQL scripts: {@code &quot;;&quot;}.
+	 */
+	public static final String DEFAULT_STATEMENT_SEPARATOR = &quot;;&quot;;
+
+	/**
+	 * Fallback statement separator within SQL scripts: {@code &quot;\n&quot;}.
+	 * &lt;p&gt;Used if neither a custom separator nor the
+	 * {@link #DEFAULT_STATEMENT_SEPARATOR} is present in a given script.
+	 */
+	public static final String FALLBACK_STATEMENT_SEPARATOR = &quot;\n&quot;;
+
+	/**
+	 * End of file (EOF) SQL statement separator: {@code &quot;^^^ END OF SCRIPT ^^^&quot;}.
+	 * &lt;p&gt;This value may be supplied as the {@code separator} to {@link
+	 * #executeSqlScript(Connection, EncodedResource, DataBufferFactory, boolean, boolean, String[], String, String, String)}
+	 * to denote that an SQL script contains a single statement (potentially
+	 * spanning multiple lines) with no explicit statement separator. Note that
+	 * such a script should not actually contain this value; it is merely a
+	 * &lt;em&gt;virtual&lt;/em&gt; statement separator.
+	 */
+	public static final String EOF_STATEMENT_SEPARATOR = &quot;^^^ END OF SCRIPT ^^^&quot;;
+
+	/**
+	 * Default prefixes for single-line comments within SQL scripts: {@code [&quot;--&quot;]}.
+	 */
+<span class="fc" id="L92">	public static final String[] DEFAULT_COMMENT_PREFIXES = {&quot;--&quot;};</span>
+
+	/**
+	 * Default start delimiter for block comments within SQL scripts: {@code &quot;/*&quot;}.
+	 */
+	public static final String DEFAULT_BLOCK_COMMENT_START_DELIMITER = &quot;/*&quot;;
+
+	/**
+	 * Default end delimiter for block comments within SQL scripts: &lt;code&gt;&quot;*&amp;#47;&quot;&lt;/code&gt;.
+	 */
+	public static final String DEFAULT_BLOCK_COMMENT_END_DELIMITER = &quot;*/&quot;;
+
+
+<span class="fc" id="L105">	private static final Log logger = LogFactory.getLog(ScriptUtils.class);</span>
+
+
+	/**
+	 * Execute the given SQL script using default settings for statement
+	 * separators, comment delimiters, and exception handling flags.
+	 * &lt;p&gt;Statement separators and comments will be removed before executing
+	 * individual statements within the supplied script.
+	 * &lt;p&gt;&lt;strong&gt;Warning&lt;/strong&gt;: this method does &lt;em&gt;not&lt;/em&gt; release the
+	 * provided {@link Connection}.
+	 * @param connection the R2DBC connection to use to execute the script; already
+	 * configured and ready to use
+	 * @param resource the resource to load the SQL script from; encoded with the
+	 * current platform's default encoding
+	 * @throws ScriptException if an error occurred while executing the SQL script
+	 * @see #executeSqlScript(Connection, EncodedResource, DataBufferFactory, boolean, boolean, String[], String, String, String)
+	 * @see #DEFAULT_STATEMENT_SEPARATOR
+	 * @see #DEFAULT_COMMENT_PREFIXES
+	 * @see #DEFAULT_BLOCK_COMMENT_START_DELIMITER
+	 * @see #DEFAULT_BLOCK_COMMENT_END_DELIMITER
+	 * @see org.springframework.r2dbc.connection.ConnectionFactoryUtils#getConnection
+	 * @see org.springframework.r2dbc.connection.ConnectionFactoryUtils#releaseConnection
+	 */
+	public static Mono&lt;Void&gt; executeSqlScript(Connection connection, Resource resource) {
+<span class="nc" id="L129">		return executeSqlScript(connection, new EncodedResource(resource));</span>
+	}
+
+	/**
+	 * Execute the given SQL script using default settings for statement
+	 * separators, comment delimiters, and exception handling flags.
+	 * &lt;p&gt;Statement separators and comments will be removed before executing
+	 * individual statements within the supplied script.
+	 * &lt;p&gt;&lt;strong&gt;Warning&lt;/strong&gt;: this method does &lt;em&gt;not&lt;/em&gt; release the
+	 * provided {@link Connection}.
+	 * @param connection the R2DBC connection to use to execute the script; already
+	 * configured and ready to use
+	 * @param resource the resource (potentially associated with a specific encoding)
+	 * to load the SQL script from
+	 * @throws ScriptException if an error occurred while executing the SQL script
+	 * @see #executeSqlScript(Connection, EncodedResource, DataBufferFactory, boolean, boolean, String[], String, String, String)
+	 * @see #DEFAULT_STATEMENT_SEPARATOR
+	 * @see #DEFAULT_COMMENT_PREFIXES
+	 * @see #DEFAULT_BLOCK_COMMENT_START_DELIMITER
+	 * @see #DEFAULT_BLOCK_COMMENT_END_DELIMITER
+	 * @see org.springframework.r2dbc.connection.ConnectionFactoryUtils#getConnection
+	 * @see org.springframework.r2dbc.connection.ConnectionFactoryUtils#releaseConnection
+	 */
+	public static Mono&lt;Void&gt; executeSqlScript(Connection connection, EncodedResource resource) {
+<span class="nc" id="L153">		return executeSqlScript(connection, resource, DefaultDataBufferFactory.sharedInstance, false, false,</span>
+				DEFAULT_COMMENT_PREFIXES, DEFAULT_STATEMENT_SEPARATOR, DEFAULT_BLOCK_COMMENT_START_DELIMITER,
+				DEFAULT_BLOCK_COMMENT_END_DELIMITER);
+	}
+
+	/**
+	 * Execute the given SQL script.
+	 * &lt;p&gt;Statement separators and comments will be removed before executing
+	 * individual statements within the supplied script.
+	 * &lt;p&gt;&lt;strong&gt;Warning&lt;/strong&gt;: this method does &lt;em&gt;not&lt;/em&gt; release the
+	 * provided {@link Connection}.
+	 * @param connection the R2DBC connection to use to execute the script; already
+	 * configured and ready to use
+	 * @param resource the resource (potentially associated with a specific encoding)
+	 * to load the SQL script from
+	 * @param dataBufferFactory the factory to create data buffers with
+	 * @param continueOnError whether to continue without throwing an exception
+	 * in the event of an error
+	 * @param ignoreFailedDrops whether to continue in the event of specifically
+	 * an error on a {@code DROP} statement
+	 * @param commentPrefix the prefix that identifies single-line comments in the
+	 * SQL script (typically &quot;--&quot;)
+	 * @param separator the script statement separator; defaults to
+	 * {@value #DEFAULT_STATEMENT_SEPARATOR} if not specified and falls back to
+	 * {@value #FALLBACK_STATEMENT_SEPARATOR} as a last resort; may be set to
+	 * {@value #EOF_STATEMENT_SEPARATOR} to signal that the script contains a
+	 * single statement without a separator
+	 * @param blockCommentStartDelimiter the &lt;em&gt;start&lt;/em&gt; block comment delimiter
+	 * @param blockCommentEndDelimiter the &lt;em&gt;end&lt;/em&gt; block comment delimiter
+	 * @throws ScriptException if an error occurred while executing the SQL script
+	 * @see #DEFAULT_STATEMENT_SEPARATOR
+	 * @see #FALLBACK_STATEMENT_SEPARATOR
+	 * @see #EOF_STATEMENT_SEPARATOR
+	 * @see org.springframework.r2dbc.connection.ConnectionFactoryUtils#getConnection
+	 * @see org.springframework.r2dbc.connection.ConnectionFactoryUtils#releaseConnection
+	 */
+	public static Mono&lt;Void&gt; executeSqlScript(Connection connection, EncodedResource resource,
+			DataBufferFactory dataBufferFactory, boolean continueOnError, boolean ignoreFailedDrops,
+			String commentPrefix, @Nullable String separator, String blockCommentStartDelimiter,
+			String blockCommentEndDelimiter) {
+
+<span class="nc" id="L194">		return executeSqlScript(connection, resource, dataBufferFactory, continueOnError,</span>
+				ignoreFailedDrops, new String[] { commentPrefix }, separator,
+				blockCommentStartDelimiter, blockCommentEndDelimiter);
+	}
+
+	/**
+	 * Execute the given SQL script.
+	 * &lt;p&gt;Statement separators and comments will be removed before executing
+	 * individual statements within the supplied script.
+	 * &lt;p&gt;&lt;strong&gt;Warning&lt;/strong&gt;: this method does &lt;em&gt;not&lt;/em&gt; release the
+	 * provided {@link Connection}.
+	 * @param connection the R2DBC connection to use to execute the script; already
+	 * configured and ready to use
+	 * @param resource the resource (potentially associated with a specific encoding)
+	 * to load the SQL script from
+	 * @param dataBufferFactory the factory to create data buffers with
+	 * @param continueOnError whether to continue without throwing an exception
+	 * in the event of an error
+	 * @param ignoreFailedDrops whether to continue in the event of specifically
+	 * an error on a {@code DROP} statement
+	 * @param commentPrefixes the prefixes that identify single-line comments in the
+	 * SQL script (typically &quot;--&quot;)
+	 * @param separator the script statement separator; defaults to
+	 * {@value #DEFAULT_STATEMENT_SEPARATOR} if not specified and falls back to
+	 * {@value #FALLBACK_STATEMENT_SEPARATOR} as a last resort; may be set to
+	 * {@value #EOF_STATEMENT_SEPARATOR} to signal that the script contains a
+	 * single statement without a separator
+	 * @param blockCommentStartDelimiter the &lt;em&gt;start&lt;/em&gt; block comment delimiter
+	 * @param blockCommentEndDelimiter the &lt;em&gt;end&lt;/em&gt; block comment delimiter
+	 * @throws ScriptException if an error occurred while executing the SQL script
+	 * @see #DEFAULT_STATEMENT_SEPARATOR
+	 * @see #FALLBACK_STATEMENT_SEPARATOR
+	 * @see #EOF_STATEMENT_SEPARATOR
+	 * @see org.springframework.r2dbc.connection.ConnectionFactoryUtils#getConnection
+	 * @see org.springframework.r2dbc.connection.ConnectionFactoryUtils#releaseConnection
+	 */
+	public static Mono&lt;Void&gt; executeSqlScript(Connection connection, EncodedResource resource,
+			DataBufferFactory dataBufferFactory, boolean continueOnError, boolean ignoreFailedDrops,
+			String[] commentPrefixes, @Nullable String separator, String blockCommentStartDelimiter,
+			String blockCommentEndDelimiter) {
+
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L236">			logger.debug(&quot;Executing SQL script from &quot; + resource);</span>
+		}
+
+<span class="fc" id="L239">		long startTime = System.currentTimeMillis();</span>
+
+<span class="fc" id="L241">		Mono&lt;String&gt; inputScript = readScript(resource, dataBufferFactory, separator)</span>
+<span class="pc" id="L242">				.onErrorMap(IOException.class, ex -&gt; new CannotReadScriptException(resource, ex));</span>
+
+<span class="fc" id="L244">		AtomicInteger statementNumber = new AtomicInteger();</span>
+
+<span class="fc" id="L246">		Flux&lt;Void&gt; executeScript = inputScript.flatMapIterable(script -&gt; {</span>
+<span class="fc" id="L247">			String separatorToUse = separator;</span>
+<span class="pc bpc" id="L248" title="1 of 2 branches missed.">			if (separatorToUse == null) {</span>
+<span class="nc" id="L249">				separatorToUse = DEFAULT_STATEMENT_SEPARATOR;</span>
+			}
+<span class="pc bpc" id="L251" title="1 of 2 branches missed.">			if (!EOF_STATEMENT_SEPARATOR.equals(separatorToUse) &amp;&amp;</span>
+<span class="fc bfc" id="L252" title="All 2 branches covered.">					!containsStatementSeparator(resource, script, separatorToUse, commentPrefixes,</span>
+						blockCommentStartDelimiter, blockCommentEndDelimiter)) {
+<span class="fc" id="L254">				separatorToUse = FALLBACK_STATEMENT_SEPARATOR;</span>
+			}
+<span class="fc" id="L256">			return splitSqlScript(resource, script, separatorToUse, commentPrefixes,</span>
+					blockCommentStartDelimiter, blockCommentEndDelimiter);
+<span class="fc" id="L258">		}).concatMap(statement -&gt; {</span>
+<span class="fc" id="L259">			statementNumber.incrementAndGet();</span>
+<span class="fc" id="L260">			return runStatement(statement, connection, resource, continueOnError, ignoreFailedDrops, statementNumber);</span>
+		});
+
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L264">			executeScript = executeScript.doOnComplete(() -&gt; {</span>
+<span class="nc" id="L265">				long elapsedTime = System.currentTimeMillis() - startTime;</span>
+<span class="nc" id="L266">				logger.debug(&quot;Executed SQL script from &quot; + resource + &quot; in &quot; + elapsedTime + &quot; ms.&quot;);</span>
+<span class="nc" id="L267">			});</span>
+		}
+
+<span class="pc bnc" id="L270" title="All 2 branches missed.">		return executeScript.onErrorMap(ex -&gt; !(ex instanceof ScriptException),</span>
+<span class="nc" id="L271">				ex -&gt; new UncategorizedScriptException(</span>
+						&quot;Failed to execute database script from resource [&quot; + resource + &quot;]&quot;, ex))
+<span class="fc" id="L273">				.then();</span>
+	}
+
+	/**
+	 * Read a script from the provided resource, using the supplied statement
+	 * separator, and build a {@code String} containing the lines.
+	 * @param resource the {@code EncodedResource} containing the script to be
+	 * processed
+	 * @param dataBufferFactory the factory to create data buffers with
+	 * @param separator the statement separator in the SQL script (typically &quot;;&quot;)
+	 * @return a {@link Mono} of {@link String} containing the script lines that
+	 * completes once the resource has been loaded
+	 */
+	static Mono&lt;String&gt; readScript(EncodedResource resource, DataBufferFactory dataBufferFactory,
+			@Nullable String separator) {
+
+<span class="fc" id="L289">		return DataBufferUtils.join(DataBufferUtils.read(resource.getResource(), dataBufferFactory, 8192))</span>
+<span class="fc" id="L290">				.handle((it, sink) -&gt; {</span>
+<span class="fc" id="L291">					try (InputStream is = it.asInputStream()) {</span>
+<span class="pc bpc" id="L292" title="1 of 2 branches missed.">						InputStreamReader in = (resource.getCharset() != null ?</span>
+<span class="pc" id="L293">								new InputStreamReader(is, resource.getCharset()) : new InputStreamReader(is));</span>
+<span class="fc" id="L294">						LineNumberReader lnr = new LineNumberReader(in);</span>
+<span class="fc" id="L295">						String script = readScript(lnr, separator);</span>
+<span class="fc" id="L296">						sink.next(script);</span>
+<span class="fc" id="L297">						sink.complete();</span>
+					}
+<span class="nc" id="L299">					catch (Exception ex) {</span>
+<span class="nc" id="L300">						sink.error(ex);</span>
+					}
+					finally {
+<span class="fc" id="L303">						DataBufferUtils.release(it);</span>
+					}
+<span class="fc" id="L305">				});</span>
+	}
+
+	/**
+	 * Read a script from the provided {@code LineNumberReader} and build a
+	 * {@code String} containing the lines.
+	 * @param lineNumberReader the {@code LineNumberReader} containing the script
+	 * to be processed
+	 * @param separator the statement separator in the SQL script (typically &quot;;&quot;)
+	 * @return a {@code String} containing the script lines
+	 * @throws IOException in case of I/O errors
+	 */
+	private static String readScript(LineNumberReader lineNumberReader, @Nullable String separator) throws IOException {
+<span class="fc" id="L318">		StringBuilder scriptBuilder = new StringBuilder();</span>
+<span class="fc" id="L319">		String currentLine = lineNumberReader.readLine();</span>
+<span class="fc bfc" id="L320" title="All 2 branches covered.">		while (currentLine != null) {</span>
+<span class="fc bfc" id="L321" title="All 2 branches covered.">			if (scriptBuilder.length() &gt; 0) {</span>
+<span class="fc" id="L322">				scriptBuilder.append('\n');</span>
+			}
+<span class="fc" id="L324">			scriptBuilder.append(currentLine);</span>
+<span class="fc" id="L325">			currentLine = lineNumberReader.readLine();</span>
+		}
+<span class="fc" id="L327">		appendSeparatorToScriptIfNecessary(scriptBuilder, separator);</span>
+<span class="fc" id="L328">		return scriptBuilder.toString();</span>
+	}
+
+	private static void appendSeparatorToScriptIfNecessary(StringBuilder scriptBuilder, @Nullable String separator) {
+<span class="pc bpc" id="L332" title="1 of 2 branches missed.">		if (separator == null) {</span>
+<span class="nc" id="L333">			return;</span>
+		}
+<span class="fc" id="L335">		String trimmed = separator.trim();</span>
+<span class="pc bpc" id="L336" title="1 of 2 branches missed.">		if (trimmed.length() == separator.length()) {</span>
+<span class="fc" id="L337">			return;</span>
+		}
+		// separator ends in whitespace, so we might want to see if the script is trying
+		// to end the same way
+<span class="nc bnc" id="L341" title="All 2 branches missed.">		if (scriptBuilder.lastIndexOf(trimmed) == scriptBuilder.length() - trimmed.length()) {</span>
+<span class="nc" id="L342">			scriptBuilder.append(separator.substring(trimmed.length()));</span>
+		}
+<span class="nc" id="L344">	}</span>
+
+	/**
+	 * Determine if the provided SQL script contains the specified statement separator.
+	 * &lt;p&gt;This method is intended to be used to find the string separating each
+	 * SQL statement &amp;mdash; for example, a ';' character.
+	 * &lt;p&gt;Any occurrence of the separator within the script will be ignored if it
+	 * is within a &lt;em&gt;literal&lt;/em&gt; block of text enclosed in single quotes
+	 * ({@code '}) or double quotes ({@code &quot;}), if it is escaped with a backslash
+	 * ({@code \}), or if it is within a single-line comment or block comment.
+	 * @param resource the resource from which the script was read, or {@code null}
+	 * if unknown
+	 * @param script the SQL script to search within
+	 * @param separator the statement separator to search for
+	 * @param commentPrefixes the prefixes that identify single-line comments
+	 * (typically {@code &quot;--&quot;})
+	 * @param blockCommentStartDelimiter the &lt;em&gt;start&lt;/em&gt; block comment delimiter
+	 * (typically {@code &quot;/*&quot;})
+	 * @param blockCommentEndDelimiter the &lt;em&gt;end&lt;/em&gt; block comment delimiter
+	 * (typically &lt;code&gt;&quot;*&amp;#47;&quot;&lt;/code&gt;)
+	 * @since 5.3.8
+	 */
+	static boolean containsStatementSeparator(EncodedResource resource, String script,
+			String separator, String[] commentPrefixes, String blockCommentStartDelimiter,
+			String blockCommentEndDelimiter) {
+
+<span class="fc" id="L370">		boolean inSingleQuote = false;</span>
+<span class="fc" id="L371">		boolean inDoubleQuote = false;</span>
+<span class="fc" id="L372">		boolean inEscape = false;</span>
+
+<span class="fc bfc" id="L374" title="All 2 branches covered.">		for (int i = 0; i &lt; script.length(); i++) {</span>
+<span class="fc" id="L375">			char c = script.charAt(i);</span>
+<span class="fc bfc" id="L376" title="All 2 branches covered.">			if (inEscape) {</span>
+<span class="fc" id="L377">				inEscape = false;</span>
+<span class="fc" id="L378">				continue;</span>
+			}
+			// MySQL style escapes
+<span class="fc bfc" id="L381" title="All 2 branches covered.">			if (c == '\\') {</span>
+<span class="fc" id="L382">				inEscape = true;</span>
+<span class="fc" id="L383">				continue;</span>
+			}
+<span class="fc bfc" id="L385" title="All 4 branches covered.">			if (!inDoubleQuote &amp;&amp; (c == '\'')) {</span>
+<span class="fc bfc" id="L386" title="All 2 branches covered.">				inSingleQuote = !inSingleQuote;</span>
+			}
+<span class="fc bfc" id="L388" title="All 4 branches covered.">			else if (!inSingleQuote &amp;&amp; (c == '&quot;')) {</span>
+<span class="fc bfc" id="L389" title="All 2 branches covered.">				inDoubleQuote = !inDoubleQuote;</span>
+			}
+<span class="fc bfc" id="L391" title="All 4 branches covered.">			if (!inSingleQuote &amp;&amp; !inDoubleQuote) {</span>
+<span class="fc bfc" id="L392" title="All 2 branches covered.">				if (script.startsWith(separator, i)) {</span>
+<span class="fc" id="L393">					return true;</span>
+				}
+<span class="fc bfc" id="L395" title="All 2 branches covered.">				else if (startsWithAny(script, commentPrefixes, i)) {</span>
+					// Skip over any content from the start of the comment to the EOL
+<span class="fc" id="L397">					int indexOfNextNewline = script.indexOf('\n', i);</span>
+<span class="pc bpc" id="L398" title="1 of 2 branches missed.">					if (indexOfNextNewline &gt; i) {</span>
+<span class="fc" id="L399">						i = indexOfNextNewline;</span>
+<span class="fc" id="L400">						continue;</span>
+					}
+					else {
+						// If there's no EOL, we must be at the end of the script, so stop here.
+						break;
+					}
+				}
+<span class="fc bfc" id="L407" title="All 2 branches covered.">				else if (script.startsWith(blockCommentStartDelimiter, i)) {</span>
+					// Skip over any block comments
+<span class="fc" id="L409">					int indexOfCommentEnd = script.indexOf(blockCommentEndDelimiter, i);</span>
+<span class="pc bpc" id="L410" title="1 of 2 branches missed.">					if (indexOfCommentEnd &gt; i) {</span>
+<span class="fc" id="L411">						i = indexOfCommentEnd + blockCommentEndDelimiter.length() - 1;</span>
+<span class="fc" id="L412">						continue;</span>
+					}
+					else {
+<span class="nc" id="L415">						throw new ScriptParseException(</span>
+								&quot;Missing block comment end delimiter: &quot; + blockCommentEndDelimiter, resource);
+					}
+				}
+			}
+		}
+
+<span class="fc" id="L422">		return false;</span>
+	}
+
+	/**
+	 * Split an SQL script into separate statements delimited by the provided
+	 * separator string and return a {@code List} containing each individual
+	 * statement.
+	 * &lt;p&gt;Within the script, the provided {@code commentPrefixes} will be honored:
+	 * any text beginning with one of the comment prefixes and extending to the
+	 * end of the line will be omitted from the output. Similarly, the provided
+	 * {@code blockCommentStartDelimiter} and {@code blockCommentEndDelimiter}
+	 * delimiters will be honored: any text enclosed in a block comment will be
+	 * omitted from the output. In addition, multiple adjacent whitespace characters
+	 * will be collapsed into a single space.
+	 * @param resource the resource from which the script was read
+	 * @param script the SQL script
+	 * @param separator text separating each statement
+	 * (typically a ';' or newline character)
+	 * @param commentPrefixes the prefixes that identify SQL line comments
+	 * (typically &quot;--&quot;)
+	 * @param blockCommentStartDelimiter the &lt;em&gt;start&lt;/em&gt; block comment delimiter;
+	 * never {@code null} or empty
+	 * @param blockCommentEndDelimiter the &lt;em&gt;end&lt;/em&gt; block comment delimiter;
+	 * never {@code null} or empty
+	 * @return a list of statements
+	 * @throws ScriptException if an error occurred while splitting the SQL script
+	 */
+	static List&lt;String&gt; splitSqlScript(EncodedResource resource, String script,
+			String separator, String[] commentPrefixes, String blockCommentStartDelimiter,
+			String blockCommentEndDelimiter) {
+
+<span class="fc" id="L453">		Assert.hasText(script, &quot;'script' must not be null or empty&quot;);</span>
+<span class="fc" id="L454">		Assert.notNull(separator, &quot;'separator' must not be null&quot;);</span>
+<span class="fc" id="L455">		Assert.notEmpty(commentPrefixes, &quot;'commentPrefixes' must not be null or empty&quot;);</span>
+<span class="fc bfc" id="L456" title="All 2 branches covered.">		for (String commentPrefix : commentPrefixes) {</span>
+<span class="fc" id="L457">			Assert.hasText(commentPrefix, &quot;'commentPrefixes' must not contain null or empty elements&quot;);</span>
+		}
+<span class="fc" id="L459">		Assert.hasText(blockCommentStartDelimiter, &quot;'blockCommentStartDelimiter' must not be null or empty&quot;);</span>
+<span class="fc" id="L460">		Assert.hasText(blockCommentEndDelimiter, &quot;'blockCommentEndDelimiter' must not be null or empty&quot;);</span>
+
+<span class="fc" id="L462">		List&lt;String&gt; statements = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L463">		StringBuilder sb = new StringBuilder();</span>
+<span class="fc" id="L464">		boolean inSingleQuote = false;</span>
+<span class="fc" id="L465">		boolean inDoubleQuote = false;</span>
+<span class="fc" id="L466">		boolean inEscape = false;</span>
+
+<span class="fc bfc" id="L468" title="All 2 branches covered.">		for (int i = 0; i &lt; script.length(); i++) {</span>
+<span class="fc" id="L469">			char c = script.charAt(i);</span>
+<span class="fc bfc" id="L470" title="All 2 branches covered.">			if (inEscape) {</span>
+<span class="fc" id="L471">				inEscape = false;</span>
+<span class="fc" id="L472">				sb.append(c);</span>
+<span class="fc" id="L473">				continue;</span>
+			}
+			// MySQL style escapes
+<span class="fc bfc" id="L476" title="All 2 branches covered.">			if (c == '\\') {</span>
+<span class="fc" id="L477">				inEscape = true;</span>
+<span class="fc" id="L478">				sb.append(c);</span>
+<span class="fc" id="L479">				continue;</span>
+			}
+<span class="fc bfc" id="L481" title="All 4 branches covered.">			if (!inDoubleQuote &amp;&amp; (c == '\'')) {</span>
+<span class="fc bfc" id="L482" title="All 2 branches covered.">				inSingleQuote = !inSingleQuote;</span>
+			}
+<span class="fc bfc" id="L484" title="All 4 branches covered.">			else if (!inSingleQuote &amp;&amp; (c == '&quot;')) {</span>
+<span class="fc bfc" id="L485" title="All 2 branches covered.">				inDoubleQuote = !inDoubleQuote;</span>
+			}
+<span class="fc bfc" id="L487" title="All 4 branches covered.">			if (!inSingleQuote &amp;&amp; !inDoubleQuote) {</span>
+<span class="fc bfc" id="L488" title="All 2 branches covered.">				if (script.startsWith(separator, i)) {</span>
+					// We've reached the end of the current statement
+<span class="fc bfc" id="L490" title="All 2 branches covered.">					if (sb.length() &gt; 0) {</span>
+<span class="fc" id="L491">						statements.add(sb.toString());</span>
+<span class="fc" id="L492">						sb = new StringBuilder();</span>
+					}
+<span class="fc" id="L494">					i += separator.length() - 1;</span>
+<span class="fc" id="L495">					continue;</span>
+				}
+<span class="fc bfc" id="L497" title="All 2 branches covered.">				else if (startsWithAny(script, commentPrefixes, i)) {</span>
+					// Skip over any content from the start of the comment to the EOL
+<span class="fc" id="L499">					int indexOfNextNewline = script.indexOf('\n', i);</span>
+<span class="fc bfc" id="L500" title="All 2 branches covered.">					if (indexOfNextNewline &gt; i) {</span>
+<span class="fc" id="L501">						i = indexOfNextNewline;</span>
+<span class="fc" id="L502">						continue;</span>
+					}
+					else {
+						// If there's no EOL, we must be at the end of the script, so stop here.
+						break;
+					}
+				}
+<span class="fc bfc" id="L509" title="All 2 branches covered.">				else if (script.startsWith(blockCommentStartDelimiter, i)) {</span>
+					// Skip over any block comments
+<span class="fc" id="L511">					int indexOfCommentEnd = script.indexOf(blockCommentEndDelimiter, i);</span>
+<span class="pc bpc" id="L512" title="1 of 2 branches missed.">					if (indexOfCommentEnd &gt; i) {</span>
+<span class="fc" id="L513">						i = indexOfCommentEnd + blockCommentEndDelimiter.length() - 1;</span>
+<span class="fc" id="L514">						continue;</span>
+					}
+					else {
+<span class="nc" id="L517">						throw new ScriptParseException(</span>
+								&quot;Missing block comment end delimiter: &quot; + blockCommentEndDelimiter, resource);
+					}
+				}
+<span class="fc bfc" id="L521" title="All 8 branches covered.">				else if (c == ' ' || c == '\r' || c == '\n' || c == '\t') {</span>
+					// Avoid multiple adjacent whitespace characters
+<span class="fc bfc" id="L523" title="All 4 branches covered.">					if (sb.length() &gt; 0 &amp;&amp; sb.charAt(sb.length() - 1) != ' ') {</span>
+<span class="fc" id="L524">						c = ' ';</span>
+					}
+					else {
+						continue;
+					}
+				}
+			}
+<span class="fc" id="L531">			sb.append(c);</span>
+		}
+
+<span class="fc bfc" id="L534" title="All 2 branches covered.">		if (StringUtils.hasText(sb)) {</span>
+<span class="fc" id="L535">			statements.add(sb.toString());</span>
+		}
+
+<span class="fc" id="L538">		return statements;</span>
+	}
+
+	private static boolean startsWithAny(String script, String[] prefixes, int offset) {
+<span class="fc bfc" id="L542" title="All 2 branches covered.">		for (String prefix : prefixes) {</span>
+<span class="fc bfc" id="L543" title="All 2 branches covered.">			if (script.startsWith(prefix, offset)) {</span>
+<span class="fc" id="L544">				return true;</span>
+			}
+		}
+<span class="fc" id="L547">		return false;</span>
+	}
+
+	private static Publisher&lt;? extends Void&gt; runStatement(String statement, Connection connection,
+			EncodedResource resource, boolean continueOnError, boolean ignoreFailedDrops, AtomicInteger statementNumber) {
+
+<span class="fc" id="L553">		Mono&lt;Long&gt; execution = Flux.from(connection.createStatement(statement).execute())</span>
+<span class="fc" id="L554">				.flatMap(Result::getRowsUpdated)</span>
+<span class="fc" id="L555">				.collect(Collectors.summingLong(count -&gt; count));</span>
+
+<span class="pc bpc" id="L557" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L558">			execution = execution.doOnNext(rowsAffected -&gt;</span>
+<span class="nc" id="L559">					logger.debug(rowsAffected + &quot; returned as update count for SQL: &quot; + statement));</span>
+		}
+
+<span class="fc" id="L562">		return execution.onErrorResume(ex -&gt; {</span>
+<span class="fc" id="L563">			boolean dropStatement = StringUtils.startsWithIgnoreCase(statement.trim(), &quot;drop&quot;);</span>
+<span class="pc bpc" id="L564" title="3 of 6 branches missed.">			if (continueOnError || (dropStatement &amp;&amp; ignoreFailedDrops)) {</span>
+<span class="pc bpc" id="L565" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L566">					logger.debug(ScriptStatementFailedException.buildErrorMessage(</span>
+<span class="nc" id="L567">							statement, statementNumber.get(), resource), ex);</span>
+				}
+			}
+			else {
+<span class="nc" id="L571">				return Mono.error(new ScriptStatementFailedException(statement, statementNumber.get(), resource, ex));</span>
+			}
+<span class="fc" id="L573">			return Mono.empty();</span>
+<span class="fc" id="L574">		}).then();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

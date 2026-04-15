@@ -1,0 +1,480 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ControllerMethodResolver.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.result.method.annotation</a> &gt; <span class="el_source">ControllerMethodResolver.java</span></div><h1>ControllerMethodResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.result.method.annotation;
+
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import reactor.core.scheduler.Scheduler;
+
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.core.KotlinDetector;
+import org.springframework.core.MethodIntrospector;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.HttpMessageReader;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils.MethodFilter;
+import org.springframework.validation.method.MethodValidator;
+import org.springframework.web.bind.annotation.InitBinder;
+import org.springframework.web.bind.annotation.ModelAttribute;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.support.WebBindingInitializer;
+import org.springframework.web.method.ControllerAdviceBean;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.method.annotation.ExceptionHandlerMappingInfo;
+import org.springframework.web.method.annotation.ExceptionHandlerMethodResolver;
+import org.springframework.web.method.annotation.HandlerMethodValidator;
+import org.springframework.web.reactive.HandlerMapping;
+import org.springframework.web.reactive.accept.RequestedContentTypeResolver;
+import org.springframework.web.reactive.result.method.HandlerMethodArgumentResolver;
+import org.springframework.web.reactive.result.method.InvocableHandlerMethod;
+import org.springframework.web.reactive.result.method.SyncHandlerMethodArgumentResolver;
+import org.springframework.web.reactive.result.method.SyncInvocableHandlerMethod;
+import org.springframework.web.server.NotAcceptableStatusException;
+import org.springframework.web.server.ServerWebExchange;
+
+/**
+ * Package-private class to assist {@link RequestMappingHandlerAdapter} with
+ * resolving, initializing, and caching annotated methods declared in
+ * {@code @Controller} and {@code @ControllerAdvice} components.
+ *
+ * &lt;p&gt;Assists with the following annotations:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code @InitBinder}
+ * &lt;li&gt;{@code @ModelAttribute}
+ * &lt;li&gt;{@code @RequestMapping}
+ * &lt;li&gt;{@code @ExceptionHandler}
+ * &lt;/ul&gt;
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ */
+class ControllerMethodResolver {
+
+	/**
+	 * MethodFilter that matches {@link InitBinder @InitBinder} methods.
+	 */
+<span class="fc" id="L87">	private static final MethodFilter INIT_BINDER_METHODS = method -&gt;</span>
+<span class="fc" id="L88">			AnnotatedElementUtils.hasAnnotation(method, InitBinder.class);</span>
+
+	/**
+	 * MethodFilter that matches {@link ModelAttribute @ModelAttribute} methods.
+	 */
+<span class="fc" id="L93">	private static final MethodFilter MODEL_ATTRIBUTE_METHODS = method -&gt;</span>
+<span class="fc bfc" id="L94" title="All 2 branches covered.">			(!AnnotatedElementUtils.hasAnnotation(method, RequestMapping.class) &amp;&amp;</span>
+<span class="fc bfc" id="L95" title="All 2 branches covered.">					AnnotatedElementUtils.hasAnnotation(method, ModelAttribute.class));</span>
+
+<span class="fc" id="L97">	private static final boolean BEAN_VALIDATION_PRESENT =</span>
+<span class="fc" id="L98">			ClassUtils.isPresent(&quot;jakarta.validation.Validator&quot;, HandlerMethod.class.getClassLoader());</span>
+
+<span class="fc" id="L100">	private static final Log logger = LogFactory.getLog(ControllerMethodResolver.class);</span>
+
+
+	private final List&lt;SyncHandlerMethodArgumentResolver&gt; initBinderResolvers;
+
+	private final List&lt;HandlerMethodArgumentResolver&gt; modelAttributeResolvers;
+
+	private final List&lt;HandlerMethodArgumentResolver&gt; requestMappingResolvers;
+
+	private final List&lt;HandlerMethodArgumentResolver&gt; exceptionHandlerResolvers;
+
+	private final ReactiveAdapterRegistry reactiveAdapterRegistry;
+
+	private final RequestedContentTypeResolver contentTypeResolver;
+
+	private final @Nullable Scheduler invocationScheduler;
+
+	private final @Nullable Predicate&lt;? super HandlerMethod&gt; blockingMethodPredicate;
+
+	private final @Nullable MethodValidator methodValidator;
+
+<span class="fc" id="L121">	private final Map&lt;Class&lt;?&gt;, Set&lt;Method&gt;&gt; initBinderMethodCache = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+<span class="fc" id="L123">	private final Map&lt;Class&lt;?&gt;, Set&lt;Method&gt;&gt; modelAttributeMethodCache = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+<span class="fc" id="L125">	private final Map&lt;Class&lt;?&gt;, ExceptionHandlerMethodResolver&gt; exceptionHandlerCache = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+<span class="fc" id="L127">	private final Map&lt;ControllerAdviceBean, Set&lt;Method&gt;&gt; initBinderAdviceCache = new LinkedHashMap&lt;&gt;(64);</span>
+
+<span class="fc" id="L129">	private final Map&lt;ControllerAdviceBean, Set&lt;Method&gt;&gt; modelAttributeAdviceCache = new LinkedHashMap&lt;&gt;(64);</span>
+
+<span class="fc" id="L131">	private final Map&lt;ControllerAdviceBean, ExceptionHandlerMethodResolver&gt; exceptionHandlerAdviceCache =</span>
+			new LinkedHashMap&lt;&gt;(64);
+
+<span class="fc" id="L134">	private final Map&lt;Class&lt;?&gt;, SessionAttributesHandler&gt; sessionAttributesHandlerCache = new ConcurrentHashMap&lt;&gt;(64);</span>
+
+
+
+	ControllerMethodResolver(
+			ArgumentResolverConfigurer customResolvers, ReactiveAdapterRegistry adapterRegistry,
+			ConfigurableApplicationContext context, RequestedContentTypeResolver contentTypeResolver,
+			List&lt;HttpMessageReader&lt;?&gt;&gt; readers, @Nullable WebBindingInitializer webBindingInitializer,
+<span class="fc" id="L142">			@Nullable Scheduler invocationScheduler, @Nullable Predicate&lt;? super HandlerMethod&gt; blockingMethodPredicate) {</span>
+
+<span class="fc" id="L144">		Assert.notNull(customResolvers, &quot;ArgumentResolverConfigurer is required&quot;);</span>
+<span class="fc" id="L145">		Assert.notNull(adapterRegistry, &quot;ReactiveAdapterRegistry is required&quot;);</span>
+<span class="fc" id="L146">		Assert.notNull(context, &quot;ApplicationContext is required&quot;);</span>
+<span class="fc" id="L147">		Assert.notNull(contentTypeResolver, &quot;RequestedContentTypeResolver is required&quot;);</span>
+<span class="fc" id="L148">		Assert.notNull(readers, &quot;HttpMessageReader List is required&quot;);</span>
+
+<span class="fc" id="L150">		this.initBinderResolvers = initBinderResolvers(customResolvers, adapterRegistry, context);</span>
+<span class="fc" id="L151">		this.modelAttributeResolvers = modelMethodResolvers(customResolvers, adapterRegistry, context);</span>
+<span class="fc" id="L152">		this.requestMappingResolvers = requestMappingResolvers(customResolvers, adapterRegistry, context, readers);</span>
+<span class="fc" id="L153">		this.exceptionHandlerResolvers = exceptionHandlerResolvers(customResolvers, adapterRegistry, context);</span>
+<span class="fc" id="L154">		this.reactiveAdapterRegistry = adapterRegistry;</span>
+<span class="fc" id="L155">		this.contentTypeResolver = contentTypeResolver;</span>
+<span class="fc" id="L156">		this.invocationScheduler = invocationScheduler;</span>
+<span class="fc" id="L157">		this.blockingMethodPredicate = blockingMethodPredicate;</span>
+
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">		if (BEAN_VALIDATION_PRESENT) {</span>
+<span class="fc" id="L160">			this.methodValidator = HandlerMethodValidator.from(webBindingInitializer, null,</span>
+<span class="fc" id="L161">					methodParamPredicate(this.requestMappingResolvers, ModelAttributeMethodArgumentResolver.class),</span>
+<span class="fc" id="L162">					methodParamPredicate(this.requestMappingResolvers, RequestParamMethodArgumentResolver.class));</span>
+		}
+		else {
+<span class="nc" id="L165">			this.methodValidator = null;</span>
+		}
+
+<span class="fc" id="L168">		initControllerAdviceCaches(context);</span>
+<span class="fc" id="L169">	}</span>
+
+	private List&lt;SyncHandlerMethodArgumentResolver&gt; initBinderResolvers(
+			ArgumentResolverConfigurer customResolvers, ReactiveAdapterRegistry adapterRegistry,
+			ConfigurableApplicationContext context) {
+
+<span class="fc" id="L175">		return initResolvers(customResolvers, adapterRegistry, context, false, Collections.emptyList()).stream()</span>
+<span class="fc" id="L176">				.filter(SyncHandlerMethodArgumentResolver.class::isInstance)</span>
+<span class="fc" id="L177">				.map(SyncHandlerMethodArgumentResolver.class::cast)</span>
+<span class="fc" id="L178">				.toList();</span>
+	}
+
+	private static List&lt;HandlerMethodArgumentResolver&gt; modelMethodResolvers(
+			ArgumentResolverConfigurer customResolvers, ReactiveAdapterRegistry adapterRegistry,
+			ConfigurableApplicationContext context) {
+
+<span class="fc" id="L185">		return initResolvers(customResolvers, adapterRegistry, context, true, Collections.emptyList());</span>
+	}
+
+	private static List&lt;HandlerMethodArgumentResolver&gt; requestMappingResolvers(
+			ArgumentResolverConfigurer customResolvers, ReactiveAdapterRegistry adapterRegistry,
+			ConfigurableApplicationContext context, List&lt;HttpMessageReader&lt;?&gt;&gt; readers) {
+
+<span class="fc" id="L192">		return initResolvers(customResolvers, adapterRegistry, context, true, readers);</span>
+	}
+
+	private static List&lt;HandlerMethodArgumentResolver&gt; exceptionHandlerResolvers(
+			ArgumentResolverConfigurer customResolvers, ReactiveAdapterRegistry adapterRegistry,
+			ConfigurableApplicationContext context) {
+
+<span class="fc" id="L199">		return initResolvers(customResolvers, adapterRegistry, context, false, Collections.emptyList());</span>
+	}
+
+	private static List&lt;HandlerMethodArgumentResolver&gt; initResolvers(ArgumentResolverConfigurer customResolvers,
+			ReactiveAdapterRegistry adapterRegistry, ConfigurableApplicationContext context,
+			boolean supportDataBinding, List&lt;HttpMessageReader&lt;?&gt;&gt; readers) {
+
+<span class="fc" id="L206">		ConfigurableListableBeanFactory beanFactory = context.getBeanFactory();</span>
+<span class="pc bpc" id="L207" title="1 of 4 branches missed.">		boolean requestMappingMethod = !readers.isEmpty() &amp;&amp; supportDataBinding;</span>
+
+		// Annotation-based...
+<span class="fc" id="L210">		List&lt;HandlerMethodArgumentResolver&gt; result = new ArrayList&lt;&gt;(30);</span>
+<span class="fc" id="L211">		result.add(new RequestParamMethodArgumentResolver(beanFactory, adapterRegistry, false));</span>
+<span class="fc" id="L212">		result.add(new RequestParamMapMethodArgumentResolver(adapterRegistry));</span>
+<span class="fc" id="L213">		result.add(new PathVariableMethodArgumentResolver(beanFactory, adapterRegistry));</span>
+<span class="fc" id="L214">		result.add(new PathVariableMapMethodArgumentResolver(adapterRegistry));</span>
+<span class="fc" id="L215">		result.add(new MatrixVariableMethodArgumentResolver(beanFactory, adapterRegistry));</span>
+<span class="fc" id="L216">		result.add(new MatrixVariableMapMethodArgumentResolver(adapterRegistry));</span>
+<span class="fc bfc" id="L217" title="All 2 branches covered.">		if (!readers.isEmpty()) {</span>
+<span class="fc" id="L218">			result.add(new RequestBodyMethodArgumentResolver(readers, adapterRegistry));</span>
+<span class="fc" id="L219">			result.add(new RequestPartMethodArgumentResolver(readers, adapterRegistry));</span>
+		}
+<span class="fc bfc" id="L221" title="All 2 branches covered.">		if (supportDataBinding) {</span>
+<span class="fc" id="L222">			result.add(new ModelAttributeMethodArgumentResolver(adapterRegistry, false));</span>
+		}
+<span class="fc" id="L224">		result.add(new RequestHeaderMethodArgumentResolver(beanFactory, adapterRegistry));</span>
+<span class="fc" id="L225">		result.add(new RequestHeaderMapMethodArgumentResolver(adapterRegistry));</span>
+<span class="fc" id="L226">		result.add(new CookieValueMethodArgumentResolver(beanFactory, adapterRegistry));</span>
+<span class="fc" id="L227">		result.add(new ExpressionValueMethodArgumentResolver(beanFactory, adapterRegistry));</span>
+<span class="fc" id="L228">		result.add(new SessionAttributeMethodArgumentResolver(beanFactory, adapterRegistry));</span>
+<span class="fc" id="L229">		result.add(new RequestAttributeMethodArgumentResolver(beanFactory, adapterRegistry));</span>
+
+		// Type-based...
+<span class="fc bfc" id="L232" title="All 2 branches covered.">		if (!readers.isEmpty()) {</span>
+<span class="fc" id="L233">			result.add(new HttpEntityMethodArgumentResolver(readers, adapterRegistry));</span>
+		}
+<span class="fc" id="L235">		result.add(new ModelMethodArgumentResolver(adapterRegistry));</span>
+<span class="fc bfc" id="L236" title="All 2 branches covered.">		if (supportDataBinding) {</span>
+<span class="fc" id="L237">			result.add(new ErrorsMethodArgumentResolver(adapterRegistry));</span>
+		}
+<span class="fc" id="L239">		result.add(new ServerWebExchangeMethodArgumentResolver(adapterRegistry));</span>
+<span class="fc" id="L240">		result.add(new PrincipalMethodArgumentResolver(adapterRegistry));</span>
+<span class="fc bfc" id="L241" title="All 2 branches covered.">		if (requestMappingMethod) {</span>
+<span class="fc" id="L242">			result.add(new SessionStatusMethodArgumentResolver());</span>
+		}
+<span class="fc" id="L244">		result.add(new WebSessionMethodArgumentResolver(adapterRegistry));</span>
+<span class="fc" id="L245">		result.add(new ApiVersionMethodArgumentResolver());</span>
+<span class="pc bpc" id="L246" title="1 of 2 branches missed.">		if (KotlinDetector.isKotlinPresent()) {</span>
+<span class="fc" id="L247">			result.add(new ContinuationHandlerMethodArgumentResolver());</span>
+		}
+
+		// Custom...
+<span class="fc" id="L251">		result.addAll(customResolvers.getCustomResolvers());</span>
+
+		// Catch-all...
+<span class="fc" id="L254">		result.add(new RequestParamMethodArgumentResolver(beanFactory, adapterRegistry, true));</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">		if (supportDataBinding) {</span>
+<span class="fc" id="L256">			result.add(new ModelAttributeMethodArgumentResolver(adapterRegistry, true));</span>
+		}
+
+<span class="fc" id="L259">		return result;</span>
+	}
+
+	private void initControllerAdviceCaches(ApplicationContext applicationContext) {
+<span class="fc" id="L263">		List&lt;ControllerAdviceBean&gt; beans = ControllerAdviceBean.findAnnotatedBeans(applicationContext);</span>
+<span class="fc bfc" id="L264" title="All 2 branches covered.">		for (ControllerAdviceBean bean : beans) {</span>
+<span class="fc" id="L265">			Class&lt;?&gt; beanType = bean.getBeanType();</span>
+<span class="pc bpc" id="L266" title="1 of 2 branches missed.">			if (beanType != null) {</span>
+<span class="fc" id="L267">				Set&lt;Method&gt; attrMethods = MethodIntrospector.selectMethods(beanType, MODEL_ATTRIBUTE_METHODS);</span>
+<span class="fc bfc" id="L268" title="All 2 branches covered.">				if (!attrMethods.isEmpty()) {</span>
+<span class="fc" id="L269">					this.modelAttributeAdviceCache.put(bean, attrMethods);</span>
+				}
+<span class="fc" id="L271">				Set&lt;Method&gt; binderMethods = MethodIntrospector.selectMethods(beanType, INIT_BINDER_METHODS);</span>
+<span class="fc bfc" id="L272" title="All 2 branches covered.">				if (!binderMethods.isEmpty()) {</span>
+<span class="fc" id="L273">					this.initBinderAdviceCache.put(bean, binderMethods);</span>
+				}
+<span class="fc" id="L275">				ExceptionHandlerMethodResolver resolver = new ExceptionHandlerMethodResolver(beanType);</span>
+<span class="pc bpc" id="L276" title="1 of 2 branches missed.">				if (resolver.hasExceptionMappings()) {</span>
+<span class="fc" id="L277">					this.exceptionHandlerAdviceCache.put(bean, resolver);</span>
+				}
+			}
+<span class="fc" id="L280">		}</span>
+
+<span class="fc bfc" id="L282" title="All 2 branches covered.">		if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L283">			int modelSize = this.modelAttributeAdviceCache.size();</span>
+<span class="fc" id="L284">			int binderSize = this.initBinderAdviceCache.size();</span>
+<span class="fc" id="L285">			int handlerSize = this.exceptionHandlerAdviceCache.size();</span>
+<span class="pc bpc" id="L286" title="1 of 6 branches missed.">			if (modelSize == 0 &amp;&amp; binderSize == 0 &amp;&amp; handlerSize == 0) {</span>
+<span class="fc" id="L287">				logger.debug(&quot;ControllerAdvice beans: none&quot;);</span>
+			}
+			else {
+<span class="fc" id="L290">				logger.debug(&quot;ControllerAdvice beans: &quot; + modelSize + &quot; @ModelAttribute, &quot; + binderSize +</span>
+						&quot; @InitBinder, &quot; + handlerSize + &quot; @ExceptionHandler&quot;);
+			}
+		}
+<span class="fc" id="L294">	}</span>
+
+	private static Predicate&lt;MethodParameter&gt; methodParamPredicate(
+			List&lt;HandlerMethodArgumentResolver&gt; resolvers, Class&lt;?&gt; resolverType) {
+
+<span class="fc" id="L299">		return parameter -&gt; {</span>
+<span class="nc bnc" id="L300" title="All 2 branches missed.">			for (HandlerMethodArgumentResolver resolver : resolvers) {</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">				if (resolver.supportsParameter(parameter)) {</span>
+<span class="nc" id="L302">					return resolverType.isInstance(resolver);</span>
+				}
+<span class="nc" id="L304">			}</span>
+<span class="nc" id="L305">			return false;</span>
+		};
+	}
+
+	/**
+	 * Return a {@link Scheduler} for the given method if it is considered
+	 * blocking by the underlying blocking method predicate, or null if no
+	 * particular scheduler should be used for this method invocation.
+	 */
+	public @Nullable Scheduler getSchedulerFor(HandlerMethod handlerMethod) {
+<span class="pc bpc" id="L315" title="1 of 2 branches missed.">		if (this.invocationScheduler != null) {</span>
+<span class="nc bnc" id="L316" title="All 2 branches missed.">			Assert.state(this.blockingMethodPredicate != null, &quot;Expected HandlerMethod Predicate&quot;);</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">			if (this.blockingMethodPredicate.test(handlerMethod)) {</span>
+<span class="nc" id="L318">				return this.invocationScheduler;</span>
+			}
+		}
+<span class="fc" id="L321">		return null;</span>
+	}
+
+	/**
+	 * Return an {@link InvocableHandlerMethod} for the given
+	 * {@code @RequestMapping} method initialized with argument resolvers.
+	 */
+	public InvocableHandlerMethod getRequestMappingMethod(HandlerMethod handlerMethod) {
+<span class="fc" id="L329">		InvocableHandlerMethod invocable = new InvocableHandlerMethod(handlerMethod);</span>
+<span class="fc" id="L330">		invocable.setArgumentResolvers(this.requestMappingResolvers);</span>
+<span class="fc" id="L331">		invocable.setReactiveAdapterRegistry(this.reactiveAdapterRegistry);</span>
+<span class="fc" id="L332">		invocable.setMethodValidator(this.methodValidator);</span>
+<span class="fc" id="L333">		invocable.setInvocationScheduler(getSchedulerFor(handlerMethod));</span>
+<span class="fc" id="L334">		return invocable;</span>
+	}
+
+	/**
+	 * Find {@code @InitBinder} methods in {@code @ControllerAdvice} components
+	 * or in the controller of the given {@code @RequestMapping} method.
+	 */
+	public List&lt;SyncInvocableHandlerMethod&gt; getInitBinderMethods(HandlerMethod handlerMethod) {
+<span class="fc" id="L342">		List&lt;SyncInvocableHandlerMethod&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L343">		Class&lt;?&gt; handlerType = handlerMethod.getBeanType();</span>
+
+		// Global methods first
+<span class="fc" id="L346">		this.initBinderAdviceCache.forEach((adviceBean, methods) -&gt; {</span>
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">			if (adviceBean.isApplicableToBeanType(handlerType)) {</span>
+<span class="fc" id="L348">				Object bean = adviceBean.resolveBean();</span>
+<span class="fc" id="L349">				methods.forEach(method -&gt; result.add(getInitBinderMethod(bean, method)));</span>
+			}
+<span class="fc" id="L351">		});</span>
+
+<span class="fc" id="L353">		this.initBinderMethodCache</span>
+<span class="fc" id="L354">				.computeIfAbsent(handlerType,</span>
+<span class="fc" id="L355">						key -&gt; MethodIntrospector.selectMethods(key, INIT_BINDER_METHODS))</span>
+<span class="fc" id="L356">				.forEach(method -&gt; {</span>
+<span class="fc" id="L357">					Object bean = handlerMethod.getBean();</span>
+<span class="fc" id="L358">					result.add(getInitBinderMethod(bean, method));</span>
+<span class="fc" id="L359">				});</span>
+
+<span class="fc" id="L361">		return result;</span>
+	}
+
+	private SyncInvocableHandlerMethod getInitBinderMethod(Object bean, Method method) {
+<span class="fc" id="L365">		SyncInvocableHandlerMethod invocable = new SyncInvocableHandlerMethod(bean, method);</span>
+<span class="fc" id="L366">		invocable.setArgumentResolvers(this.initBinderResolvers);</span>
+<span class="fc" id="L367">		return invocable;</span>
+	}
+
+	/**
+	 * Find {@code @ModelAttribute} methods in {@code @ControllerAdvice}
+	 * components or in the controller of the given {@code @RequestMapping} method.
+	 */
+	public List&lt;InvocableHandlerMethod&gt; getModelAttributeMethods(HandlerMethod handlerMethod) {
+<span class="fc" id="L375">		List&lt;InvocableHandlerMethod&gt; result = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L376">		Class&lt;?&gt; handlerType = handlerMethod.getBeanType();</span>
+
+		// Global methods first
+<span class="fc" id="L379">		this.modelAttributeAdviceCache.forEach((adviceBean, methods) -&gt; {</span>
+<span class="pc bpc" id="L380" title="1 of 2 branches missed.">			if (adviceBean.isApplicableToBeanType(handlerType)) {</span>
+<span class="fc" id="L381">				Object bean = adviceBean.resolveBean();</span>
+<span class="fc" id="L382">				methods.forEach(method -&gt; result.add(createAttributeMethod(bean, method)));</span>
+			}
+<span class="fc" id="L384">		});</span>
+
+<span class="fc" id="L386">		this.modelAttributeMethodCache</span>
+<span class="fc" id="L387">				.computeIfAbsent(handlerType,</span>
+<span class="fc" id="L388">						key -&gt; MethodIntrospector.selectMethods(key, MODEL_ATTRIBUTE_METHODS))</span>
+<span class="fc" id="L389">				.forEach(method -&gt; {</span>
+<span class="fc" id="L390">					Object bean = handlerMethod.getBean();</span>
+<span class="fc" id="L391">					result.add(createAttributeMethod(bean, method));</span>
+<span class="fc" id="L392">				});</span>
+
+<span class="fc" id="L394">		return result;</span>
+	}
+
+	private InvocableHandlerMethod createAttributeMethod(Object bean, Method method) {
+<span class="fc" id="L398">		InvocableHandlerMethod invocable = new InvocableHandlerMethod(bean, method);</span>
+<span class="fc" id="L399">		invocable.setArgumentResolvers(this.modelAttributeResolvers);</span>
+<span class="fc" id="L400">		return invocable;</span>
+	}
+
+	/**
+	 * Look for an {@code @ExceptionHandler} method within the class of the given
+	 * controller method, and also within {@code @ControllerAdvice} classes that
+	 * are applicable to the class of the given controller method.
+	 * @param ex the exception to find a handler for
+	 * @param exchange the current HTTP exchange
+	 * @param handlerMethod the controller method that raised the exception,
+	 *        or if {@code null}, check only {@code @ControllerAdvice} classes.
+	 */
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	public @Nullable InvocableHandlerMethod getExceptionHandlerMethod(Throwable ex, ServerWebExchange exchange, @Nullable HandlerMethod handlerMethod) {
+
+<span class="fc bfc" id="L415" title="All 2 branches covered.">		Class&lt;?&gt; handlerType = (handlerMethod != null ? handlerMethod.getBeanType() : null);</span>
+<span class="fc" id="L416">		List&lt;MediaType&gt; requestedMediaTypes = List.of(MediaType.ALL);</span>
+		try {
+<span class="fc" id="L418">			requestedMediaTypes = this.contentTypeResolver.resolveMediaTypes(exchange);</span>
+		}
+<span class="fc" id="L420">		catch (NotAcceptableStatusException exc) {</span>
+<span class="pc bpc" id="L421" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L422">				logger.debug(&quot;Could not parse Accept header for requested media types&quot;, exc);</span>
+			}
+<span class="fc" id="L424">		}</span>
+
+		// Controller-local first
+<span class="fc bfc" id="L427" title="All 2 branches covered.">		if (handlerType != null) {</span>
+<span class="fc bfc" id="L428" title="All 2 branches covered.">			for (MediaType mediaType : requestedMediaTypes) {</span>
+<span class="fc" id="L429">				ExceptionHandlerMappingInfo mappingInfo = this.exceptionHandlerCache</span>
+<span class="fc" id="L430">						.computeIfAbsent(handlerType, ExceptionHandlerMethodResolver::new)</span>
+<span class="fc" id="L431">						.resolveExceptionMapping(ex, mediaType);</span>
+<span class="fc bfc" id="L432" title="All 2 branches covered.">				if (mappingInfo != null) {</span>
+<span class="fc bfc" id="L433" title="All 2 branches covered.">					if (!mappingInfo.getProducibleTypes().isEmpty()) {</span>
+<span class="fc" id="L434">						exchange.getAttributes().put(HandlerMapping.PRODUCIBLE_MEDIA_TYPES_ATTRIBUTE, mappingInfo.getProducibleTypes());</span>
+					}
+<span class="fc" id="L436">					return createInvocableHandlerMethod(handlerMethod.getBean(), mappingInfo.getHandlerMethod());</span>
+				}
+<span class="fc" id="L438">			}</span>
+		}
+
+		// Global exception handlers
+<span class="fc bfc" id="L442" title="All 2 branches covered.">		for (MediaType mediaType : requestedMediaTypes) {</span>
+<span class="fc bfc" id="L443" title="All 2 branches covered.">			for (Map.Entry&lt;ControllerAdviceBean, ExceptionHandlerMethodResolver&gt; entry : this.exceptionHandlerAdviceCache.entrySet()) {</span>
+<span class="fc" id="L444">				ControllerAdviceBean advice = entry.getKey();</span>
+<span class="pc bpc" id="L445" title="1 of 2 branches missed.">				if (advice.isApplicableToBeanType(handlerType)) {</span>
+<span class="fc" id="L446">					ExceptionHandlerMappingInfo mappingInfo = entry.getValue().resolveExceptionMapping(ex, mediaType);</span>
+<span class="fc bfc" id="L447" title="All 2 branches covered.">					if (mappingInfo != null) {</span>
+<span class="pc bpc" id="L448" title="1 of 2 branches missed.">						if (!mappingInfo.getProducibleTypes().isEmpty()) {</span>
+<span class="nc" id="L449">							exchange.getAttributes().put(HandlerMapping.PRODUCIBLE_MEDIA_TYPES_ATTRIBUTE, mappingInfo.getProducibleTypes());</span>
+						}
+<span class="fc" id="L451">						return createInvocableHandlerMethod(advice.resolveBean(), mappingInfo.getHandlerMethod());</span>
+					}
+				}
+<span class="fc" id="L454">			}</span>
+<span class="fc" id="L455">		}</span>
+
+<span class="fc" id="L457">		return null;</span>
+	}
+
+	private InvocableHandlerMethod createInvocableHandlerMethod(Object bean, Method method) {
+<span class="fc" id="L461">		InvocableHandlerMethod invocable = new InvocableHandlerMethod(bean, method);</span>
+<span class="fc" id="L462">		invocable.setArgumentResolvers(this.exceptionHandlerResolvers);</span>
+<span class="fc" id="L463">		return invocable;</span>
+	}
+
+	public boolean hasMethodValidator() {
+<span class="pc bpc" id="L467" title="1 of 2 branches missed.">		return (this.methodValidator != null);</span>
+	}
+
+	/**
+	 * Return the handler for the type-level {@code @SessionAttributes} annotation
+	 * based on the given controller method.
+	 */
+	public SessionAttributesHandler getSessionAttributesHandler(HandlerMethod handlerMethod) {
+<span class="fc" id="L475">		Class&lt;?&gt; handlerType = handlerMethod.getBeanType();</span>
+<span class="fc" id="L476">		return this.sessionAttributesHandlerCache.computeIfAbsent(handlerType, SessionAttributesHandler::new);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

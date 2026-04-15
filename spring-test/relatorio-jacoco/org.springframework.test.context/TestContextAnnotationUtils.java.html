@@ -1,0 +1,659 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TestContextAnnotationUtils.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context</a> &gt; <span class="el_source">TestContextAnnotationUtils.java</span></div><h1>TestContextAnnotationUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context;
+
+import java.lang.annotation.Annotation;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.function.Predicate;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.SpringProperties;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.core.annotation.MergedAnnotation;
+import org.springframework.core.annotation.MergedAnnotationCollectors;
+import org.springframework.core.annotation.MergedAnnotationPredicates;
+import org.springframework.core.annotation.MergedAnnotations;
+import org.springframework.core.annotation.MergedAnnotations.SearchStrategy;
+import org.springframework.core.annotation.RepeatableContainers;
+import org.springframework.core.style.DefaultToStringStyler;
+import org.springframework.core.style.SimpleValueStyler;
+import org.springframework.core.style.ToStringCreator;
+import org.springframework.test.context.NestedTestConfiguration.EnclosingConfiguration;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ConcurrentLruCache;
+import org.springframework.util.ObjectUtils;
+
+/**
+ * {@code TestContextAnnotationUtils} is a collection of utility methods that
+ * complements the standard support already available in {@link MergedAnnotations},
+ * {@link AnnotationUtils}, and {@link AnnotatedElementUtils}, while transparently
+ * honoring {@link NestedTestConfiguration @NestedTestConfiguration} semantics.
+ *
+ * &lt;p&gt;Mainly for internal use within the &lt;em&gt;Spring TestContext Framework&lt;/em&gt;
+ * but also supported for third-party integrations with the TestContext framework.
+ *
+ * &lt;p&gt;Whereas {@code MergedAnnotations}, {@code AnnotationUtils} and
+ * {@code AnnotatedElementUtils} provide utilities for &lt;em&gt;getting&lt;/em&gt; or
+ * &lt;em&gt;finding&lt;/em&gt; annotations, {@code TestContextAnnotationUtils} goes a step
+ * further by providing support for determining the &lt;em&gt;root class&lt;/em&gt; on which
+ * an annotation is declared, either directly or indirectly via a
+ * &lt;em&gt;composed annotation&lt;/em&gt;. This additional information is encapsulated in
+ * an {@link AnnotationDescriptor}.
+ *
+ * &lt;p&gt;The additional information provided by an {@code AnnotationDescriptor} is
+ * required by the &lt;em&gt;Spring TestContext Framework&lt;/em&gt; in order to be able to
+ * support class inheritance and enclosing class hierarchy traversals for
+ * annotations such as {@link ContextConfiguration @ContextConfiguration},
+ * {@link TestExecutionListeners @TestExecutionListeners}, and
+ * {@link ActiveProfiles @ActiveProfiles} which offer support for merging and
+ * overriding various &lt;em&gt;inherited&lt;/em&gt; annotation attributes &amp;mdash; for
+ * example, {@link ContextConfiguration#inheritLocations}.
+ *
+ * @author Sam Brannen
+ * @since 5.3
+ * @see MergedAnnotations
+ * @see MergedAnnotations.Search
+ * @see MergedAnnotations.Search#withEnclosingClasses(Predicate)
+ * @see #searchEnclosingClass(Class)
+ * @see AnnotationUtils
+ * @see AnnotatedElementUtils
+ * @see AnnotationDescriptor
+ * @see NestedTestConfiguration
+ */
+<span class="nc" id="L82">public abstract class TestContextAnnotationUtils {</span>
+
+<span class="fc" id="L84">	private static final ConcurrentLruCache&lt;Class&lt;?&gt;, EnclosingConfiguration&gt; cachedEnclosingConfigurationModes =</span>
+			new ConcurrentLruCache&lt;&gt;(32, TestContextAnnotationUtils::lookUpEnclosingConfiguration);
+
+	private static volatile @Nullable EnclosingConfiguration defaultEnclosingConfigurationMode;
+
+
+	/**
+	 * Determine if an annotation of the specified {@code annotationType} is
+	 * present or meta-present on the supplied {@link Class} according to the
+	 * search algorithm used in {@link #findMergedAnnotation(Class, Class)}.
+	 * &lt;p&gt;If this method returns {@code true}, then {@code findMergedAnnotation(...)}
+	 * will return a non-null value.
+	 * @param clazz the class to look for annotations on
+	 * @param annotationType the type of annotation to look for
+	 * @return {@code true} if a matching annotation is present
+	 * @since 5.3.3
+	 * @see #findMergedAnnotation(Class, Class)
+	 */
+	public static boolean hasAnnotation(Class&lt;?&gt; clazz, Class&lt;? extends Annotation&gt; annotationType) {
+<span class="fc" id="L103">		return MergedAnnotations.search(SearchStrategy.TYPE_HIERARCHY)</span>
+<span class="fc" id="L104">				.withEnclosingClasses(TestContextAnnotationUtils::searchEnclosingClass)</span>
+<span class="fc" id="L105">				.from(clazz)</span>
+<span class="fc" id="L106">				.isPresent(annotationType);</span>
+	}
+
+	/**
+	 * Find the first annotation of the specified {@code annotationType} within
+	 * the annotation hierarchy &lt;em&gt;above&lt;/em&gt; the supplied class, merge that
+	 * annotation's attributes with &lt;em&gt;matching&lt;/em&gt; attributes from annotations
+	 * in lower levels of the annotation hierarchy, and synthesize the result back
+	 * into an annotation of the specified {@code annotationType}.
+	 * &lt;p&gt;In the context of this method, the term &quot;above&quot; means within the
+	 * {@linkplain Class#getSuperclass() superclass} hierarchy or within the
+	 * {@linkplain Class#getEnclosingClass() enclosing class} hierarchy of the
+	 * supplied class. The enclosing class hierarchy will only be searched
+	 * according to {@link NestedTestConfiguration @NestedTestConfiguration}
+	 * semantics.
+	 * &lt;p&gt;{@link org.springframework.core.annotation.AliasFor @AliasFor} semantics
+	 * are fully supported, both within a single annotation and within annotation
+	 * hierarchies.
+	 * @param clazz the class to look for annotations on
+	 * @param annotationType the type of annotation to look for
+	 * @return the merged, synthesized {@code Annotation}, or {@code null} if not found
+	 * @see AnnotatedElementUtils#findMergedAnnotation(java.lang.reflect.AnnotatedElement, Class)
+	 * @see #findAnnotationDescriptor(Class, Class)
+	 * @see #searchEnclosingClass(Class)
+	 */
+	public static &lt;T extends Annotation&gt; @Nullable T findMergedAnnotation(Class&lt;?&gt; clazz, Class&lt;T&gt; annotationType) {
+<span class="fc" id="L132">		return findMergedAnnotation(clazz, annotationType, TestContextAnnotationUtils::searchEnclosingClass);</span>
+	}
+
+	private static &lt;T extends Annotation&gt; @Nullable T findMergedAnnotation(Class&lt;?&gt; clazz, Class&lt;T&gt; annotationType,
+			Predicate&lt;Class&lt;?&gt;&gt; searchEnclosingClass) {
+
+<span class="fc" id="L138">		return MergedAnnotations.search(SearchStrategy.TYPE_HIERARCHY)</span>
+<span class="fc" id="L139">				.withEnclosingClasses(searchEnclosingClass)</span>
+<span class="fc" id="L140">				.from(clazz)</span>
+<span class="fc" id="L141">				.get(annotationType)</span>
+<span class="fc" id="L142">				.synthesize(MergedAnnotation::isPresent).orElse(null);</span>
+	}
+
+	/**
+	 * Get all &lt;em&gt;repeatable annotations&lt;/em&gt; of the specified {@code annotationType}
+	 * within the annotation hierarchy &lt;em&gt;above&lt;/em&gt; the supplied class; and for
+	 * each annotation found, merge that annotation's attributes with &lt;em&gt;matching&lt;/em&gt;
+	 * attributes from annotations in lower levels of the annotation hierarchy and
+	 * synthesize the results back into an annotation of the specified {@code annotationType}.
+	 * &lt;p&gt;This method will find {@link java.lang.annotation.Inherited @Inherited}
+	 * annotations declared on superclasses if the supplied class does not have
+	 * any local declarations of the repeatable annotation. If no inherited
+	 * annotations are found, this method will search within the
+	 * {@linkplain Class#getEnclosingClass() enclosing class} hierarchy of the
+	 * supplied class. The enclosing class hierarchy will only be searched
+	 * according to {@link NestedTestConfiguration @NestedTestConfiguration}
+	 * semantics.
+	 * &lt;p&gt;The container type that holds the repeatable annotations will be looked up
+	 * via {@link java.lang.annotation.Repeatable}.
+	 * &lt;p&gt;{@link org.springframework.core.annotation.AliasFor @AliasFor} semantics
+	 * are fully supported, both within a single annotation and within annotation
+	 * hierarchies.
+	 * @param clazz the class on which to search for annotations (never {@code null})
+	 * @param annotationType the annotation type to find (never {@code null})
+	 * @return the set of all merged repeatable annotations found, or an empty set
+	 * if none were found
+	 * @see AnnotatedElementUtils#getMergedRepeatableAnnotations(java.lang.reflect.AnnotatedElement, Class)
+	 * @see #searchEnclosingClass(Class)
+	 */
+	public static &lt;T extends Annotation&gt; Set&lt;T&gt; getMergedRepeatableAnnotations(
+			Class&lt;?&gt; clazz, Class&lt;T&gt; annotationType) {
+
+		// Present (via @Inherited semantics), directly present, or meta-present?
+<span class="fc" id="L175">		Set&lt;T&gt; mergedAnnotations = MergedAnnotations.from(clazz, SearchStrategy.INHERITED_ANNOTATIONS)</span>
+<span class="fc" id="L176">				.stream(annotationType)</span>
+<span class="fc" id="L177">				.collect(MergedAnnotationCollectors.toAnnotationSet());</span>
+
+<span class="fc bfc" id="L179" title="All 2 branches covered.">		if (!mergedAnnotations.isEmpty()) {</span>
+<span class="fc" id="L180">			return mergedAnnotations;</span>
+		}
+
+		// Declared on an enclosing class of an inner class?
+<span class="fc bfc" id="L184" title="All 2 branches covered.">		if (searchEnclosingClass(clazz)) {</span>
+			// Then mimic @Inherited semantics within the enclosing class hierarchy.
+<span class="fc" id="L186">			return getMergedRepeatableAnnotations(clazz.getEnclosingClass(), annotationType);</span>
+		}
+
+<span class="fc" id="L189">		return Collections.emptySet();</span>
+	}
+
+	/**
+	 * Find the {@link AnnotationDescriptor} for the supplied {@code annotationType}
+	 * on the supplied {@link Class}, traversing its annotations, interfaces,
+	 * superclasses, and enclosing classes if no annotation can be found on the
+	 * given class itself.
+	 * &lt;p&gt;This method explicitly handles class-level annotations which are not
+	 * declared as {@linkplain java.lang.annotation.Inherited inherited} &lt;em&gt;as
+	 * well as meta-annotations&lt;/em&gt;.
+	 * &lt;p&gt;The algorithm operates as follows:
+	 * &lt;ol&gt;
+	 * &lt;li&gt;Search for the annotation on the given class and return a corresponding
+	 * {@code AnnotationDescriptor} if found.
+	 * &lt;li&gt;Recursively search through all annotations that the given class declares.&lt;/li&gt;
+	 * &lt;li&gt;Recursively search through all interfaces implemented by the given class.&lt;/li&gt;
+	 * &lt;li&gt;Recursively search through the superclass hierarchy of the given class.&lt;/li&gt;
+	 * &lt;li&gt;Recursively search through the enclosing class hierarchy of the given class
+	 * if appropriate according to {@link NestedTestConfiguration @NestedTestConfiguration}
+	 * semantics.&lt;/li&gt;
+	 * &lt;/ol&gt;
+	 * &lt;p&gt;In this context, the term &lt;em&gt;recursively&lt;/em&gt; means that the search
+	 * process continues by returning to step #1 with the current annotation,
+	 * interface, superclass, or enclosing class as the class to look for
+	 * annotations on.
+	 * @param clazz the class to look for annotations on
+	 * @param annotationType the type of annotation to look for
+	 * @return the corresponding annotation descriptor if the annotation was found;
+	 * otherwise {@code null}
+	 * @see #findAnnotationDescriptorForTypes(Class, Class...)
+	 */
+	public static &lt;T extends Annotation&gt; @Nullable AnnotationDescriptor&lt;T&gt; findAnnotationDescriptor(
+			@Nullable Class&lt;?&gt; clazz, Class&lt;T&gt; annotationType) {
+
+<span class="fc" id="L224">		Assert.notNull(annotationType, &quot;Annotation type must not be null&quot;);</span>
+<span class="fc" id="L225">		return findAnnotationDescriptor(clazz, annotationType, TestContextAnnotationUtils::searchEnclosingClass,</span>
+			new HashSet&lt;&gt;());
+	}
+
+	/**
+	 * Perform the search algorithm for {@link #findAnnotationDescriptor(Class, Class)},
+	 * avoiding endless recursion by tracking which annotations have already been
+	 * &lt;em&gt;visited&lt;/em&gt;.
+	 * @param clazz the class to look for annotations on
+	 * @param annotationType the type of annotation to look for
+	 * @param searchEnclosingClass a predicate which evaluates to {@code true}
+	 * if a search should be performed on the enclosing class
+	 * @param visited the set of annotations that have already been visited
+	 * @return the corresponding annotation descriptor if the annotation was found;
+	 * otherwise {@code null}
+	 */
+	private static &lt;T extends Annotation&gt; @Nullable AnnotationDescriptor&lt;T&gt; findAnnotationDescriptor(
+			@Nullable Class&lt;?&gt; clazz, Class&lt;T&gt; annotationType, Predicate&lt;Class&lt;?&gt;&gt; searchEnclosingClass,
+			Set&lt;Annotation&gt; visited) {
+
+<span class="fc bfc" id="L245" title="All 4 branches covered.">		if (clazz == null || Object.class == clazz) {</span>
+<span class="fc" id="L246">			return null;</span>
+		}
+
+		// Declared locally?
+<span class="fc bfc" id="L250" title="All 2 branches covered.">		if (AnnotationUtils.isAnnotationDeclaredLocally(annotationType, clazz)) {</span>
+<span class="fc" id="L251">			return new AnnotationDescriptor&lt;&gt;(clazz, clazz.getAnnotation(annotationType));</span>
+		}
+
+		AnnotationDescriptor&lt;T&gt; descriptor;
+
+		// Declared on a composed annotation (i.e., as a meta-annotation)?
+<span class="fc bfc" id="L257" title="All 2 branches covered.">		for (Annotation composedAnn : clazz.getDeclaredAnnotations()) {</span>
+<span class="fc" id="L258">			Class&lt;? extends Annotation&gt; composedType = composedAnn.annotationType();</span>
+<span class="fc bfc" id="L259" title="All 4 branches covered.">			if (!AnnotationUtils.isInJavaLangAnnotationPackage(composedType.getName()) &amp;&amp; visited.add(composedAnn)) {</span>
+<span class="fc" id="L260">				descriptor = findAnnotationDescriptor(composedType, annotationType, searchEnclosingClass, visited);</span>
+<span class="fc bfc" id="L261" title="All 2 branches covered.">				if (descriptor != null) {</span>
+<span class="fc" id="L262">					return new AnnotationDescriptor&lt;&gt;(clazz, descriptor.getDeclaringClass(), descriptor.getAnnotation());</span>
+				}
+			}
+		}
+
+		// Declared on an interface?
+<span class="fc bfc" id="L268" title="All 2 branches covered.">		for (Class&lt;?&gt; ifc : clazz.getInterfaces()) {</span>
+<span class="fc" id="L269">			descriptor = findAnnotationDescriptor(ifc, annotationType, searchEnclosingClass, visited);</span>
+<span class="fc bfc" id="L270" title="All 2 branches covered.">			if (descriptor != null) {</span>
+<span class="fc" id="L271">				return new AnnotationDescriptor&lt;&gt;(clazz, descriptor.getDeclaringClass(), descriptor.getAnnotation());</span>
+			}
+		}
+
+		// Declared on a superclass?
+<span class="fc" id="L276">		descriptor = findAnnotationDescriptor(clazz.getSuperclass(), annotationType, searchEnclosingClass, visited);</span>
+<span class="fc bfc" id="L277" title="All 2 branches covered.">		if (descriptor != null) {</span>
+<span class="fc" id="L278">			return descriptor;</span>
+		}
+
+		// Declared on an enclosing class of an inner class?
+<span class="fc bfc" id="L282" title="All 2 branches covered.">		if (searchEnclosingClass.test(clazz)) {</span>
+<span class="fc" id="L283">			descriptor = findAnnotationDescriptor(clazz.getEnclosingClass(), annotationType, searchEnclosingClass, visited);</span>
+<span class="fc bfc" id="L284" title="All 2 branches covered.">			if (descriptor != null) {</span>
+<span class="fc" id="L285">				return descriptor;</span>
+			}
+		}
+
+<span class="fc" id="L289">		return null;</span>
+	}
+
+	/**
+	 * Find the {@link UntypedAnnotationDescriptor} for the first {@link Class}
+	 * in the inheritance hierarchy of the specified {@code clazz} (including
+	 * the specified {@code clazz} itself) which declares at least one of the
+	 * specified {@code annotationTypes}.
+	 * &lt;p&gt;This method traverses the annotations, interfaces, superclasses, and
+	 * enclosing classes of the specified {@code clazz} if no annotation can be
+	 * found on the given class itself.
+	 * &lt;p&gt;This method explicitly handles class-level annotations which are not
+	 * declared as {@linkplain java.lang.annotation.Inherited inherited} &lt;em&gt;as
+	 * well as meta-annotations&lt;/em&gt;.
+	 * &lt;p&gt;The algorithm operates as follows:
+	 * &lt;ol&gt;
+	 * &lt;li&gt;Search for a local declaration of one of the annotation types on the
+	 * given class and return a corresponding {@code UntypedAnnotationDescriptor}
+	 * if found.
+	 * &lt;li&gt;Recursively search through all annotations that the given class declares.&lt;/li&gt;
+	 * &lt;li&gt;Recursively search through all interfaces implemented by the given class.&lt;/li&gt;
+	 * &lt;li&gt;Recursively search through the superclass hierarchy of the given class.&lt;/li&gt;
+	 * &lt;li&gt;Recursively search through the enclosing class hierarchy of the given class
+	 * if appropriate according to {@link NestedTestConfiguration @NestedTestConfiguration}
+	 * semantics.&lt;/li&gt;
+	 * &lt;/ol&gt;
+	 * &lt;p&gt;In this context, the term &lt;em&gt;recursively&lt;/em&gt; means that the search
+	 * process continues by returning to step #1 with the current annotation,
+	 * interface, superclass, or enclosing class as the class to look for
+	 * annotations on.
+	 * @param clazz the class to look for annotations on
+	 * @param annotationTypes the types of annotations to look for
+	 * @return the corresponding annotation descriptor if one of the annotations
+	 * was found; otherwise {@code null}
+	 * @see #findAnnotationDescriptor(Class, Class)
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public static @Nullable UntypedAnnotationDescriptor findAnnotationDescriptorForTypes(
+			Class&lt;?&gt; clazz, Class&lt;? extends Annotation&gt;... annotationTypes) {
+
+<span class="fc" id="L329">		assertNonEmptyAnnotationTypeArray(annotationTypes, &quot;The list of annotation types must not be empty&quot;);</span>
+<span class="fc" id="L330">		return findAnnotationDescriptorForTypes(clazz, annotationTypes, new HashSet&lt;&gt;());</span>
+	}
+
+	/**
+	 * Perform the search algorithm for {@link #findAnnotationDescriptorForTypes(Class, Class...)},
+	 * avoiding endless recursion by tracking which annotations have already been
+	 * &lt;em&gt;visited&lt;/em&gt;.
+	 * @param clazz the class to look for annotations on
+	 * @param annotationTypes the types of annotations to look for
+	 * @param visited the set of annotations that have already been visited
+	 * @return the corresponding annotation descriptor if one of the annotations
+	 * was found; otherwise {@code null}
+	 */
+	private static @Nullable UntypedAnnotationDescriptor findAnnotationDescriptorForTypes(@Nullable Class&lt;?&gt; clazz,
+			Class&lt;? extends Annotation&gt;[] annotationTypes, Set&lt;Annotation&gt; visited) {
+
+<span class="fc bfc" id="L346" title="All 4 branches covered.">		if (clazz == null || Object.class == clazz) {</span>
+<span class="fc" id="L347">			return null;</span>
+		}
+
+		// Declared locally?
+<span class="fc bfc" id="L351" title="All 2 branches covered.">		for (Class&lt;? extends Annotation&gt; annotationType : annotationTypes) {</span>
+<span class="fc bfc" id="L352" title="All 2 branches covered.">			if (AnnotationUtils.isAnnotationDeclaredLocally(annotationType, clazz)) {</span>
+<span class="fc" id="L353">				return new UntypedAnnotationDescriptor(clazz, clazz.getAnnotation(annotationType), annotationTypes);</span>
+			}
+		}
+
+		// Declared on a composed annotation (i.e., as a meta-annotation)?
+<span class="fc bfc" id="L358" title="All 2 branches covered.">		for (Annotation composedAnnotation : clazz.getDeclaredAnnotations()) {</span>
+<span class="fc bfc" id="L359" title="All 4 branches covered.">			if (!AnnotationUtils.isInJavaLangAnnotationPackage(composedAnnotation) &amp;&amp; visited.add(composedAnnotation)) {</span>
+<span class="fc" id="L360">				UntypedAnnotationDescriptor descriptor = findAnnotationDescriptorForTypes(</span>
+<span class="fc" id="L361">						composedAnnotation.annotationType(), annotationTypes, visited);</span>
+<span class="fc bfc" id="L362" title="All 2 branches covered.">				if (descriptor != null) {</span>
+<span class="fc" id="L363">					return new UntypedAnnotationDescriptor(clazz, descriptor.getDeclaringClass(),</span>
+<span class="fc" id="L364">							descriptor.getAnnotation(), annotationTypes);</span>
+				}
+			}
+		}
+
+		// Declared on an interface?
+<span class="fc bfc" id="L370" title="All 2 branches covered.">		for (Class&lt;?&gt; ifc : clazz.getInterfaces()) {</span>
+<span class="fc" id="L371">			UntypedAnnotationDescriptor descriptor = findAnnotationDescriptorForTypes(ifc, annotationTypes, visited);</span>
+<span class="fc bfc" id="L372" title="All 2 branches covered.">			if (descriptor != null) {</span>
+<span class="fc" id="L373">				return new UntypedAnnotationDescriptor(clazz, descriptor.getDeclaringClass(),</span>
+<span class="fc" id="L374">						descriptor.getAnnotation(), annotationTypes);</span>
+			}
+		}
+
+		// Declared on a superclass?
+<span class="fc" id="L379">		UntypedAnnotationDescriptor descriptor =</span>
+<span class="fc" id="L380">				findAnnotationDescriptorForTypes(clazz.getSuperclass(), annotationTypes, visited);</span>
+<span class="fc bfc" id="L381" title="All 2 branches covered.">		if (descriptor != null) {</span>
+<span class="fc" id="L382">			return descriptor;</span>
+		}
+
+		// Declared on an enclosing class of an inner class?
+<span class="fc bfc" id="L386" title="All 2 branches covered.">		if (searchEnclosingClass(clazz)) {</span>
+<span class="fc" id="L387">			descriptor = findAnnotationDescriptorForTypes(clazz.getEnclosingClass(), annotationTypes, visited);</span>
+<span class="fc bfc" id="L388" title="All 2 branches covered.">			if (descriptor != null) {</span>
+<span class="fc" id="L389">				return descriptor;</span>
+			}
+		}
+
+<span class="fc" id="L393">		return null;</span>
+	}
+
+	/**
+	 * Determine if annotations on the enclosing class of the supplied class
+	 * should be searched by annotation search algorithms within the &lt;em&gt;Spring
+	 * TestContext Framework&lt;/em&gt;.
+	 * @param clazz the class whose enclosing class should potentially be searched
+	 * @return {@code true} if the supplied class is an inner class whose enclosing
+	 * class should be searched
+	 * @see ClassUtils#isInnerClass(Class)
+	 * @see NestedTestConfiguration @NestedTestConfiguration
+	 */
+	public static boolean searchEnclosingClass(Class&lt;?&gt; clazz) {
+<span class="fc bfc" id="L407" title="All 2 branches covered.">		return (ClassUtils.isInnerClass(clazz) &amp;&amp;</span>
+<span class="fc bfc" id="L408" title="All 2 branches covered.">				getEnclosingConfiguration(clazz) == EnclosingConfiguration.INHERIT);</span>
+	}
+
+	static void clearCaches() {
+<span class="fc" id="L412">		cachedEnclosingConfigurationModes.clear();</span>
+<span class="fc" id="L413">		defaultEnclosingConfigurationMode = null;</span>
+<span class="fc" id="L414">	}</span>
+
+	/**
+	 * Get the {@link EnclosingConfiguration} mode for the supplied class.
+	 * @param clazz the class for which the enclosing configuration mode should
+	 * be resolved
+	 * @return the resolved enclosing configuration mode
+	 */
+	private static EnclosingConfiguration getEnclosingConfiguration(Class&lt;?&gt; clazz) {
+<span class="fc" id="L423">		return cachedEnclosingConfigurationModes.get(clazz);</span>
+	}
+
+	private static EnclosingConfiguration lookUpEnclosingConfiguration(Class&lt;?&gt; clazz) {
+		// @NestedTestConfiguration should not be discovered on an enclosing class
+		// for a nested interface (which is always static), so our predicate simply
+		// ensures that the candidate class is an inner class.
+<span class="fc" id="L430">		Predicate&lt;Class&lt;?&gt;&gt; searchEnclosingClass = ClassUtils::isInnerClass;</span>
+<span class="fc" id="L431">		NestedTestConfiguration nestedTestConfiguration =</span>
+<span class="fc" id="L432">				findMergedAnnotation(clazz, NestedTestConfiguration.class, searchEnclosingClass);</span>
+<span class="fc bfc" id="L433" title="All 2 branches covered.">		return (nestedTestConfiguration != null ? nestedTestConfiguration.value() : getDefaultEnclosingConfigurationMode());</span>
+	}
+
+	private static EnclosingConfiguration getDefaultEnclosingConfigurationMode() {
+<span class="fc" id="L437">		EnclosingConfiguration defaultConfigurationMode = defaultEnclosingConfigurationMode;</span>
+<span class="fc bfc" id="L438" title="All 2 branches covered.">		if (defaultConfigurationMode == null) {</span>
+<span class="fc" id="L439">			String value = SpringProperties.getProperty(NestedTestConfiguration.ENCLOSING_CONFIGURATION_PROPERTY_NAME);</span>
+<span class="fc" id="L440">			EnclosingConfiguration enclosingConfigurationMode = EnclosingConfiguration.from(value);</span>
+			defaultConfigurationMode =
+<span class="fc bfc" id="L442" title="All 2 branches covered.">					(enclosingConfigurationMode != null ? enclosingConfigurationMode : EnclosingConfiguration.INHERIT);</span>
+<span class="fc" id="L443">			defaultEnclosingConfigurationMode = defaultConfigurationMode;</span>
+		}
+<span class="fc" id="L445">		return defaultConfigurationMode;</span>
+	}
+
+	private static void assertNonEmptyAnnotationTypeArray(Class&lt;?&gt;[] annotationTypes, String message) {
+<span class="pc bpc" id="L449" title="1 of 2 branches missed.">		if (ObjectUtils.isEmpty(annotationTypes)) {</span>
+<span class="nc" id="L450">			throw new IllegalArgumentException(message);</span>
+		}
+<span class="fc bfc" id="L452" title="All 2 branches covered.">		for (Class&lt;?&gt; clazz : annotationTypes) {</span>
+<span class="pc bpc" id="L453" title="1 of 2 branches missed.">			if (!Annotation.class.isAssignableFrom(clazz)) {</span>
+<span class="nc" id="L454">				throw new IllegalArgumentException(&quot;Array elements must be of type Annotation&quot;);</span>
+			}
+		}
+<span class="fc" id="L457">	}</span>
+
+
+	/**
+	 * Descriptor for an {@link Annotation}, including the {@linkplain
+	 * #getDeclaringClass() class} on which the annotation is &lt;em&gt;declared&lt;/em&gt;
+	 * as well as the {@linkplain #getAnnotation() merged annotation} instance.
+	 * &lt;p&gt;If the annotation is used as a meta-annotation, the &lt;em&gt;root declaring
+	 * class&lt;/em&gt; is not directly annotated with the annotation but rather
+	 * indirectly via a composed annotation.
+	 * &lt;p&gt;Given the following example, if we are searching for the {@code @Transactional}
+	 * annotation &lt;em&gt;on&lt;/em&gt; the {@code TransactionalTests} class, then the
+	 * properties of the {@code AnnotationDescriptor} would be as follows.
+	 * &lt;ul&gt;
+	 * &lt;li&gt;rootDeclaringClass: {@code TransactionalTests} class object&lt;/li&gt;
+	 * &lt;li&gt;declaringClass: {@code TransactionalTests} class object&lt;/li&gt;
+	 * &lt;li&gt;annotation: instance of the {@code Transactional} annotation&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * &lt;p&gt;&lt;pre style=&quot;code&quot;&gt;
+	 * &amp;#064;Transactional
+	 * &amp;#064;ContextConfiguration({&quot;/test-datasource.xml&quot;, &quot;/repository-config.xml&quot;})
+	 * public class TransactionalTests { }
+	 * &lt;/pre&gt;
+	 * &lt;p&gt;Given the following example, if we are searching for the {@code @Transactional}
+	 * annotation &lt;em&gt;on&lt;/em&gt; the {@code UserRepositoryTests} class, then the
+	 * properties of the {@code AnnotationDescriptor} would be as follows.
+	 * &lt;ul&gt;
+	 * &lt;li&gt;rootDeclaringClass: {@code UserRepositoryTests} class object&lt;/li&gt;
+	 * &lt;li&gt;declaringClass: {@code RepositoryTests} class object&lt;/li&gt;
+	 * &lt;li&gt;annotation: instance of the {@code Transactional} annotation&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * &lt;p&gt;&lt;pre style=&quot;code&quot;&gt;
+	 * &amp;#064;Transactional
+	 * &amp;#064;ContextConfiguration({&quot;/test-datasource.xml&quot;, &quot;/repository-config.xml&quot;})
+	 * &amp;#064;Retention(RetentionPolicy.RUNTIME)
+	 * public &amp;#064;interface RepositoryTests { }
+	 *
+	 * &amp;#064;RepositoryTests
+	 * public class UserRepositoryTests { }
+	 * &lt;/pre&gt;
+	 *
+	 * @param &lt;T&gt; the annotation type
+	 */
+	public static class AnnotationDescriptor&lt;T extends Annotation&gt; {
+
+		private final Class&lt;?&gt; rootDeclaringClass;
+
+		private final Class&lt;?&gt; declaringClass;
+
+		private final T annotation;
+
+		AnnotationDescriptor(Class&lt;?&gt; rootDeclaringClass, T annotation) {
+<span class="fc" id="L509">			this(rootDeclaringClass, rootDeclaringClass, annotation);</span>
+<span class="fc" id="L510">		}</span>
+
+		@SuppressWarnings(&quot;unchecked&quot;)
+<span class="fc" id="L513">		AnnotationDescriptor(Class&lt;?&gt; rootDeclaringClass, Class&lt;?&gt; declaringClass, T annotation) {</span>
+<span class="fc" id="L514">			Assert.notNull(rootDeclaringClass, &quot;'rootDeclaringClass' must not be null&quot;);</span>
+<span class="fc" id="L515">			Assert.notNull(declaringClass, &quot;'declaringClass' must not be null&quot;);</span>
+<span class="fc" id="L516">			Assert.notNull(annotation, &quot;Annotation must not be null&quot;);</span>
+<span class="fc" id="L517">			this.rootDeclaringClass = rootDeclaringClass;</span>
+<span class="fc" id="L518">			this.declaringClass = declaringClass;</span>
+<span class="fc" id="L519">			T mergedAnnotation = (T) AnnotatedElementUtils.findMergedAnnotation(</span>
+<span class="fc" id="L520">					rootDeclaringClass, annotation.annotationType());</span>
+<span class="pc bpc" id="L521" title="1 of 2 branches missed.">			Assert.state(mergedAnnotation != null,</span>
+<span class="nc" id="L522">					() -&gt; &quot;Failed to find merged annotation for &quot; + annotation);</span>
+<span class="fc" id="L523">			this.annotation = mergedAnnotation;</span>
+<span class="fc" id="L524">		}</span>
+
+		public Class&lt;?&gt; getRootDeclaringClass() {
+<span class="fc" id="L527">			return this.rootDeclaringClass;</span>
+		}
+
+		public Class&lt;?&gt; getDeclaringClass() {
+<span class="fc" id="L531">			return this.declaringClass;</span>
+		}
+
+		/**
+		 * Get the merged annotation for this descriptor.
+		 */
+		public T getAnnotation() {
+<span class="fc" id="L538">			return this.annotation;</span>
+		}
+
+		@SuppressWarnings(&quot;unchecked&quot;)
+		Class&lt;T&gt; getAnnotationType() {
+<span class="fc" id="L543">			return (Class&lt;T&gt;) this.annotation.annotationType();</span>
+		}
+
+		/**
+		 * Find the next {@link AnnotationDescriptor} for the specified annotation
+		 * type in the hierarchy above the {@linkplain #getRootDeclaringClass()
+		 * root declaring class} of this descriptor.
+		 * &lt;p&gt;If a corresponding annotation is found in the superclass hierarchy
+		 * of the root declaring class, that will be returned. Otherwise, an
+		 * attempt will be made to find a corresponding annotation in the
+		 * {@linkplain Class#getEnclosingClass() enclosing class} hierarchy of
+		 * the root declaring class if {@linkplain #searchEnclosingClass appropriate}.
+		 * @return the next corresponding annotation descriptor if the annotation
+		 * was found; otherwise {@code null}
+		 */
+		public @Nullable AnnotationDescriptor&lt;T&gt; next() {
+			// Declared on a superclass?
+<span class="fc" id="L560">			AnnotationDescriptor&lt;T&gt; descriptor =</span>
+<span class="fc" id="L561">					findAnnotationDescriptor(getRootDeclaringClass().getSuperclass(), getAnnotationType());</span>
+			// Declared on an enclosing class of an inner class?
+<span class="fc bfc" id="L563" title="All 4 branches covered.">			if (descriptor == null &amp;&amp; searchEnclosingClass(getRootDeclaringClass())) {</span>
+<span class="fc" id="L564">				descriptor = findAnnotationDescriptor(getRootDeclaringClass().getEnclosingClass(), getAnnotationType());</span>
+			}
+<span class="fc" id="L566">			return descriptor;</span>
+		}
+
+		/**
+		 * Find &lt;strong&gt;all&lt;/strong&gt; annotations of the specified annotation type
+		 * that are present or meta-present on the {@linkplain #getRootDeclaringClass()
+		 * root declaring class} of this descriptor or on any interfaces that the
+		 * root declaring class implements.
+		 * @return the set of all merged, synthesized {@code Annotations} found,
+		 * or an empty set if none were found
+		 */
+		public Set&lt;T&gt; findAllLocalMergedAnnotations() {
+<span class="nc" id="L578">			SearchStrategy searchStrategy = SearchStrategy.TYPE_HIERARCHY;</span>
+<span class="nc" id="L579">			return MergedAnnotations.from(getRootDeclaringClass(), searchStrategy, RepeatableContainers.none())</span>
+<span class="nc" id="L580">					.stream(getAnnotationType())</span>
+<span class="nc" id="L581">					.filter(MergedAnnotationPredicates.firstRunOf(MergedAnnotation::getAggregateIndex))</span>
+<span class="nc" id="L582">					.collect(MergedAnnotationCollectors.toAnnotationSet());</span>
+		}
+
+		/**
+		 * Provide a textual representation of this {@code AnnotationDescriptor}.
+		 */
+		@Override
+		public String toString() {
+<span class="nc" id="L590">			return new ToStringCreator(this, new DefaultToStringStyler(new SimpleValueStyler()))</span>
+<span class="nc" id="L591">					.append(&quot;rootDeclaringClass&quot;, this.rootDeclaringClass)</span>
+<span class="nc" id="L592">					.append(&quot;declaringClass&quot;, this.declaringClass)</span>
+<span class="nc" id="L593">					.append(&quot;annotation&quot;, this.annotation)</span>
+<span class="nc" id="L594">					.toString();</span>
+		}
+	}
+
+
+	/**
+	 * &lt;em&gt;Untyped&lt;/em&gt; extension of {@link AnnotationDescriptor} that is used
+	 * to describe the declaration of one of several candidate annotation types
+	 * where the actual annotation type cannot be predetermined.
+	 */
+	public static class UntypedAnnotationDescriptor extends AnnotationDescriptor&lt;Annotation&gt; {
+
+		private final Class&lt;? extends Annotation&gt;[] annotationTypes;
+
+		UntypedAnnotationDescriptor(Class&lt;?&gt; rootDeclaringClass, Annotation annotation,
+				Class&lt;? extends Annotation&gt;[] annotationTypes) {
+
+<span class="fc" id="L611">			this(rootDeclaringClass, rootDeclaringClass, annotation, annotationTypes);</span>
+<span class="fc" id="L612">		}</span>
+
+		UntypedAnnotationDescriptor(Class&lt;?&gt; rootDeclaringClass, Class&lt;?&gt; declaringClass,
+				Annotation annotation, Class&lt;? extends Annotation&gt;[] annotationTypes) {
+
+<span class="fc" id="L617">			super(rootDeclaringClass, declaringClass, annotation);</span>
+<span class="fc" id="L618">			this.annotationTypes = annotationTypes;</span>
+<span class="fc" id="L619">		}</span>
+
+		/**
+		 * Find the next {@link UntypedAnnotationDescriptor} for the specified
+		 * annotation types in the hierarchy above the
+		 * {@linkplain #getRootDeclaringClass() root declaring class} of this
+		 * descriptor.
+		 * &lt;p&gt;If one of the corresponding annotations is found in the superclass
+		 * hierarchy of the root declaring class, that will be returned. Otherwise,
+		 * an attempt will be made to find a corresponding annotation in the
+		 * {@linkplain Class#getEnclosingClass() enclosing class} hierarchy of
+		 * the root declaring class if {@linkplain #searchEnclosingClass appropriate}.
+		 * @return the next corresponding annotation descriptor if one of the
+		 * annotations was found; otherwise {@code null}
+		 * @see AnnotationDescriptor#next()
+		 */
+		@Override
+		public @Nullable UntypedAnnotationDescriptor next() {
+			// Declared on a superclass?
+<span class="fc" id="L638">			UntypedAnnotationDescriptor descriptor =</span>
+<span class="fc" id="L639">					findAnnotationDescriptorForTypes(getRootDeclaringClass().getSuperclass(), this.annotationTypes);</span>
+			// Declared on an enclosing class of an inner class?
+<span class="fc bfc" id="L641" title="All 4 branches covered.">			if (descriptor == null &amp;&amp; searchEnclosingClass(getRootDeclaringClass())) {</span>
+<span class="fc" id="L642">				descriptor = findAnnotationDescriptorForTypes(getRootDeclaringClass().getEnclosingClass(), this.annotationTypes);</span>
+			}
+<span class="fc" id="L644">			return descriptor;</span>
+		}
+
+		/**
+		 * Throws an {@link UnsupportedOperationException} since the type of annotation
+		 * represented by an {@code UntypedAnnotationDescriptor} is unknown.
+		 */
+		@Override
+		public Set&lt;Annotation&gt; findAllLocalMergedAnnotations() {
+<span class="nc" id="L653">			throw new UnsupportedOperationException(</span>
+					&quot;findAllLocalMergedAnnotations() is unsupported in UntypedAnnotationDescriptor&quot;);
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

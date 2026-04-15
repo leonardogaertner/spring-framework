@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MetadataEncoder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.rsocket</a> &gt; <span class="el_source">MetadataEncoder.java</span></div><h1>MetadataEncoder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.rsocket;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufAllocator;
+import io.netty.buffer.CompositeByteBuf;
+import io.rsocket.metadata.WellKnownMimeType;
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.codec.Encoder;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.NettyDataBufferFactory;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.MimeType;
+import org.springframework.util.ObjectUtils;
+
+/**
+ * Helps to collect metadata values and mime types, and encode them.
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.2
+ */
+final class MetadataEncoder {
+
+	/** For route variable replacement. */
+<span class="fc" id="L53">	private static final Pattern VARS_PATTERN = Pattern.compile(&quot;\\{(.+?)}&quot;);</span>
+
+<span class="fc" id="L55">	private static final Object NO_VALUE = new Object();</span>
+
+
+	private final MimeType metadataMimeType;
+
+	private final RSocketStrategies strategies;
+
+	private final boolean isComposite;
+
+	private final ByteBufAllocator allocator;
+
+	private @Nullable String route;
+
+<span class="fc" id="L68">	private final List&lt;MetadataEntry&gt; metadataEntries = new ArrayList&lt;&gt;(4);</span>
+
+	private boolean hasAsyncValues;
+
+
+<span class="fc" id="L73">	MetadataEncoder(MimeType metadataMimeType, RSocketStrategies strategies) {</span>
+<span class="fc" id="L74">		Assert.notNull(metadataMimeType, &quot;'metadataMimeType' is required&quot;);</span>
+<span class="fc" id="L75">		Assert.notNull(strategies, &quot;RSocketStrategies is required&quot;);</span>
+<span class="fc" id="L76">		this.metadataMimeType = metadataMimeType;</span>
+<span class="fc" id="L77">		this.strategies = strategies;</span>
+<span class="fc" id="L78">		this.isComposite = this.metadataMimeType.toString().equals(</span>
+<span class="fc" id="L79">				WellKnownMimeType.MESSAGE_RSOCKET_COMPOSITE_METADATA.getString());</span>
+<span class="fc bfc" id="L80" title="All 2 branches covered.">		this.allocator = bufferFactory() instanceof NettyDataBufferFactory nettyDBF ?</span>
+<span class="fc" id="L81">				nettyDBF.getByteBufAllocator() : ByteBufAllocator.DEFAULT;</span>
+<span class="fc" id="L82">	}</span>
+
+
+	private DataBufferFactory bufferFactory() {
+<span class="fc" id="L86">		return this.strategies.dataBufferFactory();</span>
+	}
+
+
+	/**
+	 * Set the route to a remote handler as described in
+	 * {@link RSocketRequester#route(String, Object...)}.
+	 */
+	public MetadataEncoder route(String route, Object... routeVars) {
+<span class="fc" id="L95">		this.route = expand(route, routeVars);</span>
+<span class="fc" id="L96">		assertMetadataEntryCount();</span>
+<span class="fc" id="L97">		return this;</span>
+	}
+
+	private static String expand(String route, Object... routeVars) {
+<span class="fc bfc" id="L101" title="All 2 branches covered.">		if (ObjectUtils.isEmpty(routeVars)) {</span>
+<span class="fc" id="L102">			return route;</span>
+		}
+<span class="fc" id="L104">		StringBuilder sb = new StringBuilder();</span>
+<span class="fc" id="L105">		int index = 0;</span>
+<span class="fc" id="L106">		Matcher matcher = VARS_PATTERN.matcher(route);</span>
+<span class="fc bfc" id="L107" title="All 2 branches covered.">		while (matcher.find()) {</span>
+<span class="pc bpc" id="L108" title="1 of 2 branches missed.">			Assert.isTrue(index &lt; routeVars.length, () -&gt; &quot;No value for variable '&quot; + matcher.group(1) + &quot;'&quot;);</span>
+<span class="fc" id="L109">			String value = routeVars[index].toString().replace(&quot;.&quot;, &quot;%2E&quot;);</span>
+<span class="fc" id="L110">			matcher.appendReplacement(sb, value);</span>
+<span class="fc" id="L111">			index++;</span>
+<span class="fc" id="L112">		}</span>
+<span class="fc" id="L113">		matcher.appendTail(sb);</span>
+<span class="fc" id="L114">		return sb.toString();</span>
+	}
+
+	private void assertMetadataEntryCount() {
+<span class="fc bfc" id="L118" title="All 2 branches covered.">		if (!this.isComposite) {</span>
+<span class="fc bfc" id="L119" title="All 2 branches covered.">			int count = this.route != null ? this.metadataEntries.size() + 1 : this.metadataEntries.size();</span>
+<span class="fc bfc" id="L120" title="All 2 branches covered.">			Assert.isTrue(count &lt; 2, &quot;Composite metadata required for multiple metadata entries.&quot;);</span>
+		}
+<span class="fc" id="L122">	}</span>
+
+	/**
+	 * Add a metadata entry. If called more than once or in addition to route,
+	 * composite metadata must be in use.
+	 */
+	public MetadataEncoder metadata(Object metadata, @Nullable MimeType mimeType) {
+<span class="fc bfc" id="L129" title="All 2 branches covered.">		if (this.isComposite) {</span>
+<span class="fc" id="L130">			Assert.notNull(mimeType, &quot;MimeType is required for composite metadata entries.&quot;);</span>
+		}
+<span class="fc bfc" id="L132" title="All 2 branches covered.">		else if (mimeType == null) {</span>
+<span class="fc" id="L133">			mimeType = this.metadataMimeType;</span>
+		}
+<span class="fc bfc" id="L135" title="All 2 branches covered.">		else if (!this.metadataMimeType.equals(mimeType)) {</span>
+<span class="fc" id="L136">			throw new IllegalArgumentException(</span>
+					&quot;Mime type is optional when not using composite metadata, but it was provided &quot; +
+							&quot;and does not match the connection metadata mime type '&quot; + this.metadataMimeType + &quot;'.&quot;);
+		}
+<span class="fc" id="L140">		ReactiveAdapter adapter = this.strategies.reactiveAdapterRegistry().getAdapter(metadata.getClass());</span>
+<span class="fc bfc" id="L141" title="All 2 branches covered.">		if (adapter != null) {</span>
+<span class="fc" id="L142">			Object originalMetadata = metadata;</span>
+<span class="pc bpc" id="L143" title="1 of 2 branches missed.">			Assert.isTrue(!adapter.isMultiValue(), () -&gt; &quot;Expected single value: &quot; + originalMetadata);</span>
+<span class="fc" id="L144">			metadata = Mono.from(adapter.toPublisher(metadata)).defaultIfEmpty(NO_VALUE);</span>
+<span class="fc" id="L145">			this.hasAsyncValues = true;</span>
+		}
+<span class="fc" id="L147">		this.metadataEntries.add(new MetadataEntry(metadata, mimeType));</span>
+<span class="fc" id="L148">		assertMetadataEntryCount();</span>
+<span class="fc" id="L149">		return this;</span>
+	}
+
+	/**
+	 * Add route and/or metadata, both optional.
+	 */
+	public MetadataEncoder metadataAndOrRoute(@Nullable Map&lt;Object, MimeType&gt; metadata,
+			@Nullable String route, Object @Nullable [] vars) {
+
+<span class="pc bpc" id="L158" title="1 of 2 branches missed.">		if (route != null) {</span>
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">			this.route = expand(route, vars != null ? vars : new Object[0]);</span>
+		}
+<span class="fc bfc" id="L161" title="All 2 branches covered.">		if (!CollectionUtils.isEmpty(metadata)) {</span>
+<span class="fc bfc" id="L162" title="All 2 branches covered.">			for (Map.Entry&lt;Object, MimeType&gt; entry : metadata.entrySet()) {</span>
+<span class="fc" id="L163">				metadata(entry.getKey(), entry.getValue());</span>
+<span class="fc" id="L164">			}</span>
+		}
+<span class="fc" id="L166">		assertMetadataEntryCount();</span>
+<span class="fc" id="L167">		return this;</span>
+	}
+
+
+	/**
+	 * Encode the collected metadata entries to a {@code DataBuffer}.
+	 * @see PayloadUtils#createPayload(DataBuffer, DataBuffer)
+	 */
+	public Mono&lt;DataBuffer&gt; encode() {
+<span class="fc bfc" id="L176" title="All 2 branches covered.">		return this.hasAsyncValues ?</span>
+<span class="fc" id="L177">				resolveAsyncMetadata().map(this::encodeEntries) :</span>
+<span class="fc" id="L178">				Mono.fromCallable(() -&gt; encodeEntries(this.metadataEntries));</span>
+	}
+
+	@SuppressWarnings(&quot;deprecation&quot;)
+	private DataBuffer encodeEntries(List&lt;MetadataEntry&gt; entries) {
+<span class="fc bfc" id="L183" title="All 2 branches covered.">		if (this.isComposite) {</span>
+<span class="fc" id="L184">			CompositeByteBuf composite = this.allocator.compositeBuffer();</span>
+			try {
+<span class="pc bpc" id="L186" title="1 of 2 branches missed.">				if (this.route != null) {</span>
+<span class="fc" id="L187">					io.rsocket.metadata.CompositeMetadataCodec.encodeAndAddMetadata(composite, this.allocator,</span>
+<span class="fc" id="L188">							WellKnownMimeType.MESSAGE_RSOCKET_ROUTING, encodeRoute());</span>
+				}
+<span class="fc" id="L190">				entries.forEach(entry -&gt; {</span>
+<span class="fc" id="L191">					Object value = entry.value();</span>
+<span class="fc" id="L192">					io.rsocket.metadata.CompositeMetadataCodec.encodeAndAddMetadata(</span>
+<span class="fc" id="L193">							composite, this.allocator, entry.mimeType().toString(),</span>
+<span class="fc bfc" id="L194" title="All 2 branches covered.">							value instanceof ByteBuf byteBuf ? byteBuf : PayloadUtils.asByteBuf(encodeEntry(entry)));</span>
+<span class="fc" id="L195">				});</span>
+<span class="fc" id="L196">				return asDataBuffer(composite);</span>
+				}
+<span class="nc" id="L198">			catch (Throwable ex) {</span>
+<span class="nc" id="L199">				composite.release();</span>
+<span class="nc" id="L200">				throw ex;</span>
+			}
+		}
+<span class="fc bfc" id="L203" title="All 2 branches covered.">		else if (this.route != null) {</span>
+<span class="fc" id="L204">			Assert.isTrue(entries.isEmpty(), &quot;Composite metadata required for route and other entries&quot;);</span>
+<span class="fc" id="L205">			String routingMimeType = WellKnownMimeType.MESSAGE_RSOCKET_ROUTING.getString();</span>
+<span class="fc bfc" id="L206" title="All 2 branches covered.">			return this.metadataMimeType.toString().equals(routingMimeType) ?</span>
+<span class="fc" id="L207">					asDataBuffer(encodeRoute()) :</span>
+<span class="fc" id="L208">					encodeEntry(this.route, this.metadataMimeType);</span>
+		}
+		else {
+<span class="pc bpc" id="L211" title="1 of 2 branches missed.">			Assert.isTrue(entries.size() == 1, &quot;Composite metadata required for multiple entries&quot;);</span>
+<span class="fc" id="L212">			MetadataEntry entry = entries.get(0);</span>
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">			if (!this.metadataMimeType.equals(entry.mimeType())) {</span>
+<span class="nc" id="L214">				throw new IllegalArgumentException(</span>
+						&quot;Connection configured for metadata mime type &quot; +
+								&quot;'&quot; + this.metadataMimeType + &quot;', but actual is `&quot; + entries + &quot;`&quot;);
+			}
+<span class="fc" id="L218">			return encodeEntry(entry);</span>
+		}
+	}
+
+	private ByteBuf encodeRoute() {
+<span class="fc" id="L223">		return io.rsocket.metadata.TaggingMetadataCodec.createRoutingMetadata(</span>
+<span class="fc" id="L224">				this.allocator, Collections.singletonList(this.route)).getContent();</span>
+	}
+
+	private &lt;T&gt; DataBuffer encodeEntry(MetadataEntry entry) {
+<span class="fc" id="L228">		return encodeEntry(entry.value(), entry.mimeType());</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private &lt;T&gt; DataBuffer encodeEntry(Object value, MimeType mimeType) {
+<span class="fc bfc" id="L233" title="All 2 branches covered.">		if (value instanceof ByteBuf byteBuf) {</span>
+<span class="fc" id="L234">			return asDataBuffer(byteBuf);</span>
+		}
+<span class="fc" id="L236">		ResolvableType type = ResolvableType.forInstance(value);</span>
+<span class="fc" id="L237">		Encoder&lt;T&gt; encoder = this.strategies.encoder(type, mimeType);</span>
+<span class="pc" id="L238">		Assert.notNull(encoder, () -&gt; &quot;No encoder for metadata &quot; + value + &quot;, mimeType '&quot; + mimeType + &quot;'&quot;);</span>
+<span class="fc" id="L239">		return encoder.encodeValue((T) value, bufferFactory(), type, mimeType, Collections.emptyMap());</span>
+	}
+
+	private DataBuffer asDataBuffer(ByteBuf byteBuf) {
+<span class="fc bfc" id="L243" title="All 2 branches covered.">		if (bufferFactory() instanceof NettyDataBufferFactory nettyDBF) {</span>
+<span class="fc" id="L244">			return nettyDBF.wrap(byteBuf);</span>
+		}
+		else {
+<span class="fc" id="L247">			DataBuffer buffer = bufferFactory().wrap(byteBuf.nioBuffer());</span>
+<span class="fc" id="L248">			byteBuf.release();</span>
+<span class="fc" id="L249">			return buffer;</span>
+		}
+	}
+
+	private Mono&lt;List&lt;MetadataEntry&gt;&gt; resolveAsyncMetadata() {
+<span class="fc" id="L254">		Assert.state(this.hasAsyncValues, &quot;No asynchronous values to resolve&quot;);</span>
+<span class="fc" id="L255">		List&lt;Mono&lt;?&gt;&gt; valueMonos = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L256">		this.metadataEntries.forEach(entry -&gt; {</span>
+<span class="fc" id="L257">			Object v = entry.value();</span>
+<span class="fc bfc" id="L258" title="All 2 branches covered.">			valueMonos.add(v instanceof Mono&lt;?&gt; mono ? mono : Mono.just(v));</span>
+<span class="fc" id="L259">		});</span>
+<span class="fc" id="L260">		return Mono.zip(valueMonos, values -&gt; {</span>
+<span class="fc" id="L261">			List&lt;MetadataEntry&gt; result = new ArrayList&lt;&gt;(values.length);</span>
+<span class="fc bfc" id="L262" title="All 2 branches covered.">			for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">				if (values[i] != NO_VALUE) {</span>
+<span class="fc" id="L264">					result.add(new MetadataEntry(values[i], this.metadataEntries.get(i).mimeType()));</span>
+				}
+			}
+<span class="fc" id="L267">			return result;</span>
+		});
+	}
+
+
+	/**
+	 * Holder for the metadata value and mime type.
+	 * @since 5.2.2
+	 */
+	private static class MetadataEntry {
+
+		private final Object value;
+
+		private final MimeType mimeType;
+
+<span class="fc" id="L282">		MetadataEntry(Object value, MimeType mimeType) {</span>
+<span class="fc" id="L283">			this.value = value;</span>
+<span class="fc" id="L284">			this.mimeType = mimeType;</span>
+<span class="fc" id="L285">		}</span>
+
+		public Object value() {
+<span class="fc" id="L288">			return this.value;</span>
+		}
+
+		public MimeType mimeType() {
+<span class="fc" id="L292">			return this.mimeType;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

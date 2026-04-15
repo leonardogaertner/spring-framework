@@ -1,0 +1,229 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ConfigurationClassUtils.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.context.annotation</a> &gt; <span class="el_source">ConfigurationClassUtils.java</span></div><h1>ConfigurationClassUtils.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.context.annotation;
+
+import java.io.IOException;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aop.framework.AopInfrastructureBean;
+import org.springframework.beans.factory.annotation.AnnotatedBeanDefinition;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
+import org.springframework.beans.factory.config.BeanPostProcessor;
+import org.springframework.beans.factory.support.AbstractBeanDefinition;
+import org.springframework.cglib.proxy.Enhancer;
+import org.springframework.context.event.EventListenerFactory;
+import org.springframework.core.Conventions;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.core.annotation.Order;
+import org.springframework.core.type.AnnotationMetadata;
+import org.springframework.core.type.classreading.MetadataReader;
+import org.springframework.core.type.classreading.MetadataReaderFactory;
+import org.springframework.stereotype.Component;
+
+/**
+ * Utilities for identifying and configuring {@link Configuration} classes.
+ *
+ * @author Chris Beams
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @author Stephane Nicoll
+ * @since 6.0
+ */
+<span class="nc" id="L53">public abstract class ConfigurationClassUtils {</span>
+
+	static final String CONFIGURATION_CLASS_FULL = &quot;full&quot;;
+
+	static final String CONFIGURATION_CLASS_LITE = &quot;lite&quot;;
+
+	/**
+	 * When set to {@link Boolean#TRUE}, this attribute signals that the bean class
+	 * for the given {@link BeanDefinition} should be considered as a candidate
+	 * configuration class in 'lite' mode by default.
+	 * &lt;p&gt;For example, a class registered directly with an {@code ApplicationContext}
+	 * should always be considered a configuration class candidate.
+	 * @since 6.0.10
+	 */
+<span class="fc" id="L67">	static final String CANDIDATE_ATTRIBUTE =</span>
+<span class="fc" id="L68">			Conventions.getQualifiedAttributeName(ConfigurationClassPostProcessor.class, &quot;candidate&quot;);</span>
+
+<span class="fc" id="L70">	static final String CONFIGURATION_CLASS_ATTRIBUTE =</span>
+<span class="fc" id="L71">			Conventions.getQualifiedAttributeName(ConfigurationClassPostProcessor.class, &quot;configurationClass&quot;);</span>
+
+<span class="fc" id="L73">	static final String ORDER_ATTRIBUTE =</span>
+<span class="fc" id="L74">			Conventions.getQualifiedAttributeName(ConfigurationClassPostProcessor.class, &quot;order&quot;);</span>
+
+
+<span class="fc" id="L77">	private static final Log logger = LogFactory.getLog(ConfigurationClassUtils.class);</span>
+
+<span class="fc" id="L79">	private static final Set&lt;String&gt; candidateIndicators = Set.of(</span>
+<span class="fc" id="L80">			Component.class.getName(),</span>
+<span class="fc" id="L81">			ComponentScan.class.getName(),</span>
+<span class="fc" id="L82">			Import.class.getName(),</span>
+<span class="fc" id="L83">			ImportResource.class.getName());</span>
+
+
+	/**
+	 * Initialize a configuration class proxy for the specified class.
+	 * @param userClass the configuration class to initialize
+	 */
+	@SuppressWarnings(&quot;unused&quot;) // Used by AOT-optimized generated code
+	public static Class&lt;?&gt; initializeConfigurationClass(Class&lt;?&gt; userClass) {
+<span class="nc" id="L92">		Class&lt;?&gt; configurationClass = new ConfigurationClassEnhancer().enhance(userClass, null);</span>
+<span class="nc" id="L93">		Enhancer.registerStaticCallbacks(configurationClass, ConfigurationClassEnhancer.CALLBACKS);</span>
+<span class="nc" id="L94">		return configurationClass;</span>
+	}
+
+
+	/**
+	 * Check whether the given bean definition is a candidate for a configuration class
+	 * (or a nested component class declared within a configuration/component class,
+	 * to be auto-registered as well), and mark it accordingly.
+	 * @param beanDef the bean definition to check
+	 * @param metadataReaderFactory the current factory in use by the caller
+	 * @return whether the candidate qualifies as (any kind of) configuration class
+	 */
+	static boolean checkConfigurationClassCandidate(
+			BeanDefinition beanDef, MetadataReaderFactory metadataReaderFactory) {
+
+<span class="fc" id="L109">		String className = beanDef.getBeanClassName();</span>
+<span class="fc bfc" id="L110" title="All 4 branches covered.">		if (className == null || beanDef.getFactoryMethodName() != null) {</span>
+<span class="fc" id="L111">			return false;</span>
+		}
+
+		AnnotationMetadata metadata;
+<span class="fc bfc" id="L115" title="All 2 branches covered.">		if (beanDef instanceof AnnotatedBeanDefinition annotatedBd &amp;&amp;</span>
+<span class="fc bfc" id="L116" title="All 2 branches covered.">				className.equals(annotatedBd.getMetadata().getClassName())) {</span>
+			// Can reuse the pre-parsed metadata from the given BeanDefinition...
+<span class="fc" id="L118">			metadata = annotatedBd.getMetadata();</span>
+		}
+<span class="pc bpc" id="L120" title="1 of 4 branches missed.">		else if (beanDef instanceof AbstractBeanDefinition abstractBd &amp;&amp; abstractBd.hasBeanClass()) {</span>
+			// Check already loaded Class if present...
+			// since we possibly can't even load the class file for this Class.
+<span class="fc" id="L123">			Class&lt;?&gt; beanClass = abstractBd.getBeanClass();</span>
+<span class="fc bfc" id="L124" title="All 2 branches covered.">			if (BeanFactoryPostProcessor.class.isAssignableFrom(beanClass) ||</span>
+<span class="fc bfc" id="L125" title="All 2 branches covered.">					BeanPostProcessor.class.isAssignableFrom(beanClass) ||</span>
+<span class="fc bfc" id="L126" title="All 2 branches covered.">					AopInfrastructureBean.class.isAssignableFrom(beanClass) ||</span>
+<span class="fc bfc" id="L127" title="All 2 branches covered.">					EventListenerFactory.class.isAssignableFrom(beanClass)) {</span>
+<span class="fc" id="L128">				return false;</span>
+			}
+<span class="fc" id="L130">			metadata = AnnotationMetadata.introspect(beanClass);</span>
+<span class="fc" id="L131">		}</span>
+		else {
+			try {
+<span class="fc" id="L134">				MetadataReader metadataReader = metadataReaderFactory.getMetadataReader(className);</span>
+<span class="fc" id="L135">				metadata = metadataReader.getAnnotationMetadata();</span>
+			}
+<span class="fc" id="L137">			catch (IOException ex) {</span>
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L139">					logger.debug(&quot;Could not find class file for introspecting configuration annotations: &quot; +</span>
+							className, ex);
+				}
+<span class="fc" id="L142">				return false;</span>
+<span class="fc" id="L143">			}</span>
+		}
+
+<span class="fc" id="L146">		Map&lt;String, @Nullable Object&gt; config = metadata.getAnnotationAttributes(Configuration.class.getName());</span>
+<span class="fc bfc" id="L147" title="All 4 branches covered.">		if (config != null &amp;&amp; !Boolean.FALSE.equals(config.get(&quot;proxyBeanMethods&quot;))) {</span>
+<span class="fc" id="L148">			beanDef.setAttribute(CONFIGURATION_CLASS_ATTRIBUTE, CONFIGURATION_CLASS_FULL);</span>
+		}
+<span class="fc bfc" id="L150" title="All 4 branches covered.">		else if (config != null || Boolean.TRUE.equals(beanDef.getAttribute(CANDIDATE_ATTRIBUTE)) ||</span>
+<span class="fc bfc" id="L151" title="All 2 branches covered.">				isConfigurationCandidate(metadata)) {</span>
+<span class="fc" id="L152">			beanDef.setAttribute(CONFIGURATION_CLASS_ATTRIBUTE, CONFIGURATION_CLASS_LITE);</span>
+		}
+		else {
+<span class="fc" id="L155">			return false;</span>
+		}
+
+		// It's a full or lite configuration candidate... Let's determine the order value, if any.
+<span class="fc" id="L159">		Integer order = getOrder(metadata);</span>
+<span class="fc bfc" id="L160" title="All 2 branches covered.">		if (order != null) {</span>
+<span class="fc" id="L161">			beanDef.setAttribute(ORDER_ATTRIBUTE, order);</span>
+		}
+
+<span class="fc" id="L164">		return true;</span>
+	}
+
+	/**
+	 * Check the given metadata for a configuration class candidate
+	 * (or nested component class declared within a configuration/component class).
+	 * @param metadata the metadata of the annotated class
+	 * @return {@code true} if the given class is to be registered for
+	 * configuration class processing; {@code false} otherwise
+	 */
+	static boolean isConfigurationCandidate(AnnotationMetadata metadata) {
+		// Do not consider an interface or an annotation...
+<span class="fc bfc" id="L176" title="All 2 branches covered.">		if (metadata.isInterface()) {</span>
+<span class="fc" id="L177">			return false;</span>
+		}
+
+		// Any of the typical annotations found?
+<span class="fc bfc" id="L181" title="All 2 branches covered.">		for (String indicator : candidateIndicators) {</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">			if (metadata.isAnnotated(indicator)) {</span>
+<span class="fc" id="L183">				return true;</span>
+			}
+<span class="fc" id="L185">		}</span>
+
+		// Finally, let's look for @Bean methods...
+<span class="fc" id="L188">		return hasBeanMethods(metadata);</span>
+	}
+
+	static boolean hasBeanMethods(AnnotationMetadata metadata) {
+		try {
+<span class="fc" id="L193">			return metadata.hasAnnotatedMethods(Bean.class.getName());</span>
+		}
+<span class="nc" id="L195">		catch (Throwable ex) {</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L197">				logger.debug(&quot;Failed to introspect @Bean methods on class [&quot; + metadata.getClassName() + &quot;]: &quot; + ex);</span>
+			}
+<span class="nc" id="L199">			return false;</span>
+		}
+	}
+
+	/**
+	 * Determine the order for the given configuration class metadata.
+	 * @param metadata the metadata of the annotated class
+	 * @return the {@code @Order} annotation value on the configuration class,
+	 * or {@code Ordered.LOWEST_PRECEDENCE} if none declared
+	 * @since 5.0
+	 */
+	public static @Nullable Integer getOrder(AnnotationMetadata metadata) {
+<span class="fc" id="L211">		Map&lt;String, @Nullable Object&gt; orderAttributes = metadata.getAnnotationAttributes(Order.class.getName());</span>
+<span class="fc bfc" id="L212" title="All 2 branches covered.">		return (orderAttributes != null ? ((Integer) orderAttributes.get(AnnotationUtils.VALUE)) : null);</span>
+	}
+
+	/**
+	 * Determine the order for the given configuration class bean definition,
+	 * as set by {@link #checkConfigurationClassCandidate}.
+	 * @param beanDef the bean definition to check
+	 * @return the {@link Order @Order} annotation value on the configuration class,
+	 * or {@link Ordered#LOWEST_PRECEDENCE} if none declared
+	 * @since 4.2
+	 */
+	public static int getOrder(BeanDefinition beanDef) {
+<span class="fc" id="L224">		Integer order = (Integer) beanDef.getAttribute(ORDER_ATTRIBUTE);</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">		return (order != null ? order : Ordered.LOWEST_PRECEDENCE);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

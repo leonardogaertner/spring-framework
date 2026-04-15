@@ -1,0 +1,350 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ReactorResourceFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.client</a> &gt; <span class="el_source">ReactorResourceFactory.java</span></div><h1>ReactorResourceFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.client;
+
+import java.time.Duration;
+import java.util.function.Consumer;
+import java.util.function.Supplier;
+
+import org.jspecify.annotations.Nullable;
+import reactor.netty.http.HttpResources;
+import reactor.netty.resources.ConnectionProvider;
+import reactor.netty.resources.LoopResources;
+
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationContextAware;
+import org.springframework.context.SmartLifecycle;
+import org.springframework.util.Assert;
+
+/**
+ * Factory to manage Reactor Netty resources, i.e. {@link LoopResources} for
+ * event loop threads and {@link ConnectionProvider} for the connection pool,
+ * within the lifecycle of a Spring {@code ApplicationContext}.
+ *
+ * &lt;p&gt;This factory implements {@link SmartLifecycle} and is expected typically
+ * to be declared as a Spring-managed bean.
+ *
+ * &lt;p&gt;Note that after a {@link SmartLifecycle} stop/restart, new instances of
+ * the configured {@link LoopResources} and {@link ConnectionProvider} are
+ * created, so any references to those should be updated. However, this factory
+ * does not participate in {@linkplain #isPauseable() pause} scenarios.
+ *
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @author Sebastien Deleuze
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 6.1
+ */
+<span class="fc" id="L55">public class ReactorResourceFactory</span>
+		implements ApplicationContextAware, InitializingBean, DisposableBean, SmartLifecycle {
+
+<span class="fc" id="L58">	private boolean useGlobalResources = true;</span>
+
+	private @Nullable Consumer&lt;HttpResources&gt; globalResourcesConsumer;
+
+<span class="pc" id="L62">	private Supplier&lt;ConnectionProvider&gt; connectionProviderSupplier = () -&gt; ConnectionProvider.create(&quot;webflux&quot;, 500);</span>
+
+	private volatile @Nullable ConnectionProvider connectionProvider;
+
+<span class="pc" id="L66">	private Supplier&lt;LoopResources&gt; loopResourcesSupplier = () -&gt; LoopResources.create(&quot;webflux-http&quot;);</span>
+
+	private volatile @Nullable LoopResources loopResources;
+
+<span class="fc" id="L70">	private boolean manageConnectionProvider = false;</span>
+
+<span class="fc" id="L72">	private boolean manageLoopResources = false;</span>
+
+<span class="fc" id="L74">	private Duration shutdownQuietPeriod = Duration.ofSeconds(LoopResources.DEFAULT_SHUTDOWN_QUIET_PERIOD);</span>
+
+<span class="fc" id="L76">	private Duration shutdownTimeout = Duration.ofSeconds(LoopResources.DEFAULT_SHUTDOWN_TIMEOUT);</span>
+
+	private @Nullable ApplicationContext applicationContext;
+
+	private volatile boolean running;
+
+<span class="fc" id="L82">	private final Object lifecycleMonitor = new Object();</span>
+
+
+	/**
+	 * Whether to use global Reactor Netty resources via {@link HttpResources}.
+	 * &lt;p&gt;Default is &quot;true&quot; in which case this factory initializes and stops the
+	 * global Reactor Netty resources within Spring's {@code ApplicationContext}
+	 * lifecycle. If set to &quot;false&quot; the factory manages its resources independent
+	 * of the global ones.
+	 * @param useGlobalResources whether to expose and manage the global resources
+	 * @see #addGlobalResourcesConsumer(Consumer)
+	 */
+	public void setUseGlobalResources(boolean useGlobalResources) {
+<span class="nc" id="L95">		this.useGlobalResources = useGlobalResources;</span>
+<span class="nc" id="L96">	}</span>
+
+	/**
+	 * Whether this factory exposes the global
+	 * {@link reactor.netty.http.HttpResources HttpResources} holder.
+	 */
+	public boolean isUseGlobalResources() {
+<span class="nc" id="L103">		return this.useGlobalResources;</span>
+	}
+
+	/**
+	 * Add a Consumer for configuring the global Reactor Netty resources on
+	 * startup. When this option is used, {@link #setUseGlobalResources} is also
+	 * enabled.
+	 * @param consumer the consumer to apply
+	 * @see #setUseGlobalResources(boolean)
+	 */
+	public void addGlobalResourcesConsumer(Consumer&lt;HttpResources&gt; consumer) {
+<span class="nc" id="L114">		this.useGlobalResources = true;</span>
+<span class="nc bnc" id="L115" title="All 2 branches missed.">		this.globalResourcesConsumer = (this.globalResourcesConsumer != null ?</span>
+<span class="nc" id="L116">				this.globalResourcesConsumer.andThen(consumer) : consumer);</span>
+<span class="nc" id="L117">	}</span>
+
+	/**
+	 * Use this when you don't want to participate in global resources and
+	 * you want to customize the creation of the managed {@code ConnectionProvider}.
+	 * &lt;p&gt;By default, {@code ConnectionProvider.elastic(&quot;http&quot;)} is used.
+	 * &lt;p&gt;Note that this supplier is ignored if {@link #isUseGlobalResources()}
+	 * is {@code true} or once the {@link #setConnectionProvider(ConnectionProvider) ConnectionProvider}
+	 * is set.
+	 * @param supplier the supplier to use
+	 */
+	public void setConnectionProviderSupplier(Supplier&lt;ConnectionProvider&gt; supplier) {
+<span class="nc" id="L129">		this.connectionProviderSupplier = supplier;</span>
+<span class="nc" id="L130">	}</span>
+
+	/**
+	 * Use this when you want to provide an externally managed
+	 * {@link ConnectionProvider} instance.
+	 * @param connectionProvider the connection provider to use as is
+	 */
+	public void setConnectionProvider(ConnectionProvider connectionProvider) {
+<span class="nc" id="L138">		this.connectionProvider = connectionProvider;</span>
+<span class="nc" id="L139">	}</span>
+
+	/**
+	 * Return the configured {@link ConnectionProvider}.
+	 * &lt;p&gt;Lazily tries to start the resources on demand if not initialized yet.
+	 * @see #start()
+	 */
+	public ConnectionProvider getConnectionProvider() {
+<span class="pc bpc" id="L147" title="1 of 2 branches missed.">		if (this.connectionProvider == null) {</span>
+<span class="nc" id="L148">			start();</span>
+		}
+<span class="fc" id="L150">		ConnectionProvider connectionProvider = this.connectionProvider;</span>
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">		Assert.state(connectionProvider != null, &quot;ConnectionProvider not initialized&quot;);</span>
+<span class="fc" id="L152">		return connectionProvider;</span>
+	}
+
+	/**
+	 * Use this when you don't want to participate in global resources and
+	 * you want to customize the creation of the managed {@code LoopResources}.
+	 * &lt;p&gt;By default, {@code LoopResources.create(&quot;webflux-http&quot;)} is used.
+	 * &lt;p&gt;Note that this supplier is ignored if {@link #isUseGlobalResources()}
+	 * is {@code true} or once the {@link #setLoopResources(LoopResources) LoopResources}
+	 * is set.
+	 * @param supplier the supplier to use
+	 */
+	public void setLoopResourcesSupplier(Supplier&lt;LoopResources&gt; supplier) {
+<span class="nc" id="L165">		this.loopResourcesSupplier = supplier;</span>
+<span class="nc" id="L166">	}</span>
+
+	/**
+	 * Use this option when you want to provide an externally managed
+	 * {@link LoopResources} instance.
+	 * @param loopResources the loop resources to use as is
+	 */
+	public void setLoopResources(LoopResources loopResources) {
+<span class="nc" id="L174">		this.loopResources = loopResources;</span>
+<span class="nc" id="L175">	}</span>
+
+	/**
+	 * Return the configured {@link LoopResources}.
+	 * &lt;p&gt;Lazily tries to start the resources on demand if not initialized yet.
+	 * @see #start()
+	 */
+	public LoopResources getLoopResources() {
+<span class="pc bpc" id="L183" title="1 of 2 branches missed.">		if (this.loopResources == null) {</span>
+<span class="nc" id="L184">			start();</span>
+		}
+<span class="fc" id="L186">		LoopResources loopResources = this.loopResources;</span>
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">		Assert.state(loopResources != null, &quot;LoopResources not initialized&quot;);</span>
+<span class="fc" id="L188">		return loopResources;</span>
+	}
+
+	/**
+	 * Configure the amount of time we'll wait before shutting down resources.
+	 * If a task is submitted during the {@code shutdownQuietPeriod}, it is guaranteed
+	 * to be accepted and the {@code shutdownQuietPeriod} will start over.
+	 * &lt;p&gt;By default, this is set to
+	 * {@link LoopResources#DEFAULT_SHUTDOWN_QUIET_PERIOD} which is 2 seconds but
+	 * can also be overridden with the system property
+	 * {@link reactor.netty.ReactorNetty#SHUTDOWN_QUIET_PERIOD
+	 * ReactorNetty.SHUTDOWN_QUIET_PERIOD}.
+	 * @see #setShutdownTimeout(Duration)
+	 */
+	public void setShutdownQuietPeriod(Duration shutdownQuietPeriod) {
+<span class="fc" id="L203">		Assert.notNull(shutdownQuietPeriod, &quot;shutdownQuietPeriod should not be null&quot;);</span>
+<span class="fc" id="L204">		this.shutdownQuietPeriod = shutdownQuietPeriod;</span>
+<span class="fc" id="L205">	}</span>
+
+	/**
+	 * Configure the maximum amount of time to wait until the disposal of the
+	 * underlying resources regardless if a task was submitted during the
+	 * {@code shutdownQuietPeriod}.
+	 * &lt;p&gt;By default, this is set to
+	 * {@link LoopResources#DEFAULT_SHUTDOWN_TIMEOUT} which is 15 seconds but
+	 * can also be overridden with the system property
+	 * {@link reactor.netty.ReactorNetty#SHUTDOWN_TIMEOUT
+	 * ReactorNetty.SHUTDOWN_TIMEOUT}.
+	 * @see #setShutdownQuietPeriod(Duration)
+	 */
+	public void setShutdownTimeout(Duration shutdownTimeout) {
+<span class="nc" id="L219">		Assert.notNull(shutdownTimeout, &quot;shutdownTimeout should not be null&quot;);</span>
+<span class="nc" id="L220">		this.shutdownTimeout = shutdownTimeout;</span>
+<span class="nc" id="L221">	}</span>
+
+	/**
+	 * Setting an {@link ApplicationContext} is optional: If set, Reactor resources
+	 * will be initialized in the {@link #start() lifecycle start} phase and closed
+	 * in the {@link #stop() lifecycle stop} phase. If not set, it will happen in
+	 * {@link #afterPropertiesSet()} and {@link #destroy()}, respectively.
+	 */
+	@Override
+	public void setApplicationContext(ApplicationContext applicationContext) {
+<span class="nc" id="L231">		this.applicationContext = applicationContext;</span>
+<span class="nc" id="L232">	}</span>
+
+
+	/**
+	 * Starts the resources if initialized outside an ApplicationContext.
+	 * This is for backwards compatibility; the preferred way is to rely on
+	 * the ApplicationContext's {@link SmartLifecycle lifecycle management}.
+	 * @see #start()
+	 */
+	@Override
+	public void afterPropertiesSet() {
+<span class="pc bpc" id="L243" title="1 of 2 branches missed.">		if (this.applicationContext == null) {</span>
+<span class="fc" id="L244">			start();</span>
+		}
+<span class="fc" id="L246">	}</span>
+
+	/**
+	 * Stops the resources if initialized outside an ApplicationContext.
+	 * This is for backwards compatibility; the preferred way is to rely on
+	 * the ApplicationContext's {@link SmartLifecycle lifecycle management}.
+	 * @see #stop()
+	 */
+	@Override
+	public void destroy() {
+<span class="pc bpc" id="L256" title="1 of 2 branches missed.">		if (this.applicationContext == null) {</span>
+<span class="fc" id="L257">			stop();</span>
+		}
+<span class="fc" id="L259">	}</span>
+
+	@Override
+	public void start() {
+<span class="fc" id="L263">		synchronized (this.lifecycleMonitor) {</span>
+<span class="pc bpc" id="L264" title="1 of 2 branches missed.">			if (!this.running) {</span>
+<span class="pc bpc" id="L265" title="1 of 2 branches missed.">				if (this.useGlobalResources) {</span>
+<span class="pc bpc" id="L266" title="2 of 4 branches missed.">					Assert.isTrue(this.loopResources == null &amp;&amp; this.connectionProvider == null,</span>
+							&quot;'useGlobalResources' is mutually exclusive with explicitly configured resources&quot;);
+<span class="fc" id="L268">					HttpResources httpResources = HttpResources.get();</span>
+<span class="pc bpc" id="L269" title="1 of 2 branches missed.">					if (this.globalResourcesConsumer != null) {</span>
+<span class="nc" id="L270">						this.globalResourcesConsumer.accept(httpResources);</span>
+					}
+<span class="fc" id="L272">					this.connectionProvider = httpResources;</span>
+<span class="fc" id="L273">					this.loopResources = httpResources;</span>
+<span class="fc" id="L274">				}</span>
+				else {
+<span class="nc bnc" id="L276" title="All 2 branches missed.">					if (this.loopResources == null) {</span>
+<span class="nc" id="L277">						this.manageLoopResources = true;</span>
+<span class="nc" id="L278">						this.loopResources = this.loopResourcesSupplier.get();</span>
+					}
+<span class="nc bnc" id="L280" title="All 2 branches missed.">					if (this.connectionProvider == null) {</span>
+<span class="nc" id="L281">						this.manageConnectionProvider = true;</span>
+<span class="nc" id="L282">						this.connectionProvider = this.connectionProviderSupplier.get();</span>
+					}
+				}
+<span class="fc" id="L285">				this.running = true;</span>
+			}
+<span class="fc" id="L287">		}</span>
+
+<span class="fc" id="L289">	}</span>
+
+	@Override
+	public void stop() {
+<span class="fc" id="L293">		synchronized (this.lifecycleMonitor) {</span>
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">			if (this.running) {</span>
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">				if (this.useGlobalResources) {</span>
+<span class="fc" id="L296">					HttpResources.disposeLoopsAndConnectionsLater(this.shutdownQuietPeriod, this.shutdownTimeout).block();</span>
+<span class="fc" id="L297">					this.connectionProvider = null;</span>
+<span class="fc" id="L298">					this.loopResources = null;</span>
+				}
+				else {
+					try {
+<span class="nc" id="L302">						ConnectionProvider provider = this.connectionProvider;</span>
+<span class="nc bnc" id="L303" title="All 4 branches missed.">						if (provider != null &amp;&amp; this.manageConnectionProvider) {</span>
+<span class="nc" id="L304">							this.connectionProvider = null;</span>
+<span class="nc" id="L305">							provider.disposeLater().block();</span>
+						}
+					}
+<span class="nc" id="L308">					catch (Throwable ex) {</span>
+						// ignore
+<span class="nc" id="L310">					}</span>
+
+					try {
+<span class="nc" id="L313">						LoopResources resources = this.loopResources;</span>
+<span class="nc bnc" id="L314" title="All 4 branches missed.">						if (resources != null &amp;&amp; this.manageLoopResources) {</span>
+<span class="nc" id="L315">							this.loopResources = null;</span>
+<span class="nc" id="L316">							resources.disposeLater(this.shutdownQuietPeriod, this.shutdownTimeout).block();</span>
+						}
+					}
+<span class="nc" id="L319">					catch (Throwable ex) {</span>
+						// ignore
+<span class="nc" id="L321">					}</span>
+				}
+<span class="fc" id="L323">				this.running = false;</span>
+			}
+<span class="fc" id="L325">		}</span>
+<span class="fc" id="L326">	}</span>
+
+	@Override
+	public boolean isRunning() {
+<span class="fc" id="L330">		return this.running;</span>
+	}
+
+	/**
+	 * Returns {@code false} to indicate that a {@code ReactorResourceFactory}
+	 * should be skipped in a pause scenario.
+	 * @since 7.0
+	 */
+	@Override
+	public boolean isPauseable() {
+<span class="nc" id="L340">		return false;</span>
+	}
+
+	@Override
+	public int getPhase() {
+		// Same as plain Lifecycle
+<span class="nc" id="L346">		return 0;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

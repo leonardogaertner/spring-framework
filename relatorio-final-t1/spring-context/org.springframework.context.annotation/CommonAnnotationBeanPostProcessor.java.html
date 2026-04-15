@@ -1,0 +1,894 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>CommonAnnotationBeanPostProcessor.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.context.annotation</a> &gt; <span class="el_source">CommonAnnotationBeanPostProcessor.java</span></div><h1>CommonAnnotationBeanPostProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.context.annotation;
+
+import java.beans.PropertyDescriptor;
+import java.io.Serializable;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.Field;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aop.TargetSource;
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.aot.generate.AccessControl;
+import org.springframework.aot.generate.GeneratedClass;
+import org.springframework.aot.generate.GeneratedMethod;
+import org.springframework.aot.generate.GenerationContext;
+import org.springframework.aot.hint.ExecutableMode;
+import org.springframework.aot.hint.RuntimeHints;
+import org.springframework.aot.hint.support.ClassHintUtils;
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.PropertyValues;
+import org.springframework.beans.factory.BeanCreationException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.annotation.InitDestroyAnnotationBeanPostProcessor;
+import org.springframework.beans.factory.annotation.InjectionMetadata;
+import org.springframework.beans.factory.aot.BeanRegistrationAotContribution;
+import org.springframework.beans.factory.aot.BeanRegistrationCode;
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.config.DependencyDescriptor;
+import org.springframework.beans.factory.config.EmbeddedValueResolver;
+import org.springframework.beans.factory.config.InstantiationAwareBeanPostProcessor;
+import org.springframework.beans.factory.support.AutowireCandidateResolver;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.beans.factory.support.RegisteredBean;
+import org.springframework.beans.factory.support.RootBeanDefinition;
+import org.springframework.core.BridgeMethodResolver;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.javapoet.ClassName;
+import org.springframework.javapoet.CodeBlock;
+import org.springframework.jndi.support.SimpleJndiBeanFactory;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.util.StringValueResolver;
+
+/**
+ * {@link org.springframework.beans.factory.config.BeanPostProcessor} implementation
+ * that supports common Java annotations out of the box, in particular the common
+ * annotations in the {@code jakarta.annotation} package. These common Java
+ * annotations are supported in many Jakarta EE technologies (for example, JSF and JAX-RS).
+ *
+ * &lt;p&gt;This post-processor includes support for the {@link jakarta.annotation.PostConstruct}
+ * and {@link jakarta.annotation.PreDestroy} annotations - as init annotation
+ * and destroy annotation, respectively - through inheriting from
+ * {@link InitDestroyAnnotationBeanPostProcessor} with pre-configured annotation types.
+ *
+ * &lt;p&gt;The central element is the {@link jakarta.annotation.Resource} annotation
+ * for annotation-driven injection of named beans, by default from the containing
+ * Spring BeanFactory, with only {@code mappedName} references resolved in JNDI.
+ * The {@link #setAlwaysUseJndiLookup &quot;alwaysUseJndiLookup&quot; flag} enforces JNDI lookups
+ * equivalent to standard Jakarta EE resource injection for {@code name} references
+ * and default names as well. The target beans can be simple POJOs, with no special
+ * requirements other than the type having to match.
+ *
+ * &lt;p&gt;This post-processor also supports the EJB {@link jakarta.ejb.EJB} annotation,
+ * analogous to {@link jakarta.annotation.Resource}, with the capability to
+ * specify both a local bean name and a global JNDI name for fallback retrieval.
+ * The target beans can be plain POJOs as well as EJB Session Beans in this case.
+ *
+ * &lt;p&gt;For default usage, resolving resource names as Spring bean names,
+ * simply define the following in your application context:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;bean class=&quot;org.springframework.context.annotation.CommonAnnotationBeanPostProcessor&quot;/&amp;gt;&lt;/pre&gt;
+ *
+ * For direct JNDI access, resolving resource names as JNDI resource references
+ * within the Jakarta EE application's &quot;java:comp/env/&quot; namespace, use the following:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;bean class=&quot;org.springframework.context.annotation.CommonAnnotationBeanPostProcessor&quot;&amp;gt;
+ *   &amp;lt;property name=&quot;alwaysUseJndiLookup&quot; value=&quot;true&quot;/&amp;gt;
+ * &amp;lt;/bean&amp;gt;&lt;/pre&gt;
+ *
+ * {@code mappedName} references will always be resolved in JNDI,
+ * allowing for global JNDI names (including &quot;java:&quot; prefix) as well. The
+ * &quot;alwaysUseJndiLookup&quot; flag just affects {@code name} references and
+ * default names (inferred from the field name / property name).
+ *
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; A default CommonAnnotationBeanPostProcessor will be registered
+ * by the &quot;context:annotation-config&quot; and &quot;context:component-scan&quot; XML tags.
+ * Remove or turn off the default annotation configuration there if you intend
+ * to specify a custom CommonAnnotationBeanPostProcessor bean definition!
+ * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Annotation injection will be performed &lt;i&gt;before&lt;/i&gt; XML injection;
+ * thus the latter configuration will override the former for properties wired through
+ * both approaches.
+ *
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 2.5
+ * @see #setAlwaysUseJndiLookup
+ * @see #setResourceFactory
+ * @see org.springframework.beans.factory.annotation.InitDestroyAnnotationBeanPostProcessor
+ * @see org.springframework.beans.factory.annotation.AutowiredAnnotationBeanPostProcessor
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class CommonAnnotationBeanPostProcessor extends InitDestroyAnnotationBeanPostProcessor
+		implements InstantiationAwareBeanPostProcessor, BeanFactoryAware, Serializable {
+
+	// Defensive reference to JNDI API for JDK 9+ (optional java.naming module)
+<span class="fc" id="L145">	private static final boolean JNDI_PRESENT = ClassUtils.isPresent(</span>
+<span class="fc" id="L146">			&quot;javax.naming.InitialContext&quot;, CommonAnnotationBeanPostProcessor.class.getClassLoader());</span>
+
+	private static final @Nullable Class&lt;? extends Annotation&gt; JAKARTA_RESOURCE_TYPE;
+
+	private static final @Nullable Class&lt;? extends Annotation&gt; EJB_ANNOTATION_TYPE;
+
+<span class="fc" id="L152">	private static final Set&lt;Class&lt;? extends Annotation&gt;&gt; resourceAnnotationTypes = CollectionUtils.newLinkedHashSet(2);</span>
+
+	static {
+<span class="fc" id="L155">		JAKARTA_RESOURCE_TYPE = loadAnnotationType(&quot;jakarta.annotation.Resource&quot;);</span>
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">		if (JAKARTA_RESOURCE_TYPE != null) {</span>
+<span class="fc" id="L157">			resourceAnnotationTypes.add(JAKARTA_RESOURCE_TYPE);</span>
+		}
+
+<span class="fc" id="L160">		EJB_ANNOTATION_TYPE = loadAnnotationType(&quot;jakarta.ejb.EJB&quot;);</span>
+<span class="fc bfc" id="L161" title="All 2 branches covered.">		if (EJB_ANNOTATION_TYPE != null) {</span>
+<span class="fc" id="L162">			resourceAnnotationTypes.add(EJB_ANNOTATION_TYPE);</span>
+		}
+<span class="fc" id="L164">	}</span>
+
+
+<span class="fc" id="L167">	private final Set&lt;String&gt; ignoredResourceTypes = new HashSet&lt;&gt;(1);</span>
+
+<span class="fc" id="L169">	private boolean fallbackToDefaultTypeMatch = true;</span>
+
+<span class="fc" id="L171">	private boolean alwaysUseJndiLookup = false;</span>
+
+	private transient @Nullable BeanFactory jndiFactory;
+
+	private transient @Nullable BeanFactory resourceFactory;
+
+	private transient @Nullable BeanFactory beanFactory;
+
+	private transient @Nullable StringValueResolver embeddedValueResolver;
+
+<span class="fc" id="L181">	private final transient Map&lt;String, InjectionMetadata&gt; injectionMetadataCache = new ConcurrentHashMap&lt;&gt;(256);</span>
+
+
+	/**
+	 * Create a new CommonAnnotationBeanPostProcessor,
+	 * with the init and destroy annotation types set to
+	 * {@link jakarta.annotation.PostConstruct} and {@link jakarta.annotation.PreDestroy},
+	 * respectively.
+	 */
+<span class="fc" id="L190">	public CommonAnnotationBeanPostProcessor() {</span>
+<span class="fc" id="L191">		setOrder(Ordered.LOWEST_PRECEDENCE - 3);</span>
+
+		// Jakarta EE 9 set of annotations in jakarta.annotation package
+<span class="fc" id="L194">		addInitAnnotationType(loadAnnotationType(&quot;jakarta.annotation.PostConstruct&quot;));</span>
+<span class="fc" id="L195">		addDestroyAnnotationType(loadAnnotationType(&quot;jakarta.annotation.PreDestroy&quot;));</span>
+
+		// java.naming module present on JDK 9+?
+<span class="pc bpc" id="L198" title="1 of 2 branches missed.">		if (JNDI_PRESENT) {</span>
+<span class="fc" id="L199">			this.jndiFactory = new SimpleJndiBeanFactory();</span>
+		}
+<span class="fc" id="L201">	}</span>
+
+
+	/**
+	 * Ignore the given resource type when resolving {@code @Resource} annotations.
+	 * @param resourceType the resource type to ignore
+	 */
+	public void ignoreResourceType(String resourceType) {
+<span class="nc" id="L209">		Assert.notNull(resourceType, &quot;Ignored resource type must not be null&quot;);</span>
+<span class="nc" id="L210">		this.ignoredResourceTypes.add(resourceType);</span>
+<span class="nc" id="L211">	}</span>
+
+	/**
+	 * Set whether to allow a fallback to a type match if no explicit name has been
+	 * specified. The default name (i.e. the field name or bean property name) will
+	 * still be checked first; if a bean of that name exists, it will be taken.
+	 * However, if no bean of that name exists, a by-type resolution of the
+	 * dependency will be attempted if this flag is &quot;true&quot;.
+	 * &lt;p&gt;Default is &quot;true&quot;. Switch this flag to &quot;false&quot; in order to enforce a
+	 * by-name lookup in all cases, throwing an exception in case of no name match.
+	 * @see org.springframework.beans.factory.config.AutowireCapableBeanFactory#resolveDependency
+	 */
+	public void setFallbackToDefaultTypeMatch(boolean fallbackToDefaultTypeMatch) {
+<span class="nc" id="L224">		this.fallbackToDefaultTypeMatch = fallbackToDefaultTypeMatch;</span>
+<span class="nc" id="L225">	}</span>
+
+	/**
+	 * Set whether to always use JNDI lookups equivalent to standard Jakarta EE resource
+	 * injection, &lt;b&gt;even for {@code name} attributes and default names&lt;/b&gt;.
+	 * &lt;p&gt;Default is &quot;false&quot;: Resource names are used for Spring bean lookups in the
+	 * containing BeanFactory; only {@code mappedName} attributes point directly
+	 * into JNDI. Switch this flag to &quot;true&quot; for enforcing Jakarta EE style JNDI lookups
+	 * in any case, even for {@code name} attributes and default names.
+	 * @see #setJndiFactory
+	 * @see #setResourceFactory
+	 */
+	public void setAlwaysUseJndiLookup(boolean alwaysUseJndiLookup) {
+<span class="nc" id="L238">		this.alwaysUseJndiLookup = alwaysUseJndiLookup;</span>
+<span class="nc" id="L239">	}</span>
+
+	/**
+	 * Specify the factory for objects to be injected into {@code @Resource} /
+	 * {@code @EJB} annotated fields and setter methods,
+	 * &lt;b&gt;for {@code mappedName} attributes that point directly into JNDI&lt;/b&gt;.
+	 * This factory will also be used if &quot;alwaysUseJndiLookup&quot; is set to &quot;true&quot; in order
+	 * to enforce JNDI lookups even for {@code name} attributes and default names.
+	 * &lt;p&gt;The default is a {@link org.springframework.jndi.support.SimpleJndiBeanFactory}
+	 * for JNDI lookup behavior equivalent to standard Jakarta EE resource injection.
+	 * @see #setResourceFactory
+	 * @see #setAlwaysUseJndiLookup
+	 */
+	public void setJndiFactory(BeanFactory jndiFactory) {
+<span class="nc" id="L253">		Assert.notNull(jndiFactory, &quot;BeanFactory must not be null&quot;);</span>
+<span class="nc" id="L254">		this.jndiFactory = jndiFactory;</span>
+<span class="nc" id="L255">	}</span>
+
+	/**
+	 * Specify the factory for objects to be injected into {@code @Resource} /
+	 * {@code @EJB} annotated fields and setter methods,
+	 * &lt;b&gt;for {@code name} attributes and default names&lt;/b&gt;.
+	 * &lt;p&gt;The default is the BeanFactory that this post-processor is defined in,
+	 * if any, looking up resource names as Spring bean names. Specify the resource
+	 * factory explicitly for programmatic usage of this post-processor.
+	 * &lt;p&gt;Specifying Spring's {@link org.springframework.jndi.support.SimpleJndiBeanFactory}
+	 * leads to JNDI lookup behavior equivalent to standard Jakarta EE resource injection,
+	 * even for {@code name} attributes and default names. This is the same behavior
+	 * that the &quot;alwaysUseJndiLookup&quot; flag enables.
+	 * @see #setAlwaysUseJndiLookup
+	 */
+	public void setResourceFactory(BeanFactory resourceFactory) {
+<span class="fc" id="L271">		Assert.notNull(resourceFactory, &quot;BeanFactory must not be null&quot;);</span>
+<span class="fc" id="L272">		this.resourceFactory = resourceFactory;</span>
+<span class="fc" id="L273">	}</span>
+
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="fc" id="L277">		Assert.notNull(beanFactory, &quot;BeanFactory must not be null&quot;);</span>
+<span class="fc" id="L278">		this.beanFactory = beanFactory;</span>
+<span class="fc bfc" id="L279" title="All 2 branches covered.">		if (this.resourceFactory == null) {</span>
+<span class="fc" id="L280">			this.resourceFactory = beanFactory;</span>
+		}
+<span class="pc bpc" id="L282" title="1 of 2 branches missed.">		if (beanFactory instanceof ConfigurableBeanFactory configurableBeanFactory) {</span>
+<span class="fc" id="L283">			this.embeddedValueResolver = new EmbeddedValueResolver(configurableBeanFactory);</span>
+		}
+<span class="fc" id="L285">	}</span>
+
+
+	@Override
+	public void postProcessMergedBeanDefinition(RootBeanDefinition beanDefinition, Class&lt;?&gt; beanType, String beanName) {
+<span class="fc" id="L290">		super.postProcessMergedBeanDefinition(beanDefinition, beanType, beanName);</span>
+<span class="fc" id="L291">		InjectionMetadata metadata = findResourceMetadata(beanName, beanType, null);</span>
+<span class="fc" id="L292">		metadata.checkConfigMembers(beanDefinition);</span>
+<span class="fc" id="L293">	}</span>
+
+	@Override
+	public @Nullable BeanRegistrationAotContribution processAheadOfTime(RegisteredBean registeredBean) {
+<span class="fc" id="L297">		BeanRegistrationAotContribution parentAotContribution = super.processAheadOfTime(registeredBean);</span>
+<span class="fc" id="L298">		Class&lt;?&gt; beanClass = registeredBean.getBeanClass();</span>
+<span class="fc" id="L299">		String beanName = registeredBean.getBeanName();</span>
+<span class="fc" id="L300">		RootBeanDefinition beanDefinition = registeredBean.getMergedBeanDefinition();</span>
+<span class="fc" id="L301">		InjectionMetadata metadata = findResourceMetadata(beanName, beanClass,</span>
+<span class="fc" id="L302">				beanDefinition.getPropertyValues());</span>
+<span class="fc" id="L303">		Collection&lt;LookupElement&gt; injectedElements = getInjectedElements(metadata,</span>
+<span class="fc" id="L304">				beanDefinition.getPropertyValues());</span>
+<span class="fc bfc" id="L305" title="All 2 branches covered.">		if (!ObjectUtils.isEmpty(injectedElements)) {</span>
+<span class="fc" id="L306">			AotContribution aotContribution = new AotContribution(beanClass, injectedElements,</span>
+<span class="fc" id="L307">					getAutowireCandidateResolver(registeredBean));</span>
+<span class="fc" id="L308">			return BeanRegistrationAotContribution.concat(parentAotContribution, aotContribution);</span>
+		}
+<span class="fc" id="L310">		return parentAotContribution;</span>
+	}
+
+	private @Nullable AutowireCandidateResolver getAutowireCandidateResolver(RegisteredBean registeredBean) {
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">		if (registeredBean.getBeanFactory() instanceof DefaultListableBeanFactory lbf) {</span>
+<span class="fc" id="L315">			return lbf.getAutowireCandidateResolver();</span>
+		}
+<span class="nc" id="L317">		return null;</span>
+	}
+
+	@SuppressWarnings({ &quot;rawtypes&quot;, &quot;unchecked&quot; })
+	private Collection&lt;LookupElement&gt; getInjectedElements(InjectionMetadata metadata, PropertyValues propertyValues) {
+<span class="fc" id="L322">		return (Collection) metadata.getInjectedElements(propertyValues);</span>
+	}
+
+	@Override
+	public void resetBeanDefinition(String beanName) {
+<span class="nc" id="L327">		this.injectionMetadataCache.remove(beanName);</span>
+<span class="nc" id="L328">	}</span>
+
+	@Override
+	public @Nullable Object postProcessBeforeInstantiation(Class&lt;?&gt; beanClass, String beanName) {
+<span class="fc" id="L332">		return null;</span>
+	}
+
+	@Override
+	public boolean postProcessAfterInstantiation(Object bean, String beanName) {
+<span class="fc" id="L337">		return true;</span>
+	}
+
+	@Override
+	public PropertyValues postProcessProperties(PropertyValues pvs, Object bean, String beanName) {
+<span class="fc" id="L342">		InjectionMetadata metadata = findResourceMetadata(beanName, bean.getClass(), pvs);</span>
+		try {
+<span class="fc" id="L344">			metadata.inject(bean, beanName, pvs);</span>
+		}
+<span class="fc" id="L346">		catch (Throwable ex) {</span>
+<span class="fc" id="L347">			throw new BeanCreationException(beanName, &quot;Injection of resource dependencies failed&quot;, ex);</span>
+<span class="fc" id="L348">		}</span>
+<span class="fc" id="L349">		return pvs;</span>
+	}
+
+	/**
+	 * &lt;em&gt;Native&lt;/em&gt; processing method for direct calls with an arbitrary target
+	 * instance, resolving all of its fields and methods which are annotated with
+	 * one of the supported 'resource' annotation types.
+	 * @param bean the target instance to process
+	 * @throws BeanCreationException if resource injection failed
+	 * @since 6.1.3
+	 */
+	public void processInjection(Object bean) throws BeanCreationException {
+<span class="fc" id="L361">		Class&lt;?&gt; clazz = bean.getClass();</span>
+<span class="fc" id="L362">		InjectionMetadata metadata = findResourceMetadata(clazz.getName(), clazz, null);</span>
+		try {
+<span class="fc" id="L364">			metadata.inject(bean, null, null);</span>
+		}
+<span class="nc" id="L366">		catch (BeanCreationException ex) {</span>
+<span class="nc" id="L367">			throw ex;</span>
+		}
+<span class="nc" id="L369">		catch (Throwable ex) {</span>
+<span class="nc" id="L370">			throw new BeanCreationException(</span>
+					&quot;Injection of resource dependencies failed for class [&quot; + clazz + &quot;]&quot;, ex);
+<span class="fc" id="L372">		}</span>
+<span class="fc" id="L373">	}</span>
+
+
+	private InjectionMetadata findResourceMetadata(String beanName, Class&lt;?&gt; clazz, @Nullable PropertyValues pvs) {
+		// Fall back to class name as cache key, for backwards compatibility with custom callers.
+<span class="pc bpc" id="L378" title="1 of 2 branches missed.">		String cacheKey = (StringUtils.hasLength(beanName) ? beanName : clazz.getName());</span>
+		// Quick check on the concurrent map first, with minimal locking.
+<span class="fc" id="L380">		InjectionMetadata metadata = this.injectionMetadataCache.get(cacheKey);</span>
+<span class="fc bfc" id="L381" title="All 2 branches covered.">		if (InjectionMetadata.needsRefresh(metadata, clazz)) {</span>
+<span class="fc" id="L382">			synchronized (this.injectionMetadataCache) {</span>
+<span class="fc" id="L383">				metadata = this.injectionMetadataCache.get(cacheKey);</span>
+<span class="pc bpc" id="L384" title="1 of 2 branches missed.">				if (InjectionMetadata.needsRefresh(metadata, clazz)) {</span>
+<span class="fc bfc" id="L385" title="All 2 branches covered.">					if (metadata != null) {</span>
+<span class="fc" id="L386">						metadata.clear(pvs);</span>
+					}
+<span class="fc" id="L388">					metadata = buildResourceMetadata(clazz);</span>
+<span class="fc" id="L389">					this.injectionMetadataCache.put(cacheKey, metadata);</span>
+				}
+<span class="fc" id="L391">			}</span>
+		}
+<span class="fc" id="L393">		return metadata;</span>
+	}
+
+	private InjectionMetadata buildResourceMetadata(Class&lt;?&gt; clazz) {
+<span class="fc bfc" id="L397" title="All 2 branches covered.">		if (!AnnotationUtils.isCandidateClass(clazz, resourceAnnotationTypes)) {</span>
+<span class="fc" id="L398">			return InjectionMetadata.EMPTY;</span>
+		}
+
+<span class="fc" id="L401">		List&lt;InjectionMetadata.InjectedElement&gt; elements = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L402">		Class&lt;?&gt; targetClass = ClassUtils.getUserClass(clazz);</span>
+
+		do {
+<span class="fc" id="L405">			final List&lt;InjectionMetadata.InjectedElement&gt; currElements = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L407">			ReflectionUtils.doWithLocalFields(targetClass, field -&gt; {</span>
+<span class="fc bfc" id="L408" title="All 4 branches covered.">				if (EJB_ANNOTATION_TYPE != null &amp;&amp; field.isAnnotationPresent(EJB_ANNOTATION_TYPE)) {</span>
+<span class="pc bpc" id="L409" title="1 of 2 branches missed.">					if (Modifier.isStatic(field.getModifiers())) {</span>
+<span class="nc" id="L410">						throw new IllegalStateException(&quot;@EJB annotation is not supported on static fields&quot;);</span>
+					}
+<span class="fc" id="L412">					currElements.add(new EjbRefElement(field, field, null));</span>
+				}
+<span class="pc bpc" id="L414" title="1 of 4 branches missed.">				else if (JAKARTA_RESOURCE_TYPE != null &amp;&amp; field.isAnnotationPresent(JAKARTA_RESOURCE_TYPE)) {</span>
+<span class="pc bpc" id="L415" title="1 of 2 branches missed.">					if (Modifier.isStatic(field.getModifiers())) {</span>
+<span class="nc" id="L416">						throw new IllegalStateException(&quot;@Resource annotation is not supported on static fields&quot;);</span>
+					}
+<span class="pc bpc" id="L418" title="1 of 2 branches missed.">					if (!this.ignoredResourceTypes.contains(field.getType().getName())) {</span>
+<span class="fc" id="L419">						currElements.add(new ResourceElement(field, field, null));</span>
+					}
+				}
+<span class="fc" id="L422">			});</span>
+
+<span class="fc" id="L424">			ReflectionUtils.doWithLocalMethods(targetClass, method -&gt; {</span>
+<span class="fc bfc" id="L425" title="All 2 branches covered.">				if (method.isBridge()) {</span>
+<span class="fc" id="L426">					return;</span>
+				}
+<span class="fc bfc" id="L428" title="All 4 branches covered.">				if (EJB_ANNOTATION_TYPE != null &amp;&amp; method.isAnnotationPresent(EJB_ANNOTATION_TYPE)) {</span>
+<span class="pc bpc" id="L429" title="1 of 2 branches missed.">					if (method.equals(BridgeMethodResolver.getMostSpecificMethod(method, clazz))) {</span>
+<span class="pc bpc" id="L430" title="1 of 2 branches missed.">						if (Modifier.isStatic(method.getModifiers())) {</span>
+<span class="nc" id="L431">							throw new IllegalStateException(&quot;@EJB annotation is not supported on static methods&quot;);</span>
+						}
+<span class="pc bpc" id="L433" title="1 of 2 branches missed.">						if (method.getParameterCount() != 1) {</span>
+<span class="nc" id="L434">							throw new IllegalStateException(&quot;@EJB annotation requires a single-arg method: &quot; + method);</span>
+						}
+<span class="fc" id="L436">						PropertyDescriptor pd = BeanUtils.findPropertyForMethod(method, clazz);</span>
+<span class="fc" id="L437">						currElements.add(new EjbRefElement(method, method, pd));</span>
+<span class="fc" id="L438">					}</span>
+				}
+<span class="pc bpc" id="L440" title="1 of 4 branches missed.">				else if (JAKARTA_RESOURCE_TYPE != null &amp;&amp; method.isAnnotationPresent(JAKARTA_RESOURCE_TYPE)) {</span>
+<span class="fc bfc" id="L441" title="All 2 branches covered.">					if (method.equals(BridgeMethodResolver.getMostSpecificMethod(method, clazz))) {</span>
+<span class="pc bpc" id="L442" title="1 of 2 branches missed.">						if (Modifier.isStatic(method.getModifiers())) {</span>
+<span class="nc" id="L443">							throw new IllegalStateException(&quot;@Resource annotation is not supported on static methods&quot;);</span>
+						}
+<span class="fc" id="L445">						Class&lt;?&gt;[] paramTypes = method.getParameterTypes();</span>
+<span class="pc bpc" id="L446" title="1 of 2 branches missed.">						if (paramTypes.length != 1) {</span>
+<span class="nc" id="L447">							throw new IllegalStateException(&quot;@Resource annotation requires a single-arg method: &quot; + method);</span>
+						}
+<span class="pc bpc" id="L449" title="1 of 2 branches missed.">						if (!this.ignoredResourceTypes.contains(paramTypes[0].getName())) {</span>
+<span class="fc" id="L450">							PropertyDescriptor pd = BeanUtils.findPropertyForMethod(method, clazz);</span>
+<span class="fc" id="L451">							currElements.add(new ResourceElement(method, method, pd));</span>
+						}
+					}
+				}
+<span class="fc" id="L455">			});</span>
+
+<span class="fc" id="L457">			elements.addAll(0, currElements);</span>
+<span class="fc" id="L458">			targetClass = targetClass.getSuperclass();</span>
+		}
+<span class="fc bfc" id="L460" title="All 4 branches covered.">		while (targetClass != null &amp;&amp; targetClass != Object.class);</span>
+
+<span class="fc" id="L462">		return InjectionMetadata.forElements(elements, clazz);</span>
+	}
+
+	/**
+	 * Obtain a lazily resolving resource proxy for the given name and type,
+	 * delegating to {@link #getResource} on demand once a method call comes in.
+	 * @param element the descriptor for the annotated field/method
+	 * @param requestingBeanName the name of the requesting bean
+	 * @return the resource object (never {@code null})
+	 * @since 4.2
+	 * @see #getResource
+	 * @see Lazy
+	 */
+	protected Object buildLazyResourceProxy(LookupElement element, @Nullable String requestingBeanName) {
+<span class="fc" id="L476">		TargetSource ts = new TargetSource() {</span>
+			@Override
+			public Class&lt;?&gt; getTargetClass() {
+<span class="fc" id="L479">				return element.lookupType;</span>
+			}
+			@Override
+			public Object getTarget() {
+<span class="fc" id="L483">				return getResource(element, requestingBeanName);</span>
+			}
+		};
+
+<span class="fc" id="L487">		ProxyFactory pf = new ProxyFactory();</span>
+<span class="fc" id="L488">		pf.setTargetSource(ts);</span>
+<span class="fc bfc" id="L489" title="All 2 branches covered.">		if (element.lookupType.isInterface()) {</span>
+<span class="fc" id="L490">			pf.addInterface(element.lookupType);</span>
+		}
+<span class="fc bfc" id="L492" title="All 2 branches covered.">		ClassLoader classLoader = (this.beanFactory instanceof ConfigurableBeanFactory configurableBeanFactory ?</span>
+<span class="fc" id="L493">				configurableBeanFactory.getBeanClassLoader() : null);</span>
+<span class="fc" id="L494">		return pf.getProxy(classLoader);</span>
+	}
+
+	/**
+	 * Obtain the resource object for the given name and type.
+	 * @param element the descriptor for the annotated field/method
+	 * @param requestingBeanName the name of the requesting bean
+	 * @return the resource object (never {@code null})
+	 * @throws NoSuchBeanDefinitionException if no corresponding target resource found
+	 */
+	protected Object getResource(LookupElement element, @Nullable String requestingBeanName)
+			throws NoSuchBeanDefinitionException {
+
+		// JNDI lookup to perform?
+<span class="fc" id="L508">		String jndiName = null;</span>
+<span class="pc bpc" id="L509" title="1 of 2 branches missed.">		if (StringUtils.hasLength(element.mappedName)) {</span>
+<span class="nc" id="L510">			jndiName = element.mappedName;</span>
+		}
+<span class="pc bpc" id="L512" title="1 of 2 branches missed.">		else if (this.alwaysUseJndiLookup) {</span>
+<span class="nc" id="L513">			jndiName = element.name;</span>
+		}
+<span class="pc bpc" id="L515" title="1 of 2 branches missed.">		if (jndiName != null) {</span>
+<span class="nc bnc" id="L516" title="All 2 branches missed.">			if (this.jndiFactory == null) {</span>
+<span class="nc" id="L517">				throw new NoSuchBeanDefinitionException(element.lookupType,</span>
+						&quot;No JNDI factory configured - specify the 'jndiFactory' property&quot;);
+			}
+<span class="nc" id="L520">			return this.jndiFactory.getBean(jndiName, element.lookupType);</span>
+		}
+
+		// Regular resource autowiring
+<span class="pc bpc" id="L524" title="1 of 2 branches missed.">		if (this.resourceFactory == null) {</span>
+<span class="nc" id="L525">			throw new NoSuchBeanDefinitionException(element.lookupType,</span>
+					&quot;No resource factory configured - specify the 'resourceFactory' property&quot;);
+		}
+<span class="fc" id="L528">		return autowireResource(this.resourceFactory, element, requestingBeanName);</span>
+	}
+
+	/**
+	 * Obtain a resource object for the given name and type through autowiring
+	 * based on the given factory.
+	 * @param factory the factory to autowire against
+	 * @param element the descriptor for the annotated field/method
+	 * @param requestingBeanName the name of the requesting bean
+	 * @return the resource object (never {@code null})
+	 * @throws NoSuchBeanDefinitionException if no corresponding target resource found
+	 */
+	protected Object autowireResource(BeanFactory factory, LookupElement element, @Nullable String requestingBeanName)
+			throws NoSuchBeanDefinitionException {
+
+		Object resource;
+		Set&lt;String&gt; autowiredBeanNames;
+<span class="fc" id="L545">		String name = element.name;</span>
+
+<span class="fc bfc" id="L547" title="All 2 branches covered.">		if (factory instanceof AutowireCapableBeanFactory autowireCapableBeanFactory) {</span>
+<span class="pc bpc" id="L548" title="1 of 6 branches missed.">			if (this.fallbackToDefaultTypeMatch &amp;&amp; element.isDefaultName &amp;&amp; !factory.containsBean(name)) {</span>
+<span class="fc" id="L549">				autowiredBeanNames = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc" id="L550">				resource = autowireCapableBeanFactory.resolveDependency(</span>
+<span class="fc" id="L551">						element.getDependencyDescriptor(), requestingBeanName, autowiredBeanNames, null);</span>
+<span class="pc bpc" id="L552" title="1 of 2 branches missed.">				if (resource == null) {</span>
+<span class="nc" id="L553">					throw new NoSuchBeanDefinitionException(element.getLookupType(), &quot;No resolvable resource object&quot;);</span>
+				}
+			}
+			else {
+<span class="fc" id="L557">				resource = autowireCapableBeanFactory.resolveBeanByName(name, element.getDependencyDescriptor());</span>
+<span class="fc" id="L558">				autowiredBeanNames = Collections.singleton(name);</span>
+			}
+		}
+		else {
+<span class="fc" id="L562">			resource = factory.getBean(name, element.lookupType);</span>
+<span class="fc" id="L563">			autowiredBeanNames = Collections.singleton(name);</span>
+		}
+
+<span class="fc bfc" id="L566" title="All 2 branches covered.">		if (factory instanceof ConfigurableBeanFactory configurableBeanFactory) {</span>
+<span class="fc bfc" id="L567" title="All 2 branches covered.">			for (String autowiredBeanName : autowiredBeanNames) {</span>
+<span class="fc bfc" id="L568" title="All 4 branches covered.">				if (requestingBeanName != null &amp;&amp; configurableBeanFactory.containsBean(autowiredBeanName)) {</span>
+<span class="fc" id="L569">					configurableBeanFactory.registerDependentBean(autowiredBeanName, requestingBeanName);</span>
+				}
+<span class="fc" id="L571">			}</span>
+		}
+
+<span class="fc" id="L574">		return resource;</span>
+	}
+
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private static @Nullable Class&lt;? extends Annotation&gt; loadAnnotationType(String name) {
+		try {
+<span class="fc" id="L581">			return (Class&lt;? extends Annotation&gt;)</span>
+<span class="fc" id="L582">					ClassUtils.forName(name, CommonAnnotationBeanPostProcessor.class.getClassLoader());</span>
+		}
+<span class="fc" id="L584">		catch (ClassNotFoundException ex) {</span>
+<span class="fc" id="L585">			return null;</span>
+		}
+	}
+
+
+	/**
+	 * Class representing generic injection information about an annotated field
+	 * or setter method, supporting @Resource and related annotations.
+	 */
+	protected abstract static class LookupElement extends InjectionMetadata.InjectedElement {
+
+<span class="fc" id="L596">		protected String name = &quot;&quot;;</span>
+
+<span class="fc" id="L598">		protected boolean isDefaultName = false;</span>
+
+<span class="fc" id="L600">		protected Class&lt;?&gt; lookupType = Object.class;</span>
+
+		protected @Nullable String mappedName;
+
+		public LookupElement(Member member, @Nullable PropertyDescriptor pd) {
+<span class="fc" id="L605">			super(member, pd);</span>
+<span class="fc" id="L606">		}</span>
+
+		/**
+		 * Return the resource name for the lookup.
+		 */
+		public final String getName() {
+<span class="fc" id="L612">			return this.name;</span>
+		}
+
+		/**
+		 * Return the desired type for the lookup.
+		 */
+		public final Class&lt;?&gt; getLookupType() {
+<span class="fc" id="L619">			return this.lookupType;</span>
+		}
+
+		/**
+		 * Build a DependencyDescriptor for the underlying field/method.
+		 */
+		public final DependencyDescriptor getDependencyDescriptor() {
+<span class="fc bfc" id="L626" title="All 2 branches covered.">			if (this.isField) {</span>
+<span class="fc" id="L627">				return new ResourceElementResolver.LookupDependencyDescriptor(</span>
+<span class="fc" id="L628">						(Field) this.member, this.lookupType, isLazyLookup());</span>
+			}
+			else {
+<span class="fc" id="L631">				return new ResourceElementResolver.LookupDependencyDescriptor(</span>
+<span class="fc" id="L632">						(Method) this.member, this.lookupType, isLazyLookup());</span>
+			}
+		}
+
+		/**
+		 * Determine whether this dependency is marked for lazy lookup.
+		 * The default is {@code false}.
+		 * @since 6.1.2
+		 */
+		boolean isLazyLookup() {
+<span class="fc" id="L642">			return false;</span>
+		}
+	}
+
+
+	/**
+	 * Class representing injection information about an annotated field
+	 * or setter method, supporting the @Resource annotation.
+	 */
+	private class ResourceElement extends LookupElement {
+
+		private final boolean lazyLookup;
+
+<span class="fc" id="L655">		public ResourceElement(Member member, AnnotatedElement ae, @Nullable PropertyDescriptor pd) {</span>
+<span class="fc" id="L656">			super(member, pd);</span>
+<span class="fc" id="L657">			jakarta.annotation.Resource resource = ae.getAnnotation(jakarta.annotation.Resource.class);</span>
+<span class="fc" id="L658">			String resourceName = resource.name();</span>
+<span class="fc" id="L659">			Class&lt;?&gt; resourceType = resource.type();</span>
+<span class="fc bfc" id="L660" title="All 2 branches covered.">			this.isDefaultName = !StringUtils.hasLength(resourceName);</span>
+<span class="fc bfc" id="L661" title="All 2 branches covered.">			if (this.isDefaultName) {</span>
+<span class="fc" id="L662">				resourceName = this.member.getName();</span>
+<span class="pc bpc" id="L663" title="2 of 6 branches missed.">				if (this.member instanceof Method &amp;&amp; resourceName.startsWith(&quot;set&quot;) &amp;&amp; resourceName.length() &gt; 3) {</span>
+<span class="fc" id="L664">					resourceName = StringUtils.uncapitalizeAsProperty(resourceName.substring(3));</span>
+				}
+			}
+<span class="pc bpc" id="L667" title="1 of 2 branches missed.">			else if (embeddedValueResolver != null) {</span>
+<span class="fc" id="L668">				resourceName = embeddedValueResolver.resolveStringValue(resourceName);</span>
+			}
+<span class="fc bfc" id="L670" title="All 2 branches covered.">			if (Object.class != resourceType) {</span>
+<span class="fc" id="L671">				checkResourceType(resourceType);</span>
+			}
+			else {
+				// No resource type specified... check field/method.
+<span class="fc" id="L675">				resourceType = getResourceType();</span>
+			}
+<span class="pc bpc" id="L677" title="1 of 2 branches missed.">			this.name = (resourceName != null ? resourceName : &quot;&quot;);</span>
+<span class="fc" id="L678">			this.lookupType = resourceType;</span>
+<span class="fc" id="L679">			String lookupValue = resource.lookup();</span>
+<span class="pc bpc" id="L680" title="1 of 2 branches missed.">			this.mappedName = (StringUtils.hasLength(lookupValue) ? lookupValue : resource.mappedName());</span>
+<span class="fc" id="L681">			Lazy lazy = ae.getAnnotation(Lazy.class);</span>
+<span class="pc bpc" id="L682" title="1 of 4 branches missed.">			this.lazyLookup = (lazy != null &amp;&amp; lazy.value());</span>
+<span class="fc" id="L683">		}</span>
+
+		@Override
+		protected Object getResourceToInject(Object target, @Nullable String requestingBeanName) {
+<span class="fc bfc" id="L687" title="All 2 branches covered.">			return (this.lazyLookup ? buildLazyResourceProxy(this, requestingBeanName) :</span>
+<span class="fc" id="L688">					getResource(this, requestingBeanName));</span>
+		}
+
+		@Override
+		boolean isLazyLookup() {
+<span class="fc" id="L693">			return this.lazyLookup;</span>
+		}
+	}
+
+
+	/**
+	 * Class representing injection information about an annotated field
+	 * or setter method, supporting the @EJB annotation.
+	 */
+	private class EjbRefElement extends LookupElement {
+
+		private final String beanName;
+
+<span class="fc" id="L706">		public EjbRefElement(Member member, AnnotatedElement ae, @Nullable PropertyDescriptor pd) {</span>
+<span class="fc" id="L707">			super(member, pd);</span>
+<span class="fc" id="L708">			jakarta.ejb.EJB resource = ae.getAnnotation(jakarta.ejb.EJB.class);</span>
+<span class="fc" id="L709">			String resourceBeanName = resource.beanName();</span>
+<span class="fc" id="L710">			String resourceName = resource.name();</span>
+<span class="fc bfc" id="L711" title="All 2 branches covered.">			this.isDefaultName = !StringUtils.hasLength(resourceName);</span>
+<span class="fc bfc" id="L712" title="All 2 branches covered.">			if (this.isDefaultName) {</span>
+<span class="fc" id="L713">				resourceName = this.member.getName();</span>
+<span class="pc bpc" id="L714" title="2 of 6 branches missed.">				if (this.member instanceof Method &amp;&amp; resourceName.startsWith(&quot;set&quot;) &amp;&amp; resourceName.length() &gt; 3) {</span>
+<span class="fc" id="L715">					resourceName = StringUtils.uncapitalizeAsProperty(resourceName.substring(3));</span>
+				}
+			}
+<span class="fc" id="L718">			Class&lt;?&gt; resourceType = resource.beanInterface();</span>
+<span class="fc bfc" id="L719" title="All 2 branches covered.">			if (Object.class != resourceType) {</span>
+<span class="fc" id="L720">				checkResourceType(resourceType);</span>
+			}
+			else {
+				// No resource type specified... check field/method.
+<span class="fc" id="L724">				resourceType = getResourceType();</span>
+			}
+<span class="fc" id="L726">			this.beanName = resourceBeanName;</span>
+<span class="fc" id="L727">			this.name = resourceName;</span>
+<span class="fc" id="L728">			this.lookupType = resourceType;</span>
+<span class="fc" id="L729">			this.mappedName = resource.mappedName();</span>
+<span class="fc" id="L730">		}</span>
+
+		@Override
+		protected Object getResourceToInject(Object target, @Nullable String requestingBeanName) {
+<span class="fc bfc" id="L734" title="All 2 branches covered.">			if (StringUtils.hasLength(this.beanName)) {</span>
+<span class="pc bpc" id="L735" title="2 of 4 branches missed.">				if (beanFactory != null &amp;&amp; beanFactory.containsBean(this.beanName)) {</span>
+					// Local match found for explicitly specified local bean name.
+<span class="fc" id="L737">					Object bean = beanFactory.getBean(this.beanName, this.lookupType);</span>
+<span class="pc bpc" id="L738" title="2 of 4 branches missed.">					if (requestingBeanName != null &amp;&amp; beanFactory instanceof ConfigurableBeanFactory configurableBeanFactory) {</span>
+<span class="fc" id="L739">						configurableBeanFactory.registerDependentBean(this.beanName, requestingBeanName);</span>
+					}
+<span class="fc" id="L741">					return bean;</span>
+				}
+<span class="nc bnc" id="L743" title="All 4 branches missed.">				else if (this.isDefaultName &amp;&amp; !StringUtils.hasLength(this.mappedName)) {</span>
+<span class="nc" id="L744">					throw new NoSuchBeanDefinitionException(this.beanName,</span>
+							&quot;Cannot resolve 'beanName' in local BeanFactory. Consider specifying a general 'name' value instead.&quot;);
+				}
+			}
+			// JNDI name lookup - may still go to a local BeanFactory.
+<span class="fc" id="L749">			return getResource(this, requestingBeanName);</span>
+		}
+	}
+
+
+	/**
+	 * {@link BeanRegistrationAotContribution} to inject resources on fields and methods.
+	 */
+	private static class AotContribution implements BeanRegistrationAotContribution {
+
+		private static final String REGISTERED_BEAN_PARAMETER = &quot;registeredBean&quot;;
+
+		private static final String INSTANCE_PARAMETER = &quot;instance&quot;;
+
+		private final Class&lt;?&gt; target;
+
+		private final Collection&lt;LookupElement&gt; lookupElements;
+
+		private final @Nullable AutowireCandidateResolver candidateResolver;
+
+		AotContribution(Class&lt;?&gt; target, Collection&lt;LookupElement&gt; lookupElements,
+<span class="fc" id="L770">				@Nullable AutowireCandidateResolver candidateResolver) {</span>
+
+<span class="fc" id="L772">			this.target = target;</span>
+<span class="fc" id="L773">			this.lookupElements = lookupElements;</span>
+<span class="fc" id="L774">			this.candidateResolver = candidateResolver;</span>
+<span class="fc" id="L775">		}</span>
+
+		@Override
+		public void applyTo(GenerationContext generationContext, BeanRegistrationCode beanRegistrationCode) {
+<span class="fc" id="L779">			GeneratedClass generatedClass = generationContext.getGeneratedClasses()</span>
+<span class="fc" id="L780">					.addForFeatureComponent(&quot;ResourceAutowiring&quot;, this.target, type -&gt; {</span>
+<span class="fc" id="L781">						type.addJavadoc(&quot;Resource autowiring for {@link $T}.&quot;, this.target);</span>
+<span class="fc" id="L782">						type.addModifiers(javax.lang.model.element.Modifier.PUBLIC);</span>
+<span class="fc" id="L783">					});</span>
+<span class="fc" id="L784">			GeneratedMethod generateMethod = generatedClass.getMethods().add(&quot;apply&quot;, method -&gt; {</span>
+<span class="fc" id="L785">				method.addJavadoc(&quot;Apply resource autowiring.&quot;);</span>
+<span class="fc" id="L786">				method.addModifiers(javax.lang.model.element.Modifier.PUBLIC,</span>
+						javax.lang.model.element.Modifier.STATIC);
+<span class="fc" id="L788">				method.addParameter(RegisteredBean.class, REGISTERED_BEAN_PARAMETER);</span>
+<span class="fc" id="L789">				method.addParameter(this.target, INSTANCE_PARAMETER);</span>
+<span class="fc" id="L790">				method.returns(this.target);</span>
+<span class="fc" id="L791">				method.addCode(generateMethodCode(generatedClass.getName(),</span>
+<span class="fc" id="L792">						generationContext.getRuntimeHints()));</span>
+<span class="fc" id="L793">			});</span>
+<span class="fc" id="L794">			beanRegistrationCode.addInstancePostProcessor(generateMethod.toMethodReference());</span>
+
+<span class="fc" id="L796">			registerHints(generationContext.getRuntimeHints());</span>
+<span class="fc" id="L797">		}</span>
+
+		private CodeBlock generateMethodCode(ClassName targetClassName, RuntimeHints hints) {
+<span class="fc" id="L800">			CodeBlock.Builder code = CodeBlock.builder();</span>
+<span class="fc bfc" id="L801" title="All 2 branches covered.">			for (LookupElement lookupElement : this.lookupElements) {</span>
+<span class="fc" id="L802">				code.addStatement(generateMethodStatementForElement(</span>
+						targetClassName, lookupElement, hints));
+<span class="fc" id="L804">			}</span>
+<span class="fc" id="L805">			code.addStatement(&quot;return $L&quot;, INSTANCE_PARAMETER);</span>
+<span class="fc" id="L806">			return code.build();</span>
+		}
+
+		private CodeBlock generateMethodStatementForElement(ClassName targetClassName,
+				LookupElement lookupElement, RuntimeHints hints) {
+
+<span class="fc" id="L812">			Member member = lookupElement.getMember();</span>
+<span class="fc bfc" id="L813" title="All 2 branches covered.">			if (member instanceof Field field) {</span>
+<span class="fc" id="L814">				return generateMethodStatementForField(</span>
+						targetClassName, field, lookupElement, hints);
+			}
+<span class="pc bpc" id="L817" title="1 of 2 branches missed.">			if (member instanceof Method method) {</span>
+<span class="fc" id="L818">				return generateMethodStatementForMethod(</span>
+						targetClassName, method, lookupElement, hints);
+			}
+<span class="nc" id="L821">			throw new IllegalStateException(</span>
+<span class="nc" id="L822">					&quot;Unsupported member type &quot; + member.getClass().getName());</span>
+		}
+
+		private CodeBlock generateMethodStatementForField(ClassName targetClassName,
+				Field field, LookupElement lookupElement, RuntimeHints hints) {
+
+<span class="fc" id="L828">			hints.reflection().registerField(field);</span>
+<span class="fc" id="L829">			CodeBlock resolver = generateFieldResolverCode(field, lookupElement);</span>
+<span class="fc" id="L830">			AccessControl accessControl = AccessControl.forMember(field);</span>
+<span class="pc bpc" id="L831" title="1 of 2 branches missed.">			if (!accessControl.isAccessibleFrom(targetClassName)) {</span>
+<span class="fc" id="L832">				return CodeBlock.of(&quot;$L.resolveAndSet($L, $L)&quot;, resolver,</span>
+						REGISTERED_BEAN_PARAMETER, INSTANCE_PARAMETER);
+			}
+<span class="nc" id="L835">			return CodeBlock.of(&quot;$L.$L = $L.resolve($L)&quot;, INSTANCE_PARAMETER,</span>
+<span class="nc" id="L836">					field.getName(), resolver, REGISTERED_BEAN_PARAMETER);</span>
+		}
+
+		private CodeBlock generateFieldResolverCode(Field field, LookupElement lookupElement) {
+<span class="pc bpc" id="L840" title="1 of 2 branches missed.">			if (lookupElement.isDefaultName) {</span>
+<span class="fc" id="L841">				return CodeBlock.of(&quot;$T.$L($S)&quot;, ResourceElementResolver.class,</span>
+<span class="fc" id="L842">						&quot;forField&quot;, field.getName());</span>
+			}
+			else {
+<span class="nc" id="L845">				return CodeBlock.of(&quot;$T.$L($S, $S)&quot;, ResourceElementResolver.class,</span>
+<span class="nc" id="L846">						&quot;forField&quot;, field.getName(), lookupElement.getName());</span>
+			}
+		}
+
+		private CodeBlock generateMethodStatementForMethod(ClassName targetClassName,
+				Method method, LookupElement lookupElement, RuntimeHints hints) {
+
+<span class="fc" id="L853">			CodeBlock resolver = generateMethodResolverCode(method, lookupElement);</span>
+<span class="fc" id="L854">			AccessControl accessControl = AccessControl.forMember(method);</span>
+<span class="fc bfc" id="L855" title="All 2 branches covered.">			if (!accessControl.isAccessibleFrom(targetClassName)) {</span>
+<span class="fc" id="L856">				hints.reflection().registerMethod(method, ExecutableMode.INVOKE);</span>
+<span class="fc" id="L857">				return CodeBlock.of(&quot;$L.resolveAndSet($L, $L)&quot;, resolver,</span>
+						REGISTERED_BEAN_PARAMETER, INSTANCE_PARAMETER);
+			}
+<span class="fc" id="L860">			hints.reflection().registerType(method.getDeclaringClass());</span>
+<span class="fc" id="L861">			return CodeBlock.of(&quot;$L.$L($L.resolve($L))&quot;, INSTANCE_PARAMETER,</span>
+<span class="fc" id="L862">					method.getName(), resolver, REGISTERED_BEAN_PARAMETER);</span>
+
+		}
+
+		private CodeBlock generateMethodResolverCode(Method method, LookupElement lookupElement) {
+<span class="fc bfc" id="L867" title="All 2 branches covered.">			if (lookupElement.isDefaultName) {</span>
+<span class="fc" id="L868">				return CodeBlock.of(&quot;$T.$L($S, $T.class)&quot;, ResourceElementResolver.class,</span>
+<span class="fc" id="L869">						&quot;forMethod&quot;, method.getName(), lookupElement.getLookupType());</span>
+			}
+			else {
+<span class="fc" id="L872">				return CodeBlock.of(&quot;$T.$L($S, $T.class, $S)&quot;, ResourceElementResolver.class,</span>
+<span class="fc" id="L873">						&quot;forMethod&quot;, method.getName(), lookupElement.getLookupType(), lookupElement.getName());</span>
+			}
+		}
+
+		private void registerHints(RuntimeHints runtimeHints) {
+<span class="fc" id="L878">			this.lookupElements.forEach(lookupElement -&gt;</span>
+<span class="fc" id="L879">					registerProxyIfNecessary(runtimeHints, lookupElement.getDependencyDescriptor()));</span>
+<span class="fc" id="L880">		}</span>
+
+		private void registerProxyIfNecessary(RuntimeHints runtimeHints, DependencyDescriptor dependencyDescriptor) {
+<span class="pc bpc" id="L883" title="1 of 2 branches missed.">			if (this.candidateResolver != null) {</span>
+<span class="fc" id="L884">				Class&lt;?&gt; proxyClass =</span>
+<span class="fc" id="L885">						this.candidateResolver.getLazyResolutionProxyClass(dependencyDescriptor, null);</span>
+<span class="fc bfc" id="L886" title="All 2 branches covered.">				if (proxyClass != null) {</span>
+<span class="fc" id="L887">					ClassHintUtils.registerProxyIfNecessary(proxyClass, runtimeHints);</span>
+				}
+			}
+<span class="fc" id="L890">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

@@ -1,0 +1,675 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractHandlerMethodMapping.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.result.method</a> &gt; <span class="el_source">AbstractHandlerMethodMapping.java</span></div><h1>AbstractHandlerMethodMapping.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.result.method;
+
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.function.Function;
+import java.util.stream.Collectors;
+
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Mono;
+
+import org.springframework.aop.support.AopUtils;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.core.MethodIntrospector;
+import org.springframework.http.server.RequestPath;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.StringUtils;
+import org.springframework.web.cors.CorsConfiguration;
+import org.springframework.web.cors.reactive.CorsUtils;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.reactive.HandlerMapping;
+import org.springframework.web.reactive.handler.AbstractHandlerMapping;
+import org.springframework.web.server.ServerWebExchange;
+
+/**
+ * Abstract base class for {@link HandlerMapping} implementations that define
+ * a mapping between a request and a {@link HandlerMethod}.
+ *
+ * &lt;p&gt;For each registered handler method, a unique mapping is maintained with
+ * subclasses defining the details of the mapping type {@code &lt;T&gt;}.
+ *
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @author Sam Brannen
+ * @since 5.0
+ * @param &lt;T&gt; the mapping for a {@link HandlerMethod} containing the conditions
+ * needed to match the handler method to an incoming request.
+ */
+<span class="fc" id="L67">public abstract class AbstractHandlerMethodMapping&lt;T&gt; extends AbstractHandlerMapping implements InitializingBean {</span>
+
+	/**
+	 * Bean name prefix for target beans behind scoped proxies. Used to exclude those
+	 * targets from handler method detection, in favor of the corresponding proxies.
+	 * &lt;p&gt;We're not checking the autowire-candidate status here, which is how the
+	 * proxy target filtering problem is being handled at the autowiring level,
+	 * since autowire-candidate may have been turned to {@code false} for other
+	 * reasons, while still expecting the bean to be eligible for handler methods.
+	 * &lt;p&gt;Originally defined in {@link org.springframework.aop.scope.ScopedProxyUtils}
+	 * but duplicated here to avoid a hard dependency on the spring-aop module.
+	 */
+	private static final String SCOPED_TARGET_NAME_PREFIX = &quot;scopedTarget.&quot;;
+
+	/**
+	 * HandlerMethod to return on a pre-flight request match when the request
+	 * mappings are more nuanced than the access control headers.
+	 */
+<span class="fc" id="L85">	private static final HandlerMethod PREFLIGHT_AMBIGUOUS_MATCH =</span>
+			new HandlerMethod(new PreFlightAmbiguousMatchHandler(),
+<span class="fc" id="L87">					ClassUtils.getMethod(PreFlightAmbiguousMatchHandler.class, &quot;handle&quot;));</span>
+
+<span class="fc" id="L89">	private static final CorsConfiguration ALLOW_CORS_CONFIG = new CorsConfiguration();</span>
+
+	static {
+<span class="fc" id="L92">		ALLOW_CORS_CONFIG.addAllowedOriginPattern(&quot;*&quot;);</span>
+<span class="fc" id="L93">		ALLOW_CORS_CONFIG.addAllowedMethod(&quot;*&quot;);</span>
+<span class="fc" id="L94">		ALLOW_CORS_CONFIG.addAllowedHeader(&quot;*&quot;);</span>
+<span class="fc" id="L95">		ALLOW_CORS_CONFIG.setAllowCredentials(true);</span>
+<span class="fc" id="L96">	}</span>
+
+
+<span class="fc" id="L99">	private final MappingRegistry mappingRegistry = new MappingRegistry();</span>
+
+
+	// TODO: handlerMethodMappingNamingStrategy
+
+	/**
+	 * Return a (read-only) map with all mappings and HandlerMethod's.
+	 */
+	public Map&lt;T, HandlerMethod&gt; getHandlerMethods() {
+<span class="fc" id="L108">		this.mappingRegistry.acquireReadLock();</span>
+		try {
+<span class="fc" id="L110">			return this.mappingRegistry.getRegistrations().entrySet().stream()</span>
+<span class="fc" id="L111">					.collect(Collectors.toUnmodifiableMap(Map.Entry::getKey, entry -&gt; entry.getValue().handlerMethod));</span>
+		}
+		finally {
+<span class="fc" id="L114">			this.mappingRegistry.releaseReadLock();</span>
+		}
+	}
+
+	/**
+	 * Return the internal mapping registry. Provided for testing purposes.
+	 */
+	MappingRegistry getMappingRegistry() {
+<span class="fc" id="L122">		return this.mappingRegistry;</span>
+	}
+
+	/**
+	 * Register the given mapping.
+	 * &lt;p&gt;This method may be invoked at runtime after initialization has completed.
+	 * @param mapping the mapping for the handler method
+	 * @param handler the handler
+	 * @param method the method
+	 */
+	public void registerMapping(T mapping, Object handler, Method method) {
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L134">			logger.trace(&quot;Register \&quot;&quot; + mapping + &quot;\&quot; to &quot; + method.toGenericString());</span>
+		}
+<span class="fc" id="L136">		this.mappingRegistry.register(mapping, handler, method);</span>
+<span class="fc" id="L137">	}</span>
+
+	/**
+	 * Un-register the given mapping.
+	 * &lt;p&gt;This method may be invoked at runtime after initialization has completed.
+	 * @param mapping the mapping to unregister
+	 */
+	public void unregisterMapping(T mapping) {
+<span class="pc bpc" id="L145" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L146">			logger.trace(&quot;Unregister mapping \&quot;&quot; + mapping);</span>
+		}
+<span class="fc" id="L148">		this.mappingRegistry.unregister(mapping);</span>
+<span class="fc" id="L149">	}</span>
+
+
+	// Handler method detection
+
+	/**
+	 * Detects handler methods at initialization.
+	 */
+	@Override
+	public void afterPropertiesSet() {
+<span class="fc" id="L159">		initHandlerMethods();</span>
+
+		// Total includes detected mappings + explicit registrations via registerMapping
+<span class="fc" id="L162">		int total = getHandlerMethods().size();</span>
+<span class="pc bpc" id="L163" title="3 of 8 branches missed.">		if ((logger.isTraceEnabled() &amp;&amp; total == 0) || (logger.isDebugEnabled() &amp;&amp; total &gt; 0) ) {</span>
+<span class="fc" id="L164">			logger.debug(total + &quot; mappings in &quot; + formatMappingName());</span>
+		}
+<span class="fc" id="L166">	}</span>
+
+	/**
+	 * Scan beans in the ApplicationContext, detect and register handler methods.
+	 * @see #isHandler(Class)
+	 * @see #getMappingForMethod(Method, Class)
+	 * @see #handlerMethodsInitialized(Map)
+	 */
+	protected void initHandlerMethods() {
+<span class="fc" id="L175">		String[] beanNames = obtainApplicationContext().getBeanNamesForType(Object.class);</span>
+
+<span class="fc bfc" id="L177" title="All 2 branches covered.">		for (String beanName : beanNames) {</span>
+<span class="pc bpc" id="L178" title="1 of 2 branches missed.">			if (!beanName.startsWith(SCOPED_TARGET_NAME_PREFIX)) {</span>
+<span class="fc" id="L179">				Class&lt;?&gt; beanType = null;</span>
+				try {
+<span class="fc" id="L181">					beanType = obtainApplicationContext().getType(beanName);</span>
+				}
+<span class="nc" id="L183">				catch (Throwable ex) {</span>
+					// An unresolvable bean type, probably from a lazy bean - let's ignore it.
+<span class="nc bnc" id="L185" title="All 2 branches missed.">					if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L186">						logger.trace(&quot;Could not resolve type for bean '&quot; + beanName + &quot;'&quot;, ex);</span>
+					}
+<span class="fc" id="L188">				}</span>
+<span class="pc bpc" id="L189" title="1 of 4 branches missed.">				if (beanType != null &amp;&amp; isHandler(beanType)) {</span>
+<span class="fc" id="L190">					detectHandlerMethods(beanName);</span>
+				}
+			}
+		}
+<span class="fc" id="L194">		handlerMethodsInitialized(getHandlerMethods());</span>
+<span class="fc" id="L195">	}</span>
+
+	/**
+	 * Look for handler methods in a handler.
+	 * @param handler the bean name of a handler or a handler instance
+	 */
+	protected void detectHandlerMethods(final Object handler) {
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">		Class&lt;?&gt; handlerType = (handler instanceof String beanName ?</span>
+<span class="pc" id="L203">				obtainApplicationContext().getType(beanName) : handler.getClass());</span>
+
+<span class="pc bpc" id="L205" title="1 of 2 branches missed.">		if (handlerType != null) {</span>
+<span class="fc" id="L206">			final Class&lt;?&gt; userType = ClassUtils.getUserClass(handlerType);</span>
+<span class="fc" id="L207">			Map&lt;Method, T&gt; methods = MethodIntrospector.selectMethods(userType,</span>
+<span class="fc" id="L208">					(MethodIntrospector.MetadataLookup&lt;T&gt;) method -&gt; getMappingForMethod(method, userType));</span>
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L210">				logger.trace(formatMappings(userType, methods));</span>
+			}
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">			else if (mappingsLogger.isDebugEnabled()) {</span>
+<span class="nc" id="L213">				mappingsLogger.debug(formatMappings(userType, methods));</span>
+			}
+<span class="fc" id="L215">			methods.forEach((method, mapping) -&gt; {</span>
+<span class="fc" id="L216">				Method invocableMethod = AopUtils.selectInvocableMethod(method, userType);</span>
+<span class="fc" id="L217">				registerHandlerMethod(handler, invocableMethod, mapping);</span>
+<span class="fc" id="L218">			});</span>
+		}
+<span class="fc" id="L220">	}</span>
+
+	private String formatMappings(Class&lt;?&gt; userType, Map&lt;Method, T&gt; methods) {
+<span class="nc" id="L223">		String packageName = ClassUtils.getPackageName(userType);</span>
+<span class="nc bnc" id="L224" title="All 2 branches missed.">		String formattedType = (StringUtils.hasText(packageName) ?</span>
+<span class="nc" id="L225">				Arrays.stream(packageName.split(&quot;\\.&quot;))</span>
+<span class="nc" id="L226">						.map(packageSegment -&gt; packageSegment.substring(0, 1))</span>
+<span class="nc" id="L227">						.collect(Collectors.joining(&quot;.&quot;, &quot;&quot;, &quot;.&quot; + userType.getSimpleName())) :</span>
+<span class="nc" id="L228">				userType.getSimpleName());</span>
+<span class="nc" id="L229">		Function&lt;Method, String&gt; methodFormatter = method -&gt; Arrays.stream(method.getParameterTypes())</span>
+<span class="nc" id="L230">				.map(Class::getSimpleName)</span>
+<span class="nc" id="L231">				.collect(Collectors.joining(&quot;,&quot;, &quot;(&quot;, &quot;)&quot;));</span>
+<span class="nc" id="L232">		return methods.entrySet().stream()</span>
+<span class="nc" id="L233">				.map(e -&gt; {</span>
+<span class="nc" id="L234">					Method method = e.getKey();</span>
+<span class="nc" id="L235">					return e.getValue() + &quot;: &quot; + method.getName() + methodFormatter.apply(method);</span>
+				})
+<span class="nc" id="L237">				.collect(Collectors.joining(&quot;\n\t&quot;, &quot;\n\t&quot; + formattedType + &quot;:&quot; + &quot;\n\t&quot;, &quot;&quot;));</span>
+	}
+
+	/**
+	 * Register a handler method and its unique mapping. Invoked at startup for
+	 * each detected handler method.
+	 * @param handler the bean name of the handler or the handler instance
+	 * @param method the method to register
+	 * @param mapping the mapping conditions associated with the handler method
+	 * @throws IllegalStateException if another method was already registered
+	 * under the same mapping
+	 */
+	protected void registerHandlerMethod(Object handler, Method method, T mapping) {
+<span class="fc" id="L250">		this.mappingRegistry.register(mapping, handler, method);</span>
+<span class="fc" id="L251">	}</span>
+
+	/**
+	 * Create the HandlerMethod instance.
+	 * @param handler either a bean name or an actual handler instance
+	 * @param method the target method
+	 * @return the created HandlerMethod
+	 */
+	protected HandlerMethod createHandlerMethod(Object handler, Method method) {
+<span class="fc bfc" id="L260" title="All 2 branches covered.">		if (handler instanceof String beanName) {</span>
+<span class="fc" id="L261">			return new HandlerMethod(beanName,</span>
+<span class="fc" id="L262">					obtainApplicationContext().getAutowireCapableBeanFactory(),</span>
+<span class="fc" id="L263">					obtainApplicationContext(),</span>
+					method);
+		}
+<span class="fc" id="L266">		return new HandlerMethod(handler, method);</span>
+	}
+
+	/**
+	 * Extract and return the CORS configuration for the mapping.
+	 */
+	protected @Nullable CorsConfiguration initCorsConfiguration(Object handler, Method method, T mapping) {
+<span class="nc" id="L273">		return null;</span>
+	}
+
+	/**
+	 * Invoked after all handler methods have been detected.
+	 * @param handlerMethods a read-only map with handler methods and mappings.
+	 */
+	protected void handlerMethodsInitialized(Map&lt;T, HandlerMethod&gt; handlerMethods) {
+<span class="fc" id="L281">	}</span>
+
+
+	// Handler method lookup
+
+	/**
+	 * Look up a handler method for the given request.
+	 * @param exchange the current exchange
+	 */
+	@Override
+	public Mono&lt;HandlerMethod&gt; getHandlerInternal(ServerWebExchange exchange) {
+<span class="fc" id="L292">		this.mappingRegistry.acquireReadLock();</span>
+		try {
+			HandlerMethod handlerMethod;
+			try {
+<span class="fc" id="L296">				handlerMethod = lookupHandlerMethod(exchange);</span>
+			}
+<span class="fc" id="L298">			catch (Exception ex) {</span>
+<span class="fc" id="L299">				return Mono.error(ex);</span>
+<span class="fc" id="L300">			}</span>
+<span class="fc bfc" id="L301" title="All 2 branches covered.">			if (handlerMethod != null) {</span>
+<span class="fc" id="L302">				handlerMethod = handlerMethod.createWithResolvedBean();</span>
+			}
+<span class="fc" id="L304">			return Mono.justOrEmpty(handlerMethod);</span>
+		}
+		finally {
+<span class="fc" id="L307">			this.mappingRegistry.releaseReadLock();</span>
+		}
+	}
+
+	/**
+	 * Look up the best-matching handler method for the current request.
+	 * If multiple matches are found, the best match is selected.
+	 * @param exchange the current exchange
+	 * @return the best-matching handler method, or {@code null} if no match
+	 * @see #handleMatch
+	 * @see #handleNoMatch
+	 */
+	protected @Nullable HandlerMethod lookupHandlerMethod(ServerWebExchange exchange) throws Exception {
+<span class="fc" id="L320">		List&lt;Match&gt; matches = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L321">		List&lt;T&gt; directPathMatches = this.mappingRegistry.getMappingsByDirectPath(exchange);</span>
+<span class="fc bfc" id="L322" title="All 2 branches covered.">		if (directPathMatches != null) {</span>
+<span class="fc" id="L323">			addMatchingMappings(directPathMatches, matches, exchange);</span>
+		}
+<span class="fc bfc" id="L325" title="All 2 branches covered.">		if (matches.isEmpty()) {</span>
+<span class="fc" id="L326">			addMatchingMappings(this.mappingRegistry.getRegistrations().keySet(), matches, exchange);</span>
+		}
+<span class="fc bfc" id="L328" title="All 2 branches covered.">		if (!matches.isEmpty()) {</span>
+<span class="fc" id="L329">			Comparator&lt;Match&gt; comparator = new MatchComparator(getMappingComparator(exchange));</span>
+<span class="fc" id="L330">			matches.sort(comparator);</span>
+<span class="fc" id="L331">			Match bestMatch = matches.get(0);</span>
+<span class="fc bfc" id="L332" title="All 2 branches covered.">			if (matches.size() &gt; 1) {</span>
+<span class="pc bpc" id="L333" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L334">					logger.trace(exchange.getLogPrefix() + matches.size() + &quot; matching mappings: &quot; + matches);</span>
+				}
+<span class="fc bfc" id="L336" title="All 2 branches covered.">				if (CorsUtils.isPreFlightRequest(exchange.getRequest())) {</span>
+<span class="fc bfc" id="L337" title="All 2 branches covered.">					for (Match match : matches) {</span>
+<span class="fc bfc" id="L338" title="All 2 branches covered.">						if (match.hasCorsConfig()) {</span>
+<span class="fc" id="L339">							return PREFLIGHT_AMBIGUOUS_MATCH;</span>
+						}
+<span class="fc" id="L341">					}</span>
+				}
+				else {
+<span class="fc" id="L344">					Match secondBestMatch = matches.get(1);</span>
+<span class="fc bfc" id="L345" title="All 2 branches covered.">					if (comparator.compare(bestMatch, secondBestMatch) == 0) {</span>
+<span class="fc" id="L346">						Method m1 = bestMatch.getHandlerMethod().getMethod();</span>
+<span class="fc" id="L347">						Method m2 = secondBestMatch.getHandlerMethod().getMethod();</span>
+<span class="fc" id="L348">						RequestPath path = exchange.getRequest().getPath();</span>
+<span class="fc" id="L349">						throw new IllegalStateException(</span>
+								&quot;Ambiguous handler methods mapped for '&quot; + path + &quot;': {&quot; + m1 + &quot;, &quot; + m2 + &quot;}&quot;);
+					}
+				}
+			}
+<span class="fc" id="L354">			handleMatch(bestMatch.mapping, bestMatch.getHandlerMethod(), exchange);</span>
+<span class="fc" id="L355">			return bestMatch.getHandlerMethod();</span>
+		}
+		else {
+<span class="fc" id="L358">			return handleNoMatch(this.mappingRegistry.getRegistrations().keySet(), exchange);</span>
+		}
+	}
+
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	private void addMatchingMappings(Collection&lt;T&gt; mappings, List&lt;Match&gt; matches, ServerWebExchange exchange) {
+<span class="fc bfc" id="L364" title="All 2 branches covered.">		for (T mapping : mappings) {</span>
+<span class="fc" id="L365">			T match = getMatchingMapping(mapping, exchange);</span>
+<span class="fc bfc" id="L366" title="All 2 branches covered.">			if (match != null) {</span>
+<span class="fc" id="L367">				matches.add(new Match(match, this.mappingRegistry.getRegistrations().get(mapping)));</span>
+			}
+<span class="fc" id="L369">		}</span>
+<span class="fc" id="L370">	}</span>
+
+	/**
+	 * Invoked when a matching mapping is found.
+	 * @param mapping the matching mapping
+	 * @param handlerMethod the matching method
+	 * @param exchange the current exchange
+	 */
+	protected void handleMatch(T mapping, HandlerMethod handlerMethod, ServerWebExchange exchange) {
+<span class="fc" id="L379">		String lookupPath = exchange.getRequest().getPath().pathWithinApplication().value();</span>
+<span class="fc" id="L380">		exchange.getAttributes().put(PATH_WITHIN_HANDLER_MAPPING_ATTRIBUTE, lookupPath);</span>
+<span class="fc" id="L381">	}</span>
+
+	/**
+	 * Invoked when no matching mapping is not found.
+	 * @param mappings all registered mappings
+	 * @param exchange the current exchange
+	 * @return an alternative HandlerMethod or {@code null}
+	 * @throws Exception provides details that can be translated into an error status code
+	 */
+	protected @Nullable HandlerMethod handleNoMatch(Set&lt;T&gt; mappings, ServerWebExchange exchange) throws Exception {
+<span class="fc" id="L391">		return null;</span>
+	}
+
+	@Override
+	protected boolean hasCorsConfigurationSource(Object handler) {
+<span class="pc bpc" id="L396" title="1 of 4 branches missed.">		return super.hasCorsConfigurationSource(handler) ||</span>
+<span class="pc bpc" id="L397" title="1 of 2 branches missed.">				(handler instanceof HandlerMethod handlerMethod &amp;&amp; this.mappingRegistry.getCorsConfiguration(handlerMethod) != null);</span>
+	}
+
+	@Override
+	protected @Nullable CorsConfiguration getCorsConfiguration(Object handler, ServerWebExchange exchange) {
+<span class="fc" id="L402">		CorsConfiguration corsConfig = super.getCorsConfiguration(handler, exchange);</span>
+<span class="pc bpc" id="L403" title="1 of 2 branches missed.">		if (handler instanceof HandlerMethod handlerMethod) {</span>
+<span class="fc bfc" id="L404" title="All 2 branches covered.">			if (handlerMethod.equals(PREFLIGHT_AMBIGUOUS_MATCH)) {</span>
+<span class="fc" id="L405">				return ALLOW_CORS_CONFIG;</span>
+			}
+<span class="fc" id="L407">			CorsConfiguration methodConfig = this.mappingRegistry.getCorsConfiguration(handlerMethod);</span>
+<span class="pc bpc" id="L408" title="1 of 2 branches missed.">			corsConfig = (corsConfig != null ? corsConfig.combine(methodConfig) : methodConfig);</span>
+		}
+<span class="fc" id="L410">		return corsConfig;</span>
+	}
+
+
+	// Abstract template methods
+
+	/**
+	 * Whether the given type is a handler with handler methods.
+	 * @param beanType the type of the bean being checked
+	 * @return &quot;true&quot; if this a handler type, &quot;false&quot; otherwise.
+	 */
+	protected abstract boolean isHandler(Class&lt;?&gt; beanType);
+
+	/**
+	 * Provide the mapping for a handler method. A method for which no
+	 * mapping can be provided is not a handler method.
+	 * @param method the method to provide a mapping for
+	 * @param handlerType the handler type, possibly a subtype of the method's
+	 * declaring class
+	 * @return the mapping, or {@code null} if the method is not mapped
+	 */
+	protected abstract @Nullable T getMappingForMethod(Method method, Class&lt;?&gt; handlerType);
+
+	/**
+	 * Return the request mapping paths that are not patterns.
+	 * @since 5.3
+	 */
+	protected Set&lt;String&gt; getDirectPaths(T mapping) {
+<span class="nc" id="L438">		return Collections.emptySet();</span>
+	}
+
+	/**
+	 * Check if a mapping matches the current request and return a (potentially
+	 * new) mapping with conditions relevant to the current request.
+	 * @param mapping the mapping to get a match for
+	 * @param exchange the current exchange
+	 * @return the match, or {@code null} if the mapping doesn't match
+	 */
+	protected abstract @Nullable T getMatchingMapping(T mapping, ServerWebExchange exchange);
+
+	/**
+	 * Return a comparator for sorting matching mappings.
+	 * The returned comparator should sort 'better' matches higher.
+	 * @param exchange the current exchange
+	 * @return the comparator (never {@code null})
+	 */
+	protected abstract Comparator&lt;T&gt; getMappingComparator(ServerWebExchange exchange);
+
+
+	/**
+	 * A registry that maintains all mappings to handler methods, exposing methods
+	 * to perform lookups and providing concurrent access.
+	 *
+	 * &lt;p&gt;Package-private for testing purposes.
+	 */
+<span class="fc" id="L465">	class MappingRegistry {</span>
+
+<span class="fc" id="L467">		private final Map&lt;T, MappingRegistration&lt;T&gt;&gt; registry = new HashMap&lt;&gt;();</span>
+
+<span class="fc" id="L469">		private final MultiValueMap&lt;String, T&gt; pathLookup = new LinkedMultiValueMap&lt;&gt;();</span>
+
+<span class="fc" id="L471">		private final Map&lt;HandlerMethod, CorsConfiguration&gt; corsLookup = new ConcurrentHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L473">		private final ReentrantReadWriteLock readWriteLock = new ReentrantReadWriteLock();</span>
+
+		/**
+		 * Return all registrations.
+		 * @since 5.3
+		 */
+		public Map&lt;T, MappingRegistration&lt;T&gt;&gt; getRegistrations() {
+<span class="fc" id="L480">			return this.registry;</span>
+		}
+
+		/**
+		 * Return matches for the given URL path. Not thread-safe.
+		 * @since 5.3
+		 * @see #acquireReadLock()
+		 */
+		public @Nullable List&lt;T&gt; getMappingsByDirectPath(ServerWebExchange exchange) {
+<span class="fc" id="L489">			String path = exchange.getRequest().getPath().pathWithinApplication().value();</span>
+<span class="fc" id="L490">			return this.pathLookup.get(path);</span>
+		}
+
+		/**
+		 * Return CORS configuration. Thread-safe for concurrent use.
+		 */
+		public @Nullable CorsConfiguration getCorsConfiguration(HandlerMethod handlerMethod) {
+<span class="fc" id="L497">			HandlerMethod original = handlerMethod.getResolvedFromHandlerMethod();</span>
+<span class="fc bfc" id="L498" title="All 2 branches covered.">			return this.corsLookup.get(original != null ? original : handlerMethod);</span>
+		}
+
+		/**
+		 * Acquire the read lock when using getMappings and getMappingsByUrl.
+		 */
+		public void acquireReadLock() {
+<span class="fc" id="L505">			this.readWriteLock.readLock().lock();</span>
+<span class="fc" id="L506">		}</span>
+
+		/**
+		 * Release the read lock after using getMappings and getMappingsByUrl.
+		 */
+		public void releaseReadLock() {
+<span class="fc" id="L512">			this.readWriteLock.readLock().unlock();</span>
+<span class="fc" id="L513">		}</span>
+
+		public void register(T mapping, Object handler, Method method) {
+<span class="fc" id="L516">			this.readWriteLock.writeLock().lock();</span>
+			try {
+<span class="fc" id="L518">				HandlerMethod handlerMethod = createHandlerMethod(handler, method);</span>
+<span class="fc" id="L519">				validateMethodMapping(handlerMethod, mapping);</span>
+
+				// Enable method validation, if applicable
+<span class="fc" id="L522">				handlerMethod = handlerMethod.createWithValidateFlags();</span>
+
+<span class="fc" id="L524">				Set&lt;String&gt; directPaths = AbstractHandlerMethodMapping.this.getDirectPaths(mapping);</span>
+<span class="fc bfc" id="L525" title="All 2 branches covered.">				for (String path : directPaths) {</span>
+<span class="fc" id="L526">					this.pathLookup.add(path, mapping);</span>
+<span class="fc" id="L527">				}</span>
+
+<span class="fc" id="L529">				CorsConfiguration corsConfig = initCorsConfiguration(handler, method, mapping);</span>
+<span class="fc bfc" id="L530" title="All 2 branches covered.">				if (corsConfig != null) {</span>
+<span class="fc" id="L531">					corsConfig.validateAllowCredentials();</span>
+<span class="fc" id="L532">					corsConfig.validateAllowPrivateNetwork();</span>
+<span class="fc" id="L533">					this.corsLookup.put(handlerMethod, corsConfig);</span>
+				}
+
+<span class="fc bfc" id="L536" title="All 2 branches covered.">				this.registry.put(mapping,</span>
+						new MappingRegistration&lt;&gt;(mapping, handlerMethod, directPaths, corsConfig != null));
+			}
+			finally {
+<span class="fc" id="L540">				this.readWriteLock.writeLock().unlock();</span>
+			}
+<span class="fc" id="L542">		}</span>
+
+		private void validateMethodMapping(HandlerMethod handlerMethod, T mapping) {
+<span class="fc" id="L545">			MappingRegistration&lt;T&gt; registration = this.registry.get(mapping);</span>
+<span class="fc bfc" id="L546" title="All 2 branches covered.">			HandlerMethod existingHandlerMethod = (registration != null ? registration.getHandlerMethod() : null);</span>
+<span class="pc bpc" id="L547" title="1 of 4 branches missed.">			if (existingHandlerMethod != null &amp;&amp; !existingHandlerMethod.equals(handlerMethod)) {</span>
+<span class="fc" id="L548">				throw new IllegalStateException(</span>
+<span class="fc" id="L549">						&quot;Ambiguous mapping. Cannot map '&quot; + handlerMethod.getBean() + &quot;' method \n&quot; +</span>
+						handlerMethod + &quot;\nto &quot; + mapping + &quot;: There is already '&quot; +
+<span class="fc" id="L551">						existingHandlerMethod.getBean() + &quot;' bean method\n&quot; + existingHandlerMethod + &quot; mapped.&quot;);</span>
+			}
+<span class="fc" id="L553">		}</span>
+
+		public void unregister(T mapping) {
+<span class="fc" id="L556">			this.readWriteLock.writeLock().lock();</span>
+			try {
+<span class="fc" id="L558">				MappingRegistration&lt;T&gt; registration = this.registry.remove(mapping);</span>
+<span class="pc bpc" id="L559" title="1 of 2 branches missed.">				if (registration == null) {</span>
+<span class="nc" id="L560">					return;</span>
+				}
+
+<span class="fc bfc" id="L563" title="All 2 branches covered.">				for (String path : registration.getDirectPaths()) {</span>
+<span class="fc" id="L564">					List&lt;T&gt; mappings = this.pathLookup.get(path);</span>
+<span class="pc bpc" id="L565" title="1 of 2 branches missed.">					if (mappings != null) {</span>
+<span class="fc" id="L566">						mappings.remove(registration.getMapping());</span>
+<span class="pc bpc" id="L567" title="1 of 2 branches missed.">						if (mappings.isEmpty()) {</span>
+<span class="fc" id="L568">							this.pathLookup.remove(path);</span>
+						}
+					}
+<span class="fc" id="L571">				}</span>
+
+<span class="fc" id="L573">				this.corsLookup.remove(registration.getHandlerMethod());</span>
+			}
+			finally {
+<span class="fc" id="L576">				this.readWriteLock.writeLock().unlock();</span>
+			}
+<span class="fc" id="L578">		}</span>
+	}
+
+
+	static class MappingRegistration&lt;T&gt; {
+
+		private final T mapping;
+
+		private final HandlerMethod handlerMethod;
+
+		private final Set&lt;String&gt; directPaths;
+
+		private final boolean corsConfig;
+
+		public MappingRegistration(
+<span class="fc" id="L593">				T mapping, HandlerMethod handlerMethod, @Nullable Set&lt;String&gt; directPaths, boolean corsConfig) {</span>
+
+<span class="fc" id="L595">			Assert.notNull(mapping, &quot;Mapping must not be null&quot;);</span>
+<span class="fc" id="L596">			Assert.notNull(handlerMethod, &quot;HandlerMethod must not be null&quot;);</span>
+<span class="fc" id="L597">			this.mapping = mapping;</span>
+<span class="fc" id="L598">			this.handlerMethod = handlerMethod;</span>
+<span class="pc bpc" id="L599" title="1 of 2 branches missed.">			this.directPaths = (directPaths != null ? directPaths : Collections.emptySet());</span>
+<span class="fc" id="L600">			this.corsConfig = corsConfig;</span>
+<span class="fc" id="L601">		}</span>
+
+		public T getMapping() {
+<span class="fc" id="L604">			return this.mapping;</span>
+		}
+
+		public HandlerMethod getHandlerMethod() {
+<span class="fc" id="L608">			return this.handlerMethod;</span>
+		}
+
+		public Set&lt;String&gt; getDirectPaths() {
+<span class="fc" id="L612">			return this.directPaths;</span>
+		}
+
+		public boolean hasCorsConfig() {
+<span class="fc" id="L616">			return this.corsConfig;</span>
+		}
+	}
+
+
+	/**
+	 * A thin wrapper around a matched HandlerMethod and its mapping, for the purpose of
+	 * comparing the best match with a comparator in the context of the current request.
+	 */
+	private class Match {
+
+		private final T mapping;
+
+		private final MappingRegistration&lt;T&gt; registration;
+
+<span class="fc" id="L631">		public Match(T mapping, MappingRegistration&lt;T&gt; registration) {</span>
+<span class="fc" id="L632">			this.mapping = mapping;</span>
+<span class="fc" id="L633">			this.registration = registration;</span>
+<span class="fc" id="L634">		}</span>
+
+		public HandlerMethod getHandlerMethod() {
+<span class="fc" id="L637">			return this.registration.getHandlerMethod();</span>
+		}
+
+		public boolean hasCorsConfig() {
+<span class="fc" id="L641">			return this.registration.hasCorsConfig();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L646">			return this.mapping.toString();</span>
+		}
+	}
+
+
+	private class MatchComparator implements Comparator&lt;Match&gt; {
+
+		private final Comparator&lt;T&gt; comparator;
+
+<span class="fc" id="L655">		public MatchComparator(Comparator&lt;T&gt; comparator) {</span>
+<span class="fc" id="L656">			this.comparator = comparator;</span>
+<span class="fc" id="L657">		}</span>
+
+		@Override
+		public int compare(Match match1, Match match2) {
+<span class="fc" id="L661">			return this.comparator.compare(match1.mapping, match2.mapping);</span>
+		}
+	}
+
+
+	private static class PreFlightAmbiguousMatchHandler {
+
+		@SuppressWarnings(&quot;unused&quot;)
+		public void handle() {
+<span class="nc" id="L670">			throw new UnsupportedOperationException(&quot;Not implemented&quot;);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

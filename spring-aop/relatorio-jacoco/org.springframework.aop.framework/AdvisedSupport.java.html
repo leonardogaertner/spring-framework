@@ -1,0 +1,748 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AdvisedSupport.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.aop.framework</a> &gt; <span class="el_source">AdvisedSupport.java</span></div><h1>AdvisedSupport.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.aop.framework;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.aopalliance.aop.Advice;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aop.Advisor;
+import org.springframework.aop.DynamicIntroductionAdvice;
+import org.springframework.aop.IntroductionAdvisor;
+import org.springframework.aop.IntroductionInfo;
+import org.springframework.aop.Pointcut;
+import org.springframework.aop.PointcutAdvisor;
+import org.springframework.aop.SpringProxy;
+import org.springframework.aop.TargetSource;
+import org.springframework.aop.support.DefaultIntroductionAdvisor;
+import org.springframework.aop.support.DefaultPointcutAdvisor;
+import org.springframework.aop.target.EmptyTargetSource;
+import org.springframework.aop.target.SingletonTargetSource;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ObjectUtils;
+
+/**
+ * Base class for AOP proxy configuration managers.
+ *
+ * &lt;p&gt;These are not themselves AOP proxies, but subclasses of this class are
+ * normally factories from which AOP proxy instances are obtained directly.
+ *
+ * &lt;p&gt;This class frees subclasses of the housekeeping of Advices
+ * and Advisors, but doesn't actually implement proxy creation
+ * methods, which are provided by subclasses.
+ *
+ * &lt;p&gt;This class is serializable; subclasses need not be.
+ *
+ * &lt;p&gt;This class is used to hold snapshots of proxies.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @see org.springframework.aop.framework.AopProxy
+ */
+public class AdvisedSupport extends ProxyConfig implements Advised {
+
+	/** use serialVersionUID from Spring 2.0 for interoperability. */
+	private static final long serialVersionUID = 2651364800145442165L;
+
+<span class="fc" id="L73">	private static final Advisor[] EMPTY_ADVISOR_ARRAY = new Advisor[0];</span>
+
+
+	/**
+	 * Canonical TargetSource when there's no target, and behavior is
+	 * supplied by the advisors.
+	 */
+<span class="fc" id="L80">	public static final TargetSource EMPTY_TARGET_SOURCE = EmptyTargetSource.INSTANCE;</span>
+
+
+	/** Package-protected to allow direct access for efficiency. */
+<span class="pc" id="L84">	@SuppressWarnings(&quot;serial&quot;)</span>
+	TargetSource targetSource = EMPTY_TARGET_SOURCE;
+
+	/** Whether the Advisors are already filtered for the specific target class. */
+<span class="pc" id="L88">	private boolean preFiltered = false;</span>
+
+	/** The AdvisorChainFactory to use. */
+<span class="pc" id="L91">	@SuppressWarnings(&quot;serial&quot;)</span>
+	private AdvisorChainFactory advisorChainFactory = DefaultAdvisorChainFactory.INSTANCE;
+
+	/**
+	 * Interfaces to be implemented by the proxy. Held in List to keep the order
+	 * of registration, to create JDK proxy with specified order of interfaces.
+	 */
+<span class="pc" id="L98">	@SuppressWarnings(&quot;serial&quot;)</span>
+	private List&lt;Class&lt;?&gt;&gt; interfaces = new ArrayList&lt;&gt;();
+
+	/**
+	 * List of Advisors. If an Advice is added, it will be wrapped
+	 * in an Advisor before being added to this List.
+	 */
+<span class="pc" id="L105">	@SuppressWarnings(&quot;serial&quot;)</span>
+	private List&lt;Advisor&gt; advisors = new ArrayList&lt;&gt;();
+
+	/**
+	 * List of minimal {@link AdvisorKeyEntry} instances,
+	 * to be assigned to the {@link #advisors} field on reduction.
+	 * @since 6.0.10
+	 * @see #reduceToAdvisorKey
+	 */
+<span class="pc" id="L114">	@SuppressWarnings(&quot;serial&quot;)</span>
+	private List&lt;Advisor&gt; advisorKey = this.advisors;
+
+	/** Cache with Method as key and advisor chain List as value. */
+	private transient @Nullable Map&lt;MethodCacheKey, List&lt;Object&gt;&gt; methodCache;
+
+	/** Cache with shared interceptors which are not method-specific. */
+	private transient volatile @Nullable List&lt;Object&gt; cachedInterceptors;
+
+	/**
+	 * Optional field for {@link AopProxy} implementations to store metadata in.
+	 * Used by {@link JdkDynamicAopProxy}.
+	 * @since 6.1.3
+	 * @see JdkDynamicAopProxy#JdkDynamicAopProxy(AdvisedSupport)
+	 */
+	transient volatile @Nullable Object proxyMetadataCache;
+
+
+	/**
+	 * No-arg constructor for use as a JavaBean.
+	 */
+<span class="fc" id="L135">	public AdvisedSupport() {</span>
+<span class="fc" id="L136">	}</span>
+
+	/**
+	 * Create an {@code AdvisedSupport} instance with the given parameters.
+	 * @param interfaces the proxied interfaces
+	 */
+<span class="nc" id="L142">	public AdvisedSupport(Class&lt;?&gt;... interfaces) {</span>
+<span class="nc" id="L143">		setInterfaces(interfaces);</span>
+<span class="nc" id="L144">	}</span>
+
+
+	/**
+	 * Set the given object as target.
+	 * &lt;p&gt;Will create a SingletonTargetSource for the object.
+	 * @see #setTargetSource
+	 * @see org.springframework.aop.target.SingletonTargetSource
+	 */
+	public void setTarget(Object target) {
+<span class="fc" id="L154">		setTargetSource(new SingletonTargetSource(target));</span>
+<span class="fc" id="L155">	}</span>
+
+	@Override
+	public void setTargetSource(@Nullable TargetSource targetSource) {
+<span class="pc bpc" id="L159" title="1 of 2 branches missed.">		this.targetSource = (targetSource != null ? targetSource : EMPTY_TARGET_SOURCE);</span>
+<span class="fc" id="L160">	}</span>
+
+	@Override
+	public TargetSource getTargetSource() {
+<span class="fc" id="L164">		return this.targetSource;</span>
+	}
+
+	/**
+	 * Set a target class to be proxied, indicating that the proxy
+	 * should be castable to the given class.
+	 * &lt;p&gt;Internally, an {@link org.springframework.aop.target.EmptyTargetSource}
+	 * for the given target class will be used. The kind of proxy needed
+	 * will be determined on actual creation of the proxy.
+	 * &lt;p&gt;This is a replacement for setting a &quot;targetSource&quot; or &quot;target&quot;,
+	 * for the case where we want a proxy based on a target class
+	 * (which can be an interface or a concrete class) without having
+	 * a fully capable TargetSource available.
+	 * @see #setTargetSource
+	 * @see #setTarget
+	 */
+	public void setTargetClass(@Nullable Class&lt;?&gt; targetClass) {
+<span class="fc" id="L181">		this.targetSource = EmptyTargetSource.forClass(targetClass);</span>
+<span class="fc" id="L182">	}</span>
+
+	@Override
+	public @Nullable Class&lt;?&gt; getTargetClass() {
+<span class="fc" id="L186">		return this.targetSource.getTargetClass();</span>
+	}
+
+	@Override
+	public void setPreFiltered(boolean preFiltered) {
+<span class="nc" id="L191">		this.preFiltered = preFiltered;</span>
+<span class="nc" id="L192">	}</span>
+
+	@Override
+	public boolean isPreFiltered() {
+<span class="fc" id="L196">		return this.preFiltered;</span>
+	}
+
+	/**
+	 * Set the advisor chain factory to use.
+	 * &lt;p&gt;Default is a {@link DefaultAdvisorChainFactory}.
+	 */
+	public void setAdvisorChainFactory(AdvisorChainFactory advisorChainFactory) {
+<span class="nc" id="L204">		Assert.notNull(advisorChainFactory, &quot;AdvisorChainFactory must not be null&quot;);</span>
+<span class="nc" id="L205">		this.advisorChainFactory = advisorChainFactory;</span>
+<span class="nc" id="L206">	}</span>
+
+	/**
+	 * Return the advisor chain factory to use (never {@code null}).
+	 */
+	public AdvisorChainFactory getAdvisorChainFactory() {
+<span class="nc" id="L212">		return this.advisorChainFactory;</span>
+	}
+
+
+	/**
+	 * Set the interfaces to be proxied.
+	 */
+	public void setInterfaces(Class&lt;?&gt;... interfaces) {
+<span class="fc" id="L220">		Assert.notNull(interfaces, &quot;Interfaces must not be null&quot;);</span>
+<span class="fc" id="L221">		this.interfaces.clear();</span>
+<span class="fc bfc" id="L222" title="All 2 branches covered.">		for (Class&lt;?&gt; ifc : interfaces) {</span>
+<span class="fc" id="L223">			addInterface(ifc);</span>
+		}
+<span class="fc" id="L225">	}</span>
+
+	/**
+	 * Add a new proxied interface.
+	 * @param ifc the additional interface to proxy
+	 */
+	public void addInterface(Class&lt;?&gt; ifc) {
+<span class="fc" id="L232">		Assert.notNull(ifc, &quot;Interface must not be null&quot;);</span>
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">		if (!ifc.isInterface()) {</span>
+<span class="nc" id="L234">			throw new IllegalArgumentException(&quot;[&quot; + ifc.getName() + &quot;] is not an interface&quot;);</span>
+		}
+<span class="fc bfc" id="L236" title="All 2 branches covered.">		if (!this.interfaces.contains(ifc)) {</span>
+<span class="fc" id="L237">			this.interfaces.add(ifc);</span>
+<span class="fc" id="L238">			adviceChanged();</span>
+		}
+<span class="fc" id="L240">	}</span>
+
+	/**
+	 * Remove a proxied interface.
+	 * &lt;p&gt;Does nothing if the given interface isn't proxied.
+	 * @param ifc the interface to remove from the proxy
+	 * @return {@code true} if the interface was removed; {@code false}
+	 * if the interface was not found and hence could not be removed
+	 */
+	public boolean removeInterface(Class&lt;?&gt; ifc) {
+<span class="fc" id="L250">		return this.interfaces.remove(ifc);</span>
+	}
+
+	@Override
+	public Class&lt;?&gt;[] getProxiedInterfaces() {
+<span class="fc" id="L255">		return ClassUtils.toClassArray(this.interfaces);</span>
+	}
+
+	@Override
+	public boolean isInterfaceProxied(Class&lt;?&gt; ifc) {
+<span class="fc bfc" id="L260" title="All 2 branches covered.">		for (Class&lt;?&gt; proxyIntf : this.interfaces) {</span>
+<span class="fc bfc" id="L261" title="All 2 branches covered.">			if (ifc.isAssignableFrom(proxyIntf)) {</span>
+<span class="fc" id="L262">				return true;</span>
+			}
+<span class="fc" id="L264">		}</span>
+<span class="fc" id="L265">		return false;</span>
+	}
+
+	boolean hasUserSuppliedInterfaces() {
+<span class="fc bfc" id="L269" title="All 2 branches covered.">		for (Class&lt;?&gt; ifc : this.interfaces) {</span>
+<span class="pc bpc" id="L270" title="1 of 4 branches missed.">			if (!SpringProxy.class.isAssignableFrom(ifc) &amp;&amp; !isAdvisorIntroducedInterface(ifc)) {</span>
+<span class="fc" id="L271">				return true;</span>
+			}
+<span class="fc" id="L273">		}</span>
+<span class="fc" id="L274">		return false;</span>
+	}
+
+	private boolean isAdvisorIntroducedInterface(Class&lt;?&gt; ifc) {
+<span class="fc bfc" id="L278" title="All 2 branches covered.">		for (Advisor advisor : this.advisors) {</span>
+<span class="fc bfc" id="L279" title="All 2 branches covered.">			if (advisor instanceof IntroductionAdvisor introductionAdvisor) {</span>
+<span class="fc bfc" id="L280" title="All 2 branches covered.">				for (Class&lt;?&gt; introducedInterface : introductionAdvisor.getInterfaces()) {</span>
+<span class="fc bfc" id="L281" title="All 2 branches covered.">					if (introducedInterface == ifc) {</span>
+<span class="fc" id="L282">						return true;</span>
+					}
+				}
+			}
+<span class="fc" id="L286">		}</span>
+<span class="fc" id="L287">		return false;</span>
+	}
+
+
+	@Override
+	public final Advisor[] getAdvisors() {
+<span class="fc" id="L293">		return this.advisors.toArray(EMPTY_ADVISOR_ARRAY);</span>
+	}
+
+	@Override
+	public int getAdvisorCount() {
+<span class="nc" id="L298">		return this.advisors.size();</span>
+	}
+
+	@Override
+	public void addAdvisor(Advisor advisor) {
+<span class="fc" id="L303">		int pos = this.advisors.size();</span>
+<span class="fc" id="L304">		addAdvisor(pos, advisor);</span>
+<span class="fc" id="L305">	}</span>
+
+	@Override
+	public void addAdvisor(int pos, Advisor advisor) throws AopConfigException {
+<span class="fc bfc" id="L309" title="All 2 branches covered.">		if (advisor instanceof IntroductionAdvisor introductionAdvisor) {</span>
+<span class="fc" id="L310">			validateIntroductionAdvisor(introductionAdvisor);</span>
+		}
+<span class="fc" id="L312">		addAdvisorInternal(pos, advisor);</span>
+<span class="fc" id="L313">	}</span>
+
+	@Override
+	public boolean removeAdvisor(Advisor advisor) {
+<span class="fc" id="L317">		int index = indexOf(advisor);</span>
+<span class="fc bfc" id="L318" title="All 2 branches covered.">		if (index == -1) {</span>
+<span class="fc" id="L319">			return false;</span>
+		}
+		else {
+<span class="fc" id="L322">			removeAdvisor(index);</span>
+<span class="fc" id="L323">			return true;</span>
+		}
+	}
+
+	@Override
+	public void removeAdvisor(int index) throws AopConfigException {
+<span class="pc bpc" id="L329" title="1 of 2 branches missed.">		if (isFrozen()) {</span>
+<span class="nc" id="L330">			throw new AopConfigException(&quot;Cannot remove Advisor: Configuration is frozen.&quot;);</span>
+		}
+<span class="fc bfc" id="L332" title="All 4 branches covered.">		if (index &lt; 0 || index &gt; this.advisors.size() - 1) {</span>
+<span class="fc" id="L333">			throw new AopConfigException(&quot;Advisor index &quot; + index + &quot; is out of bounds: &quot; +</span>
+<span class="fc" id="L334">					&quot;This configuration only has &quot; + this.advisors.size() + &quot; advisors.&quot;);</span>
+		}
+
+<span class="fc" id="L337">		Advisor advisor = this.advisors.remove(index);</span>
+<span class="fc bfc" id="L338" title="All 2 branches covered.">		if (advisor instanceof IntroductionAdvisor introductionAdvisor) {</span>
+			// We need to remove introduction interfaces.
+<span class="fc bfc" id="L340" title="All 2 branches covered.">			for (Class&lt;?&gt; ifc : introductionAdvisor.getInterfaces()) {</span>
+<span class="fc" id="L341">				removeInterface(ifc);</span>
+			}
+		}
+
+<span class="fc" id="L345">		adviceChanged();</span>
+<span class="fc" id="L346">	}</span>
+
+	@Override
+	public int indexOf(Advisor advisor) {
+<span class="fc" id="L350">		Assert.notNull(advisor, &quot;Advisor must not be null&quot;);</span>
+<span class="fc" id="L351">		return this.advisors.indexOf(advisor);</span>
+	}
+
+	@Override
+	public boolean replaceAdvisor(Advisor a, Advisor b) throws AopConfigException {
+<span class="fc" id="L356">		Assert.notNull(a, &quot;Advisor a must not be null&quot;);</span>
+<span class="fc" id="L357">		Assert.notNull(b, &quot;Advisor b must not be null&quot;);</span>
+<span class="fc" id="L358">		int index = indexOf(a);</span>
+<span class="fc bfc" id="L359" title="All 2 branches covered.">		if (index == -1) {</span>
+<span class="fc" id="L360">			return false;</span>
+		}
+<span class="fc" id="L362">		removeAdvisor(index);</span>
+<span class="fc" id="L363">		addAdvisor(index, b);</span>
+<span class="fc" id="L364">		return true;</span>
+	}
+
+	/**
+	 * Add all the given advisors to this proxy configuration.
+	 * @param advisors the advisors to register
+	 */
+	public void addAdvisors(Advisor... advisors) {
+<span class="nc" id="L372">		addAdvisors(Arrays.asList(advisors));</span>
+<span class="nc" id="L373">	}</span>
+
+	/**
+	 * Add all the given advisors to this proxy configuration.
+	 * @param advisors the advisors to register
+	 */
+	public void addAdvisors(Collection&lt;Advisor&gt; advisors) {
+<span class="pc bpc" id="L380" title="1 of 2 branches missed.">		if (isFrozen()) {</span>
+<span class="nc" id="L381">			throw new AopConfigException(&quot;Cannot add advisor: Configuration is frozen.&quot;);</span>
+		}
+<span class="fc bfc" id="L383" title="All 2 branches covered.">		if (!CollectionUtils.isEmpty(advisors)) {</span>
+<span class="fc bfc" id="L384" title="All 2 branches covered.">			for (Advisor advisor : advisors) {</span>
+<span class="fc bfc" id="L385" title="All 2 branches covered.">				if (advisor instanceof IntroductionAdvisor introductionAdvisor) {</span>
+<span class="fc" id="L386">					validateIntroductionAdvisor(introductionAdvisor);</span>
+				}
+<span class="fc" id="L388">				Assert.notNull(advisor, &quot;Advisor must not be null&quot;);</span>
+<span class="fc" id="L389">				this.advisors.add(advisor);</span>
+<span class="fc" id="L390">			}</span>
+<span class="fc" id="L391">			adviceChanged();</span>
+		}
+<span class="fc" id="L393">	}</span>
+
+	private void validateIntroductionAdvisor(IntroductionAdvisor advisor) {
+<span class="fc" id="L396">		advisor.validateInterfaces();</span>
+		// If the advisor passed validation, we can make the change.
+<span class="fc bfc" id="L398" title="All 2 branches covered.">		for (Class&lt;?&gt; ifc : advisor.getInterfaces()) {</span>
+<span class="fc" id="L399">			addInterface(ifc);</span>
+		}
+<span class="fc" id="L401">	}</span>
+
+	private void addAdvisorInternal(int pos, Advisor advisor) throws AopConfigException {
+<span class="fc" id="L404">		Assert.notNull(advisor, &quot;Advisor must not be null&quot;);</span>
+<span class="pc bpc" id="L405" title="1 of 2 branches missed.">		if (isFrozen()) {</span>
+<span class="nc" id="L406">			throw new AopConfigException(&quot;Cannot add advisor: Configuration is frozen.&quot;);</span>
+		}
+<span class="pc bpc" id="L408" title="1 of 2 branches missed.">		if (pos &gt; this.advisors.size()) {</span>
+<span class="nc" id="L409">			throw new IllegalArgumentException(</span>
+<span class="nc" id="L410">					&quot;Illegal position &quot; + pos + &quot; in advisor list with size &quot; + this.advisors.size());</span>
+		}
+<span class="fc" id="L412">		this.advisors.add(pos, advisor);</span>
+<span class="fc" id="L413">		adviceChanged();</span>
+<span class="fc" id="L414">	}</span>
+
+	/**
+	 * Allows uncontrolled access to the {@link List} of {@link Advisor Advisors}.
+	 * &lt;p&gt;Use with care, and remember to {@link #adviceChanged() fire advice changed events}
+	 * when making any modifications.
+	 */
+	protected final List&lt;Advisor&gt; getAdvisorsInternal() {
+<span class="nc" id="L422">		return this.advisors;</span>
+	}
+
+	@Override
+	public void addAdvice(Advice advice) throws AopConfigException {
+<span class="fc" id="L427">		int pos = this.advisors.size();</span>
+<span class="fc" id="L428">		addAdvice(pos, advice);</span>
+<span class="fc" id="L429">	}</span>
+
+	/**
+	 * Cannot add introductions this way unless the advice implements IntroductionInfo.
+	 */
+	@Override
+	public void addAdvice(int pos, Advice advice) throws AopConfigException {
+<span class="fc" id="L436">		Assert.notNull(advice, &quot;Advice must not be null&quot;);</span>
+<span class="fc bfc" id="L437" title="All 2 branches covered.">		if (advice instanceof IntroductionInfo introductionInfo) {</span>
+			// We don't need an IntroductionAdvisor for this kind of introduction:
+			// It's fully self-describing.
+<span class="fc" id="L440">			addAdvisor(pos, new DefaultIntroductionAdvisor(advice, introductionInfo));</span>
+		}
+<span class="pc bpc" id="L442" title="1 of 2 branches missed.">		else if (advice instanceof DynamicIntroductionAdvice) {</span>
+			// We need an IntroductionAdvisor for this kind of introduction.
+<span class="nc" id="L444">			throw new AopConfigException(&quot;DynamicIntroductionAdvice may only be added as part of IntroductionAdvisor&quot;);</span>
+		}
+		else {
+<span class="fc" id="L447">			addAdvisor(pos, new DefaultPointcutAdvisor(advice));</span>
+		}
+<span class="fc" id="L449">	}</span>
+
+	@Override
+	public boolean removeAdvice(Advice advice) throws AopConfigException {
+<span class="fc" id="L453">		int index = indexOf(advice);</span>
+<span class="fc bfc" id="L454" title="All 2 branches covered.">		if (index == -1) {</span>
+<span class="fc" id="L455">			return false;</span>
+		}
+		else {
+<span class="fc" id="L458">			removeAdvisor(index);</span>
+<span class="fc" id="L459">			return true;</span>
+		}
+	}
+
+	@Override
+	public int indexOf(Advice advice) {
+<span class="fc" id="L465">		Assert.notNull(advice, &quot;Advice must not be null&quot;);</span>
+<span class="fc bfc" id="L466" title="All 2 branches covered.">		for (int i = 0; i &lt; this.advisors.size(); i++) {</span>
+<span class="fc" id="L467">			Advisor advisor = this.advisors.get(i);</span>
+<span class="fc bfc" id="L468" title="All 2 branches covered.">			if (advisor.getAdvice() == advice) {</span>
+<span class="fc" id="L469">				return i;</span>
+			}
+		}
+<span class="fc" id="L472">		return -1;</span>
+	}
+
+	/**
+	 * Is the given advice included in any advisor within this proxy configuration?
+	 * @param advice the advice to check inclusion of
+	 * @return whether this advice instance is included
+	 */
+	public boolean adviceIncluded(@Nullable Advice advice) {
+<span class="pc bpc" id="L481" title="1 of 2 branches missed.">		if (advice != null) {</span>
+<span class="fc bfc" id="L482" title="All 2 branches covered.">			for (Advisor advisor : this.advisors) {</span>
+<span class="fc bfc" id="L483" title="All 2 branches covered.">				if (advisor.getAdvice() == advice) {</span>
+<span class="fc" id="L484">					return true;</span>
+				}
+<span class="fc" id="L486">			}</span>
+		}
+<span class="fc" id="L488">		return false;</span>
+	}
+
+	/**
+	 * Count advices of the given class.
+	 * @param adviceClass the advice class to check
+	 * @return the count of the interceptors of this class or subclasses
+	 */
+	public int countAdvicesOfType(@Nullable Class&lt;?&gt; adviceClass) {
+<span class="fc" id="L497">		int count = 0;</span>
+<span class="pc bpc" id="L498" title="1 of 2 branches missed.">		if (adviceClass != null) {</span>
+<span class="fc bfc" id="L499" title="All 2 branches covered.">			for (Advisor advisor : this.advisors) {</span>
+<span class="fc bfc" id="L500" title="All 2 branches covered.">				if (adviceClass.isInstance(advisor.getAdvice())) {</span>
+<span class="fc" id="L501">					count++;</span>
+				}
+<span class="fc" id="L503">			}</span>
+		}
+<span class="fc" id="L505">		return count;</span>
+	}
+
+
+	/**
+	 * Determine a list of {@link org.aopalliance.intercept.MethodInterceptor} objects
+	 * for the given method, based on this configuration.
+	 * @param method the proxied method
+	 * @param targetClass the target class
+	 * @return a List of MethodInterceptors (may also include InterceptorAndDynamicMethodMatchers)
+	 */
+	public List&lt;Object&gt; getInterceptorsAndDynamicInterceptionAdvice(Method method, @Nullable Class&lt;?&gt; targetClass) {
+		List&lt;Object&gt; cachedInterceptors;
+<span class="fc bfc" id="L518" title="All 2 branches covered.">		if (this.methodCache != null) {</span>
+			// Method-specific cache for method-specific pointcuts
+<span class="fc" id="L520">			MethodCacheKey cacheKey = new MethodCacheKey(method);</span>
+<span class="fc" id="L521">			cachedInterceptors = this.methodCache.get(cacheKey);</span>
+<span class="fc bfc" id="L522" title="All 2 branches covered.">			if (cachedInterceptors == null) {</span>
+<span class="fc" id="L523">				cachedInterceptors = this.advisorChainFactory.getInterceptorsAndDynamicInterceptionAdvice(</span>
+						this, method, targetClass);
+<span class="fc" id="L525">				this.methodCache.put(cacheKey, cachedInterceptors);</span>
+			}
+<span class="fc" id="L527">		}</span>
+		else {
+			// Shared cache since there are no method-specific advisors (see below).
+<span class="fc" id="L530">			cachedInterceptors = this.cachedInterceptors;</span>
+<span class="fc bfc" id="L531" title="All 2 branches covered.">			if (cachedInterceptors == null) {</span>
+<span class="fc" id="L532">				cachedInterceptors = this.advisorChainFactory.getInterceptorsAndDynamicInterceptionAdvice(</span>
+						this, method, targetClass);
+<span class="fc" id="L534">				this.cachedInterceptors = cachedInterceptors;</span>
+			}
+		}
+<span class="fc" id="L537">		return cachedInterceptors;</span>
+	}
+
+	/**
+	 * Invoked when advice has changed.
+	 */
+	protected void adviceChanged() {
+<span class="fc" id="L544">		this.methodCache = null;</span>
+<span class="fc" id="L545">		this.cachedInterceptors = null;</span>
+<span class="fc" id="L546">		this.proxyMetadataCache = null;</span>
+
+		// Initialize method cache if necessary; otherwise,
+		// cachedInterceptors is going to be shared (see above).
+<span class="fc bfc" id="L550" title="All 2 branches covered.">		for (Advisor advisor : this.advisors) {</span>
+<span class="fc bfc" id="L551" title="All 2 branches covered.">			if (advisor instanceof PointcutAdvisor) {</span>
+<span class="fc" id="L552">				this.methodCache = new ConcurrentHashMap&lt;&gt;();</span>
+<span class="fc" id="L553">				break;</span>
+			}
+<span class="fc" id="L555">		}</span>
+<span class="fc" id="L556">	}</span>
+
+	/**
+	 * Call this method on a new instance created by the no-arg constructor
+	 * to create an independent copy of the configuration from the given object.
+	 * @param other the AdvisedSupport object to copy configuration from
+	 */
+	protected void copyConfigurationFrom(AdvisedSupport other) {
+<span class="nc" id="L564">		copyConfigurationFrom(other, other.targetSource, new ArrayList&lt;&gt;(other.advisors));</span>
+<span class="nc" id="L565">	}</span>
+
+	/**
+	 * Copy the AOP configuration from the given {@link AdvisedSupport} object,
+	 * but allow substitution of a fresh {@link TargetSource} and a given interceptor chain.
+	 * @param other the {@code AdvisedSupport} object to take proxy configuration from
+	 * @param targetSource the new TargetSource
+	 * @param advisors the Advisors for the chain
+	 */
+	protected void copyConfigurationFrom(AdvisedSupport other, TargetSource targetSource, List&lt;Advisor&gt; advisors) {
+<span class="fc" id="L575">		copyFrom(other);</span>
+<span class="fc" id="L576">		this.targetSource = targetSource;</span>
+<span class="fc" id="L577">		this.advisorChainFactory = other.advisorChainFactory;</span>
+<span class="fc" id="L578">		this.interfaces = new ArrayList&lt;&gt;(other.interfaces);</span>
+<span class="fc bfc" id="L579" title="All 2 branches covered.">		for (Advisor advisor : advisors) {</span>
+<span class="pc bpc" id="L580" title="1 of 2 branches missed.">			if (advisor instanceof IntroductionAdvisor introductionAdvisor) {</span>
+<span class="nc" id="L581">				validateIntroductionAdvisor(introductionAdvisor);</span>
+			}
+<span class="fc" id="L583">			Assert.notNull(advisor, &quot;Advisor must not be null&quot;);</span>
+<span class="fc" id="L584">			this.advisors.add(advisor);</span>
+<span class="fc" id="L585">		}</span>
+<span class="fc" id="L586">		adviceChanged();</span>
+<span class="fc" id="L587">	}</span>
+
+	/**
+	 * Build a configuration-only copy of this {@link AdvisedSupport},
+	 * replacing the {@link TargetSource}.
+	 */
+	AdvisedSupport getConfigurationOnlyCopy() {
+<span class="fc" id="L594">		AdvisedSupport copy = new AdvisedSupport();</span>
+<span class="fc" id="L595">		copy.copyFrom(this);</span>
+<span class="fc" id="L596">		copy.targetSource = EmptyTargetSource.forClass(getTargetClass(), getTargetSource().isStatic());</span>
+<span class="fc" id="L597">		copy.preFiltered = this.preFiltered;</span>
+<span class="fc" id="L598">		copy.advisorChainFactory = this.advisorChainFactory;</span>
+<span class="fc" id="L599">		copy.interfaces = new ArrayList&lt;&gt;(this.interfaces);</span>
+<span class="fc" id="L600">		copy.advisors = new ArrayList&lt;&gt;(this.advisors);</span>
+<span class="fc" id="L601">		copy.advisorKey = new ArrayList&lt;&gt;(this.advisors.size());</span>
+<span class="fc bfc" id="L602" title="All 2 branches covered.">		for (Advisor advisor : this.advisors) {</span>
+<span class="fc" id="L603">			copy.advisorKey.add(new AdvisorKeyEntry(advisor));</span>
+<span class="fc" id="L604">		}</span>
+<span class="fc" id="L605">		copy.methodCache = this.methodCache;</span>
+<span class="fc" id="L606">		copy.cachedInterceptors = this.cachedInterceptors;</span>
+<span class="fc" id="L607">		copy.proxyMetadataCache = this.proxyMetadataCache;</span>
+<span class="fc" id="L608">		return copy;</span>
+	}
+
+	void reduceToAdvisorKey() {
+<span class="fc" id="L612">		this.advisors = this.advisorKey;</span>
+<span class="fc" id="L613">		this.methodCache = null;</span>
+<span class="fc" id="L614">		this.cachedInterceptors = null;</span>
+<span class="fc" id="L615">		this.proxyMetadataCache = null;</span>
+<span class="fc" id="L616">	}</span>
+
+	Object getAdvisorKey() {
+<span class="fc" id="L619">		return this.advisorKey;</span>
+	}
+
+
+	@Override
+	public String toProxyConfigString() {
+<span class="nc" id="L625">		return toString();</span>
+	}
+
+	/**
+	 * For debugging/diagnostic use.
+	 */
+	@Override
+	public String toString() {
+<span class="nc" id="L633">		StringBuilder sb = new StringBuilder(getClass().getName());</span>
+<span class="nc" id="L634">		sb.append(&quot;: &quot;).append(this.interfaces.size()).append(&quot; interfaces &quot;);</span>
+<span class="nc" id="L635">		sb.append(ClassUtils.classNamesToString(this.interfaces)).append(&quot;; &quot;);</span>
+<span class="nc" id="L636">		sb.append(this.advisors.size()).append(&quot; advisors &quot;);</span>
+<span class="nc" id="L637">		sb.append(this.advisors).append(&quot;; &quot;);</span>
+<span class="nc" id="L638">		sb.append(&quot;targetSource [&quot;).append(this.targetSource).append(&quot;]; &quot;);</span>
+<span class="nc" id="L639">		sb.append(super.toString());</span>
+<span class="nc" id="L640">		return sb.toString();</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Serialization support
+	//---------------------------------------------------------------------
+
+	private void readObject(ObjectInputStream ois) throws IOException, ClassNotFoundException {
+		// Rely on default serialization; just initialize state after deserialization.
+<span class="fc" id="L650">		ois.defaultReadObject();</span>
+
+		// Initialize method cache if necessary.
+<span class="fc" id="L653">		adviceChanged();</span>
+<span class="fc" id="L654">	}</span>
+
+
+	/**
+	 * Simple wrapper class around a Method. Used as the key when
+	 * caching methods, for efficient equals and hashCode comparisons.
+	 */
+	private static final class MethodCacheKey implements Comparable&lt;MethodCacheKey&gt; {
+
+		private final Method method;
+
+		private final int hashCode;
+
+<span class="fc" id="L667">		public MethodCacheKey(Method method) {</span>
+<span class="fc" id="L668">			this.method = method;</span>
+<span class="fc" id="L669">			this.hashCode = method.hashCode();</span>
+<span class="fc" id="L670">		}</span>
+
+		@Override
+		public boolean equals(@Nullable Object other) {
+<span class="pc bpc" id="L674" title="2 of 6 branches missed.">			return (this == other || (other instanceof MethodCacheKey that &amp;&amp;</span>
+<span class="pc bpc" id="L675" title="1 of 2 branches missed.">					(this.method == that.method || this.method.equals(that.method))));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="fc" id="L680">			return this.hashCode;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L685">			return this.method.toString();</span>
+		}
+
+		@Override
+		public int compareTo(MethodCacheKey other) {
+<span class="nc" id="L690">			int result = this.method.getName().compareTo(other.method.getName());</span>
+<span class="nc bnc" id="L691" title="All 2 branches missed.">			if (result == 0) {</span>
+<span class="nc" id="L692">				result = this.method.toString().compareTo(other.method.toString());</span>
+			}
+<span class="nc" id="L694">			return result;</span>
+		}
+	}
+
+
+	/**
+	 * Stub for an {@link Advisor} instance that is just needed for key purposes,
+	 * allowing for efficient equals and hashCode comparisons against the
+	 * advice class and the pointcut.
+	 * @since 6.0.10
+	 * @see #getConfigurationOnlyCopy()
+	 * @see #getAdvisorKey()
+	 */
+	private static final class AdvisorKeyEntry implements Advisor {
+
+		private final Class&lt;?&gt; adviceType;
+
+		private final @Nullable String classFilterKey;
+
+		private final @Nullable String methodMatcherKey;
+
+<span class="fc" id="L715">		public AdvisorKeyEntry(Advisor advisor) {</span>
+<span class="fc" id="L716">			this.adviceType = advisor.getAdvice().getClass();</span>
+<span class="fc bfc" id="L717" title="All 2 branches covered.">			if (advisor instanceof PointcutAdvisor pointcutAdvisor) {</span>
+<span class="fc" id="L718">				Pointcut pointcut = pointcutAdvisor.getPointcut();</span>
+<span class="fc" id="L719">				this.classFilterKey = pointcut.getClassFilter().toString();</span>
+<span class="fc" id="L720">				this.methodMatcherKey = pointcut.getMethodMatcher().toString();</span>
+<span class="fc" id="L721">			}</span>
+			else {
+<span class="fc" id="L723">				this.classFilterKey = null;</span>
+<span class="fc" id="L724">				this.methodMatcherKey = null;</span>
+			}
+<span class="fc" id="L726">		}</span>
+
+		@Override
+		public Advice getAdvice() {
+<span class="nc" id="L730">			throw new UnsupportedOperationException();</span>
+		}
+
+		@Override
+		public boolean equals(@Nullable Object other) {
+<span class="pc bpc" id="L735" title="3 of 6 branches missed.">			return (this == other || (other instanceof AdvisorKeyEntry that &amp;&amp;</span>
+					this.adviceType == that.adviceType &amp;&amp;
+<span class="fc bfc" id="L737" title="All 2 branches covered.">					ObjectUtils.nullSafeEquals(this.classFilterKey, that.classFilterKey) &amp;&amp;</span>
+<span class="pc bpc" id="L738" title="1 of 2 branches missed.">					ObjectUtils.nullSafeEquals(this.methodMatcherKey, that.methodMatcherKey)));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="fc" id="L743">			return this.adviceType.hashCode();</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WriteResultPublisher.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.server.reactive</a> &gt; <span class="el_source">WriteResultPublisher.java</span></div><h1>WriteResultPublisher.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.server.reactive;
+
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.commons.logging.Log;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+import reactor.core.publisher.Operators;
+
+import org.springframework.core.log.LogDelegateFactory;
+import org.springframework.util.Assert;
+
+/**
+ * Publisher returned from {@link ServerHttpResponse#writeWith(Publisher)}.
+ *
+ * @author Arjen Poutsma
+ * @author Violeta Georgieva
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ */
+@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+class WriteResultPublisher implements Publisher&lt;Void&gt; {
+
+	/**
+	 * Special logger for debugging Reactive Streams signals.
+	 * @see LogDelegateFactory#getHiddenLog(Class)
+	 * @see AbstractListenerReadPublisher#rsReadLogger
+	 * @see AbstractListenerWriteProcessor#rsWriteLogger
+	 * @see AbstractListenerWriteFlushProcessor#rsWriteFlushLogger
+	 */
+<span class="nc" id="L49">	private static final Log rsWriteResultLogger = LogDelegateFactory.getHiddenLog(WriteResultPublisher.class);</span>
+
+
+<span class="nc" id="L52">	private final AtomicReference&lt;State&gt; state = new AtomicReference&lt;&gt;(State.UNSUBSCRIBED);</span>
+
+	private final Runnable cancelTask;
+
+	private volatile @Nullable Subscriber&lt;? super Void&gt; subscriber;
+
+	private volatile boolean completedBeforeSubscribed;
+
+	private volatile @Nullable Throwable errorBeforeSubscribed;
+
+	private final String logPrefix;
+
+
+<span class="nc" id="L65">	public WriteResultPublisher(String logPrefix, Runnable cancelTask) {</span>
+<span class="nc" id="L66">		this.cancelTask = cancelTask;</span>
+<span class="nc" id="L67">		this.logPrefix = logPrefix;</span>
+<span class="nc" id="L68">	}</span>
+
+
+	@Override
+	public final void subscribe(Subscriber&lt;? super Void&gt; subscriber) {
+<span class="nc bnc" id="L73" title="All 2 branches missed.">		if (rsWriteResultLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L74">			rsWriteResultLogger.trace(this.logPrefix + &quot;got subscriber &quot; + subscriber);</span>
+		}
+<span class="nc" id="L76">		this.state.get().subscribe(this, subscriber);</span>
+<span class="nc" id="L77">	}</span>
+
+	/**
+	 * Invoke this to delegate a completion signal to the subscriber.
+	 */
+	public void publishComplete() {
+<span class="nc" id="L83">		State state = this.state.get();</span>
+<span class="nc bnc" id="L84" title="All 2 branches missed.">		if (rsWriteResultLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L85">			rsWriteResultLogger.trace(this.logPrefix + &quot;completed [&quot; + state + &quot;]&quot;);</span>
+		}
+<span class="nc" id="L87">		state.publishComplete(this);</span>
+<span class="nc" id="L88">	}</span>
+
+	/**
+	 * Invoke this to delegate an error signal to the subscriber.
+	 */
+	public void publishError(Throwable t) {
+<span class="nc" id="L94">		State state = this.state.get();</span>
+<span class="nc bnc" id="L95" title="All 2 branches missed.">		if (rsWriteResultLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L96">			rsWriteResultLogger.trace(this.logPrefix + &quot;failed: &quot; + t + &quot; [&quot; + state + &quot;]&quot;);</span>
+		}
+<span class="nc" id="L98">		state.publishError(this, t);</span>
+<span class="nc" id="L99">	}</span>
+
+	private boolean changeState(State oldState, State newState) {
+<span class="nc" id="L102">		return this.state.compareAndSet(oldState, newState);</span>
+	}
+
+
+	/**
+	 * Subscription to receive and delegate request and cancel signals from the
+	 * subscriber to this publisher.
+	 */
+	private static final class WriteResultSubscription implements Subscription {
+
+		private final WriteResultPublisher publisher;
+
+<span class="nc" id="L114">		public WriteResultSubscription(WriteResultPublisher publisher) {</span>
+<span class="nc" id="L115">			this.publisher = publisher;</span>
+<span class="nc" id="L116">		}</span>
+
+		@Override
+		public final void request(long n) {
+<span class="nc bnc" id="L120" title="All 2 branches missed.">			if (rsWriteResultLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L121">				rsWriteResultLogger.trace(this.publisher.logPrefix +</span>
+<span class="nc bnc" id="L122" title="All 2 branches missed.">						&quot;request &quot; + (n != Long.MAX_VALUE ? n : &quot;Long.MAX_VALUE&quot;));</span>
+			}
+<span class="nc" id="L124">			getState().request(this.publisher, n);</span>
+<span class="nc" id="L125">		}</span>
+
+		@Override
+		public final void cancel() {
+<span class="nc" id="L129">			State state = getState();</span>
+<span class="nc bnc" id="L130" title="All 2 branches missed.">			if (rsWriteResultLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L131">				rsWriteResultLogger.trace(this.publisher.logPrefix + &quot;cancel [&quot; + state + &quot;]&quot;);</span>
+			}
+<span class="nc" id="L133">			state.cancel(this.publisher);</span>
+<span class="nc" id="L134">		}</span>
+
+		private State getState() {
+<span class="nc" id="L137">			return this.publisher.state.get();</span>
+		}
+	}
+
+
+	/**
+	 * Represents a state for the {@link Publisher} to be in.
+	 * &lt;p&gt;&lt;pre&gt;
+	 *     UNSUBSCRIBED
+	 *          |
+	 *          v
+	 *     SUBSCRIBING
+	 *          |
+	 *          v
+	 *      SUBSCRIBED
+	 *          |
+	 *          v
+	 *      COMPLETED
+	 * &lt;/pre&gt;
+	 */
+<span class="nc" id="L157">	private enum State {</span>
+
+<span class="nc" id="L159">		UNSUBSCRIBED {</span>
+			@Override
+			void subscribe(WriteResultPublisher publisher, Subscriber&lt;? super Void&gt; subscriber) {
+<span class="nc" id="L162">				Assert.notNull(subscriber, &quot;Subscriber must not be null&quot;);</span>
+<span class="nc bnc" id="L163" title="All 2 branches missed.">				if (publisher.changeState(this, SUBSCRIBING)) {</span>
+<span class="nc" id="L164">					Subscription subscription = new WriteResultSubscription(publisher);</span>
+<span class="nc" id="L165">					publisher.subscriber = subscriber;</span>
+<span class="nc" id="L166">					subscriber.onSubscribe(subscription);</span>
+<span class="nc" id="L167">					publisher.changeState(SUBSCRIBING, SUBSCRIBED);</span>
+					// Now safe to check &quot;beforeSubscribed&quot; flags, they won't change once in NO_DEMAND
+<span class="nc bnc" id="L169" title="All 2 branches missed.">					if (publisher.completedBeforeSubscribed) {</span>
+<span class="nc" id="L170">						publisher.state.get().publishComplete(publisher);</span>
+					}
+<span class="nc" id="L172">					Throwable ex = publisher.errorBeforeSubscribed;</span>
+<span class="nc bnc" id="L173" title="All 2 branches missed.">					if (ex != null) {</span>
+<span class="nc" id="L174">						publisher.state.get().publishError(publisher, ex);</span>
+					}
+<span class="nc" id="L176">				}</span>
+				else {
+<span class="nc" id="L178">					throw new IllegalStateException(toString());</span>
+				}
+<span class="nc" id="L180">			}</span>
+			@Override
+			void publishComplete(WriteResultPublisher publisher) {
+<span class="nc" id="L183">				publisher.completedBeforeSubscribed = true;</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">				if(State.SUBSCRIBED == publisher.state.get()) {</span>
+<span class="nc" id="L185">					publisher.state.get().publishComplete(publisher);</span>
+				}
+<span class="nc" id="L187">			}</span>
+			@Override
+			void publishError(WriteResultPublisher publisher, Throwable ex) {
+<span class="nc" id="L190">				publisher.errorBeforeSubscribed = ex;</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">				if(State.SUBSCRIBED == publisher.state.get()) {</span>
+<span class="nc" id="L192">					publisher.state.get().publishError(publisher, ex);</span>
+				}
+<span class="nc" id="L194">			}</span>
+		},
+
+<span class="nc" id="L197">		SUBSCRIBING {</span>
+			@Override
+			void request(WriteResultPublisher publisher, long n) {
+<span class="nc" id="L200">				Operators.validate(n);</span>
+<span class="nc" id="L201">			}</span>
+			@Override
+			void publishComplete(WriteResultPublisher publisher) {
+<span class="nc" id="L204">				publisher.completedBeforeSubscribed = true;</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">				if(State.SUBSCRIBED == publisher.state.get()) {</span>
+<span class="nc" id="L206">					publisher.state.get().publishComplete(publisher);</span>
+				}
+<span class="nc" id="L208">			}</span>
+			@Override
+			void publishError(WriteResultPublisher publisher, Throwable ex) {
+<span class="nc" id="L211">				publisher.errorBeforeSubscribed = ex;</span>
+<span class="nc bnc" id="L212" title="All 2 branches missed.">				if(State.SUBSCRIBED == publisher.state.get()) {</span>
+<span class="nc" id="L213">					publisher.state.get().publishError(publisher, ex);</span>
+				}
+<span class="nc" id="L215">			}</span>
+		},
+
+<span class="nc" id="L218">		SUBSCRIBED {</span>
+			@Override
+			void request(WriteResultPublisher publisher, long n) {
+<span class="nc" id="L221">				Operators.validate(n);</span>
+<span class="nc" id="L222">			}</span>
+		},
+
+<span class="nc" id="L225">		COMPLETED {</span>
+			@Override
+			void request(WriteResultPublisher publisher, long n) {
+				// ignore
+<span class="nc" id="L229">			}</span>
+			@Override
+			void cancel(WriteResultPublisher publisher) {
+				// ignore
+<span class="nc" id="L233">			}</span>
+			@Override
+			void publishComplete(WriteResultPublisher publisher) {
+				// ignore
+<span class="nc" id="L237">			}</span>
+			@Override
+			void publishError(WriteResultPublisher publisher, Throwable t) {
+				// ignore
+<span class="nc" id="L241">			}</span>
+		};
+
+		void subscribe(WriteResultPublisher publisher, Subscriber&lt;? super Void&gt; subscriber) {
+<span class="nc" id="L245">			throw new IllegalStateException(toString());</span>
+		}
+
+		void request(WriteResultPublisher publisher, long n) {
+<span class="nc" id="L249">			throw new IllegalStateException(toString());</span>
+		}
+
+		void cancel(WriteResultPublisher publisher) {
+<span class="nc bnc" id="L253" title="All 2 branches missed.">			if (publisher.changeState(this, COMPLETED)) {</span>
+<span class="nc" id="L254">				publisher.cancelTask.run();</span>
+			}
+			else {
+<span class="nc" id="L257">				publisher.state.get().cancel(publisher);</span>
+			}
+<span class="nc" id="L259">		}</span>
+
+		void publishComplete(WriteResultPublisher publisher) {
+<span class="nc bnc" id="L262" title="All 2 branches missed.">			if (publisher.changeState(this, COMPLETED)) {</span>
+<span class="nc" id="L263">				Subscriber&lt;? super Void&gt; s = publisher.subscriber;</span>
+<span class="nc bnc" id="L264" title="All 2 branches missed.">				Assert.state(s != null, &quot;No subscriber&quot;);</span>
+<span class="nc" id="L265">				s.onComplete();</span>
+<span class="nc" id="L266">			}</span>
+			else {
+<span class="nc" id="L268">				publisher.state.get().publishComplete(publisher);</span>
+			}
+<span class="nc" id="L270">		}</span>
+
+		void publishError(WriteResultPublisher publisher, Throwable t) {
+<span class="nc bnc" id="L273" title="All 2 branches missed.">			if (publisher.changeState(this, COMPLETED)) {</span>
+<span class="nc" id="L274">				Subscriber&lt;? super Void&gt; s = publisher.subscriber;</span>
+<span class="nc bnc" id="L275" title="All 2 branches missed.">				Assert.state(s != null, &quot;No subscriber&quot;);</span>
+<span class="nc" id="L276">				s.onError(t);</span>
+<span class="nc" id="L277">			}</span>
+			else {
+<span class="nc" id="L279">				publisher.state.get().publishError(publisher, t);</span>
+			}
+<span class="nc" id="L281">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

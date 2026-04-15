@@ -1,0 +1,271 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>Jackson2Tokenizer.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.codec.json</a> &gt; <span class="el_source">Jackson2Tokenizer.java</span></div><h1>Jackson2Tokenizer.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.codec.json;
+
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.function.Function;
+
+import com.fasterxml.jackson.core.JsonFactory;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.core.async.ByteArrayFeeder;
+import com.fasterxml.jackson.core.async.ByteBufferFeeder;
+import com.fasterxml.jackson.core.async.NonBlockingInputFeeder;
+import com.fasterxml.jackson.databind.DeserializationContext;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.deser.DefaultDeserializationContext;
+import com.fasterxml.jackson.databind.util.TokenBuffer;
+import com.fasterxml.jackson.dataformat.smile.SmileFactory;
+import reactor.core.Exceptions;
+import reactor.core.publisher.Flux;
+
+import org.springframework.core.codec.DecodingException;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferLimitException;
+import org.springframework.core.io.buffer.DataBufferUtils;
+
+/**
+ * {@link Function} to transform a JSON stream of arbitrary size, byte array
+ * chunks into a {@code Flux&lt;TokenBuffer&gt;} where each token buffer is a
+ * well-formed JSON object with Jackson 2.x.
+ *
+ * @author Arjen Poutsma
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @since 5.0
+ * @deprecated since 7.0 in favor of {@code org.springframework.http.codec.JacksonTokenizer}
+ */
+@Deprecated(since = &quot;7.0&quot;, forRemoval = true)
+final class Jackson2Tokenizer {
+
+	private final JsonParser parser;
+
+	private final DeserializationContext deserializationContext;
+
+	private final NonBlockingInputFeeder inputFeeder;
+
+	private final boolean tokenizeArrayElements;
+
+	private final boolean forceUseOfBigDecimal;
+
+	private final int maxInMemorySize;
+
+	private int objectDepth;
+
+	private int arrayDepth;
+
+	private int byteCount;
+
+	private TokenBuffer tokenBuffer;
+
+
+	private Jackson2Tokenizer(JsonParser parser, DeserializationContext deserializationContext,
+<span class="nc" id="L80">			boolean tokenizeArrayElements, boolean forceUseOfBigDecimal, int maxInMemorySize) {</span>
+
+<span class="nc" id="L82">		this.parser = parser;</span>
+<span class="nc" id="L83">		this.deserializationContext = deserializationContext;</span>
+<span class="nc" id="L84">		this.inputFeeder = this.parser.getNonBlockingInputFeeder();</span>
+<span class="nc" id="L85">		this.tokenizeArrayElements = tokenizeArrayElements;</span>
+<span class="nc" id="L86">		this.forceUseOfBigDecimal = forceUseOfBigDecimal;</span>
+<span class="nc" id="L87">		this.maxInMemorySize = maxInMemorySize;</span>
+<span class="nc" id="L88">		this.tokenBuffer = createToken();</span>
+<span class="nc" id="L89">	}</span>
+
+
+
+	private List&lt;TokenBuffer&gt; tokenize(DataBuffer dataBuffer) {
+		try {
+<span class="nc" id="L95">			int bufferSize = dataBuffer.readableByteCount();</span>
+<span class="nc" id="L96">			List&lt;TokenBuffer&gt; tokens = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L97" title="All 2 branches missed.">			if (this.inputFeeder instanceof ByteBufferFeeder byteBufferFeeder) {</span>
+<span class="nc" id="L98">				try (DataBuffer.ByteBufferIterator iterator = dataBuffer.readableByteBuffers()) {</span>
+<span class="nc bnc" id="L99" title="All 2 branches missed.">					while (iterator.hasNext()) {</span>
+<span class="nc" id="L100">						byteBufferFeeder.feedInput(iterator.next());</span>
+<span class="nc" id="L101">						parseTokens(tokens);</span>
+					}
+				}
+			}
+<span class="nc bnc" id="L105" title="All 2 branches missed.">			else if (this.inputFeeder instanceof ByteArrayFeeder byteArrayFeeder) {</span>
+<span class="nc" id="L106">				byte[] bytes = new byte[bufferSize];</span>
+<span class="nc" id="L107">				dataBuffer.read(bytes);</span>
+<span class="nc" id="L108">				byteArrayFeeder.feedInput(bytes, 0, bufferSize);</span>
+<span class="nc" id="L109">				parseTokens(tokens);</span>
+			}
+<span class="nc" id="L111">			assertInMemorySize(bufferSize, tokens);</span>
+<span class="nc" id="L112">			return tokens;</span>
+		}
+<span class="nc" id="L114">		catch (JsonProcessingException ex) {</span>
+<span class="nc" id="L115">			throw new DecodingException(&quot;JSON decoding error: &quot; + ex.getOriginalMessage(), ex);</span>
+		}
+<span class="nc" id="L117">		catch (IOException ex) {</span>
+<span class="nc" id="L118">			throw Exceptions.propagate(ex);</span>
+		}
+		finally {
+<span class="nc" id="L121">			DataBufferUtils.release(dataBuffer);</span>
+		}
+	}
+
+	private Flux&lt;TokenBuffer&gt; endOfInput() {
+<span class="nc" id="L126">		return Flux.defer(() -&gt; {</span>
+<span class="nc" id="L127">			this.inputFeeder.endOfInput();</span>
+			try {
+<span class="nc" id="L129">				List&lt;TokenBuffer&gt; tokens = new ArrayList&lt;&gt;();</span>
+<span class="nc" id="L130">				parseTokens(tokens);</span>
+<span class="nc" id="L131">				return Flux.fromIterable(tokens);</span>
+			}
+<span class="nc" id="L133">			catch (JsonProcessingException ex) {</span>
+<span class="nc" id="L134">				throw new DecodingException(&quot;JSON decoding error: &quot; + ex.getOriginalMessage(), ex);</span>
+			}
+<span class="nc" id="L136">			catch (IOException ex) {</span>
+<span class="nc" id="L137">				throw Exceptions.propagate(ex);</span>
+			}
+		});
+	}
+
+	private void parseTokens(List&lt;TokenBuffer&gt; tokens) throws IOException {
+		// SPR-16151: Smile data format uses null to separate documents
+<span class="nc" id="L144">		boolean previousNull = false;</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">		while (!this.parser.isClosed()) {</span>
+<span class="nc" id="L146">			JsonToken token = this.parser.nextToken();</span>
+<span class="nc bnc" id="L147" title="All 6 branches missed.">			if (token == JsonToken.NOT_AVAILABLE ||</span>
+					token == null &amp;&amp; previousNull) {
+<span class="nc" id="L149">				break;</span>
+			}
+<span class="nc bnc" id="L151" title="All 2 branches missed.">			else if (token == null ) { // !previousNull</span>
+<span class="nc" id="L152">				previousNull = true;</span>
+<span class="nc" id="L153">				continue;</span>
+			}
+			else {
+<span class="nc" id="L156">				previousNull = false;</span>
+			}
+<span class="nc" id="L158">			updateDepth(token);</span>
+<span class="nc bnc" id="L159" title="All 2 branches missed.">			if (!this.tokenizeArrayElements) {</span>
+<span class="nc" id="L160">				processTokenNormal(token, tokens);</span>
+			}
+			else {
+<span class="nc" id="L163">				processTokenArray(token, tokens);</span>
+			}
+<span class="nc" id="L165">		}</span>
+<span class="nc" id="L166">	}</span>
+
+	private void updateDepth(JsonToken token) {
+<span class="nc bnc" id="L169" title="All 5 branches missed.">		switch (token) {</span>
+<span class="nc" id="L170">			case START_OBJECT -&gt; this.objectDepth++;</span>
+<span class="nc" id="L171">			case END_OBJECT -&gt; this.objectDepth--;</span>
+<span class="nc" id="L172">			case START_ARRAY -&gt; this.arrayDepth++;</span>
+<span class="nc" id="L173">			case END_ARRAY -&gt; this.arrayDepth--;</span>
+		}
+<span class="nc" id="L175">	}</span>
+
+	private void processTokenNormal(JsonToken token, List&lt;TokenBuffer&gt; result) throws IOException {
+<span class="nc" id="L178">		this.tokenBuffer.copyCurrentEvent(this.parser);</span>
+
+<span class="nc bnc" id="L180" title="All 8 branches missed.">		if ((token.isStructEnd() || token.isScalarValue()) &amp;&amp; this.objectDepth == 0 &amp;&amp; this.arrayDepth == 0) {</span>
+<span class="nc" id="L181">			result.add(this.tokenBuffer);</span>
+<span class="nc" id="L182">			this.tokenBuffer = createToken();</span>
+		}
+<span class="nc" id="L184">	}</span>
+
+	private void processTokenArray(JsonToken token, List&lt;TokenBuffer&gt; result) throws IOException {
+<span class="nc bnc" id="L187" title="All 2 branches missed.">		if (!isTopLevelArrayToken(token)) {</span>
+<span class="nc" id="L188">			this.tokenBuffer.copyCurrentEvent(this.parser);</span>
+		}
+
+<span class="nc bnc" id="L191" title="All 8 branches missed.">		if (this.objectDepth == 0 &amp;&amp; (this.arrayDepth == 0 || this.arrayDepth == 1) &amp;&amp;</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">				(token == JsonToken.END_OBJECT || token.isScalarValue())) {</span>
+<span class="nc" id="L193">			result.add(this.tokenBuffer);</span>
+<span class="nc" id="L194">			this.tokenBuffer = createToken();</span>
+		}
+<span class="nc" id="L196">	}</span>
+
+	private TokenBuffer createToken() {
+<span class="nc" id="L199">		TokenBuffer tokenBuffer = new TokenBuffer(this.parser, this.deserializationContext);</span>
+<span class="nc" id="L200">		tokenBuffer.forceUseOfBigDecimal(this.forceUseOfBigDecimal);</span>
+<span class="nc" id="L201">		return tokenBuffer;</span>
+	}
+
+	private boolean isTopLevelArrayToken(JsonToken token) {
+<span class="nc bnc" id="L205" title="All 10 branches missed.">		return this.objectDepth == 0 &amp;&amp; ((token == JsonToken.START_ARRAY &amp;&amp; this.arrayDepth == 1) ||</span>
+				(token == JsonToken.END_ARRAY &amp;&amp; this.arrayDepth == 0));
+	}
+
+	private void assertInMemorySize(int currentBufferSize, List&lt;TokenBuffer&gt; result) {
+<span class="nc bnc" id="L210" title="All 2 branches missed.">		if (this.maxInMemorySize &gt;= 0) {</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">			if (!result.isEmpty()) {</span>
+<span class="nc" id="L212">				this.byteCount = 0;</span>
+			}
+<span class="nc bnc" id="L214" title="All 2 branches missed.">			else if (currentBufferSize &gt; Integer.MAX_VALUE - this.byteCount) {</span>
+<span class="nc" id="L215">				raiseLimitException();</span>
+			}
+			else {
+<span class="nc" id="L218">				this.byteCount += currentBufferSize;</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">				if (this.byteCount &gt; this.maxInMemorySize) {</span>
+<span class="nc" id="L220">					raiseLimitException();</span>
+				}
+			}
+		}
+<span class="nc" id="L224">	}</span>
+
+	private void raiseLimitException() {
+<span class="nc" id="L227">		throw new DataBufferLimitException(</span>
+				&quot;Exceeded limit on max bytes per JSON object: &quot; + this.maxInMemorySize);
+	}
+
+
+	/**
+	 * Tokenize the given {@code Flux&lt;DataBuffer&gt;} into {@code Flux&lt;TokenBuffer&gt;}.
+	 * @param dataBuffers the source data buffers
+	 * @param jsonFactory the factory to use
+	 * @param objectMapper the current mapper instance
+	 * @param tokenizeArrays if {@code true} and the &quot;top level&quot; JSON object is
+	 * an array, each element is returned individually immediately after it is received
+	 * @param forceUseOfBigDecimal if {@code true}, any floating point values encountered
+	 * in source will use {@link java.math.BigDecimal}
+	 * @param maxInMemorySize maximum memory size
+	 * @return the resulting token buffers
+	 */
+	public static Flux&lt;TokenBuffer&gt; tokenize(Flux&lt;DataBuffer&gt; dataBuffers, JsonFactory jsonFactory,
+			ObjectMapper objectMapper, boolean tokenizeArrays, boolean forceUseOfBigDecimal, int maxInMemorySize) {
+
+		try {
+			JsonParser parser;
+<span class="nc bnc" id="L249" title="All 2 branches missed.">			if (jsonFactory.getFormatName().equals(SmileFactory.FORMAT_NAME_SMILE)) {</span>
+				// ByteBufferFeeder is not supported for Smile
+<span class="nc" id="L251">				parser = jsonFactory.createNonBlockingByteArrayParser();</span>
+			}
+			else {
+<span class="nc" id="L254">				parser = jsonFactory.createNonBlockingByteBufferParser();</span>
+			}
+<span class="nc" id="L256">			DeserializationContext context = objectMapper.getDeserializationContext();</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">			if (context instanceof DefaultDeserializationContext ddc) {</span>
+<span class="nc" id="L258">				context = ddc.createInstance(objectMapper.getDeserializationConfig(),</span>
+<span class="nc" id="L259">						parser, objectMapper.getInjectableValues());</span>
+			}
+<span class="nc" id="L261">			Jackson2Tokenizer tokenizer =</span>
+					new Jackson2Tokenizer(parser, context, tokenizeArrays, forceUseOfBigDecimal, maxInMemorySize);
+<span class="nc" id="L263">			return dataBuffers.concatMapIterable(tokenizer::tokenize).concatWith(tokenizer.endOfInput());</span>
+		}
+<span class="nc" id="L265">		catch (IOException ex) {</span>
+<span class="nc" id="L266">			return Flux.error(ex);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

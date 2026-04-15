@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ConcurrencyLimitBeanPostProcessor.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.resilience.annotation</a> &gt; <span class="el_source">ConcurrencyLimitBeanPostProcessor.java</span></div><h1>ConcurrencyLimitBeanPostProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.resilience.annotation;
+
+import java.lang.reflect.Method;
+import java.util.Collections;
+import java.util.IdentityHashMap;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+
+import org.aopalliance.intercept.MethodInterceptor;
+import org.aopalliance.intercept.MethodInvocation;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aop.Pointcut;
+import org.springframework.aop.ProxyMethodInvocation;
+import org.springframework.aop.framework.autoproxy.AbstractBeanFactoryAwareAdvisingPostProcessor;
+import org.springframework.aop.interceptor.ConcurrencyThrottleInterceptor;
+import org.springframework.aop.support.ComposablePointcut;
+import org.springframework.aop.support.DefaultPointcutAdvisor;
+import org.springframework.aop.support.annotation.AnnotationMatchingPointcut;
+import org.springframework.context.EmbeddedValueResolverAware;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.resilience.InvocationRejectedException;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.util.StringValueResolver;
+
+/**
+ * A convenient {@link org.springframework.beans.factory.config.BeanPostProcessor
+ * BeanPostProcessor} that applies a concurrency interceptor to all bean methods
+ * annotated with {@link ConcurrencyLimit @ConcurrencyLimit}.
+ *
+ * @author Juergen Hoeller
+ * @author Hyunsang Han
+ * @since 7.0
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class ConcurrencyLimitBeanPostProcessor extends AbstractBeanFactoryAwareAdvisingPostProcessor
+		implements EmbeddedValueResolverAware {
+
+	private @Nullable StringValueResolver embeddedValueResolver;
+
+
+<span class="fc" id="L60">	public ConcurrencyLimitBeanPostProcessor() {</span>
+<span class="fc" id="L61">		setBeforeExistingAdvisors(true);</span>
+
+<span class="fc" id="L63">		Pointcut cpc = new AnnotationMatchingPointcut(ConcurrencyLimit.class, true);</span>
+<span class="fc" id="L64">		Pointcut mpc = new AnnotationMatchingPointcut(null, ConcurrencyLimit.class, true);</span>
+<span class="fc" id="L65">		this.advisor = new DefaultPointcutAdvisor(</span>
+<span class="fc" id="L66">				new ComposablePointcut(cpc).union(mpc),</span>
+				new ConcurrencyLimitInterceptor());
+<span class="fc" id="L68">	}</span>
+
+
+	@Override
+	public void setEmbeddedValueResolver(StringValueResolver resolver) {
+<span class="fc" id="L73">		this.embeddedValueResolver = resolver;</span>
+<span class="fc" id="L74">	}</span>
+
+
+<span class="fc" id="L77">	private class ConcurrencyLimitInterceptor implements MethodInterceptor {</span>
+
+<span class="fc" id="L79">		private final Map&lt;Object, ConcurrencyThrottleHolder&gt; holderPerInstance =</span>
+<span class="fc" id="L80">				Collections.synchronizedMap(new IdentityHashMap&lt;&gt;(16));</span>
+
+		@Override
+		public @Nullable Object invoke(MethodInvocation invocation) throws Throwable {
+<span class="fc" id="L84">			Method method = invocation.getMethod();</span>
+<span class="fc" id="L85">			Object instance = invocation.getThis();</span>
+<span class="pc bpc" id="L86" title="1 of 2 branches missed.">			Class&lt;?&gt; targetClass = (instance != null ? instance.getClass() : method.getDeclaringClass());</span>
+<span class="pc bpc" id="L87" title="1 of 2 branches missed.">			if (invocation instanceof ProxyMethodInvocation methodInvocation) {</span>
+				// Apply concurrency throttling at the AOP proxy level (independent of target instance)
+<span class="fc" id="L89">				instance = methodInvocation.getProxy();</span>
+			}
+<span class="pc bpc" id="L91" title="1 of 2 branches missed.">			Assert.state(instance != null, &quot;Unique instance required - use a ProxyMethodInvocation&quot;);</span>
+
+			// Build unique ConcurrencyThrottleHolder instance per target object
+<span class="fc" id="L94">			ConcurrencyThrottleHolder holder = this.holderPerInstance.computeIfAbsent(instance,</span>
+<span class="fc" id="L95">					k -&gt; new ConcurrencyThrottleHolder());</span>
+
+			// Determine method-specific interceptor instance with isolated concurrency count
+<span class="fc" id="L98">			MethodInterceptor interceptor = holder.methodInterceptors.get(method);</span>
+<span class="fc bfc" id="L99" title="All 2 branches covered.">			if (interceptor == null) {</span>
+<span class="fc" id="L100">				synchronized (holder) {</span>
+<span class="fc" id="L101">					interceptor = holder.methodInterceptors.get(method);</span>
+<span class="fc bfc" id="L102" title="All 2 branches covered.">					if (interceptor == null) {</span>
+<span class="fc" id="L103">						boolean perMethod = false;</span>
+<span class="fc" id="L104">						ConcurrencyLimit annotation = AnnotatedElementUtils.findMergedAnnotation(method, ConcurrencyLimit.class);</span>
+<span class="fc bfc" id="L105" title="All 2 branches covered.">						if (annotation != null) {</span>
+<span class="fc" id="L106">							perMethod = true;</span>
+						}
+						else {
+<span class="fc" id="L109">							interceptor = holder.classInterceptor;</span>
+<span class="fc bfc" id="L110" title="All 2 branches covered.">							if (interceptor == null) {</span>
+<span class="fc" id="L111">								annotation = AnnotatedElementUtils.findMergedAnnotation(targetClass, ConcurrencyLimit.class);</span>
+							}
+						}
+<span class="fc bfc" id="L114" title="All 2 branches covered.">						if (interceptor == null) {</span>
+<span class="pc bpc" id="L115" title="1 of 2 branches missed.">							Assert.state(annotation != null, &quot;No @ConcurrencyLimit annotation found&quot;);</span>
+<span class="fc" id="L116">							int concurrencyLimit = parseInt(annotation.limit(), annotation.limitString());</span>
+<span class="fc bfc" id="L117" title="All 2 branches covered.">							if (concurrencyLimit &lt; -1) {</span>
+<span class="fc" id="L118">								throw new IllegalStateException(annotation + &quot; must be configured with a valid limit&quot;);</span>
+							}
+<span class="fc bfc" id="L120" title="All 2 branches covered.">							String name = (perMethod ? ClassUtils.getQualifiedMethodName(method) : targetClass.getName());</span>
+<span class="fc bfc" id="L121" title="All 2 branches covered.">							interceptor = (annotation.policy() == ConcurrencyLimit.ThrottlePolicy.REJECT ?</span>
+<span class="fc" id="L122">									new RejectingConcurrencyThrottleInterceptor(concurrencyLimit, name, instance) :</span>
+<span class="fc" id="L123">									new ResilienceConcurrencyThrottleInterceptor(concurrencyLimit, name, instance));</span>
+<span class="fc bfc" id="L124" title="All 2 branches covered.">							if (!perMethod) {</span>
+<span class="fc" id="L125">								holder.classInterceptor = interceptor;</span>
+							}
+						}
+<span class="fc" id="L128">						holder.methodInterceptors.put(method, interceptor);</span>
+					}
+<span class="fc" id="L130">				}</span>
+			}
+<span class="fc" id="L132">			return interceptor.invoke(invocation);</span>
+		}
+
+		private int parseInt(int value, String stringValue) {
+<span class="fc bfc" id="L136" title="All 2 branches covered.">			if (StringUtils.hasText(stringValue)) {</span>
+<span class="fc bfc" id="L137" title="All 2 branches covered.">				if (embeddedValueResolver != null) {</span>
+<span class="fc" id="L138">					stringValue = embeddedValueResolver.resolveStringValue(stringValue);</span>
+				}
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">				if (StringUtils.hasText(stringValue)) {</span>
+<span class="fc" id="L141">					return Integer.parseInt(stringValue);</span>
+				}
+			}
+<span class="fc" id="L144">			return value;</span>
+		}
+	}
+
+
+<span class="fc" id="L149">	private static class ConcurrencyThrottleHolder {</span>
+
+<span class="fc" id="L151">		final Map&lt;Method, MethodInterceptor&gt; methodInterceptors = new ConcurrentHashMap&lt;&gt;();</span>
+
+		@Nullable MethodInterceptor classInterceptor;
+	}
+
+
+	private static class ResilienceConcurrencyThrottleInterceptor extends ConcurrencyThrottleInterceptor {
+
+		private final String identifier;
+
+		private final Object target;
+
+		public ResilienceConcurrencyThrottleInterceptor(int concurrencyLimit, String identifier, Object target) {
+<span class="fc" id="L164">			super(concurrencyLimit);</span>
+<span class="fc" id="L165">			this.identifier = identifier;</span>
+<span class="fc" id="L166">			this.target = target;</span>
+<span class="fc" id="L167">		}</span>
+
+		@Override
+		protected void onAccessRejected(String msg) {
+<span class="fc" id="L171">			throw new InvocationRejectedException(msg + &quot; &quot; + this.identifier, this.target);</span>
+		}
+	}
+
+
+	private static class RejectingConcurrencyThrottleInterceptor extends ResilienceConcurrencyThrottleInterceptor {
+
+		public RejectingConcurrencyThrottleInterceptor(int concurrencyLimit, String identifier, Object target) {
+<span class="fc" id="L179">			super(concurrencyLimit, identifier, target);</span>
+<span class="fc" id="L180">		}</span>
+
+		@Override
+		protected void onLimitReached() {
+<span class="nc" id="L184">			onAccessRejected(&quot;Concurrency limit reached: &quot; + getConcurrencyLimit() + &quot; - not allowed to enter&quot;);</span>
+<span class="nc" id="L185">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

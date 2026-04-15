@@ -1,0 +1,475 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractListenerWriteFlushProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.server.reactive</a> &gt; <span class="el_source">AbstractListenerWriteFlushProcessor.java</span></div><h1>AbstractListenerWriteFlushProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.server.reactive;
+
+import java.io.IOException;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.commons.logging.Log;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Processor;
+import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+
+import org.springframework.core.log.LogDelegateFactory;
+import org.springframework.util.Assert;
+
+/**
+ * An alternative to {@link AbstractListenerWriteProcessor} but instead writing
+ * a {@code Publisher&lt;Publisher&lt;T&gt;&gt;} with flush boundaries enforces after
+ * the completion of each nested Publisher.
+ *
+ * @author Arjen Poutsma
+ * @author Violeta Georgieva
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ * @param &lt;T&gt; the type of element signaled to the {@link Subscriber}
+ */
+@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+public abstract class AbstractListenerWriteFlushProcessor&lt;T&gt; implements Processor&lt;Publisher&lt;? extends T&gt;, Void&gt; {
+
+	/**
+	 * Special logger for debugging Reactive Streams signals.
+	 * @see LogDelegateFactory#getHiddenLog(Class)
+	 * @see AbstractListenerReadPublisher#rsReadLogger
+	 * @see AbstractListenerWriteProcessor#rsWriteLogger
+	 * @see WriteResultPublisher#rsWriteResultLogger
+	 */
+<span class="nc" id="L53">	protected static final Log rsWriteFlushLogger =</span>
+<span class="nc" id="L54">			LogDelegateFactory.getHiddenLog(AbstractListenerWriteFlushProcessor.class);</span>
+
+
+<span class="nc" id="L57">	private final AtomicReference&lt;State&gt; state = new AtomicReference&lt;&gt;(State.UNSUBSCRIBED);</span>
+
+	private @Nullable Subscription subscription;
+
+	private volatile boolean sourceCompleted;
+
+	private volatile @Nullable AbstractListenerWriteProcessor&lt;?&gt; currentWriteProcessor;
+
+	private final WriteResultPublisher resultPublisher;
+
+	private final String logPrefix;
+
+
+	public AbstractListenerWriteFlushProcessor() {
+<span class="nc" id="L71">		this(&quot;&quot;);</span>
+<span class="nc" id="L72">	}</span>
+
+	/**
+	 * Create an instance with the given log prefix.
+	 * @since 5.1
+	 */
+<span class="nc" id="L78">	public AbstractListenerWriteFlushProcessor(String logPrefix) {</span>
+<span class="nc" id="L79">		this.logPrefix = logPrefix;</span>
+<span class="nc" id="L80">		this.resultPublisher = new WriteResultPublisher(logPrefix + &quot;[WFP] &quot;,</span>
+				() -&gt; {
+<span class="nc" id="L82">					cancel();</span>
+					// Complete immediately
+<span class="nc" id="L84">					State oldState = this.state.getAndSet(State.COMPLETED);</span>
+<span class="nc bnc" id="L85" title="All 2 branches missed.">					if (rsWriteFlushLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L86">						rsWriteFlushLogger.trace(getLogPrefix() + oldState + &quot; -&gt; &quot; + this.state);</span>
+					}
+					// Propagate to current &quot;write&quot; Processor
+<span class="nc" id="L89">					AbstractListenerWriteProcessor&lt;?&gt; writeProcessor = this.currentWriteProcessor;</span>
+<span class="nc bnc" id="L90" title="All 2 branches missed.">					if (writeProcessor != null) {</span>
+<span class="nc" id="L91">						writeProcessor.cancelAndSetCompleted();</span>
+					}
+<span class="nc" id="L93">					this.currentWriteProcessor = null;</span>
+<span class="nc" id="L94">				});</span>
+<span class="nc" id="L95">	}</span>
+
+
+	/**
+	 * Create an instance with the given log prefix.
+	 * @since 5.1
+	 */
+	public String getLogPrefix() {
+<span class="nc" id="L103">		return this.logPrefix;</span>
+	}
+
+
+	// Subscriber methods and async I/O notification methods...
+
+	@Override
+	public final void onSubscribe(Subscription subscription) {
+<span class="nc" id="L111">		this.state.get().onSubscribe(this, subscription);</span>
+<span class="nc" id="L112">	}</span>
+
+	@Override
+	public final void onNext(Publisher&lt;? extends T&gt; publisher) {
+<span class="nc bnc" id="L116" title="All 2 branches missed.">		if (rsWriteFlushLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L117">			rsWriteFlushLogger.trace(getLogPrefix() + &quot;onNext: \&quot;write\&quot; Publisher&quot;);</span>
+		}
+<span class="nc" id="L119">		this.state.get().onNext(this, publisher);</span>
+<span class="nc" id="L120">	}</span>
+
+	/**
+	 * Error signal from the upstream, write Publisher. This is also used by
+	 * subclasses to delegate error notifications from the container.
+	 */
+	@Override
+	public final void onError(Throwable ex) {
+<span class="nc" id="L128">		State state = this.state.get();</span>
+<span class="nc bnc" id="L129" title="All 2 branches missed.">		if (rsWriteFlushLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L130">			rsWriteFlushLogger.trace(getLogPrefix() + &quot;onError: &quot; + ex + &quot; [&quot; + state + &quot;]&quot;);</span>
+		}
+<span class="nc" id="L132">		state.onError(this, ex);</span>
+<span class="nc" id="L133">	}</span>
+
+	/**
+	 * Completion signal from the upstream, write Publisher. This is also used
+	 * by subclasses to delegate completion notifications from the container.
+	 */
+	@Override
+	public final void onComplete() {
+<span class="nc" id="L141">		State state = this.state.get();</span>
+<span class="nc bnc" id="L142" title="All 2 branches missed.">		if (rsWriteFlushLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L143">			rsWriteFlushLogger.trace(getLogPrefix() + &quot;onComplete [&quot; + state + &quot;]&quot;);</span>
+		}
+<span class="nc" id="L145">		state.onComplete(this);</span>
+<span class="nc" id="L146">	}</span>
+
+	/**
+	 * Invoked when flushing is possible, either in the same thread after a check
+	 * via {@link #isWritePossible()}, or as a callback from the underlying
+	 * container.
+	 */
+	protected final void onFlushPossible() {
+<span class="nc" id="L154">		this.state.get().onFlushPossible(this);</span>
+<span class="nc" id="L155">	}</span>
+
+	/**
+	 * Cancel the upstream chain of &quot;write&quot; Publishers only, for example due to
+	 * Servlet container error/completion notifications. This should usually
+	 * be followed up with a call to either {@link #onError(Throwable)} or
+	 * {@link #onComplete()} to notify the downstream chain, that is unless
+	 * cancellation came from downstream.
+	 */
+	protected void cancel() {
+<span class="nc bnc" id="L165" title="All 2 branches missed.">		if (rsWriteFlushLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L166">			rsWriteFlushLogger.trace(getLogPrefix() + &quot;cancel [&quot; + this.state + &quot;]&quot;);</span>
+		}
+<span class="nc bnc" id="L168" title="All 2 branches missed.">		if (this.subscription != null) {</span>
+<span class="nc" id="L169">			this.subscription.cancel();</span>
+		}
+<span class="nc" id="L171">	}</span>
+
+
+	// Publisher implementation for result notifications...
+
+	@Override
+	public final void subscribe(Subscriber&lt;? super Void&gt; subscriber) {
+<span class="nc" id="L178">		this.resultPublisher.subscribe(subscriber);</span>
+<span class="nc" id="L179">	}</span>
+
+
+	// Write API methods to be implemented or template methods to override...
+
+	/**
+	 * Create a new processor for the current flush boundary.
+	 */
+	protected abstract Processor&lt;? super T, Void&gt; createWriteProcessor();
+
+	/**
+	 * Whether writing/flushing is possible.
+	 */
+	protected abstract boolean isWritePossible();
+
+	/**
+	 * Flush the output if ready, or otherwise {@link #isFlushPending()} should
+	 * return true after.
+	 * &lt;p&gt;This is primarily for the Servlet non-blocking I/O API where flush
+	 * cannot be called without a readyToWrite check.
+	 */
+	protected abstract void flush() throws IOException;
+
+	/**
+	 * Whether flushing is pending.
+	 * &lt;p&gt;This is primarily for the Servlet non-blocking I/O API where flush
+	 * cannot be called without a readyToWrite check.
+	 */
+	protected abstract boolean isFlushPending();
+
+	/**
+	 * Invoked when an error happens while flushing.
+	 * &lt;p&gt;The default implementation cancels the upstream write publisher and
+	 * sends an onError downstream as the result of request handling.
+	 */
+	protected void flushingFailed(Throwable t) {
+<span class="nc" id="L215">		cancel();</span>
+<span class="nc" id="L216">		onError(t);</span>
+<span class="nc" id="L217">	}</span>
+
+
+	// Private methods for use in State...
+
+	private boolean changeState(State oldState, State newState) {
+<span class="nc" id="L223">		boolean result = this.state.compareAndSet(oldState, newState);</span>
+<span class="nc bnc" id="L224" title="All 4 branches missed.">		if (result &amp;&amp; rsWriteFlushLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L225">			rsWriteFlushLogger.trace(getLogPrefix() + oldState + &quot; -&gt; &quot; + newState);</span>
+		}
+<span class="nc" id="L227">		return result;</span>
+	}
+
+	private void flushIfPossible() {
+<span class="nc" id="L231">		boolean result = isWritePossible();</span>
+<span class="nc bnc" id="L232" title="All 2 branches missed.">		if (rsWriteFlushLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L233">			rsWriteFlushLogger.trace(getLogPrefix() + &quot;isWritePossible[&quot; + result + &quot;]&quot;);</span>
+		}
+<span class="nc bnc" id="L235" title="All 2 branches missed.">		if (result) {</span>
+<span class="nc" id="L236">			onFlushPossible();</span>
+		}
+<span class="nc" id="L238">	}</span>
+
+
+	/**
+	 * Represents a state for the {@link Processor} to be in.
+	 *
+	 * &lt;p&gt;&lt;pre&gt;
+	 *       UNSUBSCRIBED
+	 *            |
+	 *            v
+	 *        REQUESTED &lt;---&gt; RECEIVED ------+
+	 *            |              |           |
+	 *            |              v           |
+	 *            |           FLUSHING       |
+	 *            |              |           |
+	 *            |              v           |
+	 *            +--------&gt; COMPLETED &lt;-----+
+	 * &lt;/pre&gt;
+	 */
+<span class="nc" id="L257">	private enum State {</span>
+
+<span class="nc" id="L259">		UNSUBSCRIBED {</span>
+			@Override
+			public &lt;T&gt; void onSubscribe(AbstractListenerWriteFlushProcessor&lt;T&gt; processor, Subscription subscription) {
+<span class="nc" id="L262">				Assert.notNull(subscription, &quot;Subscription must not be null&quot;);</span>
+<span class="nc bnc" id="L263" title="All 2 branches missed.">				if (processor.changeState(this, REQUESTED)) {</span>
+<span class="nc" id="L264">					processor.subscription = subscription;</span>
+<span class="nc" id="L265">					subscription.request(1);</span>
+				}
+				else {
+<span class="nc" id="L268">					super.onSubscribe(processor, subscription);</span>
+				}
+<span class="nc" id="L270">			}</span>
+
+			@Override
+			public &lt;T&gt; void onComplete(AbstractListenerWriteFlushProcessor&lt;T&gt; processor) {
+				// This can happen on (very early) completion notification from container..
+<span class="nc bnc" id="L275" title="All 2 branches missed.">				if (processor.changeState(this, COMPLETED)) {</span>
+<span class="nc" id="L276">					processor.resultPublisher.publishComplete();</span>
+				}
+				else {
+<span class="nc" id="L279">					processor.state.get().onComplete(processor);</span>
+				}
+<span class="nc" id="L281">			}</span>
+		},
+
+<span class="nc" id="L284">		REQUESTED {</span>
+			@Override
+			public &lt;T&gt; void onNext(AbstractListenerWriteFlushProcessor&lt;T&gt; processor,
+					Publisher&lt;? extends T&gt; currentPublisher) {
+
+<span class="nc bnc" id="L289" title="All 2 branches missed.">				if (processor.changeState(this, RECEIVED)) {</span>
+<span class="nc" id="L290">					Processor&lt;? super T, Void&gt; writeProcessor = processor.createWriteProcessor();</span>
+<span class="nc" id="L291">					processor.currentWriteProcessor = (AbstractListenerWriteProcessor&lt;?&gt;) writeProcessor;</span>
+<span class="nc" id="L292">					currentPublisher.subscribe(writeProcessor);</span>
+<span class="nc" id="L293">					writeProcessor.subscribe(new WriteResultSubscriber(processor));</span>
+				}
+<span class="nc" id="L295">			}</span>
+			@Override
+			public &lt;T&gt; void onComplete(AbstractListenerWriteFlushProcessor&lt;T&gt; processor) {
+<span class="nc bnc" id="L298" title="All 2 branches missed.">				if (processor.changeState(this, COMPLETED)) {</span>
+<span class="nc" id="L299">					processor.resultPublisher.publishComplete();</span>
+				}
+				else {
+<span class="nc" id="L302">					processor.state.get().onComplete(processor);</span>
+				}
+<span class="nc" id="L304">			}</span>
+		},
+
+<span class="nc" id="L307">		RECEIVED {</span>
+			@Override
+			public &lt;T&gt; void writeComplete(AbstractListenerWriteFlushProcessor&lt;T&gt; processor) {
+				try {
+<span class="nc" id="L311">					processor.flush();</span>
+				}
+<span class="nc" id="L313">				catch (Throwable ex) {</span>
+<span class="nc" id="L314">					processor.flushingFailed(ex);</span>
+<span class="nc" id="L315">					return;</span>
+<span class="nc" id="L316">				}</span>
+<span class="nc bnc" id="L317" title="All 2 branches missed.">				if (processor.changeState(this, REQUESTED)) {</span>
+<span class="nc bnc" id="L318" title="All 2 branches missed.">					if (processor.sourceCompleted) {</span>
+<span class="nc" id="L319">						handleSourceCompleted(processor);</span>
+					}
+					else {
+<span class="nc bnc" id="L322" title="All 2 branches missed.">						Assert.state(processor.subscription != null, &quot;No subscription&quot;);</span>
+<span class="nc" id="L323">						processor.subscription.request(1);</span>
+					}
+				}
+<span class="nc" id="L326">			}</span>
+			@Override
+			public &lt;T&gt; void onComplete(AbstractListenerWriteFlushProcessor&lt;T&gt; processor) {
+<span class="nc" id="L329">				processor.sourceCompleted = true;</span>
+				// A competing write might have completed very quickly
+<span class="nc bnc" id="L331" title="All 2 branches missed.">				if (processor.state.get() == State.REQUESTED) {</span>
+<span class="nc" id="L332">					handleSourceCompleted(processor);</span>
+				}
+<span class="nc" id="L334">			}</span>
+
+			private &lt;T&gt; void handleSourceCompleted(AbstractListenerWriteFlushProcessor&lt;T&gt; processor) {
+<span class="nc bnc" id="L337" title="All 2 branches missed.">				if (processor.isFlushPending()) {</span>
+					// Ensure the final flush
+<span class="nc" id="L339">					processor.changeState(State.REQUESTED, State.FLUSHING);</span>
+<span class="nc" id="L340">					processor.flushIfPossible();</span>
+				}
+<span class="nc bnc" id="L342" title="All 2 branches missed.">				else if (processor.changeState(State.REQUESTED, State.COMPLETED)) {</span>
+<span class="nc" id="L343">					processor.resultPublisher.publishComplete();</span>
+				}
+				else {
+<span class="nc" id="L346">					processor.state.get().onComplete(processor);</span>
+				}
+<span class="nc" id="L348">			}</span>
+		},
+
+<span class="nc" id="L351">		FLUSHING {</span>
+			@Override
+			public &lt;T&gt; void onFlushPossible(AbstractListenerWriteFlushProcessor&lt;T&gt; processor) {
+				try {
+<span class="nc" id="L355">					processor.flush();</span>
+				}
+<span class="nc" id="L357">				catch (Throwable ex) {</span>
+<span class="nc" id="L358">					processor.flushingFailed(ex);</span>
+<span class="nc" id="L359">					return;</span>
+<span class="nc" id="L360">				}</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">				if (processor.changeState(this, COMPLETED)) {</span>
+<span class="nc" id="L362">					processor.resultPublisher.publishComplete();</span>
+				}
+				else {
+<span class="nc" id="L365">					processor.state.get().onComplete(processor);</span>
+				}
+<span class="nc" id="L367">			}</span>
+			@Override
+			public &lt;T&gt; void onNext(AbstractListenerWriteFlushProcessor&lt;T&gt; proc, Publisher&lt;? extends T&gt; pub) {
+				// ignore
+<span class="nc" id="L371">			}</span>
+			@Override
+			public &lt;T&gt; void onComplete(AbstractListenerWriteFlushProcessor&lt;T&gt; processor) {
+				// ignore
+<span class="nc" id="L375">			}</span>
+		},
+
+<span class="nc" id="L378">		COMPLETED {</span>
+			@Override
+			public &lt;T&gt; void onNext(AbstractListenerWriteFlushProcessor&lt;T&gt; proc, Publisher&lt;? extends T&gt; pub) {
+				// ignore
+<span class="nc" id="L382">			}</span>
+			@Override
+			public &lt;T&gt; void onError(AbstractListenerWriteFlushProcessor&lt;T&gt; processor, Throwable t) {
+				// ignore
+<span class="nc" id="L386">			}</span>
+			@Override
+			public &lt;T&gt; void onComplete(AbstractListenerWriteFlushProcessor&lt;T&gt; processor) {
+				// ignore
+<span class="nc" id="L390">			}</span>
+		};
+
+
+		public &lt;T&gt; void onSubscribe(AbstractListenerWriteFlushProcessor&lt;T&gt; proc, Subscription subscription) {
+<span class="nc" id="L395">			subscription.cancel();</span>
+<span class="nc" id="L396">		}</span>
+
+		public &lt;T&gt; void onNext(AbstractListenerWriteFlushProcessor&lt;T&gt; proc, Publisher&lt;? extends T&gt; pub) {
+<span class="nc" id="L399">			throw new IllegalStateException(toString());</span>
+		}
+
+		public &lt;T&gt; void onError(AbstractListenerWriteFlushProcessor&lt;T&gt; processor, Throwable ex) {
+<span class="nc bnc" id="L403" title="All 2 branches missed.">			if (processor.changeState(this, COMPLETED)) {</span>
+<span class="nc" id="L404">				processor.resultPublisher.publishError(ex);</span>
+			}
+			else {
+<span class="nc" id="L407">				processor.state.get().onError(processor, ex);</span>
+			}
+<span class="nc" id="L409">		}</span>
+
+		public &lt;T&gt; void onComplete(AbstractListenerWriteFlushProcessor&lt;T&gt; processor) {
+<span class="nc" id="L412">			throw new IllegalStateException(toString());</span>
+		}
+
+		public &lt;T&gt; void writeComplete(AbstractListenerWriteFlushProcessor&lt;T&gt; processor) {
+<span class="nc" id="L416">			throw new IllegalStateException(toString());</span>
+		}
+
+		public &lt;T&gt; void onFlushPossible(AbstractListenerWriteFlushProcessor&lt;T&gt; processor) {
+			// ignore
+<span class="nc" id="L421">		}</span>
+
+
+		/**
+		 * Subscriber to receive and delegate completion notifications for from
+		 * the current Publisher, i.e. for the current flush boundary.
+		 */
+		private static class WriteResultSubscriber implements Subscriber&lt;Void&gt; {
+
+			private final AbstractListenerWriteFlushProcessor&lt;?&gt; processor;
+
+
+<span class="nc" id="L433">			public WriteResultSubscriber(AbstractListenerWriteFlushProcessor&lt;?&gt; processor) {</span>
+<span class="nc" id="L434">				this.processor = processor;</span>
+<span class="nc" id="L435">			}</span>
+
+			@Override
+			public void onSubscribe(Subscription subscription) {
+<span class="nc" id="L439">				subscription.request(Long.MAX_VALUE);</span>
+<span class="nc" id="L440">			}</span>
+
+			@Override
+			public void onNext(Void aVoid) {
+<span class="nc" id="L444">			}</span>
+
+			@Override
+			public void onError(Throwable ex) {
+<span class="nc bnc" id="L448" title="All 2 branches missed.">				if (rsWriteFlushLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L449">					rsWriteFlushLogger.trace(</span>
+<span class="nc" id="L450">							this.processor.getLogPrefix() + &quot;current \&quot;write\&quot; Publisher failed: &quot; + ex);</span>
+				}
+<span class="nc" id="L452">				this.processor.currentWriteProcessor = null;</span>
+<span class="nc" id="L453">				this.processor.cancel();</span>
+<span class="nc" id="L454">				this.processor.onError(ex);</span>
+<span class="nc" id="L455">			}</span>
+
+			@Override
+			public void onComplete() {
+<span class="nc bnc" id="L459" title="All 2 branches missed.">				if (rsWriteFlushLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L460">					rsWriteFlushLogger.trace(</span>
+<span class="nc" id="L461">							this.processor.getLogPrefix() + &quot;current \&quot;write\&quot; Publisher completed&quot;);</span>
+				}
+<span class="nc" id="L463">				this.processor.currentWriteProcessor = null;</span>
+<span class="nc" id="L464">				this.processor.state.get().writeComplete(this.processor);</span>
+<span class="nc" id="L465">			}</span>
+
+			@Override
+			public String toString() {
+<span class="nc" id="L469">				return this.processor.getClass().getSimpleName() + &quot;-WriteResultSubscriber&quot;;</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

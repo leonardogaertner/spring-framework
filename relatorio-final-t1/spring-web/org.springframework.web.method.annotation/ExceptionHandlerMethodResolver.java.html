@@ -1,0 +1,297 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ExceptionHandlerMethodResolver.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.method.annotation</a> &gt; <span class="el_source">ExceptionHandlerMethodResolver.java</span></div><h1>ExceptionHandlerMethodResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.method.annotation;
+
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.ExceptionDepthComparator;
+import org.springframework.core.MethodIntrospector;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.http.InvalidMediaTypeException;
+import org.springframework.http.MediaType;
+import org.springframework.util.Assert;
+import org.springframework.util.ConcurrentLruCache;
+import org.springframework.util.MimeType;
+import org.springframework.util.ReflectionUtils.MethodFilter;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+
+/**
+ * Discovers {@linkplain ExceptionHandler @ExceptionHandler} methods in a given class,
+ * including all of its superclasses, and helps to resolve a given {@link Exception}
+ * and {@link MediaType} requested by clients to combinations supported by a given {@link Method}.
+ * &lt;p&gt;This resolver will use the exception information declared as {@code @ExceptionHandler}
+ * annotation attributes, or as a method argument as a fallback. This will throw
+ * {@code IllegalStateException} instances if:
+ * &lt;ul&gt;
+ *     &lt;li&gt;No Exception information could be found for a method
+ *     &lt;li&gt;An invalid {@link MediaType} has been declared as {@code @ExceptionHandler} attribute
+ *     &lt;li&gt;Multiple handlers declare the same exception + media type mapping
+ * &lt;/ul&gt;
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @author Brian Clozel
+ * @since 3.1
+ */
+public class ExceptionHandlerMethodResolver {
+
+	/**
+	 * A filter for selecting {@code @ExceptionHandler} methods.
+	 */
+<span class="fc" id="L67">	private static final MethodFilter EXCEPTION_HANDLER_METHODS = method -&gt;</span>
+<span class="fc" id="L68">			AnnotatedElementUtils.hasAnnotation(method, ExceptionHandler.class);</span>
+
+	private static final ExceptionHandlerMappingInfo NO_MATCHING_EXCEPTION_HANDLER;
+
+	static {
+		try {
+<span class="fc" id="L74">			NO_MATCHING_EXCEPTION_HANDLER = new ExceptionHandlerMappingInfo(Set.of(), Set.of(),</span>
+<span class="fc" id="L75">					ExceptionHandlerMethodResolver.class.getDeclaredMethod(&quot;noMatchingExceptionHandler&quot;));</span>
+		}
+<span class="nc" id="L77">		catch (NoSuchMethodException ex) {</span>
+<span class="nc" id="L78">			throw new IllegalStateException(&quot;Expected method not found: &quot; + ex);</span>
+<span class="fc" id="L79">		}</span>
+<span class="fc" id="L80">	}</span>
+
+<span class="fc" id="L82">	private final Map&lt;ExceptionMapping, ExceptionHandlerMappingInfo&gt; mappedMethods = new HashMap&lt;&gt;(16);</span>
+
+<span class="fc" id="L84">	private final ConcurrentLruCache&lt;ExceptionMapping, ExceptionHandlerMappingInfo&gt; lookupCache = new ConcurrentLruCache&lt;&gt;(24,</span>
+<span class="fc" id="L85">			cacheKey -&gt; getMappedMethod(cacheKey.exceptionType(), cacheKey.mediaType()));</span>
+
+
+	/**
+	 * A constructor that finds {@link ExceptionHandler} methods in the given type.
+	 * @param handlerType the type to introspect
+	 * @throws IllegalStateException in case of invalid or ambiguous exception mapping declarations
+	 */
+<span class="fc" id="L93">	public ExceptionHandlerMethodResolver(Class&lt;?&gt; handlerType) {</span>
+<span class="fc bfc" id="L94" title="All 2 branches covered.">		for (Method method : MethodIntrospector.selectMethods(handlerType, EXCEPTION_HANDLER_METHODS)) {</span>
+<span class="fc" id="L95">			ExceptionHandlerMappingInfo mappingInfo = detectExceptionMappings(method);</span>
+<span class="fc bfc" id="L96" title="All 2 branches covered.">			for (Class&lt;? extends Throwable&gt; exceptionType : mappingInfo.getExceptionTypes()) {</span>
+<span class="fc bfc" id="L97" title="All 2 branches covered.">				for (MediaType producibleType : mappingInfo.getProducibleTypes()) {</span>
+<span class="fc" id="L98">					addExceptionMapping(new ExceptionMapping(exceptionType, producibleType), mappingInfo);</span>
+<span class="fc" id="L99">				}</span>
+<span class="fc bfc" id="L100" title="All 2 branches covered.">				if (mappingInfo.getProducibleTypes().isEmpty()) {</span>
+<span class="fc" id="L101">					addExceptionMapping(new ExceptionMapping(exceptionType, MediaType.ALL), mappingInfo);</span>
+				}
+<span class="fc" id="L103">			}</span>
+<span class="fc" id="L104">		}</span>
+<span class="fc" id="L105">	}</span>
+
+
+	/**
+	 * Extract exception mappings from the {@code @ExceptionHandler} annotation first,
+	 * and then as a fallback from the method signature itself.
+	 */
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private ExceptionHandlerMappingInfo detectExceptionMappings(Method method) {
+<span class="fc" id="L114">		ExceptionHandler exceptionHandler = readExceptionHandlerAnnotation(method);</span>
+<span class="fc" id="L115">		List&lt;Class&lt;? extends Throwable&gt;&gt; exceptions = new ArrayList&lt;&gt;(Arrays.asList(exceptionHandler.exception()));</span>
+<span class="fc bfc" id="L116" title="All 2 branches covered.">		if (exceptions.isEmpty()) {</span>
+<span class="fc bfc" id="L117" title="All 2 branches covered.">			for (Class&lt;?&gt; paramType : method.getParameterTypes()) {</span>
+<span class="fc bfc" id="L118" title="All 2 branches covered.">				if (Throwable.class.isAssignableFrom(paramType)) {</span>
+<span class="fc" id="L119">					exceptions.add((Class&lt;? extends Throwable&gt;) paramType);</span>
+				}
+			}
+		}
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">		if (exceptions.isEmpty()) {</span>
+<span class="nc" id="L124">			throw new IllegalStateException(&quot;No exception types mapped to &quot; + method);</span>
+		}
+<span class="fc" id="L126">		Set&lt;MediaType&gt; mediaTypes = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L127" title="All 2 branches covered.">		for (String mediaType : exceptionHandler.produces()) {</span>
+			try {
+<span class="fc" id="L129">				mediaTypes.add(MediaType.parseMediaType(mediaType));</span>
+			}
+<span class="nc" id="L131">			catch (InvalidMediaTypeException exc) {</span>
+<span class="nc" id="L132">				throw new IllegalStateException(&quot;Invalid media type [&quot; + mediaType + &quot;] declared on @ExceptionHandler for &quot; + method, exc);</span>
+<span class="fc" id="L133">			}</span>
+		}
+<span class="fc" id="L135">		return new ExceptionHandlerMappingInfo(Set.copyOf(exceptions), mediaTypes, method);</span>
+	}
+
+	private ExceptionHandler readExceptionHandlerAnnotation(Method method) {
+<span class="fc" id="L139">		ExceptionHandler ann = AnnotatedElementUtils.findMergedAnnotation(method, ExceptionHandler.class);</span>
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">		Assert.state(ann != null, &quot;No ExceptionHandler annotation&quot;);</span>
+<span class="fc" id="L141">		return ann;</span>
+	}
+
+	private void addExceptionMapping(ExceptionMapping mapping, ExceptionHandlerMappingInfo mappingInfo) {
+<span class="fc" id="L145">		ExceptionHandlerMappingInfo oldMapping = this.mappedMethods.put(mapping, mappingInfo);</span>
+<span class="pc bpc" id="L146" title="3 of 4 branches missed.">		if (oldMapping != null &amp;&amp; !oldMapping.getHandlerMethod().equals(mappingInfo.getHandlerMethod())) {</span>
+<span class="nc" id="L147">			throw new IllegalStateException(&quot;Ambiguous @ExceptionHandler method mapped for [&quot; +</span>
+<span class="nc" id="L148">					mapping + &quot;]: {&quot; + oldMapping.getHandlerMethod() + &quot;, &quot; + mappingInfo.getHandlerMethod() + &quot;}&quot;);</span>
+		}
+<span class="fc" id="L150">	}</span>
+
+	/**
+	 * Whether the contained type has any exception mappings.
+	 */
+	public boolean hasExceptionMappings() {
+<span class="fc bfc" id="L156" title="All 2 branches covered.">		return !this.mappedMethods.isEmpty();</span>
+	}
+
+	/**
+	 * Find a {@link Method} to handle the given exception.
+	 * &lt;p&gt;Uses {@link ExceptionDepthComparator} if more than one match is found.
+	 * @param exception the exception
+	 * @return a Method to handle the exception, or {@code null} if none found
+	 */
+	public @Nullable Method resolveMethod(Exception exception) {
+<span class="nc" id="L166">		ExceptionHandlerMappingInfo mappingInfo = resolveExceptionMapping(exception, MediaType.ALL);</span>
+<span class="nc bnc" id="L167" title="All 2 branches missed.">		return (mappingInfo != null) ? mappingInfo.getHandlerMethod() : null;</span>
+	}
+
+	/**
+	 * Find a {@link Method} to handle the given Throwable.
+	 * &lt;p&gt;Uses {@link ExceptionDepthComparator} if more than one match is found.
+	 * @param exception the exception
+	 * @return a Method to handle the exception, or {@code null} if none found
+	 * @since 5.0
+	 */
+	public @Nullable Method resolveMethodByThrowable(Throwable exception) {
+<span class="nc" id="L178">		ExceptionHandlerMappingInfo mappingInfo = resolveExceptionMapping(exception, MediaType.ALL);</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">		return (mappingInfo != null) ? mappingInfo.getHandlerMethod() : null;</span>
+	}
+
+	/**
+	 * Find a {@link Method} to handle the given Throwable for the requested {@link MediaType}.
+	 * &lt;p&gt;Uses {@link ExceptionDepthComparator} and {@link MediaType#isMoreSpecific(MimeType)}
+	 * if more than one match is found.
+	 * @param exception the exception
+	 * @param mediaType the media type requested by the HTTP client
+	 * @return a Method to handle the exception, or {@code null} if none found
+	 * @since 6.2
+	 */
+	public @Nullable ExceptionHandlerMappingInfo resolveExceptionMapping(Throwable exception, MediaType mediaType) {
+<span class="fc" id="L192">		ExceptionHandlerMappingInfo mappingInfo = resolveExceptionMappingByExceptionType(exception.getClass(), mediaType);</span>
+<span class="fc bfc" id="L193" title="All 2 branches covered.">		if (mappingInfo == null) {</span>
+<span class="fc" id="L194">			Throwable cause = exception.getCause();</span>
+<span class="fc bfc" id="L195" title="All 2 branches covered.">			if (cause != null) {</span>
+<span class="fc" id="L196">				mappingInfo = resolveExceptionMapping(cause, mediaType);</span>
+			}
+		}
+<span class="fc" id="L199">		return mappingInfo;</span>
+	}
+
+	/**
+	 * Find a {@link Method} to handle the given exception type. This can be
+	 * useful if an {@link Exception} instance is not available (for example, for tools).
+	 * &lt;p&gt;Uses {@link ExceptionDepthComparator} if more than one match is found.
+	 * @param exceptionType the exception type
+	 * @return a Method to handle the exception, or {@code null} if none found
+	 */
+	public @Nullable Method resolveMethodByExceptionType(Class&lt;? extends Throwable&gt; exceptionType) {
+<span class="nc" id="L210">		ExceptionHandlerMappingInfo mappingInfo = resolveExceptionMappingByExceptionType(exceptionType, MediaType.ALL);</span>
+<span class="nc bnc" id="L211" title="All 2 branches missed.">		return (mappingInfo != null) ? mappingInfo.getHandlerMethod() : null;</span>
+	}
+
+	/**
+	 * Find a {@link Method} to handle the given exception type and media type.
+	 * This can be useful if an {@link Exception} instance is not available (for example, for tools).
+	 * @param exceptionType the exception type
+	 * @param mediaType the media type requested by the HTTP client
+	 * @return a Method to handle the exception, or {@code null} if none found
+	 */
+	public @Nullable ExceptionHandlerMappingInfo resolveExceptionMappingByExceptionType(Class&lt;? extends Throwable&gt; exceptionType, MediaType mediaType) {
+<span class="fc" id="L222">		ExceptionHandlerMappingInfo mappingInfo = this.lookupCache.get(new ExceptionMapping(exceptionType, mediaType));</span>
+<span class="fc bfc" id="L223" title="All 2 branches covered.">		return (mappingInfo != NO_MATCHING_EXCEPTION_HANDLER ? mappingInfo : null);</span>
+	}
+
+	/**
+	 * Return the {@link Method} mapped to the given exception type, or
+	 * {@link #NO_MATCHING_EXCEPTION_HANDLER} if none.
+	 */
+	private ExceptionHandlerMappingInfo getMappedMethod(Class&lt;? extends Throwable&gt; exceptionType, MediaType mediaType) {
+<span class="fc" id="L231">		List&lt;ExceptionMapping&gt; matches = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L232" title="All 2 branches covered.">		for (ExceptionMapping mappingInfo : this.mappedMethods.keySet()) {</span>
+<span class="fc bfc" id="L233" title="All 4 branches covered.">			if (mappingInfo.exceptionType().isAssignableFrom(exceptionType) &amp;&amp; mappingInfo.mediaType().isCompatibleWith(mediaType)) {</span>
+<span class="fc" id="L234">				matches.add(mappingInfo);</span>
+			}
+<span class="fc" id="L236">		}</span>
+<span class="fc bfc" id="L237" title="All 2 branches covered.">		if (!matches.isEmpty()) {</span>
+<span class="fc bfc" id="L238" title="All 2 branches covered.">			if (matches.size() &gt; 1) {</span>
+<span class="fc" id="L239">				matches.sort(new ExceptionMappingComparator(exceptionType, mediaType));</span>
+			}
+<span class="fc" id="L241">			return Objects.requireNonNull(this.mappedMethods.get(matches.get(0)));</span>
+		}
+		else {
+<span class="fc" id="L244">			return NO_MATCHING_EXCEPTION_HANDLER;</span>
+		}
+	}
+
+	/**
+	 * For the {@link #NO_MATCHING_EXCEPTION_HANDLER} constant.
+ 	 */
+	@SuppressWarnings(&quot;unused&quot;)
+	private void noMatchingExceptionHandler() {
+<span class="nc" id="L253">	}</span>
+
+<span class="fc" id="L255">	private record ExceptionMapping(Class&lt;? extends Throwable&gt; exceptionType, MediaType mediaType) {</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L259">			return &quot;ExceptionHandler{&quot; +</span>
+<span class="nc" id="L260">					&quot;exceptionType=&quot; + this.exceptionType.getCanonicalName() +</span>
+					&quot;, mediaType=&quot; + this.mediaType +
+					'}';
+		}
+	}
+
+	private static class ExceptionMappingComparator implements Comparator&lt;ExceptionMapping&gt; {
+
+		private final ExceptionDepthComparator exceptionDepthComparator;
+
+		private final MediaType mediaType;
+
+<span class="fc" id="L272">		public ExceptionMappingComparator(Class&lt;? extends Throwable&gt; exceptionType, MediaType mediaType) {</span>
+<span class="fc" id="L273">			this.exceptionDepthComparator = new ExceptionDepthComparator(exceptionType);</span>
+<span class="fc" id="L274">			this.mediaType = mediaType;</span>
+<span class="fc" id="L275">		}</span>
+
+		@Override
+		public int compare(ExceptionMapping o1, ExceptionMapping o2) {
+<span class="fc" id="L279">			int result = this.exceptionDepthComparator.compare(o1.exceptionType(), o2.exceptionType());</span>
+<span class="fc bfc" id="L280" title="All 2 branches covered.">			if (result != 0) {</span>
+<span class="fc" id="L281">				return result;</span>
+			}
+<span class="fc bfc" id="L283" title="All 2 branches covered.">			if(o1.mediaType.equals(this.mediaType)) {</span>
+<span class="fc" id="L284">				return -1;</span>
+			}
+<span class="fc bfc" id="L286" title="All 2 branches covered.">			if(o2.mediaType.equals(this.mediaType)) {</span>
+<span class="fc" id="L287">				return 1;</span>
+			}
+<span class="pc bpc" id="L289" title="1 of 2 branches missed.">			if (o1.mediaType.equals(o2.mediaType)) {</span>
+<span class="nc" id="L290">				return 0;</span>
+			}
+<span class="pc bpc" id="L292" title="1 of 2 branches missed.">			return (o1.mediaType.isMoreSpecific(o2.mediaType)) ? -1 : 1;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

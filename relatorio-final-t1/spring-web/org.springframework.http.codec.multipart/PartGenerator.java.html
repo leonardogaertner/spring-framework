@@ -1,0 +1,734 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>PartGenerator.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-web</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.codec.multipart</a> &gt; <span class="el_source">PartGenerator.java</span></div><h1>PartGenerator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.codec.multipart;
+
+import java.io.IOException;
+import java.io.UncheckedIOException;
+import java.nio.ByteBuffer;
+import java.nio.channels.WritableByteChannel;
+import java.nio.charset.Charset;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.List;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.reactivestreams.Subscription;
+import reactor.core.publisher.BaseSubscriber;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.MonoSink;
+import reactor.core.scheduler.Scheduler;
+import reactor.util.context.Context;
+
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferLimitException;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.http.HttpHeaders;
+import org.springframework.util.FastByteArrayOutputStream;
+
+/**
+ * Subscribes to a token stream (i.e. the result of
+ * {@link MultipartParser#parse(Flux, byte[], int, Charset)}), and produces a flux
+ * of {@link Part} objects.
+ *
+ * @author Arjen Poutsma
+ * @since 5.3
+ */
+@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+final class PartGenerator extends BaseSubscriber&lt;MultipartParser.Token&gt; {
+
+<span class="fc" id="L64">	private static final Log logger = LogFactory.getLog(PartGenerator.class);</span>
+
+<span class="fc" id="L66">	private final AtomicReference&lt;State&gt; state = new AtomicReference&lt;&gt;(new InitialState());</span>
+
+<span class="fc" id="L68">	private final AtomicBoolean requestOutstanding = new AtomicBoolean();</span>
+
+	private final MonoSink&lt;Part&gt; sink;
+
+	private final int maxInMemorySize;
+
+	private final long maxDiskUsagePerPart;
+
+	private final Mono&lt;Path&gt; fileStorageDirectory;
+
+	private final Scheduler blockingOperationScheduler;
+
+
+	private PartGenerator(MonoSink&lt;Part&gt; sink, int maxInMemorySize, long maxDiskUsagePerPart,
+<span class="fc" id="L82">			Mono&lt;Path&gt; fileStorageDirectory, Scheduler blockingOperationScheduler) {</span>
+
+<span class="fc" id="L84">		this.sink = sink;</span>
+<span class="fc" id="L85">		this.maxInMemorySize = maxInMemorySize;</span>
+<span class="fc" id="L86">		this.maxDiskUsagePerPart = maxDiskUsagePerPart;</span>
+<span class="fc" id="L87">		this.fileStorageDirectory = fileStorageDirectory;</span>
+<span class="fc" id="L88">		this.blockingOperationScheduler = blockingOperationScheduler;</span>
+<span class="fc" id="L89">	}</span>
+
+	/**
+	 * Creates parts from a given stream of tokens.
+	 */
+	public static Mono&lt;Part&gt; createPart(Flux&lt;MultipartParser.Token&gt; tokens, int maxInMemorySize,
+			long maxDiskUsagePerPart, Mono&lt;Path&gt; fileStorageDirectory, Scheduler blockingOperationScheduler) {
+
+<span class="fc" id="L97">		return Mono.create(sink -&gt; {</span>
+<span class="fc" id="L98">			PartGenerator generator = new PartGenerator(sink, maxInMemorySize, maxDiskUsagePerPart,</span>
+					fileStorageDirectory, blockingOperationScheduler);
+
+<span class="fc" id="L101">			sink.onCancel(generator);</span>
+<span class="fc" id="L102">			sink.onRequest(l -&gt; generator.requestToken());</span>
+<span class="pc" id="L103">			tokens.doOnDiscard(MultipartParser.BodyToken.class, bodyToken -&gt; DataBufferUtils.release(bodyToken.buffer()))</span>
+<span class="fc" id="L104">					.subscribe(generator);</span>
+<span class="fc" id="L105">		});</span>
+	}
+
+	@Override
+	public Context currentContext() {
+<span class="fc" id="L110">		return Context.of(this.sink.contextView());</span>
+	}
+
+	@Override
+	protected void hookOnSubscribe(Subscription subscription) {
+<span class="fc" id="L115">		requestToken();</span>
+<span class="fc" id="L116">	}</span>
+
+	@Override
+	protected void hookOnNext(MultipartParser.Token token) {
+<span class="fc" id="L120">		this.requestOutstanding.set(false);</span>
+<span class="fc" id="L121">		State state = this.state.get();</span>
+<span class="fc bfc" id="L122" title="All 2 branches covered.">		if (token instanceof MultipartParser.HeadersToken) {</span>
+<span class="fc" id="L123">			newPart(state, token.headers());</span>
+		}
+		else {
+<span class="fc" id="L126">			state.body(token.buffer());</span>
+		}
+<span class="fc" id="L128">	}</span>
+
+	private void newPart(State currentState, HttpHeaders headers) {
+<span class="fc bfc" id="L131" title="All 2 branches covered.">		if (MultipartUtils.isFormField(headers)) {</span>
+<span class="fc" id="L132">			changeState(currentState, new FormFieldState(headers));</span>
+<span class="fc" id="L133">			requestToken();</span>
+		}
+		else {
+<span class="fc" id="L136">			changeState(currentState, new InMemoryState(headers));</span>
+<span class="fc" id="L137">			requestToken();</span>
+		}
+<span class="fc" id="L139">	}</span>
+
+	@Override
+	protected void hookOnComplete() {
+<span class="fc" id="L143">		this.state.get().onComplete();</span>
+<span class="fc" id="L144">	}</span>
+
+	@Override
+	protected void hookOnError(Throwable throwable) {
+<span class="nc" id="L148">		this.state.get().error(throwable);</span>
+<span class="nc" id="L149">		changeStateInternal(DisposedState.INSTANCE);</span>
+<span class="nc" id="L150">		this.sink.error(throwable);</span>
+<span class="nc" id="L151">	}</span>
+
+	@Override
+	public void dispose() {
+<span class="nc" id="L155">		changeStateInternal(DisposedState.INSTANCE);</span>
+<span class="nc" id="L156">		cancel();</span>
+<span class="nc" id="L157">	}</span>
+
+	boolean changeState(State oldState, State newState) {
+<span class="pc bpc" id="L160" title="1 of 2 branches missed.">		if (this.state.compareAndSet(oldState, newState)) {</span>
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L162">				logger.trace(&quot;Changed state: &quot; + oldState + &quot; -&gt; &quot; + newState);</span>
+			}
+<span class="fc" id="L164">			oldState.dispose();</span>
+<span class="fc" id="L165">			return true;</span>
+		}
+		else {
+<span class="nc" id="L168">			logger.warn(&quot;Could not switch from &quot; + oldState + &quot; to &quot; + newState +</span>
+<span class="nc" id="L169">					&quot;; current state:&quot; + this.state.get());</span>
+<span class="nc" id="L170">			return false;</span>
+		}
+	}
+
+	private void changeStateInternal(State newState) {
+<span class="nc bnc" id="L175" title="All 2 branches missed.">		if (this.state.get() == DisposedState.INSTANCE) {</span>
+<span class="nc" id="L176">			return;</span>
+		}
+<span class="nc" id="L178">		State oldState = this.state.getAndSet(newState);</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L180">			logger.trace(&quot;Changed state: &quot; + oldState + &quot; -&gt; &quot; + newState);</span>
+		}
+<span class="nc" id="L182">		oldState.dispose();</span>
+<span class="nc" id="L183">	}</span>
+
+	void emitPart(Part part) {
+<span class="pc bpc" id="L186" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L187">			logger.trace(&quot;Emitting: &quot; + part);</span>
+		}
+<span class="fc" id="L189">		this.sink.success(part);</span>
+<span class="fc" id="L190">	}</span>
+
+	void emitError(Throwable t) {
+<span class="nc" id="L193">		cancel();</span>
+<span class="nc" id="L194">		this.sink.error(t);</span>
+<span class="nc" id="L195">	}</span>
+
+	void requestToken() {
+<span class="fc bfc" id="L198" title="All 2 branches covered.">		if (upstream() != null &amp;&amp;</span>
+<span class="pc bpc" id="L199" title="1 of 2 branches missed.">				this.state.get().canRequest() &amp;&amp;</span>
+<span class="fc bfc" id="L200" title="All 2 branches covered.">				this.requestOutstanding.compareAndSet(false, true)) {</span>
+<span class="fc" id="L201">			request(1);</span>
+		}
+<span class="fc" id="L203">	}</span>
+
+	/**
+	 * Represents the internal state of the {@link PartGenerator} for
+	 * creating a single {@link Part}.
+	 * {@link State} instances are stateful, and created when a new
+	 * {@link MultipartParser.HeadersToken} is accepted (see
+	 * {@link #newPart(State, HttpHeaders)}).
+	 * The following rules determine which state the creator will have:
+	 * &lt;ol&gt;
+	 * &lt;li&gt;If the part is a {@linkplain MultipartUtils#isFormField(HttpHeaders) form field},
+	 * the creator will be in the {@link FormFieldState}.&lt;/li&gt;
+	 * &lt;li&gt;Otherwise, the creator will initially be in the
+	 * {@link InMemoryState}, but will switch over to {@link CreateFileState}
+	 * when the part byte count exceeds {@link #maxInMemorySize},
+	 * then to {@link WritingFileState} (to write the memory contents),
+	 * and finally {@link IdleFileState}, which switches back to
+	 * {@link WritingFileState} when more body data comes in.&lt;/li&gt;
+	 * &lt;/ol&gt;
+	 */
+	private interface State {
+
+		/**
+		 * Invoked when a {@link MultipartParser.BodyToken} is received.
+		 */
+		void body(DataBuffer dataBuffer);
+
+		/**
+		 * Invoked when all tokens for the part have been received.
+		 */
+		void onComplete();
+
+		/**
+		 * Invoked when an error has been received.
+		 */
+		default void error(Throwable throwable) {
+<span class="nc" id="L239">		}</span>
+
+		/**
+		 * Indicates whether the current state is ready to accept a new token.
+		 */
+		default boolean canRequest() {
+<span class="fc" id="L245">			return true;</span>
+		}
+
+		/**
+		 * Cleans up any state.
+		 */
+		default void dispose() {
+<span class="fc" id="L252">		}</span>
+	}
+
+
+	/**
+	 * The initial state of the creator. Throws an exception for {@link #body(DataBuffer)}.
+	 */
+	private final class InitialState implements State {
+
+<span class="fc" id="L261">		private InitialState() {</span>
+<span class="fc" id="L262">		}</span>
+
+		@Override
+		public void body(DataBuffer dataBuffer) {
+<span class="nc" id="L266">			DataBufferUtils.release(dataBuffer);</span>
+<span class="nc" id="L267">			emitError(new IllegalStateException(&quot;Body token not expected&quot;));</span>
+<span class="nc" id="L268">		}</span>
+
+		@Override
+		public void onComplete() {
+<span class="nc" id="L272">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L276">			return &quot;INITIAL&quot;;</span>
+		}
+	}
+
+
+	/**
+	 * The creator state when a {@linkplain MultipartUtils#isFormField(HttpHeaders) form field} is received.
+	 * Stores all body buffers in memory (up until {@link #maxInMemorySize}).
+	 */
+	private final class FormFieldState implements State {
+
+<span class="fc" id="L287">		private final FastByteArrayOutputStream value = new FastByteArrayOutputStream();</span>
+
+		private final HttpHeaders headers;
+
+<span class="fc" id="L291">		public FormFieldState(HttpHeaders headers) {</span>
+<span class="fc" id="L292">			this.headers = headers;</span>
+<span class="fc" id="L293">		}</span>
+
+		@Override
+		public void body(DataBuffer dataBuffer) {
+<span class="fc" id="L297">			int size = this.value.size() + dataBuffer.readableByteCount();</span>
+<span class="pc bpc" id="L298" title="2 of 4 branches missed.">			if (PartGenerator.this.maxInMemorySize == -1 ||</span>
+					size &lt; PartGenerator.this.maxInMemorySize) {
+<span class="fc" id="L300">				store(dataBuffer);</span>
+<span class="fc" id="L301">				requestToken();</span>
+			}
+			else {
+<span class="nc" id="L304">				DataBufferUtils.release(dataBuffer);</span>
+<span class="nc" id="L305">				emitError(new DataBufferLimitException(&quot;Form field value exceeded the memory usage limit of &quot; +</span>
+						PartGenerator.this.maxInMemorySize + &quot; bytes&quot;));
+			}
+<span class="fc" id="L308">		}</span>
+
+		private void store(DataBuffer dataBuffer) {
+			try {
+<span class="fc" id="L312">				byte[] bytes = new byte[dataBuffer.readableByteCount()];</span>
+<span class="fc" id="L313">				dataBuffer.read(bytes);</span>
+<span class="fc" id="L314">				this.value.write(bytes);</span>
+			}
+<span class="nc" id="L316">			catch (IOException ex) {</span>
+<span class="nc" id="L317">				emitError(ex);</span>
+			}
+			finally {
+<span class="fc" id="L320">				DataBufferUtils.release(dataBuffer);</span>
+			}
+<span class="fc" id="L322">		}</span>
+
+		@Override
+		public void onComplete() {
+<span class="fc" id="L326">			byte[] bytes = this.value.toByteArrayUnsafe();</span>
+<span class="fc" id="L327">			String value = new String(bytes, MultipartUtils.charset(this.headers));</span>
+<span class="fc" id="L328">			emitPart(DefaultParts.formFieldPart(this.headers, value));</span>
+<span class="fc" id="L329">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L333">			return &quot;FORM-FIELD&quot;;</span>
+		}
+	}
+
+
+	/**
+	 * The creator state when not handling a form field.
+	 * Stores all received buffers in a queue.
+	 * If the byte count exceeds {@link #maxInMemorySize}, the creator state
+	 * is changed to {@link CreateFileState}, and eventually to
+	 * {@link WritingFileState}.
+	 */
+	private final class InMemoryState implements State {
+
+<span class="fc" id="L347">		private final AtomicLong byteCount = new AtomicLong();</span>
+
+<span class="fc" id="L349">		private final Queue&lt;DataBuffer&gt; content = new ConcurrentLinkedQueue&lt;&gt;();</span>
+
+		private final HttpHeaders headers;
+
+<span class="fc" id="L353">		private volatile boolean releaseOnDispose = true;</span>
+
+
+<span class="fc" id="L356">		public InMemoryState(HttpHeaders headers) {</span>
+<span class="fc" id="L357">			this.headers = headers;</span>
+<span class="fc" id="L358">		}</span>
+
+		@Override
+		public void body(DataBuffer dataBuffer) {
+<span class="fc" id="L362">			long prevCount = this.byteCount.get();</span>
+<span class="fc" id="L363">			long count = this.byteCount.addAndGet(dataBuffer.readableByteCount());</span>
+<span class="pc bpc" id="L364" title="2 of 4 branches missed.">			if (PartGenerator.this.maxInMemorySize == -1 ||</span>
+					count &lt;= PartGenerator.this.maxInMemorySize) {
+<span class="fc" id="L366">				storeBuffer(dataBuffer);</span>
+			}
+<span class="nc bnc" id="L368" title="All 2 branches missed.">			else if (prevCount &lt;= PartGenerator.this.maxInMemorySize) {</span>
+<span class="nc" id="L369">				switchToFile(dataBuffer, count);</span>
+			}
+			else {
+<span class="nc" id="L372">				DataBufferUtils.release(dataBuffer);</span>
+<span class="nc" id="L373">				emitError(new IllegalStateException(&quot;Body token not expected&quot;));</span>
+			}
+<span class="fc" id="L375">		}</span>
+
+		private void storeBuffer(DataBuffer dataBuffer) {
+<span class="fc" id="L378">			this.content.add(dataBuffer);</span>
+<span class="fc" id="L379">			requestToken();</span>
+<span class="fc" id="L380">		}</span>
+
+		private void switchToFile(DataBuffer current, long byteCount) {
+<span class="nc" id="L383">			List&lt;DataBuffer&gt; content = new ArrayList&lt;&gt;(this.content);</span>
+<span class="nc" id="L384">			content.add(current);</span>
+<span class="nc" id="L385">			this.releaseOnDispose = false;</span>
+
+<span class="nc" id="L387">			CreateFileState newState = new CreateFileState(this.headers, content, byteCount);</span>
+<span class="nc bnc" id="L388" title="All 2 branches missed.">			if (changeState(this, newState)) {</span>
+<span class="nc" id="L389">				newState.createFile();</span>
+			}
+			else {
+<span class="nc" id="L392">				content.forEach(DataBufferUtils::release);</span>
+			}
+<span class="nc" id="L394">		}</span>
+
+		@Override
+		public void onComplete() {
+<span class="fc" id="L398">			emitMemoryPart();</span>
+<span class="fc" id="L399">		}</span>
+
+		private void emitMemoryPart() {
+<span class="fc" id="L402">			byte[] bytes = new byte[(int) this.byteCount.get()];</span>
+<span class="fc" id="L403">			int idx = 0;</span>
+<span class="fc bfc" id="L404" title="All 2 branches covered.">			for (DataBuffer buffer : this.content) {</span>
+<span class="fc" id="L405">				int len = buffer.readableByteCount();</span>
+<span class="fc" id="L406">				buffer.read(bytes, idx, len);</span>
+<span class="fc" id="L407">				idx += len;</span>
+<span class="fc" id="L408">				DataBufferUtils.release(buffer);</span>
+<span class="fc" id="L409">			}</span>
+<span class="fc" id="L410">			this.content.clear();</span>
+<span class="fc" id="L411">			Flux&lt;DataBuffer&gt; content = Flux.just(DefaultDataBufferFactory.sharedInstance.wrap(bytes));</span>
+<span class="fc" id="L412">			emitPart(DefaultParts.part(this.headers, content));</span>
+<span class="fc" id="L413">		}</span>
+
+		@Override
+		public void dispose() {
+<span class="nc bnc" id="L417" title="All 2 branches missed.">			if (this.releaseOnDispose) {</span>
+<span class="nc" id="L418">				this.content.forEach(DataBufferUtils::release);</span>
+			}
+<span class="nc" id="L420">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L424">			return &quot;IN-MEMORY&quot;;</span>
+		}
+	}
+
+
+	/**
+	 * The creator state when waiting for a temporary file to be created.
+	 * {@link InMemoryState} initially switches to this state when the byte
+	 * count exceeds {@link #maxInMemorySize}, and then calls
+	 * {@link #createFile()} to switch to {@link WritingFileState}.
+	 */
+	private final class CreateFileState implements State {
+
+		private final HttpHeaders headers;
+
+		private final Collection&lt;DataBuffer&gt; content;
+
+		private final long byteCount;
+
+		private volatile boolean completed;
+
+<span class="nc" id="L445">		private volatile boolean releaseOnDispose = true;</span>
+
+
+<span class="nc" id="L448">		public CreateFileState(HttpHeaders headers, Collection&lt;DataBuffer&gt; content, long byteCount) {</span>
+<span class="nc" id="L449">			this.headers = headers;</span>
+<span class="nc" id="L450">			this.content = content;</span>
+<span class="nc" id="L451">			this.byteCount = byteCount;</span>
+<span class="nc" id="L452">		}</span>
+
+		@Override
+		public void body(DataBuffer dataBuffer) {
+<span class="nc" id="L456">			DataBufferUtils.release(dataBuffer);</span>
+<span class="nc" id="L457">			emitError(new IllegalStateException(&quot;Body token not expected&quot;));</span>
+<span class="nc" id="L458">		}</span>
+
+		@Override
+		public void onComplete() {
+<span class="nc" id="L462">			this.completed = true;</span>
+<span class="nc" id="L463">		}</span>
+
+		public void createFile() {
+<span class="nc" id="L466">			PartGenerator.this.fileStorageDirectory</span>
+<span class="nc" id="L467">					.map(this::createFileState)</span>
+<span class="nc" id="L468">					.subscribeOn(PartGenerator.this.blockingOperationScheduler)</span>
+<span class="nc" id="L469">					.subscribe(this::fileCreated, PartGenerator.this::emitError);</span>
+<span class="nc" id="L470">		}</span>
+
+		private WritingFileState createFileState(Path directory) {
+			try {
+<span class="nc" id="L474">				Path tempFile = Files.createTempFile(directory, null, &quot;.multipart&quot;);</span>
+<span class="nc bnc" id="L475" title="All 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L476">					logger.trace(&quot;Storing multipart data in file &quot; + tempFile);</span>
+				}
+<span class="nc" id="L478">				WritableByteChannel channel = Files.newByteChannel(tempFile, StandardOpenOption.WRITE);</span>
+<span class="nc" id="L479">				return new WritingFileState(this, tempFile, channel);</span>
+			}
+<span class="nc" id="L481">			catch (IOException ex) {</span>
+<span class="nc" id="L482">				throw new UncheckedIOException(&quot;Could not create temp file in &quot; + directory, ex);</span>
+			}
+		}
+
+		private void fileCreated(WritingFileState newState) {
+<span class="nc" id="L487">			this.releaseOnDispose = false;</span>
+
+<span class="nc bnc" id="L489" title="All 2 branches missed.">			if (changeState(this, newState)) {</span>
+<span class="nc" id="L490">				newState.writeBuffers(this.content);</span>
+
+<span class="nc bnc" id="L492" title="All 2 branches missed.">				if (this.completed) {</span>
+<span class="nc" id="L493">					newState.onComplete();</span>
+				}
+			}
+			else {
+<span class="nc" id="L497">				MultipartUtils.closeChannel(newState.channel);</span>
+<span class="nc" id="L498">				MultipartUtils.deleteFile(newState.file);</span>
+<span class="nc" id="L499">				this.content.forEach(DataBufferUtils::release);</span>
+			}
+<span class="nc" id="L501">		}</span>
+
+		@Override
+		public void dispose() {
+<span class="nc bnc" id="L505" title="All 2 branches missed.">			if (this.releaseOnDispose) {</span>
+<span class="nc" id="L506">				this.content.forEach(DataBufferUtils::release);</span>
+			}
+<span class="nc" id="L508">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L512">			return &quot;CREATE-FILE&quot;;</span>
+		}
+	}
+
+
+	private final class IdleFileState implements State {
+
+		private final HttpHeaders headers;
+
+		private final Path file;
+
+		private final WritableByteChannel channel;
+
+		private final AtomicLong byteCount;
+
+<span class="nc" id="L527">		private volatile boolean closeOnDispose = true;</span>
+
+<span class="nc" id="L529">		private volatile boolean deleteOnDispose = true;</span>
+
+
+<span class="nc" id="L532">		public IdleFileState(WritingFileState state) {</span>
+<span class="nc" id="L533">			this.headers = state.headers;</span>
+<span class="nc" id="L534">			this.file = state.file;</span>
+<span class="nc" id="L535">			this.channel = state.channel;</span>
+<span class="nc" id="L536">			this.byteCount = state.byteCount;</span>
+<span class="nc" id="L537">		}</span>
+
+		@Override
+		public void body(DataBuffer dataBuffer) {
+<span class="nc" id="L541">			long count = this.byteCount.addAndGet(dataBuffer.readableByteCount());</span>
+<span class="nc bnc" id="L542" title="All 4 branches missed.">			if (PartGenerator.this.maxDiskUsagePerPart == -1 || count &lt;= PartGenerator.this.maxDiskUsagePerPart) {</span>
+<span class="nc" id="L543">				this.closeOnDispose = false;</span>
+<span class="nc" id="L544">				this.deleteOnDispose = false;</span>
+<span class="nc" id="L545">				WritingFileState newState = new WritingFileState(this);</span>
+<span class="nc bnc" id="L546" title="All 2 branches missed.">				if (changeState(this, newState)) {</span>
+<span class="nc" id="L547">					newState.writeBuffer(dataBuffer);</span>
+				}
+				else {
+<span class="nc" id="L550">					MultipartUtils.closeChannel(this.channel);</span>
+<span class="nc" id="L551">					MultipartUtils.deleteFile(this.file);</span>
+<span class="nc" id="L552">					DataBufferUtils.release(dataBuffer);</span>
+				}
+<span class="nc" id="L554">			}</span>
+			else {
+<span class="nc" id="L556">				MultipartUtils.closeChannel(this.channel);</span>
+<span class="nc" id="L557">				MultipartUtils.deleteFile(this.file);</span>
+<span class="nc" id="L558">				DataBufferUtils.release(dataBuffer);</span>
+<span class="nc" id="L559">				emitError(new DataBufferLimitException(</span>
+						&quot;Part exceeded the disk usage limit of &quot; + PartGenerator.this.maxDiskUsagePerPart +
+								&quot; bytes&quot;));
+			}
+<span class="nc" id="L563">		}</span>
+
+		@Override
+		public void onComplete() {
+<span class="nc" id="L567">			MultipartUtils.closeChannel(this.channel);</span>
+<span class="nc" id="L568">			this.deleteOnDispose = false;</span>
+<span class="nc" id="L569">			emitPart(DefaultParts.part(this.headers, this.file, PartGenerator.this.blockingOperationScheduler));</span>
+<span class="nc" id="L570">		}</span>
+
+		@Override
+		public void dispose() {
+<span class="nc bnc" id="L574" title="All 2 branches missed.">			if (this.closeOnDispose) {</span>
+<span class="nc" id="L575">				MultipartUtils.closeChannel(this.channel);</span>
+			}
+<span class="nc bnc" id="L577" title="All 2 branches missed.">			if (this.deleteOnDispose) {</span>
+<span class="nc" id="L578">				MultipartUtils.deleteFile(this.file);</span>
+			}
+<span class="nc" id="L580">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L584">			return &quot;IDLE-FILE&quot;;</span>
+		}
+	}
+
+
+	private final class WritingFileState implements State {
+
+		private final HttpHeaders headers;
+
+		private final Path file;
+
+		private final WritableByteChannel channel;
+
+		private final AtomicLong byteCount;
+
+		private volatile boolean completed;
+
+		private volatile boolean disposed;
+
+
+<span class="nc" id="L604">		public WritingFileState(CreateFileState state, Path file, WritableByteChannel channel) {</span>
+<span class="nc" id="L605">			this.headers = state.headers;</span>
+<span class="nc" id="L606">			this.file = file;</span>
+<span class="nc" id="L607">			this.channel = channel;</span>
+<span class="nc" id="L608">			this.byteCount = new AtomicLong(state.byteCount);</span>
+<span class="nc" id="L609">		}</span>
+
+<span class="nc" id="L611">		public WritingFileState(IdleFileState state) {</span>
+<span class="nc" id="L612">			this.headers = state.headers;</span>
+<span class="nc" id="L613">			this.file = state.file;</span>
+<span class="nc" id="L614">			this.channel = state.channel;</span>
+<span class="nc" id="L615">			this.byteCount = state.byteCount;</span>
+<span class="nc" id="L616">		}</span>
+
+		@Override
+		public void body(DataBuffer dataBuffer) {
+<span class="nc" id="L620">			DataBufferUtils.release(dataBuffer);</span>
+<span class="nc" id="L621">			emitError(new IllegalStateException(&quot;Body token not expected&quot;));</span>
+<span class="nc" id="L622">		}</span>
+
+		@Override
+		public void onComplete() {
+<span class="nc" id="L626">			this.completed = true;</span>
+<span class="nc" id="L627">			State state = PartGenerator.this.state.get();</span>
+			// writeComplete might have changed our state to IdleFileState
+<span class="nc bnc" id="L629" title="All 2 branches missed.">			if (state != this) {</span>
+<span class="nc" id="L630">				state.onComplete();</span>
+			}
+			else {
+<span class="nc" id="L633">				this.completed = true;</span>
+			}
+<span class="nc" id="L635">		}</span>
+
+		public void writeBuffer(DataBuffer dataBuffer) {
+<span class="nc" id="L638">			Mono.just(dataBuffer)</span>
+<span class="nc" id="L639">					.flatMap(this::writeInternal)</span>
+<span class="nc" id="L640">					.subscribeOn(PartGenerator.this.blockingOperationScheduler)</span>
+<span class="nc" id="L641">					.subscribe(null, PartGenerator.this::emitError, this::writeComplete);</span>
+<span class="nc" id="L642">		}</span>
+
+		public void writeBuffers(Iterable&lt;DataBuffer&gt; dataBuffers) {
+<span class="nc" id="L645">			Flux.fromIterable(dataBuffers)</span>
+<span class="nc" id="L646">					.concatMap(this::writeInternal)</span>
+<span class="nc" id="L647">					.then()</span>
+<span class="nc" id="L648">					.subscribeOn(PartGenerator.this.blockingOperationScheduler)</span>
+<span class="nc" id="L649">					.subscribe(null, PartGenerator.this::emitError, this::writeComplete);</span>
+<span class="nc" id="L650">		}</span>
+
+		private void writeComplete() {
+<span class="nc" id="L653">			IdleFileState newState = new IdleFileState(this);</span>
+<span class="nc bnc" id="L654" title="All 2 branches missed.">			if (this.disposed) {</span>
+<span class="nc" id="L655">				newState.dispose();</span>
+			}
+<span class="nc bnc" id="L657" title="All 2 branches missed.">			else if (changeState(this, newState)) {</span>
+<span class="nc bnc" id="L658" title="All 2 branches missed.">				if (this.completed) {</span>
+<span class="nc" id="L659">					newState.onComplete();</span>
+				}
+				else {
+<span class="nc" id="L662">					requestToken();</span>
+				}
+			}
+			else {
+<span class="nc" id="L666">				MultipartUtils.closeChannel(this.channel);</span>
+<span class="nc" id="L667">				MultipartUtils.deleteFile(this.file);</span>
+			}
+<span class="nc" id="L669">		}</span>
+
+		@SuppressWarnings(&quot;BlockingMethodInNonBlockingContext&quot;)
+		private Mono&lt;Void&gt; writeInternal(DataBuffer dataBuffer) {
+			try {
+<span class="nc" id="L674">				try (DataBuffer.ByteBufferIterator iterator = dataBuffer.readableByteBuffers()) {</span>
+<span class="nc bnc" id="L675" title="All 2 branches missed.">					while (iterator.hasNext()) {</span>
+<span class="nc" id="L676">						ByteBuffer byteBuffer = iterator.next();</span>
+<span class="nc bnc" id="L677" title="All 2 branches missed.">						while (byteBuffer.hasRemaining()) {</span>
+<span class="nc" id="L678">							this.channel.write(byteBuffer);</span>
+						}
+<span class="nc" id="L680">					}</span>
+				}
+<span class="nc" id="L682">				return Mono.empty();</span>
+			}
+<span class="nc" id="L684">			catch (IOException ex) {</span>
+<span class="nc" id="L685">				MultipartUtils.closeChannel(this.channel);</span>
+<span class="nc" id="L686">				MultipartUtils.deleteFile(this.file);</span>
+<span class="nc" id="L687">				return Mono.error(ex);</span>
+			}
+			finally {
+<span class="nc" id="L690">				DataBufferUtils.release(dataBuffer);</span>
+			}
+		}
+
+		@Override
+		public boolean canRequest() {
+<span class="nc" id="L696">			return false;</span>
+		}
+
+		@Override
+		public void dispose() {
+<span class="nc" id="L701">			this.disposed = true;</span>
+<span class="nc" id="L702">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L706">			return &quot;WRITE-FILE&quot;;</span>
+		}
+	}
+
+
+	private static final class DisposedState implements State {
+
+<span class="nc" id="L713">		public static final DisposedState INSTANCE = new DisposedState();</span>
+
+		private DisposedState() {
+		}
+
+		@Override
+		public void body(DataBuffer dataBuffer) {
+<span class="nc" id="L720">			DataBufferUtils.release(dataBuffer);</span>
+<span class="nc" id="L721">		}</span>
+
+		@Override
+		public void onComplete() {
+<span class="nc" id="L725">		}</span>
+
+		@Override
+		public String toString() {
+<span class="nc" id="L729">			return &quot;DISPOSED&quot;;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

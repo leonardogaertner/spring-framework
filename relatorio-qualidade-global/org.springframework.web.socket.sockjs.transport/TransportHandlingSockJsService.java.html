@@ -1,0 +1,419 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TransportHandlingSockJsService.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.socket.sockjs.transport</a> &gt; <span class="el_source">TransportHandlingSockJsService.java</span></div><h1>TransportHandlingSockJsService.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.socket.sockjs.transport;
+
+import java.io.IOException;
+import java.security.Principal;
+import java.time.Duration;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.EnumMap;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ScheduledFuture;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.context.Lifecycle;
+import org.springframework.core.log.LogFormatUtils;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.server.ServerHttpRequest;
+import org.springframework.http.server.ServerHttpResponse;
+import org.springframework.http.server.ServletServerHttpResponse;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.web.socket.WebSocketHandler;
+import org.springframework.web.socket.server.HandshakeFailureException;
+import org.springframework.web.socket.server.HandshakeHandler;
+import org.springframework.web.socket.server.HandshakeInterceptor;
+import org.springframework.web.socket.server.support.HandshakeInterceptorChain;
+import org.springframework.web.socket.sockjs.SockJsException;
+import org.springframework.web.socket.sockjs.frame.Jackson2SockJsMessageCodec;
+import org.springframework.web.socket.sockjs.frame.JacksonJsonSockJsMessageCodec;
+import org.springframework.web.socket.sockjs.frame.SockJsMessageCodec;
+import org.springframework.web.socket.sockjs.support.AbstractSockJsService;
+
+/**
+ * A basic implementation of {@link org.springframework.web.socket.sockjs.SockJsService}
+ * with support for SPI-based transport handling and session management.
+ *
+ * &lt;p&gt;Based on the {@link TransportHandler} SPI. {@code TransportHandlers} may
+ * additionally implement the {@link SockJsSessionFactory} and {@link HandshakeHandler} interfaces.
+ *
+ * &lt;p&gt;See the {@link AbstractSockJsService} base class for important details on request mapping.
+ *
+ * @author Rossen Stoyanchev
+ * @author Juergen Hoeller
+ * @author Sebastien Deleuze
+ * @since 4.0
+ */
+public class TransportHandlingSockJsService extends AbstractSockJsService implements SockJsServiceConfig, Lifecycle {
+
+<span class="fc" id="L74">	private static final boolean JACKSON_PRESENT = ClassUtils.isPresent(</span>
+<span class="fc" id="L75">			&quot;tools.jackson.databind.ObjectMapper&quot;, TransportHandlingSockJsService.class.getClassLoader());</span>
+
+<span class="fc" id="L77">	private static final boolean JACKSON_2_PRESENT = ClassUtils.isPresent(</span>
+<span class="fc" id="L78">			&quot;com.fasterxml.jackson.databind.ObjectMapper&quot;, TransportHandlingSockJsService.class.getClassLoader());</span>
+
+
+<span class="fc" id="L81">	private final Map&lt;TransportType, TransportHandler&gt; handlers = new EnumMap&lt;&gt;(TransportType.class);</span>
+
+	private @Nullable SockJsMessageCodec messageCodec;
+
+<span class="fc" id="L85">	private final List&lt;HandshakeInterceptor&gt; interceptors = new ArrayList&lt;&gt;();</span>
+
+<span class="fc" id="L87">	private final Map&lt;String, SockJsSession&gt; sessions = new ConcurrentHashMap&lt;&gt;();</span>
+
+	private @Nullable ScheduledFuture&lt;?&gt; sessionCleanupTask;
+
+	private volatile boolean running;
+
+
+	/**
+	 * Create a TransportHandlingSockJsService with given {@link TransportHandler handler} types.
+	 * @param scheduler a task scheduler for heart-beat messages and removing timed-out sessions;
+	 * the provided TaskScheduler should be declared as a Spring bean to ensure it gets
+	 * initialized at start-up and shuts down when the application stops
+	 * @param handlers one or more {@link TransportHandler} implementations to use
+	 */
+	public TransportHandlingSockJsService(TaskScheduler scheduler, TransportHandler... handlers) {
+<span class="fc" id="L102">		this(scheduler, Arrays.asList(handlers));</span>
+<span class="fc" id="L103">	}</span>
+
+	/**
+	 * Create a TransportHandlingSockJsService with given {@link TransportHandler handler} types.
+	 * @param scheduler a task scheduler for heart-beat messages and removing timed-out sessions;
+	 * the provided TaskScheduler should be declared as a Spring bean to ensure it gets
+	 * initialized at start-up and shuts down when the application stops
+	 * @param handlers one or more {@link TransportHandler} implementations to use
+	 */
+	@SuppressWarnings(&quot;removal&quot;)
+	public TransportHandlingSockJsService(TaskScheduler scheduler, Collection&lt;TransportHandler&gt; handlers) {
+<span class="fc" id="L114">		super(scheduler);</span>
+
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">		if (CollectionUtils.isEmpty(handlers)) {</span>
+<span class="nc" id="L117">			logger.warn(&quot;No transport handlers specified for TransportHandlingSockJsService&quot;);</span>
+		}
+		else {
+<span class="fc bfc" id="L120" title="All 2 branches covered.">			for (TransportHandler handler : handlers) {</span>
+<span class="fc" id="L121">				handler.initialize(this);</span>
+<span class="fc" id="L122">				this.handlers.put(handler.getTransportType(), handler);</span>
+<span class="fc" id="L123">			}</span>
+		}
+
+<span class="pc bpc" id="L126" title="1 of 2 branches missed.">		if (JACKSON_PRESENT) {</span>
+<span class="fc" id="L127">			this.messageCodec = new JacksonJsonSockJsMessageCodec();</span>
+		}
+<span class="nc bnc" id="L129" title="All 2 branches missed.">		else if (JACKSON_2_PRESENT) {</span>
+<span class="nc" id="L130">			this.messageCodec = new Jackson2SockJsMessageCodec();</span>
+		}
+<span class="fc" id="L132">	}</span>
+
+
+	/**
+	 * Return the registered handlers per transport type.
+	 */
+	public Map&lt;TransportType, TransportHandler&gt; getTransportHandlers() {
+<span class="fc" id="L139">		return Collections.unmodifiableMap(this.handlers);</span>
+	}
+
+	/**
+	 * The codec to use for encoding and decoding SockJS messages.
+	 */
+	public void setMessageCodec(SockJsMessageCodec messageCodec) {
+<span class="fc" id="L146">		this.messageCodec = messageCodec;</span>
+<span class="fc" id="L147">	}</span>
+
+	@Override
+	public SockJsMessageCodec getMessageCodec() {
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">		Assert.state(this.messageCodec != null, &quot;A SockJsMessageCodec is required but not available: &quot; +</span>
+				&quot;Add Jackson to the classpath, or configure a custom SockJsMessageCodec.&quot;);
+<span class="fc" id="L153">		return this.messageCodec;</span>
+	}
+
+	/**
+	 * Configure one or more WebSocket handshake request interceptors.
+	 */
+	public void setHandshakeInterceptors(@Nullable List&lt;HandshakeInterceptor&gt; interceptors) {
+<span class="fc" id="L160">		this.interceptors.clear();</span>
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">		if (interceptors != null) {</span>
+<span class="fc" id="L162">			this.interceptors.addAll(interceptors);</span>
+		}
+<span class="fc" id="L164">	}</span>
+
+	/**
+	 * Return the configured WebSocket handshake request interceptors.
+	 */
+	public List&lt;HandshakeInterceptor&gt; getHandshakeInterceptors() {
+<span class="fc" id="L170">		return this.interceptors;</span>
+	}
+
+
+	@Override
+	public void start() {
+<span class="fc bfc" id="L176" title="All 2 branches covered.">		if (!isRunning()) {</span>
+<span class="fc" id="L177">			this.running = true;</span>
+<span class="fc bfc" id="L178" title="All 2 branches covered.">			for (TransportHandler handler : this.handlers.values()) {</span>
+<span class="fc bfc" id="L179" title="All 2 branches covered.">				if (handler instanceof Lifecycle lifecycle) {</span>
+<span class="fc" id="L180">					lifecycle.start();</span>
+				}
+<span class="fc" id="L182">			}</span>
+		}
+<span class="fc" id="L184">	}</span>
+
+	@Override
+	public void stop() {
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">		if (isRunning()) {</span>
+<span class="fc" id="L189">			this.running = false;</span>
+<span class="fc bfc" id="L190" title="All 2 branches covered.">			for (TransportHandler handler : this.handlers.values()) {</span>
+<span class="fc bfc" id="L191" title="All 2 branches covered.">				if (handler instanceof Lifecycle lifecycle) {</span>
+<span class="fc" id="L192">					lifecycle.stop();</span>
+				}
+<span class="fc" id="L194">			}</span>
+		}
+<span class="fc" id="L196">	}</span>
+
+	@Override
+	public boolean isRunning() {
+<span class="fc" id="L200">		return this.running;</span>
+	}
+
+
+	@Override
+	protected void handleRawWebSocketRequest(ServerHttpRequest request, ServerHttpResponse response,
+			WebSocketHandler handler) throws IOException {
+
+<span class="fc" id="L208">		TransportHandler transportHandler = this.handlers.get(TransportType.WEBSOCKET);</span>
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">		if (!(transportHandler instanceof HandshakeHandler handshakeHandler)) {</span>
+<span class="nc" id="L210">			logger.error(&quot;No handler configured for raw WebSocket messages&quot;);</span>
+<span class="nc" id="L211">			response.setStatusCode(HttpStatus.NOT_FOUND);</span>
+<span class="nc" id="L212">			return;</span>
+		}
+
+<span class="fc" id="L215">		HandshakeInterceptorChain chain = new HandshakeInterceptorChain(this.interceptors, handler);</span>
+<span class="fc" id="L216">		HandshakeFailureException failure = null;</span>
+
+		try {
+<span class="fc" id="L219">			Map&lt;String, Object&gt; attributes = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L220" title="All 2 branches covered.">			if (!chain.applyBeforeHandshake(request, response, attributes)) {</span>
+<span class="fc" id="L221">				return;</span>
+			}
+<span class="fc" id="L223">			handshakeHandler.doHandshake(request, response, handler, attributes);</span>
+<span class="fc" id="L224">			chain.applyAfterHandshake(request, response, null);</span>
+		}
+<span class="nc" id="L226">		catch (HandshakeFailureException ex) {</span>
+<span class="nc" id="L227">			failure = ex;</span>
+		}
+<span class="nc" id="L229">		catch (Exception ex) {</span>
+<span class="nc" id="L230">			failure = new HandshakeFailureException(&quot;Uncaught failure for request &quot; + request.getURI(), ex);</span>
+		}
+		finally {
+<span class="pc bpc" id="L233" title="1 of 2 branches missed.">			if (failure != null) {</span>
+<span class="nc" id="L234">				chain.applyAfterHandshake(request, response, failure);</span>
+<span class="nc" id="L235">				throw failure;</span>
+			}
+		}
+<span class="fc" id="L238">	}</span>
+
+	@Override
+	protected void handleTransportRequest(ServerHttpRequest request, ServerHttpResponse response,
+			WebSocketHandler handler, String sessionId, String transport) throws SockJsException {
+
+<span class="fc" id="L244">		TransportType transportType = TransportType.fromValue(transport);</span>
+<span class="pc bpc" id="L245" title="1 of 2 branches missed.">		if (transportType == null) {</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L247">				logger.warn(LogFormatUtils.formatValue(&quot;Unknown transport type for &quot; + request.getURI(), -1, true));</span>
+			}
+<span class="nc" id="L249">			response.setStatusCode(HttpStatus.NOT_FOUND);</span>
+<span class="nc" id="L250">			return;</span>
+		}
+
+<span class="fc" id="L253">		TransportHandler transportHandler = this.handlers.get(transportType);</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">		if (transportHandler == null) {</span>
+<span class="pc bpc" id="L255" title="1 of 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="fc" id="L256">				logger.warn(LogFormatUtils.formatValue(&quot;No TransportHandler for &quot; + request.getURI(), -1, true));</span>
+			}
+<span class="fc" id="L258">			response.setStatusCode(HttpStatus.NOT_FOUND);</span>
+<span class="fc" id="L259">			return;</span>
+		}
+
+<span class="fc" id="L262">		SockJsException failure = null;</span>
+<span class="fc" id="L263">		HandshakeInterceptorChain chain = new HandshakeInterceptorChain(this.interceptors, handler);</span>
+
+		try {
+<span class="fc" id="L266">			HttpMethod supportedMethod = transportType.getHttpMethod();</span>
+<span class="fc bfc" id="L267" title="All 2 branches covered.">			if (supportedMethod != request.getMethod()) {</span>
+<span class="pc bpc" id="L268" title="2 of 4 branches missed.">				if (request.getMethod() == HttpMethod.OPTIONS &amp;&amp; transportType.supportsCors()) {</span>
+<span class="pc bpc" id="L269" title="1 of 2 branches missed.">					if (checkOrigin(request, response, HttpMethod.OPTIONS, supportedMethod)) {</span>
+<span class="fc" id="L270">						response.setStatusCode(HttpStatus.NO_CONTENT);</span>
+<span class="fc" id="L271">						addCacheHeaders(response);</span>
+					}
+				}
+<span class="nc bnc" id="L274" title="All 2 branches missed.">				else if (transportType.supportsCors()) {</span>
+<span class="nc" id="L275">					sendMethodNotAllowed(response, supportedMethod, HttpMethod.OPTIONS);</span>
+				}
+				else {
+<span class="nc" id="L278">					sendMethodNotAllowed(response, supportedMethod);</span>
+				}
+<span class="fc" id="L280">				return;</span>
+			}
+
+<span class="fc" id="L283">			SockJsSession session = this.sessions.get(sessionId);</span>
+<span class="fc" id="L284">			boolean isNewSession = false;</span>
+<span class="fc bfc" id="L285" title="All 2 branches covered.">			if (session == null) {</span>
+<span class="fc bfc" id="L286" title="All 2 branches covered.">				if (transportHandler instanceof SockJsSessionFactory sessionFactory) {</span>
+<span class="fc" id="L287">					Map&lt;String, Object&gt; attributes = new HashMap&lt;&gt;();</span>
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">					if (!chain.applyBeforeHandshake(request, response, attributes)) {</span>
+<span class="nc" id="L289">						return;</span>
+					}
+<span class="fc" id="L291">					session = createSockJsSession(sessionId, sessionFactory, handler, attributes);</span>
+<span class="fc" id="L292">					isNewSession = true;</span>
+<span class="fc" id="L293">				}</span>
+				else {
+<span class="fc" id="L295">					response.setStatusCode(HttpStatus.NOT_FOUND);</span>
+<span class="pc bpc" id="L296" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L297">						logger.debug(&quot;Session not found, sessionId=&quot; + sessionId +</span>
+								&quot;. The session may have been closed &quot; +
+								&quot;(for example, missed heart-beat) while a message was coming in.&quot;);
+					}
+<span class="fc" id="L301">					return;</span>
+				}
+			}
+			else {
+<span class="fc" id="L305">				Principal principal = session.getPrincipal();</span>
+<span class="fc bfc" id="L306" title="All 2 branches covered.">				if (principal != null) {</span>
+					// Compare usernames, not full equality (different login timestamps)
+<span class="fc" id="L308">					Principal currentPrincipal = request.getPrincipal();</span>
+<span class="pc bpc" id="L309" title="2 of 4 branches missed.">					if (!principal.equals(currentPrincipal) &amp;&amp;</span>
+<span class="pc bpc" id="L310" title="1 of 2 branches missed.">							(currentPrincipal == null || !principal.getName().equals(currentPrincipal.getName()))) {</span>
+<span class="fc" id="L311">						logger.debug(&quot;The user for the session does not match the user for the request.&quot;);</span>
+<span class="fc" id="L312">						response.setStatusCode(HttpStatus.NOT_FOUND);</span>
+<span class="fc" id="L313">						return;</span>
+					}
+				}
+<span class="pc bpc" id="L316" title="1 of 2 branches missed.">				if (!transportHandler.checkSessionType(session)) {</span>
+<span class="nc" id="L317">					logger.debug(&quot;Session type does not match the transport type for the request.&quot;);</span>
+<span class="nc" id="L318">					response.setStatusCode(HttpStatus.NOT_FOUND);</span>
+<span class="nc" id="L319">					return;</span>
+				}
+			}
+
+<span class="pc bpc" id="L323" title="1 of 2 branches missed.">			if (transportType.sendsNoCacheInstruction()) {</span>
+<span class="fc" id="L324">				addNoCacheHeaders(response);</span>
+			}
+<span class="pc bpc" id="L326" title="1 of 4 branches missed.">			if (transportType.supportsCors() &amp;&amp; !checkOrigin(request, response)) {</span>
+<span class="fc" id="L327">				return;</span>
+			}
+
+<span class="fc" id="L330">			transportHandler.handleRequest(request, response, handler, session);</span>
+
+<span class="pc bpc" id="L332" title="1 of 4 branches missed.">			if (isNewSession &amp;&amp; response instanceof ServletServerHttpResponse servletResponse) {</span>
+<span class="fc" id="L333">				int status = servletResponse.getServletResponse().getStatus();</span>
+<span class="pc bpc" id="L334" title="1 of 2 branches missed.">				if (HttpStatusCode.valueOf(status).is4xxClientError()) {</span>
+<span class="nc" id="L335">					this.sessions.remove(sessionId);</span>
+				}
+			}
+
+<span class="fc" id="L339">			chain.applyAfterHandshake(request, response, null);</span>
+		}
+<span class="nc" id="L341">		catch (SockJsException ex) {</span>
+<span class="nc" id="L342">			failure = ex;</span>
+		}
+<span class="nc" id="L344">		catch (Exception ex) {</span>
+<span class="nc" id="L345">			failure = new SockJsException(&quot;Uncaught failure for request &quot; + request.getURI(), sessionId, ex);</span>
+		}
+		finally {
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">			if (failure != null) {</span>
+<span class="nc" id="L349">				chain.applyAfterHandshake(request, response, failure);</span>
+<span class="nc" id="L350">				throw failure;</span>
+			}
+		}
+<span class="fc" id="L353">	}</span>
+
+	@Override
+	protected boolean validateRequest(String serverId, String sessionId, String transport) {
+<span class="pc bpc" id="L357" title="1 of 2 branches missed.">		if (!super.validateRequest(serverId, sessionId, transport)) {</span>
+<span class="nc" id="L358">			return false;</span>
+		}
+
+<span class="pc bpc" id="L361" title="1 of 4 branches missed.">		if (!CollectionUtils.isEmpty(getAllowedOrigins()) &amp;&amp; !getAllowedOrigins().contains(&quot;*&quot;) ||</span>
+<span class="pc bpc" id="L362" title="1 of 2 branches missed.">				!CollectionUtils.isEmpty(getAllowedOriginPatterns())) {</span>
+<span class="fc" id="L363">			TransportType transportType = TransportType.fromValue(transport);</span>
+<span class="pc bpc" id="L364" title="1 of 4 branches missed.">			if (transportType == null || !transportType.supportsOrigin()) {</span>
+<span class="pc bpc" id="L365" title="1 of 2 branches missed.">				if (logger.isWarnEnabled()) {</span>
+<span class="fc" id="L366">					logger.warn(&quot;Origin check enabled but transport '&quot; + transport + &quot;' does not support it.&quot;);</span>
+				}
+<span class="fc" id="L368">				return false;</span>
+			}
+		}
+
+<span class="fc" id="L372">		return true;</span>
+	}
+
+	private SockJsSession createSockJsSession(String sessionId, SockJsSessionFactory sessionFactory,
+			WebSocketHandler handler, Map&lt;String, Object&gt; attributes) {
+
+<span class="fc" id="L378">		SockJsSession session = this.sessions.get(sessionId);</span>
+<span class="pc bpc" id="L379" title="1 of 2 branches missed.">		if (session != null) {</span>
+<span class="nc" id="L380">			return session;</span>
+		}
+<span class="pc bpc" id="L382" title="1 of 2 branches missed.">		if (this.sessionCleanupTask == null) {</span>
+<span class="fc" id="L383">			scheduleSessionTask();</span>
+		}
+<span class="fc" id="L385">		session = sessionFactory.createSession(sessionId, handler, attributes);</span>
+<span class="fc" id="L386">		this.sessions.put(sessionId, session);</span>
+<span class="fc" id="L387">		return session;</span>
+	}
+
+	private void scheduleSessionTask() {
+<span class="fc" id="L391">		synchronized (this.sessions) {</span>
+<span class="pc bpc" id="L392" title="1 of 2 branches missed.">			if (this.sessionCleanupTask != null) {</span>
+<span class="nc" id="L393">				return;</span>
+			}
+<span class="fc" id="L395">			Duration disconnectDelay = Duration.ofMillis(getDisconnectDelay());</span>
+<span class="fc" id="L396">			this.sessionCleanupTask = getTaskScheduler().scheduleAtFixedRate(() -&gt; {</span>
+<span class="nc" id="L397">				List&lt;String&gt; removedIds = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L398" title="All 2 branches missed.">				for (SockJsSession session : this.sessions.values()) {</span>
+					try {
+<span class="nc bnc" id="L400" title="All 2 branches missed.">						if (session.getTimeSinceLastActive() &gt; getDisconnectDelay()) {</span>
+<span class="nc" id="L401">							this.sessions.remove(session.getId());</span>
+<span class="nc" id="L402">							removedIds.add(session.getId());</span>
+<span class="nc" id="L403">							session.close();</span>
+						}
+					}
+<span class="nc" id="L406">					catch (Throwable ex) {</span>
+						// Could be part of normal workflow (for example, browser tab closed)
+<span class="nc" id="L408">						logger.debug(&quot;Failed to close &quot; + session, ex);</span>
+<span class="nc" id="L409">					}</span>
+<span class="nc" id="L410">				}</span>
+<span class="nc bnc" id="L411" title="All 4 branches missed.">				if (logger.isDebugEnabled() &amp;&amp; !removedIds.isEmpty()) {</span>
+<span class="nc" id="L412">					logger.debug(&quot;Closed &quot; + removedIds.size() + &quot; sessions: &quot; + removedIds);</span>
+				}
+<span class="nc" id="L414">			}, disconnectDelay);</span>
+<span class="fc" id="L415">		}</span>
+<span class="fc" id="L416">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

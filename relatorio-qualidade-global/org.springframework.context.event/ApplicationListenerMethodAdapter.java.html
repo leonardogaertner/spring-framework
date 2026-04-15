@@ -1,0 +1,540 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ApplicationListenerMethodAdapter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.context.event</a> &gt; <span class="el_source">ApplicationListenerMethodAdapter.java</span></div><h1>ApplicationListenerMethodAdapter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.context.event;
+
+import java.lang.reflect.InaccessibleObjectException;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.lang.reflect.UndeclaredThrowableException;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.StringJoiner;
+import java.util.concurrent.CompletionStage;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+
+import org.springframework.aop.support.AopUtils;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ApplicationEvent;
+import org.springframework.context.PayloadApplicationEvent;
+import org.springframework.context.expression.AnnotatedElementKey;
+import org.springframework.core.BridgeMethodResolver;
+import org.springframework.core.CoroutinesUtils;
+import org.springframework.core.KotlinDetector;
+import org.springframework.core.Ordered;
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.annotation.Order;
+import org.springframework.lang.Contract;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@link GenericApplicationListener} adapter that delegates the processing of
+ * an event to an {@link EventListener} annotated method.
+ *
+ * &lt;p&gt;Delegates to {@link #processEvent(ApplicationEvent)} to give subclasses
+ * a chance to deviate from the default. Unwraps the content of a
+ * {@link PayloadApplicationEvent} if necessary to allow a method declaration
+ * to define any arbitrary event type. If a condition is defined, it is
+ * evaluated prior to invoking the underlying method.
+ *
+ * @author Stephane Nicoll
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @author Sebastien Deleuze
+ * @author Yanming Zhou
+ * @since 4.2
+ */
+public class ApplicationListenerMethodAdapter implements GenericApplicationListener {
+
+<span class="fc" id="L77">	private static final boolean REACTIVE_STREAMS_PRESENT = ClassUtils.isPresent(</span>
+<span class="fc" id="L78">			&quot;org.reactivestreams.Publisher&quot;, ApplicationListenerMethodAdapter.class.getClassLoader());</span>
+
+
+<span class="fc" id="L81">	protected final Log logger = LogFactory.getLog(getClass());</span>
+
+	private final String beanName;
+
+	private final Method method;
+
+	private final Method targetMethod;
+
+	private final AnnotatedElementKey methodKey;
+
+	private final List&lt;ResolvableType&gt; declaredEventTypes;
+
+	private final @Nullable String condition;
+
+	private final boolean defaultExecution;
+
+	private final int order;
+
+	private volatile @Nullable String listenerId;
+
+	private @Nullable ApplicationContext applicationContext;
+
+	private @Nullable EventExpressionEvaluator evaluator;
+
+
+	/**
+	 * Construct a new ApplicationListenerMethodAdapter.
+	 * @param beanName the name of the bean to invoke the listener method on
+	 * @param targetClass the target class that the method is declared on
+	 * @param method the listener method to invoke
+	 */
+<span class="fc" id="L112">	public ApplicationListenerMethodAdapter(String beanName, Class&lt;?&gt; targetClass, Method method) {</span>
+<span class="fc" id="L113">		this.beanName = beanName;</span>
+<span class="fc" id="L114">		this.method = BridgeMethodResolver.findBridgedMethod(method);</span>
+<span class="fc bfc" id="L115" title="All 2 branches covered.">		this.targetMethod = (!Proxy.isProxyClass(targetClass) ?</span>
+<span class="fc" id="L116">				AopUtils.getMostSpecificMethod(method, targetClass) : this.method);</span>
+<span class="fc" id="L117">		this.methodKey = new AnnotatedElementKey(this.targetMethod, targetClass);</span>
+
+<span class="fc" id="L119">		EventListener ann = AnnotatedElementUtils.findMergedAnnotation(this.targetMethod, EventListener.class);</span>
+<span class="fc" id="L120">		this.declaredEventTypes = resolveDeclaredEventTypes(method, ann);</span>
+<span class="pc bpc" id="L121" title="1 of 2 branches missed.">		this.condition = (ann != null ? ann.condition() : null);</span>
+<span class="pc bpc" id="L122" title="1 of 4 branches missed.">		this.defaultExecution = (ann == null || ann.defaultExecution());</span>
+<span class="fc" id="L123">		this.order = resolveOrder(this.targetMethod);</span>
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">		String id = (ann != null ? ann.id() : &quot;&quot;);</span>
+<span class="fc bfc" id="L125" title="All 2 branches covered.">		this.listenerId = (!id.isEmpty() ? id : null);</span>
+<span class="fc" id="L126">	}</span>
+
+	private static List&lt;ResolvableType&gt; resolveDeclaredEventTypes(Method method, @Nullable EventListener ann) {
+<span class="fc bfc" id="L129" title="All 2 branches covered.">		int count = (KotlinDetector.isSuspendingFunction(method) ? method.getParameterCount() - 1 :</span>
+<span class="fc" id="L130">				method.getParameterCount());</span>
+<span class="fc bfc" id="L131" title="All 2 branches covered.">		if (count &gt; 1) {</span>
+<span class="fc" id="L132">			throw new IllegalStateException(&quot;Maximum one parameter is allowed for event listener method: &quot; + method);</span>
+		}
+
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">		if (ann != null) {</span>
+<span class="fc" id="L136">			Class&lt;?&gt;[] classes = ann.classes();</span>
+<span class="fc bfc" id="L137" title="All 2 branches covered.">			if (classes.length &gt; 0) {</span>
+<span class="fc" id="L138">				List&lt;ResolvableType&gt; types = new ArrayList&lt;&gt;(classes.length);</span>
+<span class="fc bfc" id="L139" title="All 2 branches covered.">				for (Class&lt;?&gt; eventType : classes) {</span>
+<span class="fc" id="L140">					types.add(ResolvableType.forClass(eventType));</span>
+				}
+<span class="fc" id="L142">				return types;</span>
+			}
+		}
+
+<span class="fc bfc" id="L146" title="All 2 branches covered.">		if (count == 0) {</span>
+<span class="fc" id="L147">			throw new IllegalStateException(</span>
+					&quot;Event parameter is mandatory for event listener method: &quot; + method);
+		}
+<span class="fc" id="L150">		return Collections.singletonList(ResolvableType.forMethodParameter(method, 0));</span>
+	}
+
+	private static int resolveOrder(Method method) {
+<span class="fc" id="L154">		Order ann = AnnotatedElementUtils.findMergedAnnotation(method, Order.class);</span>
+<span class="fc bfc" id="L155" title="All 2 branches covered.">		return (ann != null ? ann.value() : Ordered.LOWEST_PRECEDENCE);</span>
+	}
+
+
+	/**
+	 * Return the target listener method.
+	 * @since 7.0.7 in public form (with protected visibility since 5.3)
+	 */
+	public final Method getTargetMethod() {
+<span class="fc" id="L164">		return this.targetMethod;</span>
+	}
+
+	/**
+	 * Return the condition to use.
+	 * &lt;p&gt;Matches the {@code condition} attribute of the {@link EventListener}
+	 * annotation or any matching attribute on a composed annotation that
+	 * is meta-annotated with {@code @EventListener}.
+	 */
+	protected final @Nullable String getCondition() {
+<span class="nc" id="L174">		return this.condition;</span>
+	}
+
+	/**
+	 * Return whether default execution is applicable for the target listener.
+	 * @since 6.2
+	 * @see #onApplicationEvent
+	 * @see EventListener#defaultExecution()
+	 */
+	protected final boolean isDefaultExecution() {
+<span class="fc" id="L184">		return this.defaultExecution;</span>
+	}
+
+
+	/**
+	 * Initialize this instance.
+	 */
+	void init(ApplicationContext applicationContext, @Nullable EventExpressionEvaluator evaluator) {
+<span class="fc" id="L192">		this.applicationContext = applicationContext;</span>
+<span class="fc" id="L193">		this.evaluator = evaluator;</span>
+<span class="fc" id="L194">	}</span>
+
+
+	@Override
+	public void onApplicationEvent(ApplicationEvent event) {
+<span class="fc bfc" id="L199" title="All 2 branches covered.">		if (this.defaultExecution) {</span>
+<span class="fc" id="L200">			processEvent(event);</span>
+		}
+<span class="fc" id="L202">	}</span>
+
+	@Override
+	public boolean supportsEventType(ResolvableType eventType) {
+<span class="fc bfc" id="L206" title="All 2 branches covered.">		for (ResolvableType declaredEventType : this.declaredEventTypes) {</span>
+<span class="fc bfc" id="L207" title="All 2 branches covered.">			if (eventType.hasUnresolvableGenerics() ?</span>
+<span class="fc bfc" id="L208" title="All 2 branches covered.">					declaredEventType.toClass().isAssignableFrom(eventType.toClass()) :</span>
+<span class="fc bfc" id="L209" title="All 2 branches covered.">					declaredEventType.isAssignableFrom(eventType)) {</span>
+<span class="fc" id="L210">				return true;</span>
+			}
+<span class="fc bfc" id="L212" title="All 2 branches covered.">			if (PayloadApplicationEvent.class.isAssignableFrom(eventType.toClass())) {</span>
+<span class="fc" id="L213">				ResolvableType payloadType = eventType.as(PayloadApplicationEvent.class).getGeneric();</span>
+<span class="fc bfc" id="L214" title="All 2 branches covered.">				if (declaredEventType.isAssignableFrom(payloadType)) {</span>
+<span class="fc" id="L215">					return true;</span>
+				}
+<span class="fc bfc" id="L217" title="All 2 branches covered.">				if (payloadType.resolve() == null) {</span>
+					// Always accept such event when the type is erased
+<span class="fc" id="L219">					return true;</span>
+				}
+			}
+<span class="fc" id="L222">		}</span>
+<span class="fc" id="L223">		return false;</span>
+	}
+
+	@Override
+	public boolean supportsSourceType(@Nullable Class&lt;?&gt; sourceType) {
+<span class="fc" id="L228">		return true;</span>
+	}
+
+	@Override
+	public int getOrder() {
+<span class="fc" id="L233">		return this.order;</span>
+	}
+
+	@Override
+	public String getListenerId() {
+<span class="fc" id="L238">		String id = this.listenerId;</span>
+<span class="fc bfc" id="L239" title="All 2 branches covered.">		if (id == null) {</span>
+<span class="fc" id="L240">			id = getDefaultListenerId();</span>
+<span class="fc" id="L241">			this.listenerId = id;</span>
+		}
+<span class="fc" id="L243">		return id;</span>
+	}
+
+	/**
+	 * Determine the default id for the target listener, to be applied in case of
+	 * no {@link EventListener#id() annotation-specified id value}.
+	 * &lt;p&gt;The default implementation builds a method name with parameter types.
+	 * @since 5.3.5
+	 * @see #getListenerId()
+	 */
+	protected String getDefaultListenerId() {
+<span class="fc" id="L254">		StringJoiner sj = new StringJoiner(&quot;,&quot;, &quot;(&quot;, &quot;)&quot;);</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">		for (Class&lt;?&gt; paramType : this.targetMethod.getParameterTypes()) {</span>
+<span class="fc" id="L256">			sj.add(paramType.getName());</span>
+		}
+<span class="fc" id="L258">		return ClassUtils.getQualifiedMethodName(this.targetMethod) + sj;</span>
+	}
+
+
+	/**
+	 * Process the specified {@link ApplicationEvent}, checking if the condition
+	 * matches and handling a non-null result, if any.
+	 * @param event the event to process through the listener method
+	 */
+	public void processEvent(ApplicationEvent event) {
+<span class="fc" id="L268">		@Nullable Object[] args = resolveArguments(event);</span>
+<span class="fc bfc" id="L269" title="All 2 branches covered.">		if (shouldHandle(event, args)) {</span>
+<span class="fc" id="L270">			Object result = doInvoke(args);</span>
+<span class="fc bfc" id="L271" title="All 2 branches covered.">			if (result != null) {</span>
+<span class="fc" id="L272">				handleResult(result);</span>
+			}
+			else {
+<span class="fc" id="L275">				logger.trace(&quot;No result object given - no result to handle&quot;);</span>
+			}
+		}
+<span class="fc" id="L278">	}</span>
+
+	/**
+	 * Determine whether the listener method would actually handle the given
+	 * event, checking if the condition matches.
+	 * @param event the event to process through the listener method
+	 * @since 6.1
+	 */
+	public boolean shouldHandle(ApplicationEvent event) {
+<span class="nc" id="L287">		return shouldHandle(event, resolveArguments(event));</span>
+	}
+
+	@Contract(&quot;_, null -&gt; false&quot;)
+	private boolean shouldHandle(ApplicationEvent event, @Nullable Object @Nullable [] args) {
+<span class="fc bfc" id="L292" title="All 2 branches covered.">		if (args == null) {</span>
+<span class="fc" id="L293">			return false;</span>
+		}
+<span class="fc bfc" id="L295" title="All 2 branches covered.">		if (StringUtils.hasText(this.condition)) {</span>
+<span class="fc" id="L296">			Assert.notNull(this.evaluator, &quot;EventExpressionEvaluator must not be null&quot;);</span>
+<span class="fc" id="L297">			return this.evaluator.condition(</span>
+					this.condition, event, this.targetMethod, this.methodKey, args);
+		}
+<span class="fc" id="L300">		return true;</span>
+	}
+
+	/**
+	 * Resolve the method arguments to use for the specified {@link ApplicationEvent}.
+	 * &lt;p&gt;These arguments will be used to invoke the method handled by this instance.
+	 * Can return {@code null} to indicate that no suitable arguments could be resolved
+	 * and therefore the method should not be invoked at all for the specified event.
+	 */
+	protected @Nullable Object @Nullable [] resolveArguments(ApplicationEvent event) {
+<span class="fc" id="L310">		ResolvableType declaredEventType = getResolvableType(event);</span>
+<span class="fc bfc" id="L311" title="All 2 branches covered.">		if (declaredEventType == null) {</span>
+<span class="fc" id="L312">			return null;</span>
+		}
+<span class="fc bfc" id="L314" title="All 2 branches covered.">		if (this.method.getParameterCount() == 0) {</span>
+<span class="fc" id="L315">			return new Object[0];</span>
+		}
+<span class="fc" id="L317">		Class&lt;?&gt; declaredEventClass = declaredEventType.toClass();</span>
+<span class="pc bpc" id="L318" title="1 of 4 branches missed.">		if (!ApplicationEvent.class.isAssignableFrom(declaredEventClass) &amp;&amp;</span>
+<span class="fc" id="L319">				event instanceof PayloadApplicationEvent&lt;?&gt; payloadEvent) {</span>
+<span class="fc" id="L320">			Object payload = payloadEvent.getPayload();</span>
+<span class="fc bfc" id="L321" title="All 2 branches covered.">			if (declaredEventClass.isInstance(payload)) {</span>
+<span class="fc" id="L322">				return new Object[] {payload};</span>
+			}
+		}
+<span class="fc" id="L325">		return new Object[] {event};</span>
+	}
+
+	protected void handleResult(Object result) {
+<span class="pc bpc" id="L329" title="1 of 4 branches missed.">		if (REACTIVE_STREAMS_PRESENT &amp;&amp; new ReactiveResultHandler().subscribeToPublisher(result)) {</span>
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L331">				logger.trace(&quot;Adapted to reactive result: &quot; + result);</span>
+			}
+		}
+<span class="pc bpc" id="L334" title="1 of 2 branches missed.">		else if (result instanceof CompletionStage&lt;?&gt; completionStage) {</span>
+<span class="nc" id="L335">			completionStage.whenComplete((event, ex) -&gt; {</span>
+<span class="nc bnc" id="L336" title="All 2 branches missed.">				if (ex != null) {</span>
+<span class="nc" id="L337">					handleAsyncError(ex);</span>
+				}
+<span class="nc bnc" id="L339" title="All 2 branches missed.">				else if (event != null) {</span>
+<span class="nc" id="L340">					publishEvents(event);</span>
+				}
+<span class="nc" id="L342">			});</span>
+		}
+		else {
+<span class="fc" id="L345">			publishEvents(result);</span>
+		}
+<span class="fc" id="L347">	}</span>
+
+	private void publishEvents(@Nullable Object result) {
+<span class="pc bpc" id="L350" title="1 of 4 branches missed.">		if (result != null &amp;&amp; result.getClass().isArray()) {</span>
+<span class="fc" id="L351">			Object[] events = ObjectUtils.toObjectArray(result);</span>
+<span class="fc bfc" id="L352" title="All 2 branches covered.">			for (Object event : events) {</span>
+<span class="fc" id="L353">				publishEvent(event);</span>
+			}
+<span class="fc" id="L355">		}</span>
+<span class="fc bfc" id="L356" title="All 2 branches covered.">		else if (result instanceof Collection&lt;?&gt; events) {</span>
+<span class="fc bfc" id="L357" title="All 2 branches covered.">			for (Object event : events) {</span>
+<span class="fc" id="L358">				publishEvent(event);</span>
+<span class="fc" id="L359">			}</span>
+		}
+		else {
+<span class="fc" id="L362">			publishEvent(result);</span>
+		}
+<span class="fc" id="L364">	}</span>
+
+	private void publishEvent(@Nullable Object event) {
+<span class="fc bfc" id="L367" title="All 2 branches covered.">		if (event != null) {</span>
+<span class="fc" id="L368">			Assert.notNull(this.applicationContext, &quot;ApplicationContext must not be null&quot;);</span>
+<span class="fc" id="L369">			this.applicationContext.publishEvent(event);</span>
+		}
+<span class="fc" id="L371">	}</span>
+
+	protected void handleAsyncError(Throwable t) {
+<span class="nc" id="L374">		logger.error(&quot;Unexpected error occurred in asynchronous listener&quot;, t);</span>
+<span class="nc" id="L375">	}</span>
+
+	/**
+	 * Invoke the event listener method with the given argument values.
+	 */
+	protected @Nullable Object doInvoke(@Nullable Object... args) {
+<span class="fc" id="L381">		Object bean = getTargetBean();</span>
+		// Detect package-protected NullBean instance through equals(null) check
+<span class="fc bfc" id="L383" title="All 2 branches covered.">		if (bean.equals(null)) {</span>
+<span class="fc" id="L384">			return null;</span>
+		}
+
+		try {
+<span class="fc" id="L388">			ReflectionUtils.makeAccessible(this.method);</span>
+<span class="pc bpc" id="L389" title="1 of 2 branches missed.">			if (KotlinDetector.isSuspendingFunction(this.method)) {</span>
+<span class="nc" id="L390">				return CoroutinesUtils.invokeSuspendingFunction(this.method, bean, args);</span>
+			}
+<span class="fc" id="L392">			return this.method.invoke(bean, args);</span>
+		}
+<span class="fc" id="L394">		catch (IllegalArgumentException ex) {</span>
+<span class="nc" id="L395">			assertTargetBean(this.method, bean, args);</span>
+<span class="nc" id="L396">			throw new IllegalStateException(getInvocationErrorMessage(bean, ex.getMessage(), args), ex);</span>
+		}
+<span class="nc" id="L398">		catch (IllegalAccessException | InaccessibleObjectException ex) {</span>
+<span class="nc" id="L399">			throw new IllegalStateException(getInvocationErrorMessage(bean, ex.getMessage(), args), ex);</span>
+		}
+<span class="fc" id="L401">		catch (InvocationTargetException ex) {</span>
+			// Throw underlying exception
+<span class="fc" id="L403">			Throwable targetException = ex.getTargetException();</span>
+<span class="fc bfc" id="L404" title="All 2 branches covered.">			if (targetException instanceof RuntimeException runtimeException) {</span>
+<span class="fc" id="L405">				throw runtimeException;</span>
+			}
+			else {
+<span class="fc" id="L408">				String msg = getInvocationErrorMessage(bean, &quot;Failed to invoke event listener method&quot;, args);</span>
+<span class="fc" id="L409">				throw new UndeclaredThrowableException(targetException, msg);</span>
+			}
+		}
+	}
+
+	/**
+	 * Return the target bean instance to use.
+	 */
+	protected Object getTargetBean() {
+<span class="fc" id="L418">		Assert.notNull(this.applicationContext, &quot;ApplicationContext must not be null&quot;);</span>
+<span class="fc" id="L419">		return this.applicationContext.getBean(this.beanName);</span>
+	}
+
+	/**
+	 * Add additional details such as the bean type and method signature to
+	 * the given error message.
+	 * @param message error message to append the HandlerMethod details to
+	 */
+	protected String getDetailedErrorMessage(Object bean, @Nullable String message) {
+<span class="pc bpc" id="L428" title="1 of 2 branches missed.">		StringBuilder sb = (StringUtils.hasLength(message) ? new StringBuilder(message).append('\n') : new StringBuilder());</span>
+<span class="fc" id="L429">		sb.append(&quot;ApplicationListenerMethodAdapter details: \n&quot;);</span>
+<span class="fc" id="L430">		sb.append(&quot;Bean [&quot;).append(bean.getClass().getName()).append(&quot;]\n&quot;);</span>
+<span class="fc" id="L431">		sb.append(&quot;Method [&quot;).append(this.method.toGenericString()).append(&quot;]\n&quot;);</span>
+<span class="fc" id="L432">		return sb.toString();</span>
+	}
+
+	/**
+	 * Assert that the target bean class is an instance of the class where the given
+	 * method is declared. In some cases the actual bean instance at event-
+	 * processing time may be a JDK dynamic proxy (lazy initialization, prototype
+	 * beans, and others). Event listener beans that require proxying should prefer
+	 * class-based proxy mechanisms.
+	 */
+	private void assertTargetBean(Method method, Object targetBean, @Nullable Object[] args) {
+<span class="fc" id="L443">		Class&lt;?&gt; methodDeclaringClass = method.getDeclaringClass();</span>
+<span class="fc" id="L444">		Class&lt;?&gt; targetBeanClass = targetBean.getClass();</span>
+<span class="pc bpc" id="L445" title="1 of 2 branches missed.">		if (!methodDeclaringClass.isAssignableFrom(targetBeanClass)) {</span>
+<span class="fc" id="L446">			String msg = &quot;The event listener method class '&quot; + methodDeclaringClass.getName() +</span>
+					&quot;' is not an instance of the actual bean class '&quot; +
+<span class="fc" id="L448">					targetBeanClass.getName() + &quot;'. If the bean requires proxying &quot; +</span>
+					&quot;(for example, due to @Transactional), please use class-based proxying.&quot;;
+<span class="fc" id="L450">			throw new IllegalStateException(getInvocationErrorMessage(targetBean, msg, args));</span>
+		}
+<span class="nc" id="L452">	}</span>
+
+	private String getInvocationErrorMessage(Object bean, @Nullable String message, @Nullable Object [] resolvedArgs) {
+<span class="fc" id="L455">		StringBuilder sb = new StringBuilder(getDetailedErrorMessage(bean, message));</span>
+<span class="fc" id="L456">		sb.append(&quot;Resolved arguments: \n&quot;);</span>
+<span class="fc bfc" id="L457" title="All 2 branches covered.">		for (int i = 0; i &lt; resolvedArgs.length; i++) {</span>
+<span class="fc" id="L458">			sb.append('[').append(i).append(&quot;] &quot;);</span>
+<span class="pc bpc" id="L459" title="1 of 2 branches missed.">			if (resolvedArgs[i] == null) {</span>
+<span class="nc" id="L460">				sb.append(&quot;[null] \n&quot;);</span>
+			}
+			else {
+<span class="fc" id="L463">				sb.append(&quot;[type=&quot;).append(resolvedArgs[i].getClass().getName()).append(&quot;] &quot;);</span>
+<span class="fc" id="L464">				sb.append(&quot;[value=&quot;).append(resolvedArgs[i]).append(&quot;]\n&quot;);</span>
+			}
+		}
+<span class="fc" id="L467">		return sb.toString();</span>
+	}
+
+	private @Nullable ResolvableType getResolvableType(ApplicationEvent event) {
+<span class="fc" id="L471">		ResolvableType payloadType = null;</span>
+<span class="fc bfc" id="L472" title="All 2 branches covered.">		if (event instanceof PayloadApplicationEvent&lt;?&gt; payloadEvent) {</span>
+<span class="fc" id="L473">			ResolvableType eventType = payloadEvent.getResolvableType();</span>
+<span class="pc bpc" id="L474" title="1 of 2 branches missed.">			if (eventType != null) {</span>
+<span class="fc" id="L475">				payloadType = eventType.as(PayloadApplicationEvent.class).getGeneric();</span>
+			}
+		}
+<span class="fc bfc" id="L478" title="All 2 branches covered.">		for (ResolvableType declaredEventType : this.declaredEventTypes) {</span>
+<span class="fc" id="L479">			Class&lt;?&gt; eventClass = declaredEventType.toClass();</span>
+<span class="pc bpc" id="L480" title="1 of 4 branches missed.">			if (!ApplicationEvent.class.isAssignableFrom(eventClass) &amp;&amp;</span>
+<span class="fc bfc" id="L481" title="All 2 branches covered.">					payloadType != null &amp;&amp; declaredEventType.isAssignableFrom(payloadType)) {</span>
+<span class="fc" id="L482">				return declaredEventType;</span>
+			}
+<span class="fc bfc" id="L484" title="All 2 branches covered.">			if (eventClass.isInstance(event)) {</span>
+<span class="fc" id="L485">				return declaredEventType;</span>
+			}
+<span class="fc" id="L487">		}</span>
+<span class="fc" id="L488">		return null;</span>
+	}
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L494">		return this.method.toGenericString();</span>
+	}
+
+
+	/**
+	 * Inner class to avoid a hard dependency on the Reactive Streams API at runtime.
+	 */
+<span class="fc" id="L501">	private class ReactiveResultHandler {</span>
+
+		public boolean subscribeToPublisher(Object result) {
+<span class="fc" id="L504">			ReactiveAdapter adapter = ReactiveAdapterRegistry.getSharedInstance().getAdapter(result.getClass());</span>
+<span class="fc bfc" id="L505" title="All 2 branches covered.">			if (adapter != null) {</span>
+<span class="fc" id="L506">				adapter.toPublisher(result).subscribe(new EventPublicationSubscriber());</span>
+<span class="fc" id="L507">				return true;</span>
+			}
+<span class="fc" id="L509">			return false;</span>
+		}
+	}
+
+
+	/**
+	 * Reactive Streams Subscriber for publishing follow-up events.
+	 */
+<span class="fc" id="L517">	private class EventPublicationSubscriber implements Subscriber&lt;Object&gt; {</span>
+
+		@Override
+		public void onSubscribe(Subscription s) {
+<span class="fc" id="L521">			s.request(Integer.MAX_VALUE);</span>
+<span class="fc" id="L522">		}</span>
+
+		@Override
+		public void onNext(Object o) {
+<span class="fc" id="L526">			publishEvents(o);</span>
+<span class="fc" id="L527">		}</span>
+
+		@Override
+		public void onError(Throwable t) {
+<span class="nc" id="L531">			handleAsyncError(t);</span>
+<span class="nc" id="L532">		}</span>
+
+		@Override
+		public void onComplete() {
+<span class="fc" id="L536">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

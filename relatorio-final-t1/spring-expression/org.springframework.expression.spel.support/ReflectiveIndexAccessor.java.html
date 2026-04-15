@@ -1,0 +1,277 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ReflectiveIndexAccessor.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-expression</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.support</a> &gt; <span class="el_source">ReflectiveIndexAccessor.java</span></div><h1>ReflectiveIndexAccessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.support;
+
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.asm.MethodVisitor;
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.IndexAccessor;
+import org.springframework.expression.TypedValue;
+import org.springframework.expression.spel.CodeFlow;
+import org.springframework.expression.spel.CompilableIndexAccessor;
+import org.springframework.expression.spel.SpelNode;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * A flexible {@link org.springframework.expression.IndexAccessor IndexAccessor}
+ * that uses reflection to read from and optionally write to an indexed structure
+ * of a target object.
+ *
+ * &lt;p&gt;The indexed structure can be accessed through a public read-method (when
+ * being read) or a public write-method (when being written). The relationship
+ * between the read-method and write-method is based on a convention that is
+ * applicable for typical implementations of indexed structures. See the example
+ * below for details.
+ *
+ * &lt;p&gt;{@code ReflectiveIndexAccessor} also implements {@link CompilableIndexAccessor}
+ * in order to support compilation to bytecode for read access. Note, however,
+ * that the configured read-method must be invocable via a public class or public
+ * interface for compilation to succeed.
+ *
+ * &lt;h3&gt;Example&lt;/h3&gt;
+ *
+ * &lt;p&gt;The {@code FruitMap} class (the {@code targetType}) represents a structure
+ * that is indexed via the {@code Color} enum (the {@code indexType}). The name
+ * of the read-method is {@code &quot;getFruit&quot;}, and that method returns a
+ * {@code String} (the {@code indexedValueType}). The name of the write-method
+ * is {@code &quot;setFruit&quot;}, and that method accepts a {@code Color} enum (the
+ * {@code indexType}) and a {@code String} (the {@code indexedValueType} which
+ * must match the return type of the read-method).
+ *
+ * &lt;p&gt;A read-only {@code IndexAccessor} for {@code FruitMap} can be created via
+ * {@code new ReflectiveIndexAccessor(FruitMap.class, Color.class, &quot;getFruit&quot;)}.
+ * With that accessor registered and a {@code FruitMap} registered as a variable
+ * named {@code #fruitMap}, the SpEL expression {@code #fruitMap[T(example.Color).RED]}
+ * will evaluate to {@code &quot;cherry&quot;}.
+ *
+ * &lt;p&gt;A read-write {@code IndexAccessor} for {@code FruitMap} can be created via
+ * {@code new ReflectiveIndexAccessor(FruitMap.class, Color.class, &quot;getFruit&quot;, &quot;setFruit&quot;)}.
+ * With that accessor registered and a {@code FruitMap} registered as a variable
+ * named {@code #fruitMap}, the SpEL expression
+ * {@code #fruitMap[T(example.Color).RED] = 'strawberry'} can be used to change
+ * the fruit mapping for the color red from {@code &quot;cherry&quot;} to {@code &quot;strawberry&quot;}.
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * package example;
+ *
+ * public enum Color {
+ *     RED, ORANGE, YELLOW
+ * }&lt;/pre&gt;
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * public class FruitMap {
+ *
+ *     private final Map&amp;lt;Color, String&amp;gt; map = new HashMap&amp;lt;&amp;gt;();
+ *
+ *     public FruitMap() {
+ *         this.map.put(Color.RED, &quot;cherry&quot;);
+ *         this.map.put(Color.ORANGE, &quot;orange&quot;);
+ *         this.map.put(Color.YELLOW, &quot;banana&quot;);
+ *     }
+ *
+ *     public String getFruit(Color color) {
+ *         return this.map.get(color);
+ *     }
+ *
+ *     public void setFruit(Color color, String fruit) {
+ *         this.map.put(color, fruit);
+ *     }
+ * }&lt;/pre&gt;
+ *
+ * @author Sam Brannen
+ * @since 6.2
+ * @see IndexAccessor
+ * @see CompilableIndexAccessor
+ * @see StandardEvaluationContext
+ * @see SimpleEvaluationContext
+ */
+public class ReflectiveIndexAccessor implements CompilableIndexAccessor {
+
+	private final Class&lt;?&gt; targetType;
+
+	private final Class&lt;?&gt; indexType;
+
+	private final Method readMethod;
+
+	private final Method readMethodToInvoke;
+
+	private final @Nullable Method writeMethodToInvoke;
+
+
+	/**
+	 * Construct a new {@code ReflectiveIndexAccessor} for read-only access.
+	 * &lt;p&gt;See {@linkplain ReflectiveIndexAccessor class-level documentation} for
+	 * further details and an example.
+	 * @param targetType the type of indexed structure which serves as the target
+	 * of index operations
+	 * @param indexType the type of index used to read from the indexed structure
+	 * @param readMethodName the name of the method used to read from the indexed
+	 * structure
+	 */
+	public ReflectiveIndexAccessor(Class&lt;?&gt; targetType, Class&lt;?&gt; indexType, String readMethodName) {
+<span class="fc" id="L132">		this(targetType, indexType, readMethodName, null);</span>
+<span class="fc" id="L133">	}</span>
+
+	/**
+	 * Construct a new {@code ReflectiveIndexAccessor} for read-write access.
+	 * &lt;p&gt;See {@linkplain ReflectiveIndexAccessor class-level documentation} for
+	 * further details and an example.
+	 * @param targetType the type of indexed structure which serves as the target
+	 * of index operations
+	 * @param indexType the type of index used to read from or write to the indexed
+	 * structure
+	 * @param readMethodName the name of the method used to read from the indexed
+	 * structure
+	 * @param writeMethodName the name of the method used to write to the indexed
+	 * structure, or {@code null} if writing is not supported
+	 */
+	public ReflectiveIndexAccessor(Class&lt;?&gt; targetType, Class&lt;?&gt; indexType, String readMethodName,
+<span class="fc" id="L149">			@Nullable String writeMethodName) {</span>
+
+<span class="fc" id="L151">		this.targetType = targetType;</span>
+<span class="fc" id="L152">		this.indexType = indexType;</span>
+
+		try {
+<span class="fc" id="L155">			this.readMethod = targetType.getMethod(readMethodName, indexType);</span>
+		}
+<span class="fc" id="L157">		catch (Exception ex) {</span>
+<span class="fc" id="L158">			throw new IllegalArgumentException(&quot;Failed to find public read-method '%s(%s)' in class '%s'.&quot;</span>
+<span class="fc" id="L159">					.formatted(readMethodName, ClassUtils.getCanonicalName(indexType),</span>
+<span class="fc" id="L160">							ClassUtils.getCanonicalName(targetType)));</span>
+<span class="fc" id="L161">		}</span>
+
+<span class="fc" id="L163">		this.readMethodToInvoke = ClassUtils.getPubliclyAccessibleMethodIfPossible(this.readMethod, targetType);</span>
+<span class="fc" id="L164">		ReflectionUtils.makeAccessible(this.readMethodToInvoke);</span>
+
+<span class="fc bfc" id="L166" title="All 2 branches covered.">		if (writeMethodName != null) {</span>
+<span class="fc" id="L167">			Class&lt;?&gt; indexedValueType = this.readMethod.getReturnType();</span>
+			Method writeMethod;
+			try {
+<span class="fc" id="L170">				writeMethod = targetType.getMethod(writeMethodName, indexType, indexedValueType);</span>
+			}
+<span class="fc" id="L172">			catch (Exception ex) {</span>
+<span class="fc" id="L173">				throw new IllegalArgumentException(&quot;Failed to find public write-method '%s(%s, %s)' in class '%s'.&quot;</span>
+<span class="fc" id="L174">						.formatted(writeMethodName, ClassUtils.getCanonicalName(indexType),</span>
+<span class="fc" id="L175">								ClassUtils.getCanonicalName(indexedValueType),</span>
+<span class="fc" id="L176">								ClassUtils.getCanonicalName(targetType)));</span>
+<span class="fc" id="L177">			}</span>
+<span class="fc" id="L178">			this.writeMethodToInvoke = ClassUtils.getPubliclyAccessibleMethodIfPossible(writeMethod, targetType);</span>
+<span class="fc" id="L179">			ReflectionUtils.makeAccessible(this.writeMethodToInvoke);</span>
+<span class="fc" id="L180">		}</span>
+		else {
+<span class="fc" id="L182">			this.writeMethodToInvoke = null;</span>
+		}
+<span class="fc" id="L184">	}</span>
+
+
+	/**
+	 * Return an array containing the {@code targetType} configured via the constructor.
+	 */
+	@Override
+	public Class&lt;?&gt;[] getSpecificTargetClasses() {
+<span class="fc" id="L192">		return new Class&lt;?&gt;[] { this.targetType };</span>
+	}
+
+	/**
+	 * Return {@code true} if the supplied {@code target} and {@code index} can
+	 * be assigned to the {@code targetType} and {@code indexType} configured
+	 * via the constructor.
+	 * &lt;p&gt;Considers primitive wrapper classes as assignable to the corresponding
+	 * primitive types.
+	 */
+	@Override
+	public boolean canRead(EvaluationContext context, Object target, Object index) {
+<span class="fc bfc" id="L204" title="All 2 branches covered.">		return (ClassUtils.isAssignableValue(this.targetType, target) &amp;&amp;</span>
+<span class="fc bfc" id="L205" title="All 2 branches covered.">				ClassUtils.isAssignableValue(this.indexType, index));</span>
+	}
+
+	/**
+	 * Invoke the configured read-method via reflection and return the result
+	 * wrapped in a {@link TypedValue}.
+	 */
+	@Override
+	public TypedValue read(EvaluationContext context, Object target, Object index) {
+<span class="fc" id="L214">		Object value = ReflectionUtils.invokeMethod(this.readMethodToInvoke, target, index);</span>
+<span class="fc" id="L215">		return new TypedValue(value);</span>
+	}
+
+	/**
+	 * Return {@code true} if a write-method has been configured and
+	 * {@link #canRead} returns {@code true} for the same arguments.
+	 */
+	@Override
+	public boolean canWrite(EvaluationContext context, Object target, Object index) {
+<span class="pc bpc" id="L224" title="1 of 4 branches missed.">		return (this.writeMethodToInvoke != null &amp;&amp; canRead(context, target, index));</span>
+	}
+
+	/**
+	 * Invoke the configured write-method via reflection.
+	 * &lt;p&gt;Should only be invoked if {@link #canWrite} returns {@code true} for the
+	 * same arguments.
+	 */
+	@Override
+	public void write(EvaluationContext context, Object target, Object index, @Nullable Object newValue) {
+<span class="pc bpc" id="L234" title="1 of 2 branches missed.">		Assert.state(this.writeMethodToInvoke != null, &quot;Write-method cannot be null&quot;);</span>
+<span class="fc" id="L235">		ReflectionUtils.invokeMethod(this.writeMethodToInvoke, target, index, newValue);</span>
+<span class="fc" id="L236">	}</span>
+
+	@Override
+	public boolean isCompilable() {
+<span class="fc" id="L240">		return true;</span>
+	}
+
+	/**
+	 * Get the return type of the configured read-method.
+	 */
+	@Override
+	public Class&lt;?&gt; getIndexedValueType() {
+<span class="fc" id="L248">		return this.readMethod.getReturnType();</span>
+	}
+
+	@Override
+	public void generateCode(SpelNode index, MethodVisitor mv, CodeFlow cf) {
+		// Find the public declaring class.
+<span class="fc" id="L254">		Class&lt;?&gt; publicDeclaringClass = this.readMethodToInvoke.getDeclaringClass();</span>
+<span class="fc" id="L255">		Assert.state(Modifier.isPublic(publicDeclaringClass.getModifiers()),</span>
+<span class="fc" id="L256">				() -&gt; &quot;Failed to find public declaring class for read-method: &quot; + this.readMethod);</span>
+<span class="fc" id="L257">		String classDesc = publicDeclaringClass.getName().replace('.', '/');</span>
+
+		// Ensure the current object on the stack is the required type.
+<span class="fc" id="L260">		String lastDesc = cf.lastDescriptor();</span>
+<span class="fc bfc" id="L261" title="All 4 branches covered.">		if (lastDesc == null || !classDesc.equals(lastDesc.substring(1))) {</span>
+<span class="fc" id="L262">			mv.visitTypeInsn(CHECKCAST, classDesc);</span>
+		}
+
+		// Push the index onto the stack.
+<span class="fc" id="L266">		cf.generateCodeForArgument(mv, index, this.indexType);</span>
+
+		// Invoke the read-method.
+<span class="fc" id="L269">		String methodName = this.readMethod.getName();</span>
+<span class="fc" id="L270">		String methodDescr = CodeFlow.createSignatureDescriptor(this.readMethod);</span>
+<span class="fc" id="L271">		boolean isInterface = publicDeclaringClass.isInterface();</span>
+<span class="fc bfc" id="L272" title="All 2 branches covered.">		int opcode = (isInterface ? INVOKEINTERFACE : INVOKEVIRTUAL);</span>
+<span class="fc" id="L273">		mv.visitMethodInsn(opcode, classDesc, methodName, methodDescr, isInterface);</span>
+<span class="fc" id="L274">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

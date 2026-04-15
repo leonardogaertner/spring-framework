@@ -1,0 +1,623 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ProxyFactoryBean.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.aop.framework</a> &gt; <span class="el_source">ProxyFactoryBean.java</span></div><h1>ProxyFactoryBean.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.aop.framework;
+
+import java.io.IOException;
+import java.io.ObjectInputStream;
+import java.io.Serializable;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+import org.aopalliance.aop.Advice;
+import org.aopalliance.intercept.Interceptor;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aop.Advisor;
+import org.springframework.aop.TargetSource;
+import org.springframework.aop.framework.adapter.AdvisorAdapterRegistry;
+import org.springframework.aop.framework.adapter.GlobalAdvisorAdapterRegistry;
+import org.springframework.aop.framework.adapter.UnknownAdviceTypeException;
+import org.springframework.aop.target.SingletonTargetSource;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanClassLoaderAware;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.BeanFactoryUtils;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.FactoryBeanNotInitializedException;
+import org.springframework.beans.factory.ListableBeanFactory;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+
+/**
+ * {@link org.springframework.beans.factory.FactoryBean} implementation that builds an
+ * AOP proxy based on beans in a Spring {@link org.springframework.beans.factory.BeanFactory}.
+ *
+ * &lt;p&gt;{@link org.aopalliance.intercept.MethodInterceptor MethodInterceptors} and
+ * {@link org.springframework.aop.Advisor Advisors} are identified by a list of bean
+ * names in the current bean factory, specified through the &quot;interceptorNames&quot; property.
+ * The last entry in the list can be the name of a target bean or a
+ * {@link org.springframework.aop.TargetSource}; however, it is normally preferable
+ * to use the &quot;targetName&quot;/&quot;target&quot;/&quot;targetSource&quot; properties instead.
+ *
+ * &lt;p&gt;Global interceptors and advisors can be added at the factory level. The specified
+ * ones are expanded in an interceptor list where an &quot;xxx*&quot; entry is included in the
+ * list, matching the given prefix with the bean names &amp;mdash; for example, &quot;global*&quot;
+ * would match both &quot;globalBean1&quot; and &quot;globalBean2&quot;; whereas, &quot;*&quot; would match all
+ * defined interceptors. The matching interceptors get applied according to their
+ * returned order value, if they implement the {@link org.springframework.core.Ordered}
+ * interface.
+ *
+ * &lt;p&gt;Creates a JDK proxy when proxy interfaces are given, and a CGLIB proxy for the
+ * actual target class if not. Note that the latter will only work if the target class
+ * does not have final methods, as a dynamic subclass will be created at runtime.
+ *
+ * &lt;p&gt;It's possible to cast a proxy obtained from this factory to {@link Advised},
+ * or to obtain the ProxyFactoryBean reference and programmatically manipulate it.
+ * This won't work for existing prototype references, which are independent. However,
+ * it will work for prototypes subsequently obtained from the factory. Changes to
+ * interception will work immediately on singletons (including existing references).
+ * However, to change interfaces or a target it's necessary to obtain a new instance
+ * from the factory. This means that singleton instances obtained from the factory
+ * do not have the same object identity. However, they do have the same interceptors
+ * and target, and changing any reference will change all objects.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @see #setInterceptorNames
+ * @see #setProxyInterfaces
+ * @see org.aopalliance.intercept.MethodInterceptor
+ * @see org.springframework.aop.Advisor
+ * @see Advised
+ */
+@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L93">public class ProxyFactoryBean extends ProxyCreatorSupport</span>
+		implements FactoryBean&lt;Object&gt;, BeanClassLoaderAware, BeanFactoryAware {
+
+	/**
+	 * This suffix in a value in an interceptor list indicates to expand globals.
+	 */
+	public static final String GLOBAL_SUFFIX = &quot;*&quot;;
+
+
+<span class="fc" id="L102">	private static final Log logger = LogFactory.getLog(ProxyFactoryBean.class);</span>
+
+	private String @Nullable [] interceptorNames;
+
+	private @Nullable String targetName;
+
+<span class="fc" id="L108">	private boolean autodetectInterfaces = true;</span>
+
+<span class="fc" id="L110">	private boolean singleton = true;</span>
+
+<span class="fc" id="L112">	private AdvisorAdapterRegistry advisorAdapterRegistry = GlobalAdvisorAdapterRegistry.getInstance();</span>
+
+<span class="fc" id="L114">	private boolean freezeProxy = false;</span>
+
+<span class="fc" id="L116">	private transient @Nullable ClassLoader proxyClassLoader = ClassUtils.getDefaultClassLoader();</span>
+
+<span class="fc" id="L118">	private transient boolean classLoaderConfigured = false;</span>
+
+	private transient @Nullable BeanFactory beanFactory;
+
+	/** Whether the advisor chain has already been initialized. */
+<span class="fc" id="L123">	private boolean advisorChainInitialized = false;</span>
+
+	/** If this is a singleton, the cached singleton proxy instance. */
+	private @Nullable Object singletonInstance;
+
+
+	/**
+	 * Set the names of the interfaces we're proxying. If no interface
+	 * is given, a CGLIB for the actual class will be created.
+	 * &lt;p&gt;This is essentially equivalent to the &quot;setInterfaces&quot; method,
+	 * but mirrors TransactionProxyFactoryBean's &quot;setProxyInterfaces&quot;.
+	 * @see #setInterfaces
+	 * @see AbstractSingletonProxyFactoryBean#setProxyInterfaces
+	 */
+	public void setProxyInterfaces(Class&lt;?&gt;[] proxyInterfaces) throws ClassNotFoundException {
+<span class="fc" id="L138">		setInterfaces(proxyInterfaces);</span>
+<span class="fc" id="L139">	}</span>
+
+	/**
+	 * Set the list of Advice/Advisor bean names. This must always be set
+	 * to use this factory bean in a bean factory.
+	 * &lt;p&gt;The referenced beans should be of type Interceptor, Advisor or Advice
+	 * The last entry in the list can be the name of any bean in the factory.
+	 * If it's neither an Advice nor an Advisor, a new SingletonTargetSource
+	 * is added to wrap it. Such a target bean cannot be used if the &quot;target&quot;
+	 * or &quot;targetSource&quot; or &quot;targetName&quot; property is set, in which case the
+	 * &quot;interceptorNames&quot; array must contain only Advice/Advisor bean names.
+	 * &lt;p&gt;&lt;b&gt;NOTE: Specifying a target bean as final name in the &quot;interceptorNames&quot;
+	 * list is deprecated and will be removed in a future Spring version.&lt;/b&gt;
+	 * Use the {@link #setTargetName &quot;targetName&quot;} property instead.
+	 * @see org.aopalliance.intercept.MethodInterceptor
+	 * @see org.springframework.aop.Advisor
+	 * @see org.aopalliance.aop.Advice
+	 * @see org.springframework.aop.target.SingletonTargetSource
+	 */
+	public void setInterceptorNames(String... interceptorNames) {
+<span class="fc" id="L159">		this.interceptorNames = interceptorNames;</span>
+<span class="fc" id="L160">	}</span>
+
+	/**
+	 * Set the name of the target bean. This is an alternative to specifying
+	 * the target name at the end of the &quot;interceptorNames&quot; array.
+	 * &lt;p&gt;You can also specify a target object or a TargetSource object
+	 * directly, via the &quot;target&quot;/&quot;targetSource&quot; property, respectively.
+	 * @see #setInterceptorNames(String[])
+	 * @see #setTarget(Object)
+	 * @see #setTargetSource(org.springframework.aop.TargetSource)
+	 */
+	public void setTargetName(String targetName) {
+<span class="fc" id="L172">		this.targetName = targetName;</span>
+<span class="fc" id="L173">	}</span>
+
+	/**
+	 * Set whether to autodetect proxy interfaces if none specified.
+	 * &lt;p&gt;Default is &quot;true&quot;. Turn this flag off to create a CGLIB
+	 * proxy for the full target class if no interfaces specified.
+	 * @see #setProxyTargetClass
+	 */
+	public void setAutodetectInterfaces(boolean autodetectInterfaces) {
+<span class="fc" id="L182">		this.autodetectInterfaces = autodetectInterfaces;</span>
+<span class="fc" id="L183">	}</span>
+
+	/**
+	 * Set the value of the singleton property. Governs whether this factory
+	 * should always return the same proxy instance (which implies the same target)
+	 * or whether it should return a new prototype instance, which implies that
+	 * the target and interceptors may be new instances also, if they are obtained
+	 * from prototype bean definitions. This allows for fine control of
+	 * independence/uniqueness in the object graph.
+	 */
+	public void setSingleton(boolean singleton) {
+<span class="fc" id="L194">		this.singleton = singleton;</span>
+<span class="fc" id="L195">	}</span>
+
+	/**
+	 * Specify the AdvisorAdapterRegistry to use.
+	 * Default is the global AdvisorAdapterRegistry.
+	 * @see org.springframework.aop.framework.adapter.GlobalAdvisorAdapterRegistry
+	 */
+	public void setAdvisorAdapterRegistry(AdvisorAdapterRegistry advisorAdapterRegistry) {
+<span class="nc" id="L203">		this.advisorAdapterRegistry = advisorAdapterRegistry;</span>
+<span class="nc" id="L204">	}</span>
+
+	@Override
+	public void setFrozen(boolean frozen) {
+<span class="fc" id="L208">		this.freezeProxy = frozen;</span>
+<span class="fc" id="L209">	}</span>
+
+	/**
+	 * Set the ClassLoader to generate the proxy class in.
+	 * &lt;p&gt;Default is the bean ClassLoader, i.e. the ClassLoader used by the
+	 * containing BeanFactory for loading all bean classes. This can be
+	 * overridden here for specific proxies.
+	 */
+	public void setProxyClassLoader(@Nullable ClassLoader classLoader) {
+<span class="nc" id="L218">		this.proxyClassLoader = classLoader;</span>
+<span class="nc bnc" id="L219" title="All 2 branches missed.">		this.classLoaderConfigured = (classLoader != null);</span>
+<span class="nc" id="L220">	}</span>
+
+	@Override
+	public void setBeanClassLoader(ClassLoader classLoader) {
+<span class="pc bpc" id="L224" title="1 of 2 branches missed.">		if (!this.classLoaderConfigured) {</span>
+<span class="fc" id="L225">			this.proxyClassLoader = classLoader;</span>
+		}
+<span class="fc" id="L227">	}</span>
+
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="fc" id="L231">		this.beanFactory = beanFactory;</span>
+<span class="fc" id="L232">		checkInterceptorNames();</span>
+<span class="fc" id="L233">	}</span>
+
+
+	/**
+	 * Return a proxy. Invoked when clients obtain beans from this factory bean.
+	 * Create an instance of the AOP proxy to be returned by this factory.
+	 * The instance will be cached for a singleton, and create on each call to
+	 * {@code getObject()} for a proxy.
+	 * @return a fresh AOP proxy reflecting the current state of this factory
+	 */
+	@Override
+	public @Nullable Object getObject() throws BeansException {
+<span class="fc" id="L245">		initializeAdvisorChain();</span>
+<span class="fc bfc" id="L246" title="All 2 branches covered.">		if (isSingleton()) {</span>
+<span class="fc" id="L247">			return getSingletonInstance();</span>
+		}
+		else {
+<span class="fc bfc" id="L250" title="All 2 branches covered.">			if (this.targetName == null) {</span>
+<span class="fc" id="L251">				logger.info(&quot;Using non-singleton proxies with singleton targets is often undesirable. &quot; +</span>
+						&quot;Enable prototype proxies by setting the 'targetName' property.&quot;);
+			}
+<span class="fc" id="L254">			return newPrototypeInstance();</span>
+		}
+	}
+
+	/**
+	 * Return the type of the proxy. Will check the singleton instance if
+	 * already created, else fall back to the proxy interface (in case of just
+	 * a single one), the target bean type, or the TargetSource's target class.
+	 * @see org.springframework.aop.framework.AopProxy#getProxyClass
+	 */
+	@Override
+	public @Nullable Class&lt;?&gt; getObjectType() {
+<span class="fc" id="L266">		synchronized (this) {</span>
+<span class="fc bfc" id="L267" title="All 2 branches covered.">			if (this.singletonInstance != null) {</span>
+<span class="fc" id="L268">				return this.singletonInstance.getClass();</span>
+			}
+<span class="fc" id="L270">		}</span>
+		try {
+			// This might be incomplete since it potentially misses introduced interfaces
+			// from Advisors that will be lazily retrieved via setInterceptorNames.
+<span class="fc" id="L274">			return createAopProxy().getProxyClass(this.proxyClassLoader);</span>
+		}
+<span class="fc" id="L276">		catch (AopConfigException ex) {</span>
+<span class="pc bpc" id="L277" title="1 of 2 branches missed.">			if (getTargetClass() == null) {</span>
+<span class="pc bpc" id="L278" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L279">					logger.debug(&quot;Failed to determine early proxy class: &quot; + ex.getMessage());</span>
+				}
+<span class="fc" id="L281">				return null;</span>
+			}
+			else {
+<span class="nc" id="L284">				throw ex;</span>
+			}
+		}
+	}
+
+	@Override
+	public boolean isSingleton() {
+<span class="fc" id="L291">		return this.singleton;</span>
+	}
+
+
+	/**
+	 * Return the singleton instance of this class's proxy object,
+	 * lazily creating it if it hasn't been created already.
+	 * @return the shared singleton proxy
+	 */
+	private synchronized Object getSingletonInstance() {
+<span class="fc bfc" id="L301" title="All 2 branches covered.">		if (this.singletonInstance == null) {</span>
+<span class="fc" id="L302">			this.targetSource = freshTargetSource();</span>
+<span class="pc bpc" id="L303" title="1 of 6 branches missed.">			if (this.autodetectInterfaces &amp;&amp; getProxiedInterfaces().length == 0 &amp;&amp; !isProxyTargetClass()) {</span>
+				// Rely on AOP infrastructure to tell us what interfaces to proxy.
+<span class="fc" id="L305">				Class&lt;?&gt; targetClass = getTargetClass();</span>
+<span class="pc bpc" id="L306" title="1 of 2 branches missed.">				if (targetClass == null) {</span>
+<span class="nc" id="L307">					throw new FactoryBeanNotInitializedException(&quot;Cannot determine target class for proxy&quot;);</span>
+				}
+<span class="fc" id="L309">				setInterfaces(ClassUtils.getAllInterfacesForClass(targetClass, this.proxyClassLoader));</span>
+			}
+			// Initialize the shared singleton instance.
+<span class="fc" id="L312">			super.setFrozen(this.freezeProxy);</span>
+<span class="fc" id="L313">			this.singletonInstance = getProxy(createAopProxy());</span>
+		}
+<span class="fc" id="L315">		return this.singletonInstance;</span>
+	}
+
+	/**
+	 * Create a new prototype instance of this class's created proxy object,
+	 * backed by an independent AdvisedSupport configuration.
+	 * @return a totally independent proxy, whose advice we may manipulate in isolation
+	 */
+	private synchronized Object newPrototypeInstance() {
+		// In the case of a prototype, we need to give the proxy
+		// an independent instance of the configuration.
+		// In this case, no proxy will have an instance of this object's configuration,
+		// but will have an independent copy.
+<span class="fc" id="L328">		ProxyCreatorSupport copy = new ProxyCreatorSupport(getAopProxyFactory());</span>
+
+		// The copy needs a fresh advisor chain, and a fresh TargetSource.
+<span class="fc" id="L331">		TargetSource targetSource = freshTargetSource();</span>
+<span class="fc" id="L332">		copy.copyConfigurationFrom(this, targetSource, freshAdvisorChain());</span>
+<span class="pc bpc" id="L333" title="1 of 6 branches missed.">		if (this.autodetectInterfaces &amp;&amp; getProxiedInterfaces().length == 0 &amp;&amp; !isProxyTargetClass()) {</span>
+			// Rely on AOP infrastructure to tell us what interfaces to proxy.
+<span class="fc" id="L335">			Class&lt;?&gt; targetClass = targetSource.getTargetClass();</span>
+<span class="pc bpc" id="L336" title="1 of 2 branches missed.">			if (targetClass != null) {</span>
+<span class="fc" id="L337">				copy.setInterfaces(ClassUtils.getAllInterfacesForClass(targetClass, this.proxyClassLoader));</span>
+			}
+		}
+<span class="fc" id="L340">		copy.setFrozen(this.freezeProxy);</span>
+
+<span class="fc" id="L342">		return getProxy(copy.createAopProxy());</span>
+	}
+
+	/**
+	 * Return the proxy object to expose.
+	 * &lt;p&gt;The default implementation uses a {@code getProxy} call with
+	 * the factory's bean class loader. Can be overridden to specify a
+	 * custom class loader.
+	 * @param aopProxy the prepared AopProxy instance to get the proxy from
+	 * @return the proxy object to expose
+	 * @see AopProxy#getProxy(ClassLoader)
+	 */
+	protected Object getProxy(AopProxy aopProxy) {
+<span class="fc" id="L355">		return aopProxy.getProxy(this.proxyClassLoader);</span>
+	}
+
+	/**
+	 * Check the interceptorNames list whether it contains a target name as final element.
+	 * If found, remove the final name from the list and set it as targetName.
+	 */
+	private void checkInterceptorNames() {
+<span class="fc bfc" id="L363" title="All 2 branches covered.">		if (!ObjectUtils.isEmpty(this.interceptorNames)) {</span>
+<span class="fc" id="L364">			String finalName = this.interceptorNames[this.interceptorNames.length - 1];</span>
+<span class="fc bfc" id="L365" title="All 4 branches covered.">			if (this.targetName == null &amp;&amp; this.targetSource == EMPTY_TARGET_SOURCE) {</span>
+				// The last name in the chain may be an Advisor/Advice or a target/TargetSource.
+				// Unfortunately we don't know; we must look at type of the bean.
+<span class="fc bfc" id="L368" title="All 4 branches covered.">				if (!finalName.endsWith(GLOBAL_SUFFIX) &amp;&amp; !isNamedBeanAnAdvisorOrAdvice(finalName)) {</span>
+					// The target isn't an interceptor.
+<span class="fc" id="L370">					this.targetName = finalName;</span>
+<span class="pc bpc" id="L371" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L372">						logger.debug(&quot;Bean with name '&quot; + finalName + &quot;' concluding interceptor chain &quot; +</span>
+								&quot;is not an advisor class: treating it as a target or TargetSource&quot;);
+					}
+<span class="fc" id="L375">					this.interceptorNames = Arrays.copyOf(this.interceptorNames, this.interceptorNames.length - 1);</span>
+				}
+			}
+		}
+<span class="fc" id="L379">	}</span>
+
+	/**
+	 * Look at bean factory metadata to work out whether this bean name,
+	 * which concludes the interceptorNames list, is an Advisor or Advice,
+	 * or may be a target.
+	 * @param beanName bean name to check
+	 * @return {@code true} if it's an Advisor or Advice
+	 */
+	private boolean isNamedBeanAnAdvisorOrAdvice(String beanName) {
+<span class="pc bpc" id="L389" title="1 of 2 branches missed.">		Assert.state(this.beanFactory != null, &quot;No BeanFactory set&quot;);</span>
+<span class="fc" id="L390">		Class&lt;?&gt; namedBeanClass = this.beanFactory.getType(beanName);</span>
+<span class="pc bpc" id="L391" title="1 of 2 branches missed.">		if (namedBeanClass != null) {</span>
+<span class="pc bpc" id="L392" title="1 of 4 branches missed.">			return (Advisor.class.isAssignableFrom(namedBeanClass) || Advice.class.isAssignableFrom(namedBeanClass));</span>
+		}
+		// Treat it as a target bean if we can't tell.
+<span class="nc bnc" id="L395" title="All 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L396">			logger.debug(&quot;Could not determine type of bean with name '&quot; + beanName +</span>
+					&quot;' - assuming it is neither an Advisor nor an Advice&quot;);
+		}
+<span class="nc" id="L399">		return false;</span>
+	}
+
+	/**
+	 * Create the advisor (interceptor) chain. Advisors that are sourced
+	 * from a BeanFactory will be refreshed each time a new prototype instance
+	 * is added. Interceptors added programmatically through the factory API
+	 * are unaffected by such changes.
+	 */
+	private synchronized void initializeAdvisorChain() throws AopConfigException, BeansException {
+<span class="fc bfc" id="L409" title="All 4 branches covered.">		if (!this.advisorChainInitialized &amp;&amp; !ObjectUtils.isEmpty(this.interceptorNames)) {</span>
+<span class="pc bpc" id="L410" title="1 of 2 branches missed.">			if (this.beanFactory == null) {</span>
+<span class="nc" id="L411">				throw new IllegalStateException(&quot;No BeanFactory available anymore (probably due to serialization) &quot; +</span>
+<span class="nc" id="L412">						&quot;- cannot resolve interceptor names &quot; + Arrays.toString(this.interceptorNames));</span>
+			}
+
+			// Globals can't be last unless we specified a targetSource using the property...
+<span class="pc bpc" id="L416" title="1 of 6 branches missed.">			if (this.interceptorNames[this.interceptorNames.length - 1].endsWith(GLOBAL_SUFFIX) &amp;&amp;</span>
+					this.targetName == null &amp;&amp; this.targetSource == EMPTY_TARGET_SOURCE) {
+<span class="fc" id="L418">				throw new AopConfigException(&quot;Target required after globals&quot;);</span>
+			}
+
+			// Materialize interceptor chain from bean names.
+<span class="fc bfc" id="L422" title="All 2 branches covered.">			for (String name : this.interceptorNames) {</span>
+<span class="fc bfc" id="L423" title="All 2 branches covered.">				if (name.endsWith(GLOBAL_SUFFIX)) {</span>
+<span class="pc bpc" id="L424" title="1 of 2 branches missed.">					if (!(this.beanFactory instanceof ListableBeanFactory lbf)) {</span>
+<span class="nc" id="L425">						throw new AopConfigException(</span>
+								&quot;Can only use global advisors or interceptors with a ListableBeanFactory&quot;);
+					}
+<span class="fc" id="L428">					addGlobalAdvisors(lbf, name.substring(0, name.length() - GLOBAL_SUFFIX.length()));</span>
+<span class="fc" id="L429">				}</span>
+
+				else {
+					// If we get here, we need to add a named interceptor.
+					// We must check if it's a singleton or prototype.
+					Object advice;
+<span class="fc bfc" id="L435" title="All 4 branches covered.">					if (this.singleton || this.beanFactory.isSingleton(name)) {</span>
+						// Add the real Advisor/Advice to the chain.
+<span class="fc" id="L437">						advice = this.beanFactory.getBean(name);</span>
+					}
+					else {
+						// It's a prototype Advice or Advisor: replace with a prototype.
+						// Avoid unnecessary creation of prototype bean just for advisor chain initialization.
+<span class="fc" id="L442">						advice = new PrototypePlaceholderAdvisor(name);</span>
+					}
+<span class="fc" id="L444">					addAdvisorOnChainCreation(advice);</span>
+				}
+			}
+
+<span class="fc" id="L448">			this.advisorChainInitialized = true;</span>
+		}
+<span class="fc" id="L450">	}</span>
+
+
+	/**
+	 * Return an independent advisor chain.
+	 * We need to do this every time a new prototype instance is returned,
+	 * to return distinct instances of prototype Advisors and Advices.
+	 */
+	private List&lt;Advisor&gt; freshAdvisorChain() {
+<span class="fc" id="L459">		Advisor[] advisors = getAdvisors();</span>
+<span class="fc" id="L460">		List&lt;Advisor&gt; freshAdvisors = new ArrayList&lt;&gt;(advisors.length);</span>
+<span class="fc bfc" id="L461" title="All 2 branches covered.">		for (Advisor advisor : advisors) {</span>
+<span class="fc bfc" id="L462" title="All 2 branches covered.">			if (advisor instanceof PrototypePlaceholderAdvisor ppa) {</span>
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L464">					logger.debug(&quot;Refreshing bean named '&quot; + ppa.getBeanName() + &quot;'&quot;);</span>
+				}
+				// Replace the placeholder with a fresh prototype instance resulting from a getBean lookup
+<span class="pc bpc" id="L467" title="1 of 2 branches missed.">				if (this.beanFactory == null) {</span>
+<span class="nc" id="L468">					throw new IllegalStateException(&quot;No BeanFactory available anymore (probably due to &quot; +</span>
+<span class="nc" id="L469">							&quot;serialization) - cannot resolve prototype advisor '&quot; + ppa.getBeanName() + &quot;'&quot;);</span>
+				}
+<span class="fc" id="L471">				Object bean = this.beanFactory.getBean(ppa.getBeanName());</span>
+<span class="fc" id="L472">				Advisor refreshedAdvisor = namedBeanToAdvisor(bean);</span>
+<span class="fc" id="L473">				freshAdvisors.add(refreshedAdvisor);</span>
+<span class="fc" id="L474">			}</span>
+			else {
+				// Add the shared instance.
+<span class="fc" id="L477">				freshAdvisors.add(advisor);</span>
+			}
+		}
+<span class="fc" id="L480">		return freshAdvisors;</span>
+	}
+
+	/**
+	 * Add all global interceptors and pointcuts.
+	 */
+	private void addGlobalAdvisors(ListableBeanFactory beanFactory, String prefix) {
+<span class="fc" id="L487">		String[] globalAdvisorNames =</span>
+<span class="fc" id="L488">				BeanFactoryUtils.beanNamesForTypeIncludingAncestors(beanFactory, Advisor.class);</span>
+<span class="fc" id="L489">		String[] globalInterceptorNames =</span>
+<span class="fc" id="L490">				BeanFactoryUtils.beanNamesForTypeIncludingAncestors(beanFactory, Interceptor.class);</span>
+<span class="pc bpc" id="L491" title="3 of 4 branches missed.">		if (globalAdvisorNames.length &gt; 0 || globalInterceptorNames.length &gt; 0) {</span>
+<span class="fc" id="L492">			List&lt;Object&gt; beans = new ArrayList&lt;&gt;(globalAdvisorNames.length + globalInterceptorNames.length);</span>
+<span class="fc bfc" id="L493" title="All 2 branches covered.">			for (String name : globalAdvisorNames) {</span>
+<span class="fc bfc" id="L494" title="All 2 branches covered.">				if (name.startsWith(prefix)) {</span>
+<span class="fc" id="L495">					beans.add(beanFactory.getBean(name));</span>
+				}
+			}
+<span class="fc bfc" id="L498" title="All 2 branches covered.">			for (String name : globalInterceptorNames) {</span>
+<span class="fc bfc" id="L499" title="All 2 branches covered.">				if (name.startsWith(prefix)) {</span>
+<span class="fc" id="L500">					beans.add(beanFactory.getBean(name));</span>
+				}
+			}
+<span class="fc" id="L503">			AnnotationAwareOrderComparator.sort(beans);</span>
+<span class="fc bfc" id="L504" title="All 2 branches covered.">			for (Object bean : beans) {</span>
+<span class="fc" id="L505">				addAdvisorOnChainCreation(bean);</span>
+<span class="fc" id="L506">			}</span>
+		}
+<span class="fc" id="L508">	}</span>
+
+	/**
+	 * Invoked when advice chain is created.
+	 * &lt;p&gt;Add the given advice, advisor or object to the interceptor list.
+	 * Because of these three possibilities, we can't type the signature
+	 * more strongly.
+	 * @param next advice, advisor or target object
+	 */
+	private void addAdvisorOnChainCreation(Object next) {
+		// We need to convert to an Advisor if necessary so that our source reference
+		// matches what we find from superclass interceptors.
+<span class="fc" id="L520">		addAdvisor(namedBeanToAdvisor(next));</span>
+<span class="fc" id="L521">	}</span>
+
+	/**
+	 * Return a TargetSource to use when creating a proxy. If the target was not
+	 * specified at the end of the interceptorNames list, the TargetSource will be
+	 * this class's TargetSource member. Otherwise, we get the target bean and wrap
+	 * it in a TargetSource if necessary.
+	 */
+	private TargetSource freshTargetSource() {
+<span class="fc bfc" id="L530" title="All 2 branches covered.">		if (this.targetName == null) {</span>
+			// Not refreshing target: bean name not specified in 'interceptorNames'
+<span class="fc" id="L532">			return this.targetSource;</span>
+		}
+		else {
+<span class="pc bpc" id="L535" title="1 of 2 branches missed.">			if (this.beanFactory == null) {</span>
+<span class="nc" id="L536">				throw new IllegalStateException(&quot;No BeanFactory available anymore (probably due to serialization) &quot; +</span>
+						&quot;- cannot resolve target with name '&quot; + this.targetName + &quot;'&quot;);
+			}
+<span class="pc bpc" id="L539" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L540">				logger.debug(&quot;Refreshing target with name '&quot; + this.targetName + &quot;'&quot;);</span>
+			}
+<span class="fc" id="L542">			Object target = this.beanFactory.getBean(this.targetName);</span>
+<span class="fc bfc" id="L543" title="All 2 branches covered.">			return (target instanceof TargetSource targetSource ? targetSource : new SingletonTargetSource(target));</span>
+		}
+	}
+
+	/**
+	 * Convert the following object sourced from calling getBean() on a name in the
+	 * interceptorNames array to an Advisor or TargetSource.
+	 */
+	private Advisor namedBeanToAdvisor(Object next) {
+		try {
+<span class="fc" id="L553">			return this.advisorAdapterRegistry.wrap(next);</span>
+		}
+<span class="fc" id="L555">		catch (UnknownAdviceTypeException ex) {</span>
+			// We expected this to be an Advisor or Advice,
+			// but it wasn't. This is a configuration error.
+<span class="fc" id="L558">			throw new AopConfigException(&quot;Unknown advisor type &quot; + next.getClass() +</span>
+					&quot;; can only include Advisor or Advice type beans in interceptorNames chain &quot; +
+					&quot;except for last entry which may also be target instance or TargetSource&quot;, ex);
+		}
+	}
+
+	/**
+	 * Blow away and recache singleton on an advice change.
+	 */
+	@Override
+	protected void adviceChanged() {
+<span class="fc" id="L569">		super.adviceChanged();</span>
+<span class="fc bfc" id="L570" title="All 2 branches covered.">		if (this.singleton) {</span>
+<span class="fc" id="L571">			logger.debug(&quot;Advice has changed; re-caching singleton instance&quot;);</span>
+<span class="fc" id="L572">			synchronized (this) {</span>
+<span class="fc" id="L573">				this.singletonInstance = null;</span>
+<span class="fc" id="L574">			}</span>
+		}
+<span class="fc" id="L576">	}</span>
+
+
+	//---------------------------------------------------------------------
+	// Serialization support
+	//---------------------------------------------------------------------
+
+	private void readObject(ObjectInputStream ois) throws IOException, ClassNotFoundException {
+		// Rely on default serialization; just initialize state after deserialization.
+<span class="fc" id="L585">		ois.defaultReadObject();</span>
+
+		// Initialize transient fields.
+<span class="fc" id="L588">		this.proxyClassLoader = ClassUtils.getDefaultClassLoader();</span>
+<span class="fc" id="L589">	}</span>
+
+
+	/**
+	 * Used in the interceptor chain where we need to replace a bean with a prototype
+	 * on creating a proxy.
+	 */
+	private static class PrototypePlaceholderAdvisor implements Advisor, Serializable {
+
+		private final String beanName;
+
+		private final String message;
+
+<span class="fc" id="L602">		public PrototypePlaceholderAdvisor(String beanName) {</span>
+<span class="fc" id="L603">			this.beanName = beanName;</span>
+<span class="fc" id="L604">			this.message = &quot;Placeholder for prototype Advisor/Advice with bean name '&quot; + beanName + &quot;'&quot;;</span>
+<span class="fc" id="L605">		}</span>
+
+		public String getBeanName() {
+<span class="fc" id="L608">			return this.beanName;</span>
+		}
+
+		@Override
+		public Advice getAdvice() {
+<span class="nc" id="L613">			throw new UnsupportedOperationException(&quot;Cannot invoke methods: &quot; + this.message);</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L618">			return this.message;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

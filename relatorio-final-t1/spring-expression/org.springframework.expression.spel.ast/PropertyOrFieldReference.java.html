@@ -1,0 +1,438 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>PropertyOrFieldReference.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-expression</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.ast</a> &gt; <span class="el_source">PropertyOrFieldReference.java</span></div><h1>PropertyOrFieldReference.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.ast;
+
+import java.lang.reflect.InvocationTargetException;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.function.Supplier;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.asm.Label;
+import org.springframework.asm.MethodVisitor;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.expression.AccessException;
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.EvaluationException;
+import org.springframework.expression.PropertyAccessor;
+import org.springframework.expression.TypedValue;
+import org.springframework.expression.spel.CodeFlow;
+import org.springframework.expression.spel.CompilablePropertyAccessor;
+import org.springframework.expression.spel.ExpressionState;
+import org.springframework.expression.spel.SpelEvaluationException;
+import org.springframework.expression.spel.SpelMessage;
+import org.springframework.expression.spel.support.ReflectivePropertyAccessor;
+import org.springframework.util.Assert;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * Represents a simple public property or field reference.
+ *
+ * &lt;h3&gt;Null-safe Navigation&lt;/h3&gt;
+ *
+ * &lt;p&gt;Null-safe navigation is supported via the {@code '?.'} operator. For example,
+ * {@code 'user?.name'} will evaluate to {@code null} if {@code user} is {@code null}
+ * and will otherwise evaluate to the name of the user. As of Spring Framework 7.0,
+ * null-safe navigation also applies when accessing a property or field on an
+ * {@link Optional} target. For example, if {@code user} is of type
+ * {@code Optional&lt;User&gt;}, the expression {@code 'user?.name'} will evaluate to
+ * {@code null} if {@code user} is {@code null} or {@link Optional#isEmpty() empty}
+ * and will otherwise evaluate to the name of the user, effectively
+ * {@code user.get().getName()} or {@code user.get().name}.
+ *
+ * @author Andy Clement
+ * @author Juergen Hoeller
+ * @author Clark Duplichien
+ * @author Sam Brannen
+ * @since 3.0
+ */
+public class PropertyOrFieldReference extends SpelNodeImpl {
+
+	private final boolean nullSafe;
+
+	private final String name;
+
+	private @Nullable String originalPrimitiveExitTypeDescriptor;
+
+	private volatile @Nullable PropertyAccessor cachedReadAccessor;
+
+	private volatile @Nullable PropertyAccessor cachedWriteAccessor;
+
+
+	public PropertyOrFieldReference(boolean nullSafe, String propertyOrFieldName, int startPos, int endPos) {
+<span class="fc" id="L81">		super(startPos, endPos);</span>
+<span class="fc" id="L82">		this.nullSafe = nullSafe;</span>
+<span class="fc" id="L83">		this.name = propertyOrFieldName;</span>
+<span class="fc" id="L84">	}</span>
+
+
+	/**
+	 * Does this node represent a null-safe property or field reference?
+	 */
+	@Override
+	public boolean isNullSafe() {
+<span class="fc" id="L92">		return this.nullSafe;</span>
+	}
+
+	/**
+	 * Get the name of the referenced property or field.
+	 */
+	public String getName() {
+<span class="fc" id="L99">		return this.name;</span>
+	}
+
+
+	@Override
+	public ValueRef getValueRef(ExpressionState state) throws EvaluationException {
+<span class="fc" id="L105">		return new AccessorValueRef(this, state.getActiveContextObject(), state.getEvaluationContext(),</span>
+<span class="fc" id="L106">				state.getConfiguration().isAutoGrowNullReferences());</span>
+	}
+
+	@Override
+	public TypedValue getValueInternal(ExpressionState state) throws EvaluationException {
+<span class="fc" id="L111">		TypedValue tv = getValueInternal(state.getActiveContextObject(), state.getEvaluationContext(),</span>
+<span class="fc" id="L112">				state.getConfiguration().isAutoGrowNullReferences());</span>
+<span class="fc" id="L113">		PropertyAccessor accessorToUse = this.cachedReadAccessor;</span>
+<span class="fc bfc" id="L114" title="All 2 branches covered.">		if (accessorToUse instanceof CompilablePropertyAccessor compilablePropertyAccessor) {</span>
+<span class="fc" id="L115">			setExitTypeDescriptor(CodeFlow.toDescriptor(compilablePropertyAccessor.getPropertyType()));</span>
+		}
+<span class="fc" id="L117">		return tv;</span>
+	}
+
+	private TypedValue getValueInternal(TypedValue contextObject, EvaluationContext evalContext,
+			boolean isAutoGrowNullReferences) throws EvaluationException {
+
+<span class="fc" id="L123">		TypedValue result = readProperty(contextObject, evalContext, this.name);</span>
+
+		// Dynamically create the objects if the user has requested that optional behavior
+<span class="fc bfc" id="L126" title="All 4 branches covered.">		if (result.getValue() == null &amp;&amp; isAutoGrowNullReferences &amp;&amp;</span>
+<span class="fc bfc" id="L127" title="All 2 branches covered.">				nextChildIs(Indexer.class, PropertyOrFieldReference.class)) {</span>
+<span class="fc" id="L128">			TypeDescriptor resultDescriptor = result.getTypeDescriptor();</span>
+<span class="pc bpc" id="L129" title="1 of 2 branches missed.">			Assert.state(resultDescriptor != null, &quot;No result type&quot;);</span>
+			// Create a new collection or map ready for the indexer
+<span class="fc bfc" id="L131" title="All 2 branches covered.">			if (List.class == resultDescriptor.getType()) {</span>
+<span class="pc bpc" id="L132" title="1 of 2 branches missed.">				if (isWritableProperty(this.name, contextObject, evalContext)) {</span>
+<span class="fc" id="L133">					List&lt;?&gt; newList = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L134">					writeProperty(contextObject, evalContext, this.name, newList);</span>
+<span class="fc" id="L135">					result = readProperty(contextObject, evalContext, this.name);</span>
+<span class="fc" id="L136">				}</span>
+			}
+<span class="fc bfc" id="L138" title="All 2 branches covered.">			else if (Map.class == resultDescriptor.getType()) {</span>
+<span class="fc bfc" id="L139" title="All 2 branches covered.">				if (isWritableProperty(this.name,contextObject, evalContext)) {</span>
+<span class="fc" id="L140">					Map&lt;?,?&gt; newMap = new HashMap&lt;&gt;();</span>
+<span class="fc" id="L141">					writeProperty(contextObject, evalContext, this.name, newMap);</span>
+<span class="fc" id="L142">					result = readProperty(contextObject, evalContext, this.name);</span>
+<span class="fc" id="L143">				}</span>
+			}
+			else {
+				// 'simple' object
+				try {
+<span class="fc bfc" id="L148" title="All 2 branches covered.">					if (isWritableProperty(this.name,contextObject, evalContext)) {</span>
+<span class="fc" id="L149">						Class&lt;?&gt; clazz = resultDescriptor.getType();</span>
+<span class="fc" id="L150">						Object newObject = ReflectionUtils.accessibleConstructor(clazz).newInstance();</span>
+<span class="fc" id="L151">						writeProperty(contextObject, evalContext, this.name, newObject);</span>
+<span class="fc" id="L152">						result = readProperty(contextObject, evalContext, this.name);</span>
+					}
+				}
+<span class="nc" id="L155">				catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L156">					throw new SpelEvaluationException(getStartPosition(), ex.getTargetException(),</span>
+<span class="nc" id="L157">							SpelMessage.UNABLE_TO_DYNAMICALLY_CREATE_OBJECT, resultDescriptor.getType());</span>
+				}
+<span class="nc" id="L159">				catch (Throwable ex) {</span>
+<span class="nc" id="L160">					throw new SpelEvaluationException(getStartPosition(), ex,</span>
+<span class="nc" id="L161">							SpelMessage.UNABLE_TO_DYNAMICALLY_CREATE_OBJECT, resultDescriptor.getType());</span>
+<span class="fc" id="L162">				}</span>
+			}
+		}
+<span class="fc" id="L165">		return result;</span>
+	}
+
+	@Override
+	public TypedValue setValueInternal(ExpressionState state, Supplier&lt;TypedValue&gt; valueSupplier)
+			throws EvaluationException {
+
+<span class="fc" id="L172">		TypedValue typedValue = valueSupplier.get();</span>
+<span class="fc" id="L173">		writeProperty(state.getActiveContextObject(), state.getEvaluationContext(), this.name, typedValue.getValue());</span>
+<span class="fc" id="L174">		return typedValue;</span>
+	}
+
+	@Override
+	public boolean isWritable(ExpressionState state) throws EvaluationException {
+<span class="fc" id="L179">		return isWritableProperty(this.name, state.getActiveContextObject(), state.getEvaluationContext());</span>
+	}
+
+	@Override
+	public String toStringAST() {
+<span class="fc" id="L184">		return this.name;</span>
+	}
+
+	/**
+	 * Attempt to read the named property from the current context object.
+	 * @return the value of the property
+	 * @throws EvaluationException if any problem accessing the property, or if it cannot be found
+	 */
+	private TypedValue readProperty(TypedValue contextObject, EvaluationContext evalContext, String name)
+			throws EvaluationException {
+
+<span class="fc" id="L195">		final Object originalTarget = contextObject.getValue();</span>
+<span class="fc" id="L196">		Object target = originalTarget;</span>
+<span class="fc" id="L197">		Optional&lt;?&gt; fallbackOptionalTarget = null;</span>
+<span class="fc" id="L198">		boolean isEmptyOptional = false;</span>
+
+<span class="fc bfc" id="L200" title="All 2 branches covered.">		if (isNullSafe()) {</span>
+<span class="fc bfc" id="L201" title="All 2 branches covered.">			if (target == null) {</span>
+<span class="fc" id="L202">				return TypedValue.NULL;</span>
+			}
+<span class="fc bfc" id="L204" title="All 2 branches covered.">			if (target instanceof Optional&lt;?&gt; optional) {</span>
+<span class="fc bfc" id="L205" title="All 2 branches covered.">				if (optional.isPresent()) {</span>
+<span class="fc" id="L206">					target = optional.get();</span>
+<span class="fc" id="L207">					fallbackOptionalTarget = optional;</span>
+				}
+				else {
+<span class="fc" id="L210">					isEmptyOptional = true;</span>
+				}
+			}
+		}
+
+<span class="fc" id="L215">		PropertyAccessor accessorToUse = this.cachedReadAccessor;</span>
+<span class="fc bfc" id="L216" title="All 2 branches covered.">		if (accessorToUse != null) {</span>
+<span class="fc bfc" id="L217" title="All 2 branches covered.">			if (evalContext.getPropertyAccessors().contains(accessorToUse)) {</span>
+				try {
+<span class="fc" id="L219">					return accessorToUse.read(evalContext, target, name);</span>
+				}
+<span class="nc" id="L221">				catch (Exception ex) {</span>
+					// This is OK - it may have gone stale due to a class change,
+					// let's try to get a new one and call it before giving up...
+				}
+			}
+<span class="fc" id="L226">			this.cachedReadAccessor = null;</span>
+		}
+
+<span class="fc" id="L229">		List&lt;PropertyAccessor&gt; accessorsToTry =</span>
+<span class="fc" id="L230">				AccessorUtils.getAccessorsToTry(target, evalContext.getPropertyAccessors());</span>
+		// Go through the accessors that may be able to resolve it. If they are a cacheable accessor then
+		// get the accessor and use it. If they are not cacheable but report they can read the property
+		// then ask them to read it.
+		try {
+<span class="fc bfc" id="L235" title="All 2 branches covered.">			for (PropertyAccessor accessor : accessorsToTry) {</span>
+				// First, attempt to find the property on the target object.
+<span class="fc bfc" id="L237" title="All 2 branches covered.">				if (accessor.canRead(evalContext, target, name)) {</span>
+<span class="fc bfc" id="L238" title="All 2 branches covered.">					if (accessor instanceof ReflectivePropertyAccessor reflectivePropertyAccessor) {</span>
+<span class="fc" id="L239">						accessor = reflectivePropertyAccessor.createOptimalAccessor(</span>
+								evalContext, target, name);
+					}
+<span class="fc" id="L242">					this.cachedReadAccessor = accessor;</span>
+<span class="fc" id="L243">					return accessor.read(evalContext, target, name);</span>
+				}
+				// Second, attempt to find the property on the original Optional instance.
+<span class="pc bpc" id="L246" title="1 of 4 branches missed.">				else if (fallbackOptionalTarget != null &amp;&amp; accessor.canRead(evalContext, fallbackOptionalTarget, name)) {</span>
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">					if (accessor instanceof ReflectivePropertyAccessor reflectivePropertyAccessor) {</span>
+<span class="fc" id="L248">						accessor = reflectivePropertyAccessor.createOptimalAccessor(</span>
+								evalContext, fallbackOptionalTarget, name);
+					}
+<span class="fc" id="L251">					this.cachedReadAccessor = accessor;</span>
+<span class="fc" id="L252">					return accessor.read(evalContext, fallbackOptionalTarget, name);</span>
+				}
+<span class="fc" id="L254">			}</span>
+		}
+<span class="nc" id="L256">		catch (Exception ex) {</span>
+<span class="nc" id="L257">			throw new SpelEvaluationException(ex, SpelMessage.EXCEPTION_DURING_PROPERTY_READ, name, ex.getMessage());</span>
+<span class="fc" id="L258">		}</span>
+
+		// If we got this far, that means we failed to find an accessor for both the
+		// target and the fallback target. So, we return NULL if the original target
+		// is a null-safe empty Optional.
+<span class="fc bfc" id="L263" title="All 2 branches covered.">		if (isEmptyOptional) {</span>
+<span class="fc" id="L264">			return TypedValue.NULL;</span>
+		}
+
+<span class="fc bfc" id="L267" title="All 2 branches covered.">		if (originalTarget == null) {</span>
+<span class="fc" id="L268">			throw new SpelEvaluationException(SpelMessage.PROPERTY_OR_FIELD_NOT_READABLE_ON_NULL, name);</span>
+		}
+		else {
+<span class="fc" id="L271">			throw new SpelEvaluationException(getStartPosition(), SpelMessage.PROPERTY_OR_FIELD_NOT_READABLE, name,</span>
+<span class="fc" id="L272">					FormatHelper.formatClassNameForMessage(getObjectClass(originalTarget)));</span>
+		}
+	}
+
+	private void writeProperty(
+			TypedValue contextObject, EvaluationContext evalContext, String name, @Nullable Object newValue)
+			throws EvaluationException {
+
+<span class="fc" id="L280">		Object target = contextObject.getValue();</span>
+<span class="fc bfc" id="L281" title="All 2 branches covered.">		if (target == null) {</span>
+<span class="pc bpc" id="L282" title="1 of 2 branches missed.">			if (isNullSafe()) {</span>
+<span class="nc" id="L283">				return;</span>
+			}
+<span class="fc" id="L285">			throw new SpelEvaluationException(</span>
+<span class="fc" id="L286">					getStartPosition(), SpelMessage.PROPERTY_OR_FIELD_NOT_WRITABLE_ON_NULL, name);</span>
+		}
+
+<span class="fc" id="L289">		PropertyAccessor accessorToUse = this.cachedWriteAccessor;</span>
+<span class="fc bfc" id="L290" title="All 2 branches covered.">		if (accessorToUse != null) {</span>
+<span class="pc bpc" id="L291" title="1 of 2 branches missed.">			if (evalContext.getPropertyAccessors().contains(accessorToUse)) {</span>
+				try {
+<span class="fc" id="L293">					accessorToUse.write(evalContext, target, name, newValue);</span>
+<span class="fc" id="L294">					return;</span>
+				}
+<span class="fc" id="L296">				catch (Exception ex) {</span>
+					// This is OK - it may have gone stale due to a class change,
+					// let's try to get a new one and call it before giving up...
+				}
+			}
+<span class="fc" id="L301">			this.cachedWriteAccessor = null;</span>
+		}
+
+<span class="fc" id="L304">		List&lt;PropertyAccessor&gt; accessorsToTry =</span>
+<span class="fc" id="L305">				AccessorUtils.getAccessorsToTry(target, evalContext.getPropertyAccessors());</span>
+		try {
+<span class="fc bfc" id="L307" title="All 2 branches covered.">			for (PropertyAccessor accessor : accessorsToTry) {</span>
+<span class="fc bfc" id="L308" title="All 2 branches covered.">				if (accessor.canWrite(evalContext, target, name)) {</span>
+<span class="fc" id="L309">					this.cachedWriteAccessor = accessor;</span>
+<span class="fc" id="L310">					accessor.write(evalContext, target, name, newValue);</span>
+<span class="fc" id="L311">					return;</span>
+				}
+<span class="fc" id="L313">			}</span>
+		}
+<span class="fc" id="L315">		catch (AccessException ex) {</span>
+<span class="fc" id="L316">			throw new SpelEvaluationException(getStartPosition(), ex, SpelMessage.EXCEPTION_DURING_PROPERTY_WRITE,</span>
+<span class="fc" id="L317">					name, ex.getMessage());</span>
+<span class="fc" id="L318">		}</span>
+
+<span class="fc" id="L320">		throw new SpelEvaluationException(getStartPosition(), SpelMessage.PROPERTY_OR_FIELD_NOT_WRITABLE, name,</span>
+<span class="fc" id="L321">				FormatHelper.formatClassNameForMessage(getObjectClass(target)));</span>
+	}
+
+	public boolean isWritableProperty(String name, TypedValue contextObject, EvaluationContext evalContext)
+			throws EvaluationException {
+
+<span class="fc" id="L327">		Object target = contextObject.getValue();</span>
+<span class="fc bfc" id="L328" title="All 2 branches covered.">		if (target != null) {</span>
+<span class="fc" id="L329">			List&lt;PropertyAccessor&gt; accessorsToTry =</span>
+<span class="fc" id="L330">					AccessorUtils.getAccessorsToTry(target, evalContext.getPropertyAccessors());</span>
+<span class="fc bfc" id="L331" title="All 2 branches covered.">			for (PropertyAccessor accessor : accessorsToTry) {</span>
+				try {
+<span class="fc bfc" id="L333" title="All 2 branches covered.">					if (accessor.canWrite(evalContext, target, name)) {</span>
+<span class="fc" id="L334">						return true;</span>
+					}
+				}
+<span class="nc" id="L337">				catch (AccessException ex) {</span>
+					// let others try
+<span class="fc" id="L339">				}</span>
+<span class="fc" id="L340">			}</span>
+		}
+<span class="fc" id="L342">		return false;</span>
+	}
+
+	@Override
+	public boolean isCompilable() {
+<span class="fc bfc" id="L347" title="All 2 branches covered.">		return (this.cachedReadAccessor instanceof CompilablePropertyAccessor compilablePropertyAccessor &amp;&amp;</span>
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">				compilablePropertyAccessor.isCompilable());</span>
+	}
+
+	@Override
+	public void generateCode(MethodVisitor mv, CodeFlow cf) {
+<span class="fc" id="L353">		PropertyAccessor accessorToUse = this.cachedReadAccessor;</span>
+<span class="fc bfc" id="L354" title="All 2 branches covered.">		if (!(accessorToUse instanceof CompilablePropertyAccessor compilablePropertyAccessor)) {</span>
+<span class="fc" id="L355">			throw new IllegalStateException(&quot;Property accessor is not compilable: &quot; + accessorToUse);</span>
+		}
+
+<span class="fc" id="L358">		Label skipIfNull = null;</span>
+<span class="fc bfc" id="L359" title="All 2 branches covered.">		if (isNullSafe()) {</span>
+<span class="fc" id="L360">			mv.visitInsn(DUP);</span>
+<span class="fc" id="L361">			skipIfNull = new Label();</span>
+<span class="fc" id="L362">			Label continueLabel = new Label();</span>
+<span class="fc" id="L363">			mv.visitJumpInsn(IFNONNULL, continueLabel);</span>
+<span class="fc" id="L364">			CodeFlow.insertCheckCast(mv, this.exitTypeDescriptor);</span>
+<span class="fc" id="L365">			mv.visitJumpInsn(GOTO, skipIfNull);</span>
+<span class="fc" id="L366">			mv.visitLabel(continueLabel);</span>
+		}
+
+<span class="fc" id="L369">		compilablePropertyAccessor.generateCode(this.name, mv, cf);</span>
+<span class="fc" id="L370">		cf.pushDescriptor(this.exitTypeDescriptor);</span>
+
+<span class="fc bfc" id="L372" title="All 2 branches covered.">		if (this.originalPrimitiveExitTypeDescriptor != null) {</span>
+			// The output of the accessor is a primitive but from the block above it might be null,
+			// so to have a common stack element type at skipIfNull target it is necessary
+			// to box the primitive
+<span class="fc" id="L376">			CodeFlow.insertBoxIfNecessary(mv, this.originalPrimitiveExitTypeDescriptor);</span>
+		}
+<span class="fc bfc" id="L378" title="All 2 branches covered.">		if (skipIfNull != null) {</span>
+<span class="fc" id="L379">			mv.visitLabel(skipIfNull);</span>
+		}
+<span class="fc" id="L381">	}</span>
+
+	void setExitTypeDescriptor(String descriptor) {
+		// If this property or field access would return a primitive - and yet
+		// it is also marked null safe - then the exit type descriptor must be
+		// promoted to the box type to allow a null value to be passed on
+<span class="fc bfc" id="L387" title="All 4 branches covered.">		if (isNullSafe() &amp;&amp; CodeFlow.isPrimitive(descriptor)) {</span>
+<span class="fc" id="L388">			this.originalPrimitiveExitTypeDescriptor = descriptor;</span>
+<span class="fc" id="L389">			this.exitTypeDescriptor = CodeFlow.toBoxedDescriptor(descriptor);</span>
+		}
+		else {
+<span class="fc" id="L392">			this.exitTypeDescriptor = descriptor;</span>
+		}
+<span class="fc" id="L394">	}</span>
+
+
+	private static class AccessorValueRef implements ValueRef {
+
+		private final PropertyOrFieldReference ref;
+
+		private final TypedValue contextObject;
+
+		private final EvaluationContext evalContext;
+
+		private final boolean autoGrowNullReferences;
+
+		public AccessorValueRef(PropertyOrFieldReference propertyOrFieldReference, TypedValue activeContextObject,
+<span class="fc" id="L408">				EvaluationContext evalContext, boolean autoGrowNullReferences) {</span>
+
+<span class="fc" id="L410">			this.ref = propertyOrFieldReference;</span>
+<span class="fc" id="L411">			this.contextObject = activeContextObject;</span>
+<span class="fc" id="L412">			this.evalContext = evalContext;</span>
+<span class="fc" id="L413">			this.autoGrowNullReferences = autoGrowNullReferences;</span>
+<span class="fc" id="L414">		}</span>
+
+		@Override
+		public TypedValue getValue() {
+<span class="fc" id="L418">			TypedValue value =</span>
+<span class="fc" id="L419">					this.ref.getValueInternal(this.contextObject, this.evalContext, this.autoGrowNullReferences);</span>
+<span class="fc bfc" id="L420" title="All 2 branches covered.">			if (this.ref.cachedReadAccessor instanceof CompilablePropertyAccessor compilablePropertyAccessor) {</span>
+<span class="fc" id="L421">				this.ref.setExitTypeDescriptor(CodeFlow.toDescriptor(compilablePropertyAccessor.getPropertyType()));</span>
+			}
+<span class="fc" id="L423">			return value;</span>
+		}
+
+		@Override
+		public void setValue(@Nullable Object newValue) {
+<span class="fc" id="L428">			this.ref.writeProperty(this.contextObject, this.evalContext, this.ref.name, newValue);</span>
+<span class="fc" id="L429">		}</span>
+
+		@Override
+		public boolean isWritable() {
+<span class="fc" id="L433">			return this.ref.isWritableProperty(this.ref.name, this.contextObject, this.evalContext);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

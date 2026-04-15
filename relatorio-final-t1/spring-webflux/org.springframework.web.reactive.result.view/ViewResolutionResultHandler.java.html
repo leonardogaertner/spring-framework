@@ -1,0 +1,608 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>ViewResolutionResultHandler.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.result.view</a> &gt; <span class="el_source">ViewResolutionResultHandler.java</span></div><h1>ViewResolutionResultHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.result.view;
+
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Optional;
+
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.core.Conventions;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.Ordered;
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatusCode;
+import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.http.server.reactive.ServerHttpResponseDecorator;
+import org.springframework.ui.Model;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.ModelAttribute;
+import org.springframework.web.reactive.BindingContext;
+import org.springframework.web.reactive.HandlerResult;
+import org.springframework.web.reactive.HandlerResultHandler;
+import org.springframework.web.reactive.accept.RequestedContentTypeResolver;
+import org.springframework.web.reactive.result.HandlerResultHandlerSupport;
+import org.springframework.web.server.NotAcceptableStatusException;
+import org.springframework.web.server.ServerWebExchange;
+
+/**
+ * {@code HandlerResultHandler} that encapsulates the view resolution algorithm
+ * supporting the following return types:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@link Void}, {@code void}, or no value -- default view name&lt;/li&gt;
+ * &lt;li&gt;{@link String} -- view name unless {@code @ModelAttribute}-annotated
+ * &lt;li&gt;{@link View} -- View to render with
+ * &lt;li&gt;{@link Model} -- attributes to add to the model
+ * &lt;li&gt;{@link Map} -- attributes to add to the model
+ * &lt;li&gt;{@link Rendering} -- use case driven API for view resolution&lt;/li&gt;
+ * &lt;li&gt;{@link ModelAttribute @ModelAttribute} -- attribute for the model
+ * &lt;li&gt;Non-simple value -- attribute for the model
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;A String-based view name is resolved through the configured
+ * {@link ViewResolver} instances into a {@link View} to use for rendering.
+ * If a view is left unspecified (for example, by returning {@code null} or a
+ * model-related return value), a default view name is selected.
+ *
+ * &lt;p&gt;By default this resolver is ordered at {@link Ordered#LOWEST_PRECEDENCE}
+ * and generally needs to be late in the order since it interprets any String
+ * return value as a view name or any non-simple value type as a model attribute
+ * while other result handlers may interpret the same otherwise based on the
+ * presence of annotations, for example, for {@code @ResponseBody}.
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ */
+public class ViewResolutionResultHandler extends HandlerResultHandlerSupport implements HandlerResultHandler, Ordered {
+
+<span class="fc" id="L96">	private static final Object NO_VALUE = new Object();</span>
+
+<span class="fc" id="L98">	private static final Mono&lt;Object&gt; NO_VALUE_MONO = Mono.just(NO_VALUE);</span>
+
+
+<span class="fc" id="L101">	private final List&lt;ViewResolver&gt; viewResolvers = new ArrayList&lt;&gt;(4);</span>
+
+<span class="fc" id="L103">	private final List&lt;View&gt; defaultViews = new ArrayList&lt;&gt;(4);</span>
+
+<span class="fc" id="L105">	private final SseStreamHandler sseHandler = new SseStreamHandler();</span>
+
+
+	/**
+	 * Basic constructor with a default {@link ReactiveAdapterRegistry}.
+	 * @param viewResolvers the resolver to use
+	 * @param contentTypeResolver to determine the requested content type
+	 */
+	public ViewResolutionResultHandler(List&lt;ViewResolver&gt; viewResolvers,
+			RequestedContentTypeResolver contentTypeResolver) {
+
+<span class="fc" id="L116">		this(viewResolvers, contentTypeResolver, ReactiveAdapterRegistry.getSharedInstance());</span>
+<span class="fc" id="L117">	}</span>
+
+	/**
+	 * Constructor with an {@link ReactiveAdapterRegistry} instance.
+	 * @param viewResolvers the view resolver to use
+	 * @param contentTypeResolver to determine the requested content type
+	 * @param registry for adaptation to reactive types
+	 */
+	public ViewResolutionResultHandler(List&lt;ViewResolver&gt; viewResolvers,
+			RequestedContentTypeResolver contentTypeResolver, ReactiveAdapterRegistry registry) {
+
+<span class="fc" id="L128">		super(contentTypeResolver, registry);</span>
+<span class="fc" id="L129">		this.viewResolvers.addAll(viewResolvers);</span>
+<span class="fc" id="L130">		AnnotationAwareOrderComparator.sort(this.viewResolvers);</span>
+<span class="fc" id="L131">	}</span>
+
+
+	/**
+	 * Return a read-only list of view resolvers.
+	 */
+	public List&lt;ViewResolver&gt; getViewResolvers() {
+<span class="fc" id="L138">		return Collections.unmodifiableList(this.viewResolvers);</span>
+	}
+
+	/**
+	 * Set the default views to consider always when resolving view names and
+	 * trying to satisfy the best matching content type.
+	 */
+	public void setDefaultViews(@Nullable List&lt;View&gt; defaultViews) {
+<span class="fc" id="L146">		this.defaultViews.clear();</span>
+<span class="pc bpc" id="L147" title="1 of 2 branches missed.">		if (defaultViews != null) {</span>
+<span class="fc" id="L148">			this.defaultViews.addAll(defaultViews);</span>
+		}
+<span class="fc" id="L150">	}</span>
+
+	/**
+	 * Return the configured default {@code View}'s.
+	 */
+	public List&lt;View&gt; getDefaultViews() {
+<span class="fc" id="L156">		return this.defaultViews;</span>
+	}
+
+
+	@Override
+	public boolean supports(HandlerResult result) {
+<span class="fc bfc" id="L162" title="All 2 branches covered.">		if (hasModelAnnotation(result.getReturnTypeSource())) {</span>
+<span class="fc" id="L163">			return true;</span>
+		}
+
+<span class="fc" id="L166">		ResolvableType returnType = result.getReturnType();</span>
+<span class="fc" id="L167">		Class&lt;?&gt; type = returnType.toClass();</span>
+
+<span class="fc" id="L169">		ReactiveAdapter adapter = getAdapter(result);</span>
+<span class="fc bfc" id="L170" title="All 2 branches covered.">		if (adapter != null) {</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">			if (adapter.isNoValue()) {</span>
+<span class="fc" id="L172">				return true;</span>
+			}
+
+<span class="fc" id="L175">			type = returnType.getGeneric().toClass();</span>
+<span class="fc" id="L176">			returnType = returnType.getNested(2);</span>
+
+<span class="fc bfc" id="L178" title="All 2 branches covered.">			if (adapter.isMultiValue()) {</span>
+<span class="pc bpc" id="L179" title="1 of 4 branches missed.">				return (Fragment.class.isAssignableFrom(type) || isSseFragmentStream(returnType));</span>
+			}
+		}
+
+<span class="fc bfc" id="L183" title="All 2 branches covered.">		return (CharSequence.class.isAssignableFrom(type) ||</span>
+<span class="fc bfc" id="L184" title="All 2 branches covered.">				Rendering.class.isAssignableFrom(type) ||</span>
+<span class="fc bfc" id="L185" title="All 2 branches covered.">				FragmentsRendering.class.isAssignableFrom(type) ||</span>
+<span class="fc bfc" id="L186" title="All 2 branches covered.">				Model.class.isAssignableFrom(type) ||</span>
+<span class="fc bfc" id="L187" title="All 2 branches covered.">				Map.class.isAssignableFrom(type) ||</span>
+<span class="fc bfc" id="L188" title="All 2 branches covered.">				View.class.isAssignableFrom(type) ||</span>
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">				isFragmentCollection(returnType.getNested(2)) ||</span>
+<span class="fc bfc" id="L190" title="All 2 branches covered.">				!BeanUtils.isSimpleProperty(type));</span>
+	}
+
+	private boolean hasModelAnnotation(MethodParameter parameter) {
+<span class="fc" id="L194">		return parameter.hasMethodAnnotation(ModelAttribute.class);</span>
+	}
+
+	private static boolean isFragmentCollection(ResolvableType returnType) {
+<span class="pc bpc" id="L198" title="1 of 2 branches missed.">		return (Collection.class.isAssignableFrom(returnType.resolve(Object.class)) &amp;&amp;</span>
+<span class="pc bnc" id="L199" title="All 2 branches missed.">				Fragment.class.equals(returnType.getNested(2).resolve()));</span>
+	}
+
+	private static boolean isSseFragmentStream(ResolvableType returnType) {
+<span class="fc bfc" id="L203" title="All 2 branches covered.">		return (ServerSentEvent.class.equals(returnType.resolve()) &amp;&amp;</span>
+<span class="pc bpc" id="L204" title="1 of 2 branches missed.">				Fragment.class.equals(returnType.getNested(2).resolve()));</span>
+	}
+
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public Mono&lt;Void&gt; handleResult(ServerWebExchange exchange, HandlerResult result) {
+		Mono&lt;Object&gt; valueMono;
+		ResolvableType valueType;
+<span class="fc" id="L212">		ReactiveAdapter adapter = getAdapter(result);</span>
+<span class="fc" id="L213">		BindingContext bindingContext = result.getBindingContext();</span>
+<span class="fc" id="L214">		Locale locale = LocaleContextHolder.getLocale(exchange.getLocaleContext());</span>
+
+<span class="fc bfc" id="L216" title="All 2 branches covered.">		if (adapter != null) {</span>
+<span class="fc bfc" id="L217" title="All 2 branches covered.">			if (adapter.isMultiValue()) {</span>
+<span class="fc bfc" id="L218" title="All 2 branches covered.">				if (isSseFragmentStream(result.getReturnType().getNested(2))) {</span>
+<span class="fc" id="L219">					return handleSseFragmentStream(exchange, result, adapter, locale, bindingContext);</span>
+				}
+
+<span class="pc bpc" id="L222" title="1 of 2 branches missed.">				valueMono = (result.getReturnValue() != null ?</span>
+<span class="fc" id="L223">						Mono.just(FragmentsRendering.fragmentsPublisher(adapter.toPublisher(result.getReturnValue())).build()) :</span>
+<span class="pc" id="L224">						Mono.empty());</span>
+
+<span class="fc" id="L226">				valueType = ResolvableType.forClass(FragmentsRendering.class);</span>
+			}
+			else {
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">				valueMono = (result.getReturnValue() != null ?</span>
+<span class="pc" id="L230">						Mono.from(adapter.toPublisher(result.getReturnValue())) : Mono.empty());</span>
+
+<span class="fc bfc" id="L232" title="All 2 branches covered.">				valueType = (adapter.isNoValue() ? ResolvableType.forClass(Void.class) :</span>
+<span class="fc" id="L233">						result.getReturnType().getGeneric());</span>
+			}
+		}
+		else {
+<span class="fc" id="L237">			valueMono = Mono.justOrEmpty(result.getReturnValue());</span>
+<span class="fc" id="L238">			valueType = result.getReturnType();</span>
+		}
+
+<span class="fc" id="L241">		return valueMono</span>
+<span class="pc bpc" id="L242" title="1 of 2 branches missed.">				.switchIfEmpty(exchange.isNotModified() ? Mono.empty() : NO_VALUE_MONO)</span>
+<span class="fc" id="L243">				.flatMap(returnValue -&gt; {</span>
+
+					Mono&lt;List&lt;View&gt;&gt; viewsMono;
+<span class="fc" id="L246">					Model model = result.getModel();</span>
+<span class="fc" id="L247">					MethodParameter parameter = result.getReturnTypeSource();</span>
+
+<span class="fc" id="L249">					Class&lt;?&gt; clazz = valueType.toClass();</span>
+<span class="pc bpc" id="L250" title="1 of 2 branches missed.">					if (clazz == Object.class) {</span>
+<span class="nc" id="L251">						clazz = returnValue.getClass();</span>
+					}
+
+<span class="fc bfc" id="L254" title="All 2 branches covered.">					if (Collection.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L255">						returnValue = FragmentsRendering.fragments((Collection&lt;Fragment&gt;) returnValue).build();</span>
+<span class="fc" id="L256">						clazz = FragmentsRendering.class;</span>
+					}
+
+<span class="pc bpc" id="L259" title="1 of 4 branches missed.">					if (returnValue == NO_VALUE || ClassUtils.isVoidType(clazz)) {</span>
+<span class="fc" id="L260">						viewsMono = resolveViews(getDefaultViewName(exchange), locale);</span>
+					}
+<span class="fc bfc" id="L262" title="All 4 branches covered.">					else if (CharSequence.class.isAssignableFrom(clazz) &amp;&amp; !hasModelAnnotation(parameter)) {</span>
+<span class="fc" id="L263">						viewsMono = resolveViews(returnValue.toString(), locale);</span>
+					}
+<span class="fc bfc" id="L265" title="All 2 branches covered.">					else if (Rendering.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L266">						Rendering render = (Rendering) returnValue;</span>
+<span class="fc" id="L267">						HttpStatusCode status = render.status();</span>
+<span class="fc bfc" id="L268" title="All 2 branches covered.">						if (status != null) {</span>
+<span class="fc" id="L269">							exchange.getResponse().setStatusCode(status);</span>
+						}
+<span class="fc" id="L271">						exchange.getResponse().getHeaders().putAll(render.headers());</span>
+<span class="fc" id="L272">						model.addAllAttributes(render.modelAttributes());</span>
+<span class="fc" id="L273">						Object view = render.view();</span>
+<span class="pc bpc" id="L274" title="1 of 2 branches missed.">						if (view == null) {</span>
+<span class="nc" id="L275">							view = getDefaultViewName(exchange);</span>
+						}
+<span class="fc bfc" id="L277" title="All 2 branches covered.">						viewsMono = (view instanceof String viewName ? resolveViews(viewName, locale) :</span>
+<span class="fc" id="L278">								Mono.just(Collections.singletonList((View) view)));</span>
+<span class="fc" id="L279">					}</span>
+<span class="fc bfc" id="L280" title="All 2 branches covered.">					else if (FragmentsRendering.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L281">						ServerHttpResponse response = exchange.getResponse();</span>
+<span class="fc" id="L282">						FragmentsRendering render = (FragmentsRendering) returnValue;</span>
+<span class="fc" id="L283">						HttpStatusCode status = render.status();</span>
+<span class="pc bpc" id="L284" title="1 of 2 branches missed.">						if (status != null) {</span>
+<span class="nc" id="L285">							response.setStatusCode(status);</span>
+						}
+<span class="fc" id="L287">						response.getHeaders().putAll(render.headers());</span>
+<span class="fc" id="L288">						bindingContext.updateModel(exchange);</span>
+
+						StreamHandler streamHandler =
+<span class="fc bfc" id="L291" title="All 2 branches covered.">								(this.sseHandler.supports(exchange.getRequest()) ? this.sseHandler : null);</span>
+
+<span class="fc bfc" id="L293" title="All 2 branches covered.">						if (streamHandler != null) {</span>
+<span class="fc" id="L294">							streamHandler.updateResponse(exchange);</span>
+						}
+
+<span class="fc" id="L297">						Flux&lt;Flux&lt;DataBuffer&gt;&gt; renderFlux = render.fragments()</span>
+<span class="fc" id="L298">								.concatMap(fragment -&gt; renderFragment(fragment, null, streamHandler, locale, bindingContext, exchange))</span>
+<span class="fc" id="L299">								.doOnDiscard(DataBuffer.class, DataBufferUtils::release);</span>
+
+<span class="fc" id="L301">						return response.writeAndFlushWith(renderFlux);</span>
+					}
+<span class="fc bfc" id="L303" title="All 2 branches covered.">					else if (Model.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L304">						model.addAllAttributes(((Model) returnValue).asMap());</span>
+<span class="fc" id="L305">						viewsMono = resolveViews(getDefaultViewName(exchange), locale);</span>
+					}
+<span class="fc bfc" id="L307" title="All 4 branches covered.">					else if (Map.class.isAssignableFrom(clazz) &amp;&amp; !hasModelAnnotation(parameter)) {</span>
+<span class="fc" id="L308">						model.addAllAttributes((Map&lt;String, ?&gt;) returnValue);</span>
+<span class="fc" id="L309">						viewsMono = resolveViews(getDefaultViewName(exchange), locale);</span>
+					}
+<span class="fc bfc" id="L311" title="All 2 branches covered.">					else if (View.class.isAssignableFrom(clazz)) {</span>
+<span class="fc" id="L312">						viewsMono = Mono.just(Collections.singletonList((View) returnValue));</span>
+					}
+					else {
+<span class="fc" id="L315">						String name = getNameForReturnValue(parameter);</span>
+<span class="fc" id="L316">						model.addAttribute(name, returnValue);</span>
+<span class="fc" id="L317">						viewsMono = resolveViews(getDefaultViewName(exchange), locale);</span>
+					}
+<span class="fc" id="L319">					bindingContext.updateModel(exchange);</span>
+<span class="fc" id="L320">					return viewsMono.flatMap(views -&gt; render(views, model.asMap(), null, bindingContext, exchange));</span>
+				});
+	}
+
+	/**
+	 * Select a default view name when a controller did not specify it.
+	 * Use the request path the leading and trailing slash stripped.
+	 */
+	private String getDefaultViewName(ServerWebExchange exchange) {
+<span class="fc" id="L329">		String path = exchange.getRequest().getPath().pathWithinApplication().value();</span>
+<span class="pc bpc" id="L330" title="1 of 2 branches missed.">		if (path.startsWith(&quot;/&quot;)) {</span>
+<span class="fc" id="L331">			path = path.substring(1);</span>
+		}
+<span class="fc bfc" id="L333" title="All 2 branches covered.">		if (path.endsWith(&quot;/&quot;)) {</span>
+<span class="fc" id="L334">			path = path.substring(0, path.length() - 1);</span>
+		}
+<span class="fc" id="L336">		return StringUtils.stripFilenameExtension(path);</span>
+	}
+
+	private Mono&lt;List&lt;View&gt;&gt; resolveViews(String viewName, Locale locale) {
+<span class="fc" id="L340">		return Flux.fromIterable(getViewResolvers())</span>
+<span class="fc" id="L341">				.concatMap(resolver -&gt; resolver.resolveViewName(viewName, locale))</span>
+<span class="fc" id="L342">				.collectList()</span>
+<span class="fc" id="L343">				.map(views -&gt; {</span>
+<span class="fc bfc" id="L344" title="All 2 branches covered.">					if (views.isEmpty()) {</span>
+<span class="fc" id="L345">						throw new IllegalStateException(</span>
+								&quot;Could not resolve view with name '&quot; + viewName + &quot;'.&quot;);
+					}
+<span class="fc" id="L348">					views.addAll(getDefaultViews());</span>
+<span class="fc" id="L349">					return views;</span>
+				});
+	}
+
+	private Mono&lt;Void&gt; handleSseFragmentStream(
+			ServerWebExchange exchange, HandlerResult result, ReactiveAdapter adapter, Locale locale,
+			BindingContext bindingContext) {
+
+<span class="fc" id="L357">		this.sseHandler.updateResponse(exchange);</span>
+
+<span class="fc" id="L359">		Flux&lt;ServerSentEvent&lt;Fragment&gt;&gt; eventFlux =</span>
+<span class="fc" id="L360">				Flux.from(adapter.toPublisher(result.getReturnValue()));</span>
+
+<span class="fc" id="L362">		Flux&lt;Flux&lt;DataBuffer&gt;&gt; dataBufferFlux = eventFlux</span>
+<span class="fc" id="L363">				.concatMap(event -&gt; renderFragment(event.data(), event, this.sseHandler, locale, bindingContext, exchange))</span>
+<span class="fc" id="L364">				.doOnDiscard(DataBuffer.class, DataBufferUtils::release);</span>
+
+<span class="fc" id="L366">		return exchange.getResponse().writeAndFlushWith(dataBufferFlux);</span>
+	}
+
+	private Mono&lt;Flux&lt;DataBuffer&gt;&gt; renderFragment(
+			@Nullable Fragment fragment, @Nullable Object streamingHints, @Nullable StreamHandler streamHandler,
+			Locale locale, BindingContext bindingContext, ServerWebExchange exchange) {
+
+<span class="pc bpc" id="L373" title="1 of 2 branches missed.">		if (fragment == null) {</span>
+<span class="nc" id="L374">			return Mono.empty();</span>
+		}
+
+		// Merge attributes from top-level model
+<span class="fc" id="L378">		fragment.mergeAttributes(bindingContext.getModel());</span>
+
+<span class="fc" id="L380">		BodySavingResponse response = new BodySavingResponse(exchange.getResponse());</span>
+<span class="fc" id="L381">		ServerWebExchange mutatedExchange = exchange.mutate().response(response).build();</span>
+
+<span class="pc bpc" id="L383" title="1 of 2 branches missed.">		Mono&lt;List&lt;View&gt;&gt; selectedViews = (fragment.isResolved() ?</span>
+<span class="nc" id="L384">				Mono.just(List.of(fragment.view())) :</span>
+<span class="pc bpc" id="L385" title="1 of 2 branches missed.">				resolveViews(fragment.viewName() != null ? fragment.viewName() : getDefaultViewName(exchange), locale));</span>
+
+<span class="fc" id="L387">		Map&lt;String, Object&gt; model = fragment.model();</span>
+
+<span class="fc bfc" id="L389" title="All 2 branches covered.">		if (streamHandler != null) {</span>
+<span class="fc" id="L390">			return selectedViews</span>
+<span class="fc" id="L391">					.flatMap(views -&gt;</span>
+<span class="fc" id="L392">							render(views, model, MediaType.TEXT_HTML, bindingContext, mutatedExchange))</span>
+<span class="fc" id="L393">					.then(Mono.fromSupplier(() -&gt; streamHandler.format(</span>
+<span class="fc" id="L394">							response.getBodyFlux(), fragment, streamingHints, exchange)));</span>
+		}
+		else {
+<span class="fc" id="L397">			return selectedViews.flatMap(views -&gt; render(views, model, null, bindingContext, mutatedExchange))</span>
+<span class="fc" id="L398">					.then(Mono.fromSupplier(response::getBodyFlux));</span>
+		}
+	}
+
+	private String getNameForReturnValue(MethodParameter returnType) {
+<span class="fc" id="L403">		return Optional.ofNullable(returnType.getMethodAnnotation(ModelAttribute.class))</span>
+<span class="fc" id="L404">				.filter(ann -&gt; StringUtils.hasText(ann.value()))</span>
+<span class="fc" id="L405">				.map(ModelAttribute::value)</span>
+<span class="fc" id="L406">				.orElseGet(() -&gt; Conventions.getVariableNameForParameter(returnType));</span>
+	}
+
+	private Mono&lt;? extends Void&gt; render(
+			List&lt;View&gt; views, Map&lt;String, Object&gt; model, @Nullable MediaType bestMediaType,
+			BindingContext bindingContext, ServerWebExchange exchange) {
+
+<span class="fc bfc" id="L413" title="All 2 branches covered.">		for (View view : views) {</span>
+<span class="fc bfc" id="L414" title="All 2 branches covered.">			if (view.isRedirectView()) {</span>
+<span class="fc" id="L415">				return renderWith(view, model, null, exchange, bindingContext);</span>
+			}
+<span class="fc" id="L417">		}</span>
+<span class="fc" id="L418">		List&lt;MediaType&gt; mediaTypes = getMediaTypes(views);</span>
+<span class="fc bfc" id="L419" title="All 2 branches covered.">		if (bestMediaType == null) {</span>
+			try {
+<span class="fc" id="L421">				bestMediaType = selectMediaType(exchange, () -&gt; mediaTypes);</span>
+			}
+<span class="nc" id="L423">			catch (NotAcceptableStatusException ex) {</span>
+<span class="nc" id="L424">				HttpStatusCode statusCode = exchange.getResponse().getStatusCode();</span>
+<span class="nc bnc" id="L425" title="All 4 branches missed.">				if (statusCode != null &amp;&amp; statusCode.isError()) {</span>
+<span class="nc bnc" id="L426" title="All 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L427">						logger.debug(&quot;Ignoring error response content (if any). &quot; + ex.getReason());</span>
+					}
+<span class="nc" id="L429">					return Mono.empty();</span>
+				}
+<span class="nc" id="L431">				throw ex;</span>
+<span class="fc" id="L432">			}</span>
+		}
+<span class="fc bfc" id="L434" title="All 2 branches covered.">		if (bestMediaType != null) {</span>
+<span class="pc bpc" id="L435" title="1 of 2 branches missed.">			for (View view : views) {</span>
+<span class="fc bfc" id="L436" title="All 2 branches covered.">				for (MediaType mediaType : view.getSupportedMediaTypes()) {</span>
+<span class="fc bfc" id="L437" title="All 2 branches covered.">					if (mediaType.isCompatibleWith(bestMediaType)) {</span>
+<span class="fc" id="L438">						return renderWith(view, model, mediaType, exchange, bindingContext);</span>
+					}
+<span class="fc" id="L440">				}</span>
+<span class="fc" id="L441">			}</span>
+		}
+<span class="fc" id="L443">		throw new NotAcceptableStatusException(mediaTypes);</span>
+	}
+
+	private Mono&lt;? extends Void&gt; renderWith(View view, Map&lt;String, Object&gt; model,
+			@Nullable MediaType mediaType, ServerWebExchange exchange, BindingContext bindingContext) {
+
+<span class="fc" id="L449">		exchange.getAttributes().put(View.BINDING_CONTEXT_ATTRIBUTE, bindingContext);</span>
+<span class="fc" id="L450">		return view.render(model, mediaType, exchange)</span>
+<span class="fc" id="L451">				.doOnTerminate(() -&gt; exchange.getAttributes().remove(View.BINDING_CONTEXT_ATTRIBUTE));</span>
+	}
+
+	private List&lt;MediaType&gt; getMediaTypes(List&lt;View&gt; views) {
+<span class="fc" id="L455">		return views.stream()</span>
+<span class="fc" id="L456">				.flatMap(view -&gt; view.getSupportedMediaTypes().stream())</span>
+<span class="fc" id="L457">				.toList();</span>
+	}
+
+
+	/**
+	 * ServerHttpResponse that saves the body Flux and does not write.
+	 */
+	private static class BodySavingResponse extends ServerHttpResponseDecorator {
+
+		private @Nullable Flux&lt;DataBuffer&gt; bodyFlux;
+
+		private @Nullable HttpHeaders headers;
+
+		BodySavingResponse(ServerHttpResponse delegate) {
+<span class="fc" id="L471">			super(delegate);</span>
+<span class="fc" id="L472">		}</span>
+
+		@Override
+		public HttpHeaders getHeaders() {
+<span class="fc bfc" id="L476" title="All 2 branches covered.">			if (!super.getHeaders().containsHeader(HttpHeaders.CONTENT_TYPE)) {</span>
+<span class="fc" id="L477">				return super.getHeaders();</span>
+			}
+			// Content-type is set, ignore further updates
+<span class="fc bfc" id="L480" title="All 2 branches covered.">			if (this.headers == null) {</span>
+<span class="fc" id="L481">				this.headers = new HttpHeaders();</span>
+<span class="fc" id="L482">				this.headers.putAll(super.getHeaders());</span>
+			}
+<span class="fc" id="L484">			return this.headers;</span>
+		}
+
+		public Flux&lt;DataBuffer&gt; getBodyFlux() {
+<span class="pc bpc" id="L488" title="1 of 2 branches missed.">			Assert.state(this.bodyFlux != null, &quot;Body not set&quot;);</span>
+<span class="fc" id="L489">			return this.bodyFlux;</span>
+		}
+
+		@Override
+		public Mono&lt;Void&gt; writeWith(Publisher&lt;? extends DataBuffer&gt; body) {
+<span class="fc" id="L494">			this.bodyFlux = Flux.from(body);</span>
+<span class="fc" id="L495">			return Mono.empty();</span>
+		}
+
+		@Override
+		public Mono&lt;Void&gt; writeAndFlushWith(Publisher&lt;? extends Publisher&lt;? extends DataBuffer&gt;&gt; body) {
+<span class="nc" id="L500">			this.bodyFlux = Flux.from(body).flatMap(Flux::from);</span>
+<span class="nc" id="L501">			return Mono.empty();</span>
+		}
+	}
+
+
+	/**
+	 * Strategy to render fragment with stream formatting.
+	 */
+	private interface StreamHandler {
+
+		/**
+		 * Whether the formatter supports the given request.
+		 */
+		boolean supports(ServerHttpRequest request);
+
+		/**
+		 * Update the response before streaming, for example, to set the content-type.
+		 */
+		void updateResponse(ServerWebExchange exchange);
+
+		/**
+		 * Format the given fragment.
+		 * @param fragmentContent the fragment serialized to data buffers
+		 * @param fragment the fragment being rendered
+		 * @param streamingHints extra hints for the stream format (e.g. ServerSentEvent wrapper)
+		 * @param exchange the current exchange
+		 * @return the formatted fragment
+		 */
+		Flux&lt;DataBuffer&gt; format(
+				Flux&lt;DataBuffer&gt; fragmentContent, Fragment fragment, @Nullable Object streamingHints,
+				ServerWebExchange exchange);
+	}
+
+
+	/**
+	 * Formatter for Server-Sent Events formatting.
+	 */
+	private static class SseStreamHandler implements StreamHandler {
+
+		@Override
+		public boolean supports(ServerHttpRequest request) {
+<span class="fc" id="L542">			String header = request.getHeaders().getFirst(HttpHeaders.ACCEPT);</span>
+<span class="pc bpc" id="L543" title="1 of 4 branches missed.">			return (header != null &amp;&amp; header.contains(MediaType.TEXT_EVENT_STREAM_VALUE));</span>
+		}
+
+		@Override
+		public void updateResponse(ServerWebExchange exchange) {
+<span class="fc" id="L548">			MediaType mediaType = MediaType.TEXT_EVENT_STREAM;</span>
+<span class="fc" id="L549">			Charset charset = getCharset(exchange.getRequest());</span>
+<span class="pc bpc" id="L550" title="1 of 2 branches missed.">			mediaType = (charset != null ? new MediaType(mediaType, charset) : mediaType);</span>
+<span class="fc" id="L551">			exchange.getResponse().getHeaders().setContentType(mediaType);</span>
+<span class="fc" id="L552">		}</span>
+
+		private @Nullable Charset getCharset(ServerHttpRequest request) {
+<span class="pc bpc" id="L555" title="1 of 2 branches missed.">			for (MediaType mediaType : request.getHeaders().getAccept()) {</span>
+<span class="pc bpc" id="L556" title="1 of 2 branches missed.">				if (mediaType.isCompatibleWith(MediaType.TEXT_EVENT_STREAM)) {</span>
+<span class="pc bpc" id="L557" title="1 of 2 branches missed.">					if (mediaType.getCharset() != null) {</span>
+<span class="nc" id="L558">						return mediaType.getCharset();</span>
+					}
+					break;
+				}
+<span class="nc" id="L562">			}</span>
+<span class="fc" id="L563">			return null;</span>
+		}
+
+		@Override
+		public Flux&lt;DataBuffer&gt; format(
+				Flux&lt;DataBuffer&gt; fragmentFlux, Fragment fragment, @Nullable Object hints,
+				ServerWebExchange exchange) {
+
+<span class="fc" id="L571">			MediaType mediaType = exchange.getResponse().getHeaders().getContentType();</span>
+<span class="pc bpc" id="L572" title="2 of 4 branches missed.">			Charset charset = (mediaType != null &amp;&amp; mediaType.getCharset() != null ?</span>
+<span class="pc" id="L573">					mediaType.getCharset() : StandardCharsets.UTF_8);</span>
+<span class="pc bpc" id="L574" title="1 of 4 branches missed.">			Assert.state(hints == null || hints instanceof ServerSentEvent, &quot;Expected ServerSentEvent&quot;);</span>
+
+<span class="fc" id="L576">			DataBufferFactory bufferFactory = exchange.getResponse().bufferFactory();</span>
+
+<span class="fc" id="L578">			ServerSentEvent&lt;?&gt; sse = (ServerSentEvent&lt;?&gt;) hints;</span>
+<span class="fc bfc" id="L579" title="All 2 branches covered.">			CharSequence eventText = (sse != null ? sse.format() :</span>
+<span class="pc bpc" id="L580" title="1 of 2 branches missed.">					(fragment.viewName() != null ? &quot;event:&quot; + fragment.viewName() + &quot;\n&quot; : &quot;&quot;) + &quot;data:&quot;);</span>
+
+<span class="fc" id="L582">			DataBuffer prefix = encodeText(eventText.toString(), charset, bufferFactory);</span>
+<span class="fc" id="L583">			DataBuffer suffix = encodeText(&quot;\n\n&quot;, charset, bufferFactory);</span>
+
+<span class="fc" id="L585">			Mono&lt;DataBuffer&gt; content = DataBufferUtils.join(fragmentFlux)</span>
+<span class="fc" id="L586">					.map(buffer -&gt; {</span>
+						String text;
+						try {
+<span class="fc" id="L589">							text = buffer.toString(charset);</span>
+						}
+						finally {
+<span class="fc" id="L592">							DataBufferUtils.release(buffer);</span>
+						}
+<span class="fc" id="L594">						text = text.replace(&quot;\n&quot;, &quot;\ndata:&quot;);</span>
+<span class="fc" id="L595">						return bufferFactory.wrap(text.getBytes(charset));</span>
+					});
+
+<span class="fc" id="L598">			return Flux.concat(Flux.just(prefix), content, Flux.just(suffix));</span>
+		}
+
+		private DataBuffer encodeText(String text, Charset charset, DataBufferFactory bufferFactory) {
+<span class="fc" id="L602">			byte[] bytes = text.getBytes(charset);</span>
+<span class="fc" id="L603">			return bufferFactory.wrap(bytes);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

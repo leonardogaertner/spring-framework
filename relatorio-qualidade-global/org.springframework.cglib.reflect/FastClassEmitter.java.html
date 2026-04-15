@@ -1,0 +1,251 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FastClassEmitter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.cglib.reflect</a> &gt; <span class="el_source">FastClassEmitter.java</span></div><h1>FastClassEmitter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2003,2004 The Apache Software Foundation
+ *
+ *  Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.cglib.reflect;
+
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+
+import org.springframework.asm.ClassVisitor;
+import org.springframework.asm.Label;
+import org.springframework.asm.Type;
+import org.springframework.cglib.core.Block;
+import org.springframework.cglib.core.ClassEmitter;
+import org.springframework.cglib.core.CodeEmitter;
+import org.springframework.cglib.core.CollectionUtils;
+import org.springframework.cglib.core.Constants;
+import org.springframework.cglib.core.DuplicatesPredicate;
+import org.springframework.cglib.core.EmitUtils;
+import org.springframework.cglib.core.MethodInfo;
+import org.springframework.cglib.core.MethodInfoTransformer;
+import org.springframework.cglib.core.ObjectSwitchCallback;
+import org.springframework.cglib.core.ProcessSwitchCallback;
+import org.springframework.cglib.core.ReflectUtils;
+import org.springframework.cglib.core.Signature;
+import org.springframework.cglib.core.TypeUtils;
+import org.springframework.cglib.core.VisibilityPredicate;
+
+@SuppressWarnings({&quot;rawtypes&quot;, &quot;unchecked&quot;, &quot;deprecation&quot;})
+class FastClassEmitter extends ClassEmitter {
+<span class="fc" id="L48">    private static final Signature CSTRUCT_CLASS =</span>
+<span class="fc" id="L49">      TypeUtils.parseConstructor(&quot;Class&quot;);</span>
+<span class="fc" id="L50">    private static final Signature METHOD_GET_INDEX =</span>
+<span class="fc" id="L51">      TypeUtils.parseSignature(&quot;int getIndex(String, Class[])&quot;);</span>
+<span class="fc" id="L52">    private static final Signature SIGNATURE_GET_INDEX =</span>
+      new Signature(&quot;getIndex&quot;, Type.INT_TYPE, new Type[]{ Constants.TYPE_SIGNATURE });
+<span class="fc" id="L54">    private static final Signature TO_STRING =</span>
+<span class="fc" id="L55">      TypeUtils.parseSignature(&quot;String toString()&quot;);</span>
+<span class="fc" id="L56">    private static final Signature CONSTRUCTOR_GET_INDEX =</span>
+<span class="fc" id="L57">      TypeUtils.parseSignature(&quot;int getIndex(Class[])&quot;);</span>
+<span class="fc" id="L58">    private static final Signature INVOKE =</span>
+<span class="fc" id="L59">      TypeUtils.parseSignature(&quot;Object invoke(int, Object, Object[])&quot;);</span>
+<span class="fc" id="L60">    private static final Signature NEW_INSTANCE =</span>
+<span class="fc" id="L61">      TypeUtils.parseSignature(&quot;Object newInstance(int, Object[])&quot;);</span>
+<span class="fc" id="L62">    private static final Signature GET_MAX_INDEX =</span>
+<span class="fc" id="L63">      TypeUtils.parseSignature(&quot;int getMaxIndex()&quot;);</span>
+<span class="fc" id="L64">    private static final Signature GET_SIGNATURE_WITHOUT_RETURN_TYPE =</span>
+<span class="fc" id="L65">      TypeUtils.parseSignature(&quot;String getSignatureWithoutReturnType(String, Class[])&quot;);</span>
+<span class="fc" id="L66">    private static final Type FAST_CLASS =</span>
+<span class="fc" id="L67">      TypeUtils.parseType(&quot;org.springframework.cglib.reflect.FastClass&quot;);</span>
+<span class="fc" id="L68">    private static final Type ILLEGAL_ARGUMENT_EXCEPTION =</span>
+<span class="fc" id="L69">      TypeUtils.parseType(&quot;IllegalArgumentException&quot;);</span>
+<span class="fc" id="L70">    private static final Type INVOCATION_TARGET_EXCEPTION =</span>
+<span class="fc" id="L71">      TypeUtils.parseType(&quot;java.lang.reflect.InvocationTargetException&quot;);</span>
+<span class="fc" id="L72">    private static final Type[] INVOCATION_TARGET_EXCEPTION_ARRAY = { INVOCATION_TARGET_EXCEPTION };</span>
+
+    public FastClassEmitter(ClassVisitor v, String className, Class type) {
+<span class="fc" id="L75">        super(v);</span>
+
+<span class="fc" id="L77">        Type base = Type.getType(type);</span>
+        // Byte code level cannot be higher than 1.8 due to STATICHOOK methods
+        // which set static final fields outside the initializer method &lt;clinit&gt;.
+<span class="fc" id="L80">        begin_class(Constants.V1_8, Constants.ACC_PUBLIC, className, FAST_CLASS, null, Constants.SOURCE_FILE);</span>
+
+        // constructor
+<span class="fc" id="L83">        CodeEmitter e = begin_method(Constants.ACC_PUBLIC, CSTRUCT_CLASS, null);</span>
+<span class="fc" id="L84">        e.load_this();</span>
+<span class="fc" id="L85">        e.load_args();</span>
+<span class="fc" id="L86">        e.super_invoke_constructor(CSTRUCT_CLASS);</span>
+<span class="fc" id="L87">        e.return_value();</span>
+<span class="fc" id="L88">        e.end_method();</span>
+
+<span class="fc" id="L90">        VisibilityPredicate vp = new VisibilityPredicate(type, false);</span>
+<span class="fc" id="L91">        List methods = ReflectUtils.addAllMethods(type, new ArrayList());</span>
+<span class="fc" id="L92">        CollectionUtils.filter(methods, vp);</span>
+<span class="fc" id="L93">        CollectionUtils.filter(methods, new DuplicatesPredicate());</span>
+<span class="fc" id="L94">        List constructors = new ArrayList(Arrays.asList(type.getDeclaredConstructors()));</span>
+<span class="fc" id="L95">        CollectionUtils.filter(constructors, vp);</span>
+
+        // getIndex(String)
+<span class="fc" id="L98">        emitIndexBySignature(methods);</span>
+
+        // getIndex(String, Class[])
+<span class="fc" id="L101">        emitIndexByClassArray(methods);</span>
+
+        // getIndex(Class[])
+<span class="fc" id="L104">        e = begin_method(Constants.ACC_PUBLIC, CONSTRUCTOR_GET_INDEX, null);</span>
+<span class="fc" id="L105">        e.load_args();</span>
+<span class="fc" id="L106">        List info = CollectionUtils.transform(constructors, MethodInfoTransformer.getInstance());</span>
+<span class="fc" id="L107">        EmitUtils.constructor_switch(e, info, new GetIndexCallback(e, info));</span>
+<span class="fc" id="L108">        e.end_method();</span>
+
+        // invoke(int, Object, Object[])
+<span class="fc" id="L111">        e = begin_method(Constants.ACC_PUBLIC, INVOKE, INVOCATION_TARGET_EXCEPTION_ARRAY);</span>
+<span class="fc" id="L112">        e.load_arg(1);</span>
+<span class="fc" id="L113">        e.checkcast(base);</span>
+<span class="fc" id="L114">        e.load_arg(0);</span>
+<span class="fc" id="L115">        invokeSwitchHelper(e, methods, 2, base);</span>
+<span class="fc" id="L116">        e.end_method();</span>
+
+        // newInstance(int, Object[])
+<span class="fc" id="L119">        e = begin_method(Constants.ACC_PUBLIC, NEW_INSTANCE, INVOCATION_TARGET_EXCEPTION_ARRAY);</span>
+<span class="fc" id="L120">        e.new_instance(base);</span>
+<span class="fc" id="L121">        e.dup();</span>
+<span class="fc" id="L122">        e.load_arg(0);</span>
+<span class="fc" id="L123">        invokeSwitchHelper(e, constructors, 1, base);</span>
+<span class="fc" id="L124">        e.end_method();</span>
+
+        // getMaxIndex()
+<span class="fc" id="L127">        e = begin_method(Constants.ACC_PUBLIC, GET_MAX_INDEX, null);</span>
+<span class="fc" id="L128">        e.push(methods.size() - 1);</span>
+<span class="fc" id="L129">        e.return_value();</span>
+<span class="fc" id="L130">        e.end_method();</span>
+
+<span class="fc" id="L132">        end_class();</span>
+<span class="fc" id="L133">    }</span>
+
+    // TODO: support constructor indices (&quot;&lt;init&gt;&quot;)
+    private void emitIndexBySignature(List methods) {
+<span class="fc" id="L137">        CodeEmitter e = begin_method(Constants.ACC_PUBLIC, SIGNATURE_GET_INDEX, null);</span>
+<span class="fc" id="L138">        List signatures = CollectionUtils.transform(methods, obj -&gt; ReflectUtils.getSignature((Method)obj).toString());</span>
+<span class="fc" id="L139">        e.load_arg(0);</span>
+<span class="fc" id="L140">        e.invoke_virtual(Constants.TYPE_OBJECT, TO_STRING);</span>
+<span class="fc" id="L141">        signatureSwitchHelper(e, signatures);</span>
+<span class="fc" id="L142">        e.end_method();</span>
+<span class="fc" id="L143">    }</span>
+
+    private static final int TOO_MANY_METHODS = 100; // TODO
+    private void emitIndexByClassArray(List methods) {
+<span class="fc" id="L147">        CodeEmitter e = begin_method(Constants.ACC_PUBLIC, METHOD_GET_INDEX, null);</span>
+<span class="fc bfc" id="L148" title="All 2 branches covered.">        if (methods.size() &gt; TOO_MANY_METHODS) {</span>
+            // hack for big classes
+<span class="fc" id="L150">            List signatures = CollectionUtils.transform(methods, obj -&gt; {</span>
+<span class="fc" id="L151">			    String s = ReflectUtils.getSignature((Method)obj).toString();</span>
+<span class="fc" id="L152">			    return s.substring(0, s.lastIndexOf(')') + 1);</span>
+			});
+<span class="fc" id="L154">            e.load_args();</span>
+<span class="fc" id="L155">            e.invoke_static(FAST_CLASS, GET_SIGNATURE_WITHOUT_RETURN_TYPE);</span>
+<span class="fc" id="L156">            signatureSwitchHelper(e, signatures);</span>
+<span class="fc" id="L157">        } else {</span>
+<span class="fc" id="L158">            e.load_args();</span>
+<span class="fc" id="L159">            List info = CollectionUtils.transform(methods, MethodInfoTransformer.getInstance());</span>
+<span class="fc" id="L160">            EmitUtils.method_switch(e, info, new GetIndexCallback(e, info));</span>
+        }
+<span class="fc" id="L162">        e.end_method();</span>
+<span class="fc" id="L163">    }</span>
+
+    private void signatureSwitchHelper(final CodeEmitter e, final List signatures) {
+<span class="fc" id="L166">        ObjectSwitchCallback callback = new ObjectSwitchCallback() {</span>
+            @Override
+			public void processCase(Object key, Label end) {
+                // TODO: remove linear indexOf
+<span class="fc" id="L170">                e.push(signatures.indexOf(key));</span>
+<span class="fc" id="L171">                e.return_value();</span>
+<span class="fc" id="L172">            }</span>
+            @Override
+			public void processDefault() {
+<span class="fc" id="L175">                e.push(-1);</span>
+<span class="fc" id="L176">                e.return_value();</span>
+<span class="fc" id="L177">            }</span>
+        };
+<span class="fc" id="L179">        EmitUtils.string_switch(e,</span>
+<span class="fc" id="L180">                                (String[])signatures.toArray(new String[signatures.size()]),</span>
+                                Constants.SWITCH_STYLE_HASH,
+                                callback);
+<span class="fc" id="L183">    }</span>
+
+    private static void invokeSwitchHelper(final CodeEmitter e, List members, final int arg, final Type base) {
+<span class="fc" id="L186">        final List info = CollectionUtils.transform(members, MethodInfoTransformer.getInstance());</span>
+<span class="fc" id="L187">        final Label illegalArg = e.make_label();</span>
+<span class="fc" id="L188">        Block block = e.begin_block();</span>
+<span class="fc" id="L189">        e.process_switch(getIntRange(info.size()), new ProcessSwitchCallback() {</span>
+            @Override
+			public void processCase(int key, Label end) {
+<span class="fc" id="L192">                MethodInfo method = (MethodInfo)info.get(key);</span>
+<span class="fc" id="L193">                Type[] types = method.getSignature().getArgumentTypes();</span>
+<span class="fc bfc" id="L194" title="All 2 branches covered.">                for (int i = 0; i &lt; types.length; i++) {</span>
+<span class="fc" id="L195">                    e.load_arg(arg);</span>
+<span class="fc" id="L196">                    e.aaload(i);</span>
+<span class="fc" id="L197">                    e.unbox(types[i]);</span>
+                }
+                // TODO: change method lookup process so MethodInfo will already reference base
+                // instead of superclass when superclass method is inaccessible
+<span class="fc" id="L201">                e.invoke(method, base);</span>
+<span class="fc bfc" id="L202" title="All 2 branches covered.">                if (!TypeUtils.isConstructor(method)) {</span>
+<span class="fc" id="L203">                    e.box(method.getSignature().getReturnType());</span>
+                }
+<span class="fc" id="L205">                e.return_value();</span>
+<span class="fc" id="L206">            }</span>
+            @Override
+			public void processDefault() {
+<span class="fc" id="L209">                e.goTo(illegalArg);</span>
+<span class="fc" id="L210">            }</span>
+        });
+<span class="fc" id="L212">        block.end();</span>
+<span class="fc" id="L213">        EmitUtils.wrap_throwable(block, INVOCATION_TARGET_EXCEPTION);</span>
+<span class="fc" id="L214">        e.mark(illegalArg);</span>
+<span class="fc" id="L215">        e.throw_exception(ILLEGAL_ARGUMENT_EXCEPTION, &quot;Cannot find matching method/constructor&quot;);</span>
+<span class="fc" id="L216">    }</span>
+
+    private static class GetIndexCallback implements ObjectSwitchCallback {
+        private CodeEmitter e;
+<span class="fc" id="L220">        private Map indexes = new HashMap();</span>
+
+<span class="fc" id="L222">        public GetIndexCallback(CodeEmitter e, List methods) {</span>
+<span class="fc" id="L223">            this.e = e;</span>
+<span class="fc" id="L224">            int index = 0;</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">            for (Iterator it = methods.iterator(); it.hasNext();) {</span>
+<span class="fc" id="L226">                indexes.put(it.next(), index++);</span>
+            }
+<span class="fc" id="L228">        }</span>
+
+        @Override
+		public void processCase(Object key, Label end) {
+<span class="fc" id="L232">            e.push(((Integer)indexes.get(key)));</span>
+<span class="fc" id="L233">            e.return_value();</span>
+<span class="fc" id="L234">        }</span>
+
+        @Override
+		public void processDefault() {
+<span class="fc" id="L238">            e.push(-1);</span>
+<span class="fc" id="L239">            e.return_value();</span>
+<span class="fc" id="L240">        }</span>
+    }
+
+    private static int[] getIntRange(int length) {
+<span class="fc" id="L244">        int[] range = new int[length];</span>
+<span class="fc bfc" id="L245" title="All 2 branches covered.">        for (int i = 0; i &lt; length; i++) {</span>
+<span class="fc" id="L246">            range[i] = i;</span>
+        }
+<span class="fc" id="L248">        return range;</span>
+    }
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

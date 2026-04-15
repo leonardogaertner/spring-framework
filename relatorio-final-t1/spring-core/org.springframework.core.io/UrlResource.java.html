@@ -1,0 +1,402 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>UrlResource.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-core</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.io</a> &gt; <span class="el_source">UrlResource.java</span></div><h1>UrlResource.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.io;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.UncheckedIOException;
+import java.net.HttpURLConnection;
+import java.net.MalformedURLException;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.net.URL;
+import java.net.URLConnection;
+import java.net.URLDecoder;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.util.Assert;
+import org.springframework.util.ResourceUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@link Resource} implementation for {@code java.net.URL} locators.
+ * Supports resolution as a {@code URL} and also as a {@code File} in
+ * case of the {@code &quot;file:&quot;} protocol.
+ *
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 28.12.2003
+ * @see java.net.URL
+ */
+public class UrlResource extends AbstractFileResolvingResource {
+
+	private static final String AUTHORIZATION = &quot;Authorization&quot;;
+
+
+	/**
+	 * Original URI, if available; used for URI and File access.
+	 */
+	private final @Nullable URI uri;
+
+	/**
+	 * Original URL, used for actual access.
+	 */
+	private final URL url;
+
+	/**
+	 * Cleaned URL String (with normalized path), used for comparisons.
+	 */
+	private volatile @Nullable String cleanedUrl;
+
+	/**
+	 * Whether to use URLConnection caches ({@code null} means default).
+	 */
+	volatile @Nullable Boolean useCaches;
+
+
+	/**
+	 * Create a new {@code UrlResource} based on the given URL object.
+	 * @param url a URL
+	 * @see #UrlResource(URI)
+	 * @see #UrlResource(String)
+	 */
+<span class="fc" id="L81">	public UrlResource(URL url) {</span>
+<span class="fc" id="L82">		Assert.notNull(url, &quot;URL must not be null&quot;);</span>
+<span class="fc" id="L83">		this.uri = null;</span>
+<span class="fc" id="L84">		this.url = url;</span>
+<span class="fc" id="L85">	}</span>
+
+	/**
+	 * Create a new {@code UrlResource} based on the given URI object.
+	 * @param uri a URI
+	 * @throws MalformedURLException if the given URL path is not valid
+	 * @since 2.5
+	 */
+<span class="nc" id="L93">	public UrlResource(URI uri) throws MalformedURLException {</span>
+<span class="nc" id="L94">		Assert.notNull(uri, &quot;URI must not be null&quot;);</span>
+<span class="nc" id="L95">		this.uri = uri;</span>
+<span class="nc" id="L96">		this.url = uri.toURL();</span>
+<span class="nc" id="L97">	}</span>
+
+	/**
+	 * Create a new {@code UrlResource} based on a URI path.
+	 * &lt;p&gt;Note: The given path needs to be pre-encoded if necessary.
+	 * @param path a URI path
+	 * @throws MalformedURLException if the given URI path is not valid
+	 * @see ResourceUtils#toURI(String)
+	 */
+<span class="fc" id="L106">	public UrlResource(String path) throws MalformedURLException {</span>
+<span class="fc" id="L107">		Assert.notNull(path, &quot;Path must not be null&quot;);</span>
+<span class="fc" id="L108">		String cleanedPath = StringUtils.cleanPath(path);</span>
+		URI uri;
+		URL url;
+
+		try {
+			// Prefer URI construction with toURL conversion (as of 6.1)
+<span class="fc" id="L114">			uri = ResourceUtils.toURI(cleanedPath);</span>
+<span class="fc" id="L115">			url = uri.toURL();</span>
+		}
+<span class="fc" id="L117">		catch (URISyntaxException | IllegalArgumentException ex) {</span>
+<span class="fc" id="L118">			uri = null;</span>
+<span class="fc" id="L119">			url = ResourceUtils.toURL(path);</span>
+<span class="fc" id="L120">		}</span>
+
+<span class="fc" id="L122">		this.uri = uri;</span>
+<span class="fc" id="L123">		this.url = url;</span>
+<span class="fc" id="L124">		this.cleanedUrl = cleanedPath;</span>
+<span class="fc" id="L125">	}</span>
+
+	/**
+	 * Create a new {@code UrlResource} based on a URI specification.
+	 * &lt;p&gt;The given parts will automatically get encoded if necessary.
+	 * @param protocol the URL protocol to use (for example, &quot;jar&quot; or &quot;file&quot; - without colon);
+	 * also known as &quot;scheme&quot;
+	 * @param location the location (for example, the file path within that protocol);
+	 * also known as &quot;scheme-specific part&quot;
+	 * @throws MalformedURLException if the given URL specification is not valid
+	 * @see java.net.URI#URI(String, String, String)
+	 */
+	public UrlResource(String protocol, String location) throws MalformedURLException {
+<span class="nc" id="L138">		this(protocol, location, null);</span>
+<span class="nc" id="L139">	}</span>
+
+	/**
+	 * Create a new {@code UrlResource} based on a URI specification.
+	 * &lt;p&gt;The given parts will automatically get encoded if necessary.
+	 * @param protocol the URL protocol to use (for example, &quot;jar&quot; or &quot;file&quot; - without colon);
+	 * also known as &quot;scheme&quot;
+	 * @param location the location (for example, the file path within that protocol);
+	 * also known as &quot;scheme-specific part&quot;
+	 * @param fragment the fragment within that location (for example, anchor on an HTML page,
+	 * as following after a &quot;#&quot; separator)
+	 * @throws MalformedURLException if the given URL specification is not valid
+	 * @see java.net.URI#URI(String, String, String)
+	 */
+<span class="nc" id="L153">	public UrlResource(String protocol, String location, @Nullable String fragment) throws MalformedURLException {</span>
+		try {
+<span class="nc" id="L155">			this.uri = new URI(protocol, location, fragment);</span>
+<span class="nc" id="L156">			this.url = this.uri.toURL();</span>
+		}
+<span class="nc" id="L158">		catch (URISyntaxException ex) {</span>
+<span class="nc" id="L159">			MalformedURLException exToThrow = new MalformedURLException(ex.getMessage());</span>
+<span class="nc" id="L160">			exToThrow.initCause(ex);</span>
+<span class="nc" id="L161">			throw exToThrow;</span>
+<span class="nc" id="L162">		}</span>
+<span class="nc" id="L163">	}</span>
+
+
+	/**
+	 * Create a new {@code UrlResource} from the given {@link URI}.
+	 * &lt;p&gt;This factory method is a convenience for {@link #UrlResource(URI)} that
+	 * catches any {@link MalformedURLException} and rethrows it wrapped in an
+	 * {@link UncheckedIOException}; suitable for use in {@link java.util.stream.Stream}
+	 * and {@link java.util.Optional} APIs or other scenarios when a checked
+	 * {@link IOException} is undesirable.
+	 * @param uri a URI
+	 * @throws UncheckedIOException if the given URL path is not valid
+	 * @since 6.0
+	 * @see #UrlResource(URI)
+	 */
+	public static UrlResource from(URI uri) throws UncheckedIOException {
+		try {
+<span class="nc" id="L180">			return new UrlResource(uri);</span>
+		}
+<span class="nc" id="L182">		catch (MalformedURLException ex) {</span>
+<span class="nc" id="L183">			throw new UncheckedIOException(ex);</span>
+		}
+	}
+
+	/**
+	 * Create a new {@code UrlResource} from the given URL path.
+	 * &lt;p&gt;This factory method is a convenience for {@link #UrlResource(String)}
+	 * that catches any {@link MalformedURLException} and rethrows it wrapped in an
+	 * {@link UncheckedIOException}; suitable for use in {@link java.util.stream.Stream}
+	 * and {@link java.util.Optional} APIs or other scenarios when a checked
+	 * {@link IOException} is undesirable.
+	 * @param path a URL path
+	 * @throws UncheckedIOException if the given URL path is not valid
+	 * @since 6.0
+	 * @see #UrlResource(String)
+	 */
+	public static UrlResource from(String path) throws UncheckedIOException {
+		try {
+<span class="nc" id="L201">			return new UrlResource(path);</span>
+		}
+<span class="nc" id="L203">		catch (MalformedURLException ex) {</span>
+<span class="nc" id="L204">			throw new UncheckedIOException(ex);</span>
+		}
+	}
+
+
+	/**
+	 * Lazily determine a cleaned URL for the given original URL.
+	 */
+	private String getCleanedUrl() {
+<span class="fc" id="L213">		String cleanedUrl = this.cleanedUrl;</span>
+<span class="fc bfc" id="L214" title="All 2 branches covered.">		if (cleanedUrl != null) {</span>
+<span class="fc" id="L215">			return cleanedUrl;</span>
+		}
+<span class="pc bpc" id="L217" title="1 of 2 branches missed.">		String originalPath = (this.uri != null ? this.uri : this.url).toString();</span>
+<span class="fc" id="L218">		cleanedUrl = StringUtils.cleanPath(originalPath);</span>
+<span class="fc" id="L219">		this.cleanedUrl = cleanedUrl;</span>
+<span class="fc" id="L220">		return cleanedUrl;</span>
+	}
+
+	/**
+	 * Set an explicit flag for {@link URLConnection#setUseCaches},
+	 * to be applied for any {@link URLConnection} operation in this resource.
+	 * &lt;p&gt;By default, caching will be applied only to jar resources.
+	 * An explicit {@code true} flag applies caching to all resources, whereas an
+	 * explicit {@code false} flag turns off caching for jar resources as well.
+	 * @since 6.2.10
+	 * @see ResourceUtils#useCachesIfNecessary
+	 */
+	public void setUseCaches(boolean useCaches) {
+<span class="nc" id="L233">		this.useCaches = useCaches;</span>
+<span class="nc" id="L234">	}</span>
+
+
+	/**
+	 * This implementation opens an InputStream for the given URL.
+	 * @see java.net.URL#openConnection()
+	 * @see java.net.URLConnection#setUseCaches(boolean)
+	 * @see java.net.URLConnection#getInputStream()
+	 */
+	@Override
+	public InputStream getInputStream() throws IOException {
+<span class="fc" id="L245">		URLConnection con = this.url.openConnection();</span>
+<span class="fc" id="L246">		customizeConnection(con);</span>
+		try {
+<span class="fc" id="L248">			return con.getInputStream();</span>
+		}
+<span class="nc" id="L250">		catch (IOException ex) {</span>
+			// Close the HTTP connection (if applicable).
+<span class="nc bnc" id="L252" title="All 2 branches missed.">			if (con instanceof HttpURLConnection httpCon) {</span>
+<span class="nc" id="L253">				httpCon.disconnect();</span>
+			}
+<span class="nc" id="L255">			throw ex;</span>
+		}
+	}
+
+	@Override
+	protected void customizeConnection(URLConnection con) throws IOException {
+<span class="fc" id="L261">		super.customizeConnection(con);</span>
+<span class="fc" id="L262">		String userInfo = this.url.getUserInfo();</span>
+<span class="pc bpc" id="L263" title="1 of 2 branches missed.">		if (userInfo != null) {</span>
+<span class="nc" id="L264">			String encodedCredentials = Base64.getUrlEncoder().encodeToString(userInfo.getBytes());</span>
+<span class="nc" id="L265">			con.setRequestProperty(AUTHORIZATION, &quot;Basic &quot; + encodedCredentials);</span>
+		}
+<span class="fc" id="L267">	}</span>
+
+	@Override
+	void useCachesIfNecessary(URLConnection con) {
+<span class="fc" id="L271">		Boolean useCaches = this.useCaches;</span>
+<span class="pc bpc" id="L272" title="1 of 2 branches missed.">		if (useCaches != null) {</span>
+<span class="nc" id="L273">			con.setUseCaches(useCaches);</span>
+		}
+		else {
+<span class="fc" id="L276">			super.useCachesIfNecessary(con);</span>
+		}
+<span class="fc" id="L278">	}</span>
+
+	/**
+	 * This implementation returns the underlying URL reference.
+	 */
+	@Override
+	public URL getURL() {
+<span class="fc" id="L285">		return this.url;</span>
+	}
+
+	/**
+	 * This implementation returns the underlying URI directly,
+	 * if possible.
+	 */
+	@Override
+	public URI getURI() throws IOException {
+<span class="pc bpc" id="L294" title="1 of 2 branches missed.">		if (this.uri != null) {</span>
+<span class="nc" id="L295">			return this.uri;</span>
+		}
+		else {
+<span class="fc" id="L298">			return super.getURI();</span>
+		}
+	}
+
+	@Override
+	public boolean isFile() {
+<span class="nc bnc" id="L304" title="All 2 branches missed.">		if (this.uri != null) {</span>
+<span class="nc" id="L305">			return super.isFile(this.uri);</span>
+		}
+		else {
+<span class="nc" id="L308">			return super.isFile();</span>
+		}
+	}
+
+	/**
+	 * This implementation returns a File reference for the underlying URL/URI,
+	 * provided that it refers to a file in the file system.
+	 * @see org.springframework.util.ResourceUtils#getFile(java.net.URL, String)
+	 */
+	@Override
+	public File getFile() throws IOException {
+<span class="fc bfc" id="L319" title="All 2 branches covered.">		if (this.uri != null) {</span>
+<span class="fc" id="L320">			return super.getFile(this.uri);</span>
+		}
+		else {
+<span class="fc" id="L323">			return super.getFile();</span>
+		}
+	}
+
+	/**
+	 * This implementation creates a {@code UrlResource}, delegating to
+	 * {@link #createRelativeURL(String)} for adapting the relative path.
+	 * @see #createRelativeURL(String)
+	 */
+	@Override
+	public Resource createRelative(String relativePath) throws MalformedURLException {
+<span class="fc" id="L334">		UrlResource resource = new UrlResource(createRelativeURL(relativePath));</span>
+<span class="fc" id="L335">		resource.useCaches = this.useCaches;</span>
+<span class="fc" id="L336">		return resource;</span>
+	}
+
+	/**
+	 * This delegate creates a {@code java.net.URL}, applying the given path
+	 * relative to the path of the underlying URL of this resource descriptor.
+	 * &lt;p&gt;A leading slash will get dropped; a &quot;#&quot; symbol will get encoded.
+	 * Note that this method effectively cleans the combined path as of 6.1.
+	 * @since 5.2
+	 * @see #createRelative(String)
+	 * @see ResourceUtils#toRelativeURL(URL, String)
+	 */
+	protected URL createRelativeURL(String relativePath) throws MalformedURLException {
+<span class="fc bfc" id="L349" title="All 2 branches covered.">		if (relativePath.startsWith(&quot;/&quot;)) {</span>
+<span class="fc" id="L350">			relativePath = relativePath.substring(1);</span>
+		}
+<span class="fc" id="L352">		return ResourceUtils.toRelativeURL(this.url, relativePath);</span>
+	}
+
+	/**
+	 * This implementation returns the URL-decoded name of the file that this URL
+	 * refers to.
+	 * @see java.net.URL#getPath()
+	 * @see java.net.URLDecoder#decode(String, java.nio.charset.Charset)
+	 */
+	@Override
+	public @Nullable String getFilename() {
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">		if (this.uri != null) {</span>
+<span class="nc" id="L364">			String path = this.uri.getPath();</span>
+<span class="nc bnc" id="L365" title="All 2 branches missed.">			if (path != null) {</span>
+				// Prefer URI path: decoded and has standard separators
+<span class="nc" id="L367">				return StringUtils.getFilename(this.uri.getPath());</span>
+			}
+		}
+		// Otherwise, process URL path
+<span class="fc" id="L371">		String filename = StringUtils.getFilename(StringUtils.cleanPath(this.url.getPath()));</span>
+<span class="pc bpc" id="L372" title="1 of 2 branches missed.">		return (filename != null ? URLDecoder.decode(filename, StandardCharsets.UTF_8) : null);</span>
+	}
+
+	/**
+	 * This implementation returns a description that includes the URL.
+	 */
+	@Override
+	public String getDescription() {
+<span class="fc bfc" id="L380" title="All 2 branches covered.">		return &quot;URL [&quot; + (this.uri != null ? this.uri : this.url) + &quot;]&quot;;</span>
+	}
+
+
+	/**
+	 * This implementation compares the underlying URL references.
+	 */
+	@Override
+	public boolean equals(@Nullable Object other) {
+<span class="pc bpc" id="L389" title="2 of 4 branches missed.">		return (this == other || (other instanceof UrlResource that &amp;&amp;</span>
+<span class="pc bpc" id="L390" title="1 of 2 branches missed.">				getCleanedUrl().equals(that.getCleanedUrl())));</span>
+	}
+
+	/**
+	 * This implementation returns the hash code of the underlying URL reference.
+	 */
+	@Override
+	public int hashCode() {
+<span class="fc" id="L398">		return getCleanedUrl().hashCode();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

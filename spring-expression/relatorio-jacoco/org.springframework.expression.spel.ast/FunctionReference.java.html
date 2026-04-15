@@ -1,0 +1,323 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>FunctionReference.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.ast</a> &gt; <span class="el_source">FunctionReference.java</span></div><h1>FunctionReference.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.ast;
+
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodType;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.StringJoiner;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.asm.MethodVisitor;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.expression.EvaluationException;
+import org.springframework.expression.TypeConverter;
+import org.springframework.expression.TypedValue;
+import org.springframework.expression.spel.CodeFlow;
+import org.springframework.expression.spel.ExpressionState;
+import org.springframework.expression.spel.SpelEvaluationException;
+import org.springframework.expression.spel.SpelMessage;
+import org.springframework.expression.spel.support.ReflectionHelper;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * A function reference is of the form &quot;#someFunction(a,b,c)&quot;.
+ *
+ * &lt;p&gt;Functions can be either a {@link Method} (for static Java methods) or a
+ * {@link MethodHandle} and must be registered in the context prior to evaluation
+ * of the expression. See the {@code registerFunction()} methods in
+ * {@link org.springframework.expression.spel.support.StandardEvaluationContext}
+ * for details.
+ *
+ * @author Andy Clement
+ * @author Juergen Hoeller
+ * @author Simon Baslé
+ * @author Sam Brannen
+ * @since 3.0
+ * @see org.springframework.expression.spel.support.StandardEvaluationContext#registerFunction(String, Method)
+ * @see org.springframework.expression.spel.support.StandardEvaluationContext#registerFunction(String, MethodHandle)
+ */
+public class FunctionReference extends SpelNodeImpl {
+
+	private final String name;
+
+	// Captures the most recently used method for the function invocation *if* the method
+	// can safely be used for compilation (i.e. no argument conversion is going on)
+	private volatile @Nullable Method method;
+
+
+	public FunctionReference(String functionName, int startPos, int endPos, SpelNodeImpl... arguments) {
+<span class="fc" id="L70">		super(startPos, endPos, arguments);</span>
+<span class="fc" id="L71">		this.name = functionName;</span>
+<span class="fc" id="L72">	}</span>
+
+
+	@Override
+	public TypedValue getValueInternal(ExpressionState state) throws EvaluationException {
+<span class="fc" id="L77">		TypedValue value = state.lookupVariable(this.name);</span>
+<span class="pc bpc" id="L78" title="1 of 2 branches missed.">		if (value == TypedValue.NULL) {</span>
+<span class="nc" id="L79">			throw new SpelEvaluationException(getStartPosition(), SpelMessage.FUNCTION_NOT_DEFINED, this.name);</span>
+		}
+<span class="fc" id="L81">		Object function = value.getValue();</span>
+
+		// Static Java method registered via a Method.
+		// Note: &quot;javaMethod&quot; cannot be named &quot;method&quot; due to a bug in Checkstyle.
+<span class="fc bfc" id="L85" title="All 2 branches covered.">		if (function instanceof Method javaMethod) {</span>
+			try {
+<span class="fc" id="L87">				return executeFunctionViaMethod(state, javaMethod);</span>
+			}
+<span class="fc" id="L89">			catch (SpelEvaluationException ex) {</span>
+<span class="fc" id="L90">				ex.setPosition(getStartPosition());</span>
+<span class="fc" id="L91">				throw ex;</span>
+			}
+		}
+
+		// Function registered via a MethodHandle.
+<span class="pc bpc" id="L96" title="1 of 2 branches missed.">		if (function instanceof MethodHandle methodHandle) {</span>
+			try {
+<span class="fc" id="L98">				return executeFunctionViaMethodHandle(state, methodHandle);</span>
+			}
+<span class="fc" id="L100">			catch (SpelEvaluationException ex) {</span>
+<span class="fc" id="L101">				ex.setPosition(getStartPosition());</span>
+<span class="fc" id="L102">				throw ex;</span>
+			}
+		}
+
+		// Neither a Method nor a MethodHandle?
+<span class="nc" id="L107">		throw new SpelEvaluationException(</span>
+<span class="nc" id="L108">				SpelMessage.FUNCTION_REFERENCE_CANNOT_BE_INVOKED, this.name, value.getClass());</span>
+	}
+
+	/**
+	 * Execute a function represented as a {@link Method}.
+	 * @param state the expression evaluation state
+	 * @param method the method to invoke
+	 * @return the return value of the invoked Java method
+	 * @throws EvaluationException if there is any problem invoking the method
+	 */
+	private TypedValue executeFunctionViaMethod(ExpressionState state, Method method) throws EvaluationException {
+<span class="fc" id="L119">		@Nullable Object[] functionArgs = getArguments(state);</span>
+
+<span class="fc bfc" id="L121" title="All 2 branches covered.">		if (!method.isVarArgs()) {</span>
+<span class="fc" id="L122">			int declaredParamCount = method.getParameterCount();</span>
+<span class="fc bfc" id="L123" title="All 2 branches covered.">			if (declaredParamCount != functionArgs.length) {</span>
+<span class="fc" id="L124">				throw new SpelEvaluationException(SpelMessage.INCORRECT_NUMBER_OF_ARGUMENTS_TO_FUNCTION,</span>
+<span class="fc" id="L125">						this.name, functionArgs.length, declaredParamCount);</span>
+			}
+		}
+<span class="fc bfc" id="L128" title="All 2 branches covered.">		if (!Modifier.isStatic(method.getModifiers())) {</span>
+<span class="fc" id="L129">			throw new SpelEvaluationException(getStartPosition(),</span>
+<span class="fc" id="L130">					SpelMessage.FUNCTION_MUST_BE_STATIC, ClassUtils.getQualifiedMethodName(method), this.name);</span>
+		}
+
+		// Convert arguments if necessary and remap them for varargs if required
+<span class="fc" id="L134">		TypeConverter converter = state.getEvaluationContext().getTypeConverter();</span>
+<span class="fc" id="L135">		boolean argumentConversionOccurred = ReflectionHelper.convertAllArguments(converter, functionArgs, method);</span>
+<span class="fc bfc" id="L136" title="All 2 branches covered.">		if (method.isVarArgs()) {</span>
+<span class="fc" id="L137">			functionArgs = ReflectionHelper.setupArgumentsForVarargsInvocation(</span>
+<span class="fc" id="L138">					method.getParameterTypes(), functionArgs);</span>
+		}
+<span class="fc" id="L140">		boolean compilable = false;</span>
+
+		try {
+<span class="fc" id="L143">			ReflectionUtils.makeAccessible(method);</span>
+<span class="fc" id="L144">			Object result = method.invoke(method.getClass(), functionArgs);</span>
+<span class="fc bfc" id="L145" title="All 2 branches covered.">			compilable = !argumentConversionOccurred;</span>
+<span class="fc" id="L146">			return new TypedValue(result, new TypeDescriptor(new MethodParameter(method, -1)).narrow(result));</span>
+		}
+<span class="nc" id="L148">		catch (Exception ex) {</span>
+<span class="nc bnc" id="L149" title="All 4 branches missed.">			Throwable cause = ((ex instanceof InvocationTargetException ite &amp;&amp; ite.getCause() != null) ?</span>
+<span class="nc" id="L150">					ite.getCause() : ex);</span>
+<span class="nc" id="L151">			throw new SpelEvaluationException(getStartPosition(), cause, SpelMessage.EXCEPTION_DURING_FUNCTION_CALL,</span>
+<span class="nc" id="L152">					this.name, cause.getMessage());</span>
+		}
+		finally {
+<span class="fc bfc" id="L155" title="All 2 branches covered.">			if (compilable) {</span>
+<span class="fc" id="L156">				this.exitTypeDescriptor = CodeFlow.toDescriptor(method.getReturnType());</span>
+<span class="fc" id="L157">				this.method = method;</span>
+			}
+			else {
+<span class="fc" id="L160">				this.exitTypeDescriptor = null;</span>
+<span class="fc" id="L161">				this.method = null;</span>
+			}
+		}
+	}
+
+	/**
+	 * Execute a function represented as {@link MethodHandle}.
+	 * &lt;p&gt;Method types that take no arguments (fully bound handles or static methods
+	 * with no parameters) can use {@link MethodHandle#invoke(Object...)} which is the most
+	 * efficient. Otherwise, {@link MethodHandle#invokeWithArguments(Object...)} is used.
+	 * @param state the expression evaluation state
+	 * @param methodHandle the method handle to invoke
+	 * @return the return value of the invoked Java method
+	 * @throws EvaluationException if there is any problem invoking the method
+	 * @since 6.1
+	 */
+	private TypedValue executeFunctionViaMethodHandle(ExpressionState state, MethodHandle methodHandle) throws EvaluationException {
+<span class="fc" id="L178">		@Nullable Object[] functionArgs = getArguments(state);</span>
+<span class="fc" id="L179">		MethodType declaredParams = methodHandle.type();</span>
+<span class="fc" id="L180">		int spelParamCount = functionArgs.length;</span>
+<span class="fc" id="L181">		int declaredParamCount = declaredParams.parameterCount();</span>
+
+		// We don't use methodHandle.isVarargsCollector(), because a MethodHandle created via
+		// MethodHandle#bindTo() is &quot;never a variable-arity method handle, even if the original
+		// target method handle was.&quot; Thus, we merely assume/suspect that varargs are supported
+		// if the last parameter type is an array.
+<span class="fc" id="L187">		boolean isSuspectedVarargs = declaredParams.lastParameterType().isArray();</span>
+
+<span class="fc bfc" id="L189" title="All 2 branches covered.">		if (isSuspectedVarargs) {</span>
+<span class="fc bfc" id="L190" title="All 2 branches covered.">			if (spelParamCount &lt; declaredParamCount - 1) {</span>
+				// Varargs, but the number of provided arguments (potentially 0) is insufficient
+				// for a varargs invocation for the number of declared parameters.
+				//
+				// As stated in the Javadoc for MethodHandle#asVarargsCollector(), &quot;the caller
+				// must supply, at a minimum, N-1 arguments, where N is the arity of the target.&quot;
+<span class="fc" id="L196">				throw new SpelEvaluationException(SpelMessage.INCORRECT_NUMBER_OF_ARGUMENTS_TO_FUNCTION,</span>
+<span class="fc" id="L197">						this.name, spelParamCount, (declaredParamCount - 1) + &quot; or more&quot;);</span>
+			}
+		}
+<span class="fc bfc" id="L200" title="All 2 branches covered.">		else if (spelParamCount != declaredParamCount) {</span>
+			// Incorrect number and not varargs. Perhaps a subset of arguments was provided,
+			// but the MethodHandle wasn't bound?
+<span class="fc" id="L203">			throw new SpelEvaluationException(SpelMessage.INCORRECT_NUMBER_OF_ARGUMENTS_TO_FUNCTION,</span>
+<span class="fc" id="L204">					this.name, spelParamCount, declaredParamCount);</span>
+		}
+
+		// simplest case: the MethodHandle is fully bound or represents a static method with no params:
+<span class="fc bfc" id="L208" title="All 2 branches covered.">		if (declaredParamCount == 0) {</span>
+			try {
+<span class="fc" id="L210">				return new TypedValue(methodHandle.invoke());</span>
+			}
+<span class="nc" id="L212">			catch (Throwable ex) {</span>
+<span class="nc" id="L213">				throw new SpelEvaluationException(getStartPosition(), ex, SpelMessage.EXCEPTION_DURING_FUNCTION_CALL,</span>
+<span class="nc" id="L214">						this.name, ex.getMessage());</span>
+			}
+			finally {
+				// Note: we consider MethodHandles not compilable
+<span class="fc" id="L218">				this.exitTypeDescriptor = null;</span>
+<span class="fc" id="L219">				this.method = null;</span>
+			}
+		}
+
+		// more complex case, we need to look at conversion and varargs repackaging
+<span class="fc" id="L224">		Integer varArgPosition = null;</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">		if (isSuspectedVarargs) {</span>
+<span class="fc" id="L226">			varArgPosition = declaredParamCount - 1;</span>
+		}
+<span class="fc" id="L228">		TypeConverter converter = state.getEvaluationContext().getTypeConverter();</span>
+<span class="fc" id="L229">		ReflectionHelper.convertAllMethodHandleArguments(converter, functionArgs, methodHandle, varArgPosition);</span>
+
+<span class="fc bfc" id="L231" title="All 2 branches covered.">		if (isSuspectedVarargs) {</span>
+<span class="fc bfc" id="L232" title="All 4 branches covered.">			if (declaredParamCount == 1 &amp;&amp; !methodHandle.isVarargsCollector()) {</span>
+				// We only repackage the arguments if the MethodHandle accepts a single
+				// argument AND the MethodHandle is not a &quot;varargs collector&quot; -- for example,
+				// when we are dealing with a bound MethodHandle.
+<span class="fc" id="L236">				functionArgs = ReflectionHelper.setupArgumentsForVarargsInvocation(</span>
+<span class="fc" id="L237">						methodHandle.type().parameterArray(), functionArgs);</span>
+			}
+<span class="fc bfc" id="L239" title="All 2 branches covered.">			else if (spelParamCount == declaredParamCount) {</span>
+				// If the varargs were supplied already packaged in an array, we have to create
+				// a new array, add the non-varargs arguments to the beginning of that array,
+				// and add the unpackaged varargs arguments to the end of that array. The reason
+				// is that MethodHandle.invokeWithArguments(Object...) does not expect varargs
+				// to be packaged in an array, in contrast to how method invocation works with
+				// reflection.
+<span class="fc" id="L246">				int actualVarargsIndex = functionArgs.length - 1;</span>
+<span class="pc bpc" id="L247" title="1 of 4 branches missed.">				if (actualVarargsIndex &gt;= 0 &amp;&amp; functionArgs[actualVarargsIndex] instanceof Object[] argsToUnpack) {</span>
+<span class="fc" id="L248">					Object[] newArgs = new Object[actualVarargsIndex + argsToUnpack.length];</span>
+<span class="fc" id="L249">					System.arraycopy(functionArgs, 0, newArgs, 0, actualVarargsIndex);</span>
+<span class="fc" id="L250">					System.arraycopy(argsToUnpack, 0, newArgs, actualVarargsIndex, argsToUnpack.length);</span>
+<span class="fc" id="L251">					functionArgs = newArgs;</span>
+				}
+			}
+		}
+
+		try {
+<span class="fc" id="L257">			return new TypedValue(methodHandle.invokeWithArguments(functionArgs));</span>
+		}
+<span class="nc" id="L259">		catch (Throwable ex) {</span>
+<span class="nc" id="L260">			throw new SpelEvaluationException(getStartPosition(), ex, SpelMessage.EXCEPTION_DURING_FUNCTION_CALL,</span>
+<span class="nc" id="L261">					this.name, ex.getMessage());</span>
+		}
+		finally {
+			// Note: we consider MethodHandles not compilable
+<span class="fc" id="L265">			this.exitTypeDescriptor = null;</span>
+<span class="fc" id="L266">			this.method = null;</span>
+		}
+	}
+
+	@Override
+	public String toStringAST() {
+<span class="fc" id="L272">		StringJoiner sj = new StringJoiner(&quot;,&quot;, &quot;(&quot;, &quot;)&quot;);</span>
+<span class="fc bfc" id="L273" title="All 2 branches covered.">		for (int i = 0; i &lt; getChildCount(); i++) {</span>
+<span class="fc" id="L274">			sj.add(getChild(i).toStringAST());</span>
+		}
+<span class="fc" id="L276">		return '#' + this.name + sj;</span>
+	}
+
+	/**
+	 * Compute the arguments to the function, they are the children of this expression node.
+	 * @return an array of argument values for the function call
+	 */
+	private @Nullable Object[] getArguments(ExpressionState state) throws EvaluationException {
+		// Compute arguments to the function
+<span class="fc" id="L285">		@Nullable Object[] arguments = new Object[getChildCount()];</span>
+<span class="fc bfc" id="L286" title="All 2 branches covered.">		for (int i = 0; i &lt; arguments.length; i++) {</span>
+<span class="fc" id="L287">			arguments[i] = this.children[i].getValueInternal(state).getValue();</span>
+		}
+<span class="fc" id="L289">		return arguments;</span>
+	}
+
+	@Override
+	public boolean isCompilable() {
+<span class="fc" id="L294">		Method method = this.method;</span>
+<span class="pc bpc" id="L295" title="1 of 2 branches missed.">		if (method == null) {</span>
+<span class="nc" id="L296">			return false;</span>
+		}
+<span class="fc" id="L298">		int methodModifiers = method.getModifiers();</span>
+<span class="pc bpc" id="L299" title="1 of 4 branches missed.">		if (!Modifier.isStatic(methodModifiers) || !Modifier.isPublic(methodModifiers) ||</span>
+<span class="fc bfc" id="L300" title="All 2 branches covered.">				!Modifier.isPublic(method.getDeclaringClass().getModifiers())) {</span>
+<span class="fc" id="L301">			return false;</span>
+		}
+<span class="fc bfc" id="L303" title="All 2 branches covered.">		for (SpelNodeImpl child : this.children) {</span>
+<span class="fc bfc" id="L304" title="All 2 branches covered.">			if (!child.isCompilable()) {</span>
+<span class="fc" id="L305">				return false;</span>
+			}
+		}
+<span class="fc" id="L308">		return true;</span>
+	}
+
+	@Override
+	public void generateCode(MethodVisitor mv, CodeFlow cf) {
+<span class="fc" id="L313">		Method method = this.method;</span>
+<span class="pc bpc" id="L314" title="1 of 2 branches missed.">		Assert.state(method != null, &quot;No method handle&quot;);</span>
+<span class="fc" id="L315">		String classDesc = method.getDeclaringClass().getName().replace('.', '/');</span>
+<span class="fc" id="L316">		generateCodeForArguments(mv, cf, method, this.children);</span>
+<span class="fc" id="L317">		mv.visitMethodInsn(INVOKESTATIC, classDesc, method.getName(),</span>
+<span class="fc" id="L318">				CodeFlow.createSignatureDescriptor(method), false);</span>
+<span class="fc" id="L319">		cf.pushDescriptor(this.exitTypeDescriptor);</span>
+<span class="fc" id="L320">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

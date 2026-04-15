@@ -1,0 +1,559 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SimpAnnotationMethodMessageHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.simp.annotation.support</a> &gt; <span class="el_source">SimpAnnotationMethodMessageHandler.java</span></div><h1>SimpAnnotationMethodMessageHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.simp.annotation.support;
+
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.Predicate;
+
+import org.apache.commons.logging.Log;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.context.EmbeddedValueResolverAware;
+import org.springframework.context.SmartLifecycle;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.convert.ConversionService;
+import org.springframework.format.support.DefaultFormattingConversionService;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.SubscribableChannel;
+import org.springframework.messaging.converter.ByteArrayMessageConverter;
+import org.springframework.messaging.converter.CompositeMessageConverter;
+import org.springframework.messaging.converter.MessageConverter;
+import org.springframework.messaging.converter.StringMessageConverter;
+import org.springframework.messaging.core.AbstractMessageSendingTemplate;
+import org.springframework.messaging.handler.DestinationPatternsMessageCondition;
+import org.springframework.messaging.handler.HandlerMethod;
+import org.springframework.messaging.handler.annotation.MessageMapping;
+import org.springframework.messaging.handler.annotation.support.AnnotationExceptionHandlerMethodResolver;
+import org.springframework.messaging.handler.annotation.support.DestinationVariableMethodArgumentResolver;
+import org.springframework.messaging.handler.annotation.support.HeaderMethodArgumentResolver;
+import org.springframework.messaging.handler.annotation.support.HeadersMethodArgumentResolver;
+import org.springframework.messaging.handler.annotation.support.MessageMethodArgumentResolver;
+import org.springframework.messaging.handler.annotation.support.PayloadMethodArgumentResolver;
+import org.springframework.messaging.handler.invocation.AbstractExceptionHandlerMethodResolver;
+import org.springframework.messaging.handler.invocation.AbstractMethodMessageHandler;
+import org.springframework.messaging.handler.invocation.CompletableFutureReturnValueHandler;
+import org.springframework.messaging.handler.invocation.HandlerMethodArgumentResolver;
+import org.springframework.messaging.handler.invocation.HandlerMethodReturnValueHandler;
+import org.springframework.messaging.handler.invocation.HandlerMethodReturnValueHandlerComposite;
+import org.springframework.messaging.handler.invocation.ReactiveReturnValueHandler;
+import org.springframework.messaging.simp.SimpAttributesContextHolder;
+import org.springframework.messaging.simp.SimpLogging;
+import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
+import org.springframework.messaging.simp.SimpMessageMappingInfo;
+import org.springframework.messaging.simp.SimpMessageSendingOperations;
+import org.springframework.messaging.simp.SimpMessageTypeMessageCondition;
+import org.springframework.messaging.simp.SimpMessagingTemplate;
+import org.springframework.messaging.simp.annotation.SubscribeMapping;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.messaging.support.MessageHeaderInitializer;
+import org.springframework.stereotype.Controller;
+import org.springframework.util.AntPathMatcher;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.PathMatcher;
+import org.springframework.util.StringValueResolver;
+import org.springframework.validation.Validator;
+
+/**
+ * A handler for messages delegating to {@link MessageMapping @MessageMapping}
+ * and {@link SubscribeMapping @SubscribeMapping} annotated methods.
+ *
+ * &lt;p&gt;Supports Ant-style path patterns with template variables.
+ *
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @author Juergen Hoeller
+ * @since 4.0
+ */
+public class SimpAnnotationMethodMessageHandler extends AbstractMethodMessageHandler&lt;SimpMessageMappingInfo&gt;
+		implements EmbeddedValueResolverAware, SmartLifecycle {
+
+<span class="fc" id="L98">	private static final boolean REACTOR_PRESENT = ClassUtils.isPresent(</span>
+<span class="fc" id="L99">			&quot;reactor.core.publisher.Flux&quot;, SimpAnnotationMethodMessageHandler.class.getClassLoader());</span>
+
+
+	private final SubscribableChannel clientInboundChannel;
+
+	private final SimpMessageSendingOperations clientMessagingTemplate;
+
+	private final SimpMessageSendingOperations brokerTemplate;
+
+	private MessageConverter messageConverter;
+
+<span class="fc" id="L110">	private ConversionService conversionService = new DefaultFormattingConversionService();</span>
+
+<span class="fc" id="L112">	private PathMatcher pathMatcher = new AntPathMatcher();</span>
+
+<span class="fc" id="L114">	private boolean slashPathSeparator = true;</span>
+
+	private @Nullable Validator validator;
+
+	private @Nullable StringValueResolver valueResolver;
+
+	private @Nullable MessageHeaderInitializer headerInitializer;
+
+	private @Nullable Predicate&lt;String&gt; headerFilter;
+
+	private @Nullable Integer phase;
+
+	private volatile boolean running;
+
+<span class="fc" id="L128">	private final Object lifecycleMonitor = new Object();</span>
+
+
+	/**
+	 * Create an instance of SimpAnnotationMethodMessageHandler with the given
+	 * message channels and broker messaging template.
+	 * @param clientInboundChannel the channel for receiving messages from clients (for example, WebSocket clients)
+	 * @param clientOutboundChannel the channel for messages to clients (for example, WebSocket clients)
+	 * @param brokerTemplate a messaging template to send application messages to the broker
+	 */
+	public SimpAnnotationMethodMessageHandler(SubscribableChannel clientInboundChannel,
+<span class="fc" id="L139">			MessageChannel clientOutboundChannel, SimpMessageSendingOperations brokerTemplate) {</span>
+
+<span class="fc" id="L141">		Assert.notNull(clientInboundChannel, &quot;clientInboundChannel must not be null&quot;);</span>
+<span class="fc" id="L142">		Assert.notNull(clientOutboundChannel, &quot;clientOutboundChannel must not be null&quot;);</span>
+<span class="fc" id="L143">		Assert.notNull(brokerTemplate, &quot;brokerTemplate must not be null&quot;);</span>
+
+<span class="fc" id="L145">		this.clientInboundChannel = clientInboundChannel;</span>
+<span class="fc" id="L146">		this.clientMessagingTemplate = new SimpMessagingTemplate(clientOutboundChannel);</span>
+<span class="fc" id="L147">		this.brokerTemplate = brokerTemplate;</span>
+
+<span class="fc" id="L149">		Collection&lt;MessageConverter&gt; converters = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L150">		converters.add(new StringMessageConverter());</span>
+<span class="fc" id="L151">		converters.add(new ByteArrayMessageConverter());</span>
+<span class="fc" id="L152">		this.messageConverter = new CompositeMessageConverter(converters);</span>
+<span class="fc" id="L153">	}</span>
+
+
+	/**
+	 * {@inheritDoc}
+	 * &lt;p&gt;Destination prefixes are expected to be slash-separated Strings and
+	 * therefore a slash is automatically appended where missing to ensure a
+	 * proper prefix-based match (i.e. matching complete segments).
+	 * &lt;p&gt;Note however that the remaining portion of a destination after the
+	 * prefix may use a different separator (for example, commonly &quot;.&quot; in messaging)
+	 * depending on the configured {@code PathMatcher}.
+	 */
+	@Override
+	public void setDestinationPrefixes(@Nullable Collection&lt;String&gt; prefixes) {
+<span class="fc" id="L167">		super.setDestinationPrefixes(appendSlashes(prefixes));</span>
+<span class="fc" id="L168">	}</span>
+
+	private static @Nullable Collection&lt;String&gt; appendSlashes(@Nullable Collection&lt;String&gt; prefixes) {
+<span class="fc bfc" id="L171" title="All 2 branches covered.">		if (CollectionUtils.isEmpty(prefixes)) {</span>
+<span class="fc" id="L172">			return prefixes;</span>
+		}
+<span class="fc" id="L174">		Collection&lt;String&gt; result = new ArrayList&lt;&gt;(prefixes.size());</span>
+<span class="fc bfc" id="L175" title="All 2 branches covered.">		for (String prefix : prefixes) {</span>
+<span class="fc bfc" id="L176" title="All 2 branches covered.">			if (!prefix.endsWith(&quot;/&quot;)) {</span>
+<span class="fc" id="L177">				prefix = prefix + &quot;/&quot;;</span>
+			}
+<span class="fc" id="L179">			result.add(prefix);</span>
+<span class="fc" id="L180">		}</span>
+<span class="fc" id="L181">		return result;</span>
+	}
+
+	/**
+	 * Configure a {@link MessageConverter} to use to convert the payload of a message from
+	 * its serialized form with a specific MIME type to an Object matching the target method
+	 * parameter. The converter is also used when sending a message to the message broker.
+	 * @see CompositeMessageConverter
+	 */
+	public void setMessageConverter(MessageConverter converter) {
+<span class="fc" id="L191">		this.messageConverter = converter;</span>
+<span class="fc" id="L192">		((AbstractMessageSendingTemplate&lt;?&gt;) this.clientMessagingTemplate).setMessageConverter(converter);</span>
+<span class="fc" id="L193">	}</span>
+
+	/**
+	 * Return the configured {@link MessageConverter}.
+	 */
+	public MessageConverter getMessageConverter() {
+<span class="nc" id="L199">		return this.messageConverter;</span>
+	}
+
+	/**
+	 * Configure a {@link ConversionService} to use when resolving method arguments,
+	 * for example message header values.
+	 * &lt;p&gt;By default, {@link DefaultFormattingConversionService} is used.
+	 */
+	public void setConversionService(ConversionService conversionService) {
+<span class="nc" id="L208">		this.conversionService = conversionService;</span>
+<span class="nc" id="L209">	}</span>
+
+	/**
+	 * Return the configured {@link ConversionService}.
+	 */
+	public ConversionService getConversionService() {
+<span class="nc" id="L215">		return this.conversionService;</span>
+	}
+
+	/**
+	 * Set the PathMatcher implementation to use for matching destinations
+	 * against configured destination patterns.
+	 * &lt;p&gt;By default, {@link AntPathMatcher} is used.
+	 */
+	public void setPathMatcher(PathMatcher pathMatcher) {
+<span class="fc" id="L224">		Assert.notNull(pathMatcher, &quot;PathMatcher must not be null&quot;);</span>
+<span class="fc" id="L225">		this.pathMatcher = pathMatcher;</span>
+<span class="fc" id="L226">		this.slashPathSeparator = this.pathMatcher.combine(&quot;a&quot;, &quot;a&quot;).equals(&quot;a/a&quot;);</span>
+<span class="fc" id="L227">	}</span>
+
+	/**
+	 * Return the PathMatcher implementation to use for matching destinations.
+	 */
+	public PathMatcher getPathMatcher() {
+<span class="fc" id="L233">		return this.pathMatcher;</span>
+	}
+
+	/**
+	 * Return the configured Validator instance.
+	 */
+	public @Nullable Validator getValidator() {
+<span class="fc" id="L240">		return this.validator;</span>
+	}
+
+	/**
+	 * Set the Validator instance used for validating {@code @Payload} arguments.
+	 * @see org.springframework.validation.annotation.Validated
+	 * @see PayloadMethodArgumentResolver
+	 */
+	public void setValidator(@Nullable Validator validator) {
+<span class="fc" id="L249">		this.validator = validator;</span>
+<span class="fc" id="L250">	}</span>
+
+	@Override
+	public void setEmbeddedValueResolver(StringValueResolver resolver) {
+<span class="fc" id="L254">		this.valueResolver = resolver;</span>
+<span class="fc" id="L255">	}</span>
+
+	/**
+	 * Configure a {@link MessageHeaderInitializer} to pass on to
+	 * {@link HandlerMethodReturnValueHandler HandlerMethodReturnValueHandlers}
+	 * that send messages from controller return values.
+	 * &lt;p&gt;By default, this property is not set.
+	 */
+	public void setHeaderInitializer(@Nullable MessageHeaderInitializer headerInitializer) {
+<span class="nc" id="L264">		this.headerInitializer = headerInitializer;</span>
+<span class="nc" id="L265">	}</span>
+
+	/**
+	 * Return the configured header initializer.
+	 */
+	public @Nullable MessageHeaderInitializer getHeaderInitializer() {
+<span class="nc" id="L271">		return this.headerInitializer;</span>
+	}
+
+	/**
+	 * Add a filter to determine which headers from the input message should be
+	 * propagated to the output message. Applies to return value handling of
+	 * {@code @SendTo}, {@code @SendToUser}, and {@code @SubscribeMapping}
+	 * controller methods. The filter is applied to the &quot;native headers&quot; submap.
+	 * Multiple filters are combined with {@link Predicate#or(Predicate)}.
+	 * &lt;p&gt;By default, no headers are propagated if this is not set.
+	 * @since 7.0.4
+	 * @see SendToMethodReturnValueHandler#addHeaderFilter(Predicate)
+	 * @see SubscriptionMethodReturnValueHandler#addHeaderFilter(Predicate)
+	 */
+	public void addHeaderFilter(Predicate&lt;String&gt; filter) {
+<span class="nc" id="L286">		Assert.notNull(filter, &quot;'headerFilter' predicate must not be null&quot;);</span>
+<span class="nc bnc" id="L287" title="All 2 branches missed.">		this.headerFilter = (this.headerFilter != null ? this.headerFilter.or(filter) : filter);</span>
+<span class="nc" id="L288">	}</span>
+
+	/**
+	 * Set the phase that this handler should run in.
+	 * &lt;p&gt;By default, this is {@link SmartLifecycle#DEFAULT_PHASE}, but with
+	 * {@code @EnableWebSocketMessageBroker} configuration it is set to 0.
+	 * @since 6.1.4
+	 */
+	public void setPhase(int phase) {
+<span class="fc" id="L297">		this.phase = phase;</span>
+<span class="fc" id="L298">	}</span>
+
+	@Override
+	public int getPhase() {
+<span class="pc bpc" id="L302" title="1 of 2 branches missed.">		return (this.phase != null ? this.phase : SmartLifecycle.super.getPhase());</span>
+	}
+
+
+	@Override
+	public final void start() {
+<span class="fc" id="L308">		synchronized (this.lifecycleMonitor) {</span>
+<span class="fc" id="L309">			this.clientInboundChannel.subscribe(this);</span>
+<span class="fc" id="L310">			this.running = true;</span>
+<span class="fc" id="L311">		}</span>
+<span class="fc" id="L312">	}</span>
+
+	@Override
+	public final void stop() {
+<span class="nc" id="L316">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L317">			this.running = false;</span>
+<span class="nc" id="L318">			this.clientInboundChannel.unsubscribe(this);</span>
+<span class="nc" id="L319">		}</span>
+<span class="nc" id="L320">	}</span>
+
+	@Override
+	public final void stop(Runnable callback) {
+<span class="nc" id="L324">		synchronized (this.lifecycleMonitor) {</span>
+<span class="nc" id="L325">			stop();</span>
+<span class="nc" id="L326">			callback.run();</span>
+<span class="nc" id="L327">		}</span>
+<span class="nc" id="L328">	}</span>
+
+	@Override
+	public final boolean isRunning() {
+<span class="fc" id="L332">		return this.running;</span>
+	}
+
+
+	@Override
+	protected List&lt;HandlerMethodArgumentResolver&gt; initArgumentResolvers() {
+<span class="fc" id="L338">		ApplicationContext context = getApplicationContext();</span>
+<span class="pc bpc" id="L339" title="1 of 2 branches missed.">		ConfigurableBeanFactory beanFactory = (context instanceof ConfigurableApplicationContext cac ?</span>
+<span class="pc" id="L340">				cac.getBeanFactory() : null);</span>
+
+<span class="fc" id="L342">		List&lt;HandlerMethodArgumentResolver&gt; resolvers = new ArrayList&lt;&gt;();</span>
+
+		// Annotation-based argument resolution
+<span class="fc" id="L345">		resolvers.add(new HeaderMethodArgumentResolver(this.conversionService, beanFactory));</span>
+<span class="fc" id="L346">		resolvers.add(new HeadersMethodArgumentResolver());</span>
+<span class="fc" id="L347">		resolvers.add(new DestinationVariableMethodArgumentResolver(this.conversionService));</span>
+
+		// Type-based argument resolution
+<span class="fc" id="L350">		resolvers.add(new PrincipalMethodArgumentResolver());</span>
+<span class="fc" id="L351">		resolvers.add(new MessageMethodArgumentResolver(this.messageConverter));</span>
+
+<span class="fc" id="L353">		resolvers.addAll(getCustomArgumentResolvers());</span>
+<span class="fc" id="L354">		resolvers.add(new PayloadMethodArgumentResolver(this.messageConverter, this.validator));</span>
+
+<span class="fc" id="L356">		return resolvers;</span>
+	}
+
+	@Override
+	protected List&lt;? extends HandlerMethodReturnValueHandler&gt; initReturnValueHandlers() {
+<span class="fc" id="L361">		List&lt;HandlerMethodReturnValueHandler&gt; handlers = new ArrayList&lt;&gt;();</span>
+
+		// Single-purpose return value types
+
+<span class="fc" id="L365">		handlers.add(new CompletableFutureReturnValueHandler());</span>
+<span class="pc bpc" id="L366" title="1 of 2 branches missed.">		if (REACTOR_PRESENT) {</span>
+<span class="fc" id="L367">			handlers.add(new ReactiveReturnValueHandler());</span>
+		}
+
+		// Annotation-based return value types
+
+<span class="fc" id="L372">		SendToMethodReturnValueHandler sendToHandler =</span>
+				new SendToMethodReturnValueHandler(this.brokerTemplate, true);
+<span class="fc" id="L374">		sendToHandler.setHeaderInitializer(this.headerInitializer);</span>
+<span class="pc bpc" id="L375" title="1 of 2 branches missed.">		if (this.headerFilter != null) {</span>
+<span class="nc" id="L376">			sendToHandler.addHeaderFilter(this.headerFilter);</span>
+		}
+<span class="fc" id="L378">		handlers.add(sendToHandler);</span>
+
+<span class="fc" id="L380">		SubscriptionMethodReturnValueHandler subscriptionHandler =</span>
+				new SubscriptionMethodReturnValueHandler(this.clientMessagingTemplate);
+<span class="fc" id="L382">		subscriptionHandler.setHeaderInitializer(this.headerInitializer);</span>
+<span class="pc bpc" id="L383" title="1 of 2 branches missed.">		if (this.headerFilter != null) {</span>
+<span class="nc" id="L384">			subscriptionHandler.addHeaderFilter(this.headerFilter);</span>
+		}
+<span class="fc" id="L386">		handlers.add(subscriptionHandler);</span>
+
+		// Custom return value types
+
+<span class="fc" id="L390">		handlers.addAll(getCustomReturnValueHandlers());</span>
+
+		// Catch-all
+
+<span class="fc" id="L394">		sendToHandler = new SendToMethodReturnValueHandler(this.brokerTemplate, false);</span>
+<span class="fc" id="L395">		sendToHandler.setHeaderInitializer(this.headerInitializer);</span>
+<span class="pc bpc" id="L396" title="1 of 2 branches missed.">		if (this.headerFilter != null) {</span>
+<span class="nc" id="L397">			sendToHandler.addHeaderFilter(this.headerFilter);</span>
+		}
+<span class="fc" id="L399">		handlers.add(sendToHandler);</span>
+
+<span class="fc" id="L401">		return handlers;</span>
+	}
+
+	@Override
+	protected Log getReturnValueHandlerLogger() {
+<span class="fc" id="L406">		return SimpLogging.forLog(HandlerMethodReturnValueHandlerComposite.defaultLogger);</span>
+	}
+
+	@Override
+	protected Log getHandlerMethodLogger() {
+<span class="fc" id="L411">		return SimpLogging.forLog(HandlerMethod.defaultLogger);</span>
+	}
+
+
+	@Override
+	protected boolean isHandler(Class&lt;?&gt; beanType) {
+<span class="fc" id="L417">		return AnnotatedElementUtils.hasAnnotation(beanType, Controller.class);</span>
+	}
+
+	@Override
+	protected @Nullable SimpMessageMappingInfo getMappingForMethod(Method method, Class&lt;?&gt; handlerType) {
+<span class="fc" id="L422">		MessageMapping messageAnn = AnnotatedElementUtils.findMergedAnnotation(method, MessageMapping.class);</span>
+<span class="fc bfc" id="L423" title="All 2 branches covered.">		if (messageAnn != null) {</span>
+<span class="fc" id="L424">			MessageMapping typeAnn = AnnotatedElementUtils.findMergedAnnotation(handlerType, MessageMapping.class);</span>
+			// Only actually register it if there are destinations specified;
+			// otherwise @MessageMapping is just being used as a (meta-annotation) marker.
+<span class="pc bpc" id="L427" title="5 of 6 branches missed.">			if (messageAnn.value().length &gt; 0 || (typeAnn != null &amp;&amp; typeAnn.value().length &gt; 0)) {</span>
+<span class="fc" id="L428">				SimpMessageMappingInfo result = createMessageMappingCondition(messageAnn.value());</span>
+<span class="fc bfc" id="L429" title="All 2 branches covered.">				if (typeAnn != null) {</span>
+<span class="fc" id="L430">					result = createMessageMappingCondition(typeAnn.value()).combine(result);</span>
+				}
+<span class="fc" id="L432">				return result;</span>
+			}
+		}
+
+<span class="fc" id="L436">		SubscribeMapping subscribeAnn = AnnotatedElementUtils.findMergedAnnotation(method, SubscribeMapping.class);</span>
+<span class="fc bfc" id="L437" title="All 2 branches covered.">		if (subscribeAnn != null) {</span>
+<span class="fc" id="L438">			MessageMapping typeAnn = AnnotatedElementUtils.findMergedAnnotation(handlerType, MessageMapping.class);</span>
+			// Only actually register it if there are destinations specified;
+			// otherwise @SubscribeMapping is just being used as a (meta-annotation) marker.
+<span class="pc bpc" id="L441" title="5 of 6 branches missed.">			if (subscribeAnn.value().length &gt; 0 || (typeAnn != null &amp;&amp; typeAnn.value().length &gt; 0)) {</span>
+<span class="fc" id="L442">				SimpMessageMappingInfo result = createSubscribeMappingCondition(subscribeAnn.value());</span>
+<span class="fc bfc" id="L443" title="All 2 branches covered.">				if (typeAnn != null) {</span>
+<span class="fc" id="L444">					result = createMessageMappingCondition(typeAnn.value()).combine(result);</span>
+				}
+<span class="fc" id="L446">				return result;</span>
+			}
+		}
+
+<span class="fc" id="L450">		return null;</span>
+	}
+
+	private SimpMessageMappingInfo createMessageMappingCondition(String[] destinations) {
+<span class="fc" id="L454">		String[] resolvedDestinations = resolveEmbeddedValuesInDestinations(destinations);</span>
+<span class="fc" id="L455">		return new SimpMessageMappingInfo(SimpMessageTypeMessageCondition.MESSAGE,</span>
+				new DestinationPatternsMessageCondition(resolvedDestinations, this.pathMatcher));
+	}
+
+	private SimpMessageMappingInfo createSubscribeMappingCondition(String[] destinations) {
+<span class="fc" id="L460">		String[] resolvedDestinations = resolveEmbeddedValuesInDestinations(destinations);</span>
+<span class="fc" id="L461">		return new SimpMessageMappingInfo(SimpMessageTypeMessageCondition.SUBSCRIBE,</span>
+				new DestinationPatternsMessageCondition(resolvedDestinations, this.pathMatcher));
+	}
+
+	/**
+	 * Resolve placeholder values in the given array of destinations.
+	 * @return a new array with updated destinations
+	 * @since 4.2
+	 */
+	protected String[] resolveEmbeddedValuesInDestinations(String[] destinations) {
+<span class="fc bfc" id="L471" title="All 2 branches covered.">		if (this.valueResolver == null) {</span>
+<span class="fc" id="L472">			return destinations;</span>
+		}
+<span class="fc" id="L474">		String[] result = new String[destinations.length];</span>
+<span class="fc bfc" id="L475" title="All 2 branches covered.">		for (int i = 0; i &lt; destinations.length; i++) {</span>
+<span class="fc" id="L476">			result[i] = Objects.requireNonNull(this.valueResolver.resolveStringValue(destinations[i]));</span>
+		}
+<span class="fc" id="L478">		return result;</span>
+	}
+
+	@Override
+	protected Set&lt;String&gt; getDirectLookupDestinations(SimpMessageMappingInfo mapping) {
+<span class="fc" id="L483">		Set&lt;String&gt; result = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L484" title="All 2 branches covered.">		for (String pattern : mapping.getDestinationConditions().getPatterns()) {</span>
+<span class="fc bfc" id="L485" title="All 2 branches covered.">			if (!this.pathMatcher.isPattern(pattern)) {</span>
+<span class="fc" id="L486">				result.add(pattern);</span>
+			}
+<span class="fc" id="L488">		}</span>
+<span class="fc" id="L489">		return result;</span>
+	}
+
+	@Override
+	protected @Nullable String getDestination(Message&lt;?&gt; message) {
+<span class="fc" id="L494">		return SimpMessageHeaderAccessor.getDestination(message.getHeaders());</span>
+	}
+
+	@Override
+	protected @Nullable String getLookupDestination(@Nullable String destination) {
+<span class="pc bpc" id="L499" title="1 of 2 branches missed.">		if (destination == null) {</span>
+<span class="nc" id="L500">			return null;</span>
+		}
+<span class="fc bfc" id="L502" title="All 2 branches covered.">		if (CollectionUtils.isEmpty(getDestinationPrefixes())) {</span>
+<span class="fc" id="L503">			return destination;</span>
+		}
+<span class="pc bpc" id="L505" title="1 of 2 branches missed.">		for (String prefix : getDestinationPrefixes()) {</span>
+<span class="fc bfc" id="L506" title="All 2 branches covered.">			if (destination.startsWith(prefix)) {</span>
+<span class="fc bfc" id="L507" title="All 2 branches covered.">				if (this.slashPathSeparator) {</span>
+<span class="fc" id="L508">					return destination.substring(prefix.length() - 1);</span>
+				}
+				else {
+<span class="fc" id="L511">					return destination.substring(prefix.length());</span>
+				}
+			}
+<span class="fc" id="L514">		}</span>
+<span class="nc" id="L515">		return null;</span>
+	}
+
+	@Override
+	protected @Nullable SimpMessageMappingInfo getMatchingMapping(SimpMessageMappingInfo mapping, Message&lt;?&gt; message) {
+<span class="fc" id="L520">		return mapping.getMatchingCondition(message);</span>
+
+	}
+
+	@Override
+	protected Comparator&lt;SimpMessageMappingInfo&gt; getMappingComparator(final Message&lt;?&gt; message) {
+<span class="pc" id="L526">		return (info1, info2) -&gt; info1.compareTo(info2, message);</span>
+	}
+
+	@Override
+	protected void handleMatch(SimpMessageMappingInfo mapping, HandlerMethod handlerMethod,
+			String lookupDestination, Message&lt;?&gt; message) {
+
+<span class="fc" id="L533">		Set&lt;String&gt; patterns = mapping.getDestinationConditions().getPatterns();</span>
+<span class="pc bpc" id="L534" title="1 of 2 branches missed.">		if (!CollectionUtils.isEmpty(patterns)) {</span>
+<span class="fc" id="L535">			String pattern = patterns.iterator().next();</span>
+<span class="fc" id="L536">			Map&lt;String, String&gt; vars = getPathMatcher().extractUriTemplateVariables(pattern, lookupDestination);</span>
+<span class="fc bfc" id="L537" title="All 2 branches covered.">			if (!CollectionUtils.isEmpty(vars)) {</span>
+<span class="fc" id="L538">				MessageHeaderAccessor mha = MessageHeaderAccessor.getAccessor(message, MessageHeaderAccessor.class);</span>
+<span class="pc bpc" id="L539" title="2 of 4 branches missed.">				Assert.state(mha != null &amp;&amp; mha.isMutable(), &quot;Mutable MessageHeaderAccessor required&quot;);</span>
+<span class="fc" id="L540">				mha.setHeader(DestinationVariableMethodArgumentResolver.DESTINATION_TEMPLATE_VARIABLES_HEADER, vars);</span>
+			}
+		}
+
+		try {
+<span class="fc" id="L545">			SimpAttributesContextHolder.setAttributesFromMessage(message);</span>
+<span class="fc" id="L546">			super.handleMatch(mapping, handlerMethod, lookupDestination, message);</span>
+		}
+		finally {
+<span class="fc" id="L549">			SimpAttributesContextHolder.resetAttributes();</span>
+		}
+<span class="fc" id="L551">	}</span>
+
+	@Override
+	protected AbstractExceptionHandlerMethodResolver createExceptionHandlerMethodResolverFor(Class&lt;?&gt; beanType) {
+<span class="fc" id="L555">		return new AnnotationExceptionHandlerMethodResolver(beanType);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

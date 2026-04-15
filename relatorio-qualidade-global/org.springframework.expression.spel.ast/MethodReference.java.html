@@ -1,0 +1,492 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MethodReference.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.ast</a> &gt; <span class="el_source">MethodReference.java</span></div><h1>MethodReference.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.ast;
+
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.lang.reflect.Proxy;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.StringJoiner;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.asm.Label;
+import org.springframework.asm.MethodVisitor;
+import org.springframework.core.convert.TypeDescriptor;
+import org.springframework.expression.AccessException;
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.EvaluationException;
+import org.springframework.expression.ExpressionInvocationTargetException;
+import org.springframework.expression.MethodExecutor;
+import org.springframework.expression.MethodResolver;
+import org.springframework.expression.TypedValue;
+import org.springframework.expression.spel.CodeFlow;
+import org.springframework.expression.spel.ExpressionState;
+import org.springframework.expression.spel.SpelEvaluationException;
+import org.springframework.expression.spel.SpelMessage;
+import org.springframework.expression.spel.support.ReflectiveMethodExecutor;
+import org.springframework.expression.spel.support.ReflectiveMethodResolver;
+import org.springframework.util.Assert;
+
+/**
+ * Expression language AST node that represents a method reference (i.e., a
+ * method invocation other than a simple property reference).
+ *
+ * &lt;h3&gt;Null-safe Invocation&lt;/h3&gt;
+ *
+ * &lt;p&gt;Null-safe invocation is supported via the {@code '?.'} operator. For example,
+ * {@code 'counter?.incrementBy(1)'} will evaluate to {@code null} if {@code counter}
+ * is {@code null} and will otherwise evaluate to the value returned from the
+ * invocation of {@code counter.incrementBy(1)}. As of Spring Framework 7.0,
+ * null-safe invocation also applies when invoking a method on an {@link Optional}
+ * target. For example, if {@code counter} is of type {@code Optional&lt;Counter&gt;},
+ * the expression {@code 'counter?.incrementBy(1)'} will evaluate to {@code null}
+ * if {@code counter} is {@code null} or {@link Optional#isEmpty() empty} and will
+ * otherwise evaluate the value returned from the invocation of
+ * {@code counter.get().incrementBy(1)}.
+ *
+ * @author Andy Clement
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 3.0
+ */
+public class MethodReference extends SpelNodeImpl {
+
+	private final boolean nullSafe;
+
+	private final String name;
+
+	private @Nullable Character originalPrimitiveExitTypeDescriptor;
+
+	private volatile @Nullable CachedMethodExecutor cachedExecutor;
+
+
+	public MethodReference(boolean nullSafe, String methodName, int startPos, int endPos, SpelNodeImpl... arguments) {
+<span class="fc" id="L84">		super(startPos, endPos, arguments);</span>
+<span class="fc" id="L85">		this.name = methodName;</span>
+<span class="fc" id="L86">		this.nullSafe = nullSafe;</span>
+<span class="fc" id="L87">	}</span>
+
+
+	/**
+	 * Does this node represent a null-safe method reference?
+	 * @since 6.0.13
+	 */
+	@Override
+	public final boolean isNullSafe() {
+<span class="fc" id="L96">		return this.nullSafe;</span>
+	}
+
+	/**
+	 * Get the name of the referenced method.
+	 */
+	public final String getName() {
+<span class="nc" id="L103">		return this.name;</span>
+	}
+
+	@Override
+	protected ValueRef getValueRef(ExpressionState state) throws EvaluationException {
+<span class="fc" id="L108">		@Nullable Object[] arguments = getArguments(state);</span>
+<span class="fc bfc" id="L109" title="All 2 branches covered.">		if (state.getActiveContextObject().getValue() == null) {</span>
+<span class="fc bfc" id="L110" title="All 2 branches covered.">			if (!isNullSafe()) {</span>
+<span class="fc" id="L111">				throw nullTargetException(getArgumentTypes(arguments));</span>
+			}
+<span class="fc" id="L113">			return ValueRef.NullValueRef.INSTANCE;</span>
+		}
+<span class="fc" id="L115">		return new MethodValueRef(state, arguments);</span>
+	}
+
+	@Override
+	public TypedValue getValueInternal(ExpressionState state) throws EvaluationException {
+<span class="fc" id="L120">		EvaluationContext evaluationContext = state.getEvaluationContext();</span>
+<span class="fc" id="L121">		TypedValue contextObject = state.getActiveContextObject();</span>
+<span class="fc" id="L122">		Object target = contextObject.getValue();</span>
+<span class="fc" id="L123">		TypeDescriptor targetType = contextObject.getTypeDescriptor();</span>
+<span class="fc" id="L124">		@Nullable Object[] arguments = getArguments(state);</span>
+<span class="fc" id="L125">		TypedValue result = getValueInternal(evaluationContext, target, targetType, arguments);</span>
+<span class="fc" id="L126">		updateExitTypeDescriptor();</span>
+<span class="fc" id="L127">		return result;</span>
+	}
+
+	private TypedValue getValueInternal(EvaluationContext evaluationContext, @Nullable Object target,
+			@Nullable TypeDescriptor targetType, @Nullable Object[] arguments) {
+
+<span class="fc" id="L133">		List&lt;TypeDescriptor&gt; argumentTypes = getArgumentTypes(arguments);</span>
+<span class="fc" id="L134">		Optional&lt;?&gt; fallbackOptionalTarget = null;</span>
+<span class="fc" id="L135">		boolean isEmptyOptional = false;</span>
+
+<span class="fc bfc" id="L137" title="All 2 branches covered.">		if (isNullSafe()) {</span>
+<span class="pc bpc" id="L138" title="1 of 2 branches missed.">			if (target == null) {</span>
+<span class="nc" id="L139">				return TypedValue.NULL;</span>
+			}
+<span class="fc bfc" id="L141" title="All 2 branches covered.">			if (target instanceof Optional&lt;?&gt; optional) {</span>
+<span class="fc bfc" id="L142" title="All 2 branches covered.">				if (optional.isPresent()) {</span>
+<span class="fc" id="L143">					target = optional.get();</span>
+<span class="fc" id="L144">					fallbackOptionalTarget = optional;</span>
+				}
+				else {
+<span class="fc" id="L147">					isEmptyOptional = true;</span>
+				}
+			}
+		}
+
+<span class="fc bfc" id="L152" title="All 2 branches covered.">		if (target == null) {</span>
+<span class="fc" id="L153">			throw nullTargetException(argumentTypes);</span>
+		}
+
+<span class="fc" id="L156">		MethodExecutor executorToUse = getCachedExecutor(evaluationContext, target, targetType, argumentTypes);</span>
+<span class="fc bfc" id="L157" title="All 2 branches covered.">		if (executorToUse != null) {</span>
+			try {
+<span class="fc" id="L159">				return executorToUse.execute(evaluationContext, target, arguments);</span>
+			}
+<span class="fc" id="L161">			catch (AccessException ex) {</span>
+				// Two reasons this can occur:
+				// 1. the method invoked actually threw a real exception
+				// 2. the method invoked was not passed the arguments it expected and
+				//    has become 'stale'
+
+				// In the first case we should not retry, in the second case we should see
+				// if there is a better suited method.
+
+				// To determine the situation, the AccessException will contain a cause.
+				// If the cause is an InvocationTargetException, a user exception was
+				// thrown inside the method. Otherwise the method could not be invoked.
+<span class="fc" id="L173">				throwSimpleExceptionIfPossible(target, ex);</span>
+
+				// At this point we know it wasn't a user problem so worth a retry if a
+				// better candidate can be found.
+<span class="fc" id="L177">				this.cachedExecutor = null;</span>
+<span class="fc" id="L178">				executorToUse = null;</span>
+			}
+		}
+
+		// Either there was no cached executor, or it no longer exists.
+
+		// First, attempt to find the method on the target object.
+<span class="fc" id="L185">		Object targetToUse = target;</span>
+<span class="fc" id="L186">		MethodExecutorSearchResult searchResult = findMethodExecutor(argumentTypes, target, evaluationContext);</span>
+<span class="fc bfc" id="L187" title="All 2 branches covered.">		if (searchResult.methodExecutor != null) {</span>
+<span class="fc" id="L188">			executorToUse = searchResult.methodExecutor;</span>
+		}
+		// Second, attempt to find the method on the original Optional instance.
+<span class="fc bfc" id="L191" title="All 2 branches covered.">		else if (fallbackOptionalTarget != null) {</span>
+<span class="fc" id="L192">			searchResult = findMethodExecutor(argumentTypes, fallbackOptionalTarget, evaluationContext);</span>
+<span class="pc bpc" id="L193" title="1 of 2 branches missed.">			if (searchResult.methodExecutor != null) {</span>
+<span class="fc" id="L194">				executorToUse = searchResult.methodExecutor;</span>
+<span class="fc" id="L195">				targetToUse = fallbackOptionalTarget;</span>
+			}
+		}
+		// If we got this far, that means we failed to find an executor for both the
+		// target and the fallback target. So, we return NULL if the original target
+		// is a null-safe empty Optional.
+<span class="fc bfc" id="L201" title="All 2 branches covered.">		else if (isEmptyOptional) {</span>
+<span class="fc" id="L202">			return TypedValue.NULL;</span>
+		}
+
+<span class="fc bfc" id="L205" title="All 2 branches covered.">		if (executorToUse == null) {</span>
+<span class="fc" id="L206">			String method = FormatHelper.formatMethodForMessage(this.name, argumentTypes);</span>
+<span class="fc" id="L207">			String className = FormatHelper.formatClassNameForMessage(</span>
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">					target instanceof Class&lt;?&gt; clazz ? clazz : target.getClass());</span>
+<span class="pc bpc" id="L209" title="1 of 2 branches missed.">			if (searchResult.accessException != null) {</span>
+<span class="nc" id="L210">				throw new SpelEvaluationException(</span>
+<span class="nc" id="L211">						getStartPosition(), searchResult.accessException, SpelMessage.PROBLEM_LOCATING_METHOD, method, className);</span>
+			}
+			else {
+<span class="fc" id="L214">				throw new SpelEvaluationException(getStartPosition(), SpelMessage.METHOD_NOT_FOUND, method, className);</span>
+			}
+		}
+
+<span class="fc" id="L218">		this.cachedExecutor = new CachedMethodExecutor(</span>
+<span class="fc bfc" id="L219" title="All 2 branches covered.">				executorToUse, (targetToUse instanceof Class&lt;?&gt; clazz ? clazz : null), targetType, argumentTypes);</span>
+		try {
+<span class="fc" id="L221">			return executorToUse.execute(evaluationContext, targetToUse, arguments);</span>
+		}
+<span class="fc" id="L223">		catch (AccessException ex) {</span>
+			// Same unwrapping exception handling as in above catch block
+<span class="nc" id="L225">			throwSimpleExceptionIfPossible(targetToUse, ex);</span>
+<span class="nc" id="L226">			throw new SpelEvaluationException(getStartPosition(), ex,</span>
+					SpelMessage.EXCEPTION_DURING_METHOD_INVOCATION, this.name,
+<span class="nc" id="L228">					targetToUse.getClass().getName(), ex.getMessage());</span>
+		}
+	}
+
+	private SpelEvaluationException nullTargetException(List&lt;TypeDescriptor&gt; argumentTypes) {
+<span class="fc" id="L233">		return new SpelEvaluationException(getStartPosition(),</span>
+				SpelMessage.METHOD_CALL_ON_NULL_OBJECT_NOT_ALLOWED,
+<span class="fc" id="L235">				FormatHelper.formatMethodForMessage(this.name, argumentTypes));</span>
+	}
+
+	private @Nullable Object[] getArguments(ExpressionState state) {
+<span class="fc" id="L239">		@Nullable Object[] arguments = new Object[getChildCount()];</span>
+<span class="fc bfc" id="L240" title="All 2 branches covered.">		for (int i = 0; i &lt; arguments.length; i++) {</span>
+			// Make the root object the active context again for evaluating the parameter expressions
+			try {
+<span class="fc" id="L243">				state.pushActiveContextObject(state.getScopeRootContextObject());</span>
+<span class="fc" id="L244">				arguments[i] = this.children[i].getValueInternal(state).getValue();</span>
+			}
+			finally {
+<span class="fc" id="L247">				state.popActiveContextObject();</span>
+			}
+		}
+<span class="fc" id="L250">		return arguments;</span>
+	}
+
+	private List&lt;TypeDescriptor&gt; getArgumentTypes(@Nullable Object... arguments) {
+<span class="fc" id="L254">		List&lt;@Nullable TypeDescriptor&gt; descriptors = new ArrayList&lt;&gt;(arguments.length);</span>
+<span class="fc bfc" id="L255" title="All 2 branches covered.">		for (Object argument : arguments) {</span>
+<span class="fc" id="L256">			descriptors.add(TypeDescriptor.forObject(argument));</span>
+		}
+<span class="fc" id="L258">		return Collections.unmodifiableList(descriptors);</span>
+	}
+
+	private @Nullable MethodExecutor getCachedExecutor(EvaluationContext evaluationContext, Object target,
+			@Nullable TypeDescriptor targetType, List&lt;TypeDescriptor&gt; argumentTypes) {
+
+<span class="fc" id="L264">		List&lt;MethodResolver&gt; methodResolvers = evaluationContext.getMethodResolvers();</span>
+<span class="pc bpc" id="L265" title="1 of 4 branches missed.">		if (methodResolvers.size() != 1 || !(methodResolvers.get(0) instanceof ReflectiveMethodResolver)) {</span>
+			// Not a default ReflectiveMethodResolver - don't know whether caching is valid
+<span class="fc" id="L267">			return null;</span>
+		}
+
+<span class="fc" id="L270">		CachedMethodExecutor executorToCheck = this.cachedExecutor;</span>
+<span class="fc bfc" id="L271" title="All 4 branches covered.">		if (executorToCheck != null &amp;&amp; executorToCheck.isSuitable(target, targetType, argumentTypes)) {</span>
+<span class="fc" id="L272">			return executorToCheck.get();</span>
+		}
+<span class="fc" id="L274">		this.cachedExecutor = null;</span>
+<span class="fc" id="L275">		return null;</span>
+	}
+
+	private MethodExecutorSearchResult findMethodExecutor(List&lt;TypeDescriptor&gt; argumentTypes, Object target,
+			EvaluationContext evaluationContext) throws SpelEvaluationException {
+
+<span class="fc" id="L281">		AccessException accessException = null;</span>
+<span class="fc bfc" id="L282" title="All 2 branches covered.">		for (MethodResolver methodResolver : evaluationContext.getMethodResolvers()) {</span>
+			try {
+<span class="fc" id="L284">				MethodExecutor methodExecutor = methodResolver.resolve(</span>
+						evaluationContext, target, this.name, argumentTypes);
+<span class="fc bfc" id="L286" title="All 2 branches covered.">				if (methodExecutor != null) {</span>
+<span class="fc" id="L287">					return new MethodExecutorSearchResult(methodExecutor, null);</span>
+				}
+			}
+<span class="nc" id="L290">			catch (AccessException ex) {</span>
+<span class="nc" id="L291">				accessException = ex;</span>
+<span class="nc" id="L292">				break;</span>
+<span class="fc" id="L293">			}</span>
+<span class="fc" id="L294">		}</span>
+
+<span class="fc" id="L296">		return new MethodExecutorSearchResult(null, accessException);</span>
+	}
+
+	/**
+	 * Decode the AccessException, throwing a lightweight evaluation exception or,
+	 * if the cause was a RuntimeException, throw the RuntimeException directly.
+	 */
+	private void throwSimpleExceptionIfPossible(Object target, AccessException ex) {
+<span class="fc bfc" id="L304" title="All 2 branches covered.">		if (ex.getCause() instanceof InvocationTargetException cause) {</span>
+<span class="fc" id="L305">			Throwable rootCause = cause.getCause();</span>
+<span class="fc bfc" id="L306" title="All 2 branches covered.">			if (rootCause instanceof RuntimeException runtimeException) {</span>
+<span class="fc" id="L307">				throw runtimeException;</span>
+			}
+<span class="fc" id="L309">			throw new ExpressionInvocationTargetException(getStartPosition(),</span>
+					&quot;A problem occurred when trying to execute method '&quot; + this.name +
+<span class="fc" id="L311">					&quot;' on object of type [&quot; + target.getClass().getName() + &quot;]&quot;, rootCause);</span>
+		}
+<span class="fc" id="L313">	}</span>
+
+	private void updateExitTypeDescriptor() {
+<span class="fc" id="L316">		CachedMethodExecutor executorToCheck = this.cachedExecutor;</span>
+<span class="fc bfc" id="L317" title="All 4 branches covered.">		if (executorToCheck != null &amp;&amp; executorToCheck.get() instanceof ReflectiveMethodExecutor reflectiveMethodExecutor) {</span>
+<span class="fc" id="L318">			Method method = reflectiveMethodExecutor.getMethod();</span>
+<span class="fc" id="L319">			String descriptor = CodeFlow.toDescriptor(method.getReturnType());</span>
+<span class="fc bfc" id="L320" title="All 6 branches covered.">			if (isNullSafe() &amp;&amp; CodeFlow.isPrimitive(descriptor) &amp;&amp; (descriptor.charAt(0) != 'V')) {</span>
+<span class="fc" id="L321">				this.originalPrimitiveExitTypeDescriptor = descriptor.charAt(0);</span>
+<span class="fc" id="L322">				this.exitTypeDescriptor = CodeFlow.toBoxedDescriptor(descriptor);</span>
+			}
+			else {
+<span class="fc" id="L325">				this.exitTypeDescriptor = descriptor;</span>
+			}
+		}
+<span class="fc" id="L328">	}</span>
+
+	@Override
+	public String toStringAST() {
+<span class="fc" id="L332">		StringJoiner sj = new StringJoiner(&quot;,&quot;, &quot;(&quot;, &quot;)&quot;);</span>
+<span class="fc bfc" id="L333" title="All 2 branches covered.">		for (int i = 0; i &lt; getChildCount(); i++) {</span>
+<span class="fc" id="L334">			sj.add(getChild(i).toStringAST());</span>
+		}
+<span class="fc" id="L336">		return this.name + sj;</span>
+	}
+
+	/**
+	 * A method reference is compilable if it has been resolved to a reflectively accessible method
+	 * and the child nodes (arguments to the method) are also compilable.
+	 */
+	@Override
+	public boolean isCompilable() {
+<span class="fc" id="L345">		CachedMethodExecutor executorToCheck = this.cachedExecutor;</span>
+<span class="fc bfc" id="L346" title="All 4 branches covered.">		if (executorToCheck == null || executorToCheck.hasProxyTarget() ||</span>
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">				!(executorToCheck.get() instanceof ReflectiveMethodExecutor executor)) {</span>
+<span class="fc" id="L348">			return false;</span>
+		}
+
+<span class="fc bfc" id="L351" title="All 2 branches covered.">		for (SpelNodeImpl child : this.children) {</span>
+<span class="pc bpc" id="L352" title="1 of 2 branches missed.">			if (!child.isCompilable()) {</span>
+<span class="nc" id="L353">				return false;</span>
+			}
+		}
+<span class="fc bfc" id="L356" title="All 2 branches covered.">		if (executor.didArgumentConversionOccur()) {</span>
+<span class="fc" id="L357">			return false;</span>
+		}
+
+<span class="fc" id="L360">		Method method = executor.getMethod();</span>
+<span class="pc bpc" id="L361" title="2 of 4 branches missed.">		return (Modifier.isPublic(method.getModifiers()) &amp;&amp; executor.getPublicDeclaringClass() != null);</span>
+	}
+
+	@Override
+	public void generateCode(MethodVisitor mv, CodeFlow cf) {
+<span class="fc" id="L366">		CachedMethodExecutor executorToCheck = this.cachedExecutor;</span>
+<span class="pc bpc" id="L367" title="2 of 4 branches missed.">		if (executorToCheck == null || !(executorToCheck.get() instanceof ReflectiveMethodExecutor methodExecutor)) {</span>
+<span class="nc" id="L368">			throw new IllegalStateException(&quot;No applicable cached executor found: &quot; + executorToCheck);</span>
+		}
+<span class="fc" id="L370">		Method method = methodExecutor.getMethod();</span>
+
+<span class="fc" id="L372">		Class&lt;?&gt; publicDeclaringClass = methodExecutor.getPublicDeclaringClass();</span>
+<span class="pc bpc" id="L373" title="1 of 2 branches missed.">		Assert.state(publicDeclaringClass != null,</span>
+<span class="nc" id="L374">				() -&gt; &quot;Failed to find public declaring class for method: &quot; + method);</span>
+
+<span class="fc" id="L376">		String classDesc = publicDeclaringClass.getName().replace('.', '/');</span>
+<span class="fc" id="L377">		boolean isStatic = Modifier.isStatic(method.getModifiers());</span>
+<span class="fc" id="L378">		String descriptor = cf.lastDescriptor();</span>
+
+<span class="fc bfc" id="L380" title="All 4 branches covered.">		if (descriptor == null &amp;&amp; !isStatic) {</span>
+			// Nothing on the stack but something is needed
+<span class="fc" id="L382">			cf.loadTarget(mv);</span>
+		}
+
+<span class="fc" id="L385">		Label skipIfNull = null;</span>
+<span class="pc bpc" id="L386" title="3 of 6 branches missed.">		if (isNullSafe() &amp;&amp; (descriptor != null || !isStatic)) {</span>
+<span class="fc" id="L387">			skipIfNull = new Label();</span>
+<span class="fc" id="L388">			Label continueLabel = new Label();</span>
+<span class="fc" id="L389">			mv.visitInsn(DUP);</span>
+<span class="fc" id="L390">			mv.visitJumpInsn(IFNONNULL, continueLabel);</span>
+<span class="fc" id="L391">			CodeFlow.insertCheckCast(mv, this.exitTypeDescriptor);</span>
+<span class="fc" id="L392">			mv.visitJumpInsn(GOTO, skipIfNull);</span>
+<span class="fc" id="L393">			mv.visitLabel(continueLabel);</span>
+		}
+
+<span class="fc bfc" id="L396" title="All 4 branches covered.">		if (descriptor != null &amp;&amp; isStatic) {</span>
+			// A static method call will not consume what is on the stack, so
+			// it needs to be popped off.
+<span class="fc" id="L399">			mv.visitInsn(POP);</span>
+		}
+
+<span class="fc bfc" id="L402" title="All 2 branches covered.">		if (CodeFlow.isPrimitive(descriptor)) {</span>
+<span class="fc" id="L403">			CodeFlow.insertBoxIfNecessary(mv, descriptor.charAt(0));</span>
+		}
+
+<span class="fc bfc" id="L406" title="All 6 branches covered.">		if (!isStatic &amp;&amp; (descriptor == null || !descriptor.substring(1).equals(classDesc))) {</span>
+<span class="fc" id="L407">			CodeFlow.insertCheckCast(mv, &quot;L&quot; + classDesc);</span>
+		}
+
+<span class="fc" id="L410">		generateCodeForArguments(mv, cf, method, this.children);</span>
+<span class="fc" id="L411">		boolean isInterface = publicDeclaringClass.isInterface();</span>
+<span class="fc bfc" id="L412" title="All 4 branches covered.">		int opcode = (isStatic ? INVOKESTATIC : isInterface ? INVOKEINTERFACE : INVOKEVIRTUAL);</span>
+<span class="fc" id="L413">		mv.visitMethodInsn(opcode, classDesc, method.getName(), CodeFlow.createSignatureDescriptor(method),</span>
+				isInterface);
+<span class="fc" id="L415">		cf.pushDescriptor(this.exitTypeDescriptor);</span>
+
+<span class="fc bfc" id="L417" title="All 2 branches covered.">		if (this.originalPrimitiveExitTypeDescriptor != null) {</span>
+			// The output of the accessor will be a primitive but from the block above it might be null,
+			// so to have a 'common stack' element at the skipIfNull target we need to box the primitive.
+<span class="fc" id="L420">			CodeFlow.insertBoxIfNecessary(mv, this.originalPrimitiveExitTypeDescriptor);</span>
+		}
+
+<span class="fc bfc" id="L423" title="All 2 branches covered.">		if (skipIfNull != null) {</span>
+<span class="fc bfc" id="L424" title="All 2 branches covered.">			if (&quot;V&quot;.equals(this.exitTypeDescriptor)) {</span>
+				// If the method return type is 'void', we need to push a null object
+				// reference onto the stack to satisfy the needs of the skipIfNull target.
+<span class="fc" id="L427">				mv.visitInsn(ACONST_NULL);</span>
+			}
+<span class="fc" id="L429">			mv.visitLabel(skipIfNull);</span>
+		}
+<span class="fc" id="L431">	}</span>
+
+
+	private class MethodValueRef implements ValueRef {
+
+		private final EvaluationContext evaluationContext;
+
+		private final @Nullable Object target;
+
+		private final @Nullable TypeDescriptor targetType;
+
+		private final @Nullable Object[] arguments;
+
+<span class="fc" id="L444">		public MethodValueRef(ExpressionState state, @Nullable Object[] arguments) {</span>
+<span class="fc" id="L445">			this.evaluationContext = state.getEvaluationContext();</span>
+<span class="fc" id="L446">			this.target = state.getActiveContextObject().getValue();</span>
+<span class="fc" id="L447">			this.targetType = state.getActiveContextObject().getTypeDescriptor();</span>
+<span class="fc" id="L448">			this.arguments = arguments;</span>
+<span class="fc" id="L449">		}</span>
+
+		@Override
+		public TypedValue getValue() {
+<span class="fc" id="L453">			TypedValue result = MethodReference.this.getValueInternal(</span>
+					this.evaluationContext, this.target, this.targetType, this.arguments);
+<span class="fc" id="L455">			updateExitTypeDescriptor();</span>
+<span class="fc" id="L456">			return result;</span>
+		}
+
+		@Override
+		public void setValue(@Nullable Object newValue) {
+<span class="nc" id="L461">			throw new IllegalAccessError();</span>
+		}
+
+		@Override
+		public boolean isWritable() {
+<span class="nc" id="L466">			return false;</span>
+		}
+	}
+
+
+<span class="fc" id="L471">	private record MethodExecutorSearchResult(@Nullable MethodExecutor methodExecutor, @Nullable AccessException accessException) {</span>
+	}
+
+<span class="fc" id="L474">	private record CachedMethodExecutor(MethodExecutor methodExecutor, @Nullable Class&lt;?&gt; staticClass,</span>
+			@Nullable TypeDescriptor targetType, List&lt;TypeDescriptor&gt; argumentTypes) {
+
+		public boolean isSuitable(Object target, @Nullable TypeDescriptor targetType, List&lt;TypeDescriptor&gt; argumentTypes) {
+<span class="fc bfc" id="L478" title="All 4 branches covered.">			return ((this.staticClass == null || this.staticClass == target) &amp;&amp;</span>
+<span class="fc bfc" id="L479" title="All 4 branches covered.">					Objects.equals(this.targetType, targetType) &amp;&amp; this.argumentTypes.equals(argumentTypes));</span>
+		}
+
+		public boolean hasProxyTarget() {
+<span class="pc bpc" id="L483" title="1 of 4 branches missed.">			return (this.targetType != null &amp;&amp; Proxy.isProxyClass(this.targetType.getType()));</span>
+		}
+
+		public MethodExecutor get() {
+<span class="fc" id="L487">			return this.methodExecutor;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

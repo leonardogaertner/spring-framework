@@ -1,0 +1,414 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UrlHandlerFilter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.filter</a> &gt; <span class="el_source">UrlHandlerFilter.java</span></div><h1>UrlHandlerFilter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.filter;
+
+import java.io.IOException;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Consumer;
+
+import jakarta.servlet.DispatcherType;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletRequestWrapper;
+import jakarta.servlet.http.HttpServletResponse;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.server.PathContainer;
+import org.springframework.http.server.RequestPath;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.StringUtils;
+import org.springframework.web.util.ServletRequestPathUtils;
+import org.springframework.web.util.pattern.PathPattern;
+import org.springframework.web.util.pattern.PathPatternParser;
+
+/**
+ * {@link jakarta.servlet.Filter} that modifies the URL, and then either
+ * redirects or wraps the request to effect the change.
+ *
+ * &lt;p&gt;To create an instance, you can use the following:
+ *
+ * &lt;pre&gt;
+ * UrlHandlerFilter filter = UrlHandlerFilter
+ *    .trailingSlashHandler(&quot;/path1/**&quot;).redirect(HttpStatus.PERMANENT_REDIRECT)
+ *    .trailingSlashHandler(&quot;/path2/**&quot;).wrapRequest()
+ *    .build();
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;This {@code Filter} should be ordered after {@link ForwardedHeaderFilter},
+ * before {@link ServletRequestPathFilter}, and before security filters.
+ *
+ * @author Rossen Stoyanchev
+ * @since 6.2
+ */
+public final class UrlHandlerFilter extends OncePerRequestFilter {
+
+<span class="nc" id="L67">	private static final Log logger = LogFactory.getLog(UrlHandlerFilter.class);</span>
+
+
+	private final MultiValueMap&lt;Handler, PathPattern&gt; handlers;
+
+
+<span class="nc" id="L73">	private UrlHandlerFilter(MultiValueMap&lt;Handler, PathPattern&gt; handlers) {</span>
+<span class="nc" id="L74">		this.handlers = new LinkedMultiValueMap&lt;&gt;(handlers);</span>
+<span class="nc" id="L75">	}</span>
+
+
+	@Override
+	protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+			throws ServletException, IOException {
+
+<span class="nc bnc" id="L82" title="All 2 branches missed.">		RequestPath path = (ServletRequestPathUtils.hasParsedRequestPath(request) ?</span>
+<span class="nc" id="L83">				ServletRequestPathUtils.getParsedRequestPath(request) :</span>
+<span class="nc" id="L84">				ServletRequestPathUtils.parse(request));</span>
+
+<span class="nc bnc" id="L86" title="All 2 branches missed.">		for (Map.Entry&lt;Handler, List&lt;PathPattern&gt;&gt; entry : this.handlers.entrySet()) {</span>
+<span class="nc bnc" id="L87" title="All 2 branches missed.">			if (!entry.getKey().supports(request, path)) {</span>
+<span class="nc" id="L88">				continue;</span>
+			}
+<span class="nc bnc" id="L90" title="All 2 branches missed.">			for (PathPattern pattern : entry.getValue()) {</span>
+<span class="nc bnc" id="L91" title="All 2 branches missed.">				if (pattern.matches(path)) {</span>
+<span class="nc" id="L92">					entry.getKey().handle(request, response, chain);</span>
+<span class="nc" id="L93">					return;</span>
+				}
+<span class="nc" id="L95">			}</span>
+<span class="nc" id="L96">		}</span>
+
+<span class="nc" id="L98">		chain.doFilter(request, response);</span>
+<span class="nc" id="L99">	}</span>
+
+
+	/**
+	 * Add a handler that removes the trailing slash from URL paths to ensure
+	 * consistent interpretation of paths with or without a trailing slash for
+	 * requestion mapping purposes. This is important especially to avoid
+	 * misalignment between URL-based authorization decisions and web framework
+	 * request mappings.
+	 * &lt;p&gt;The root path {@code &quot;/&quot;} is excluded from trailing slash handling.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; A method-level {@code @RequestMapping(&quot;/&quot;)} adds
+	 * a trailing slash to a type-level prefix mapping, and therefore would never
+	 * match to a URL with the trailing slash removed. Use {@code @RequestMapping}
+	 * without a path instead to avoid the trailing slash in the mapping.
+	 * @param pathPatterns patterns to map the handler to, e.g.
+	 * &lt;code&gt;&quot;/path/&amp;#42;&quot;&lt;/code&gt;, &lt;code&gt;&quot;/path/&amp;#42;&amp;#42;&quot;&lt;/code&gt;, &lt;code&gt;&quot;/path/foo/&quot;&lt;/code&gt;
+	 * @return a spec to configure the trailing slash handler with
+	 * @see Builder#trailingSlashHandler(String...)
+	 */
+	public static Builder.TrailingSlashSpec trailingSlashHandler(String... pathPatterns) {
+<span class="nc" id="L119">		return new DefaultBuilder().trailingSlashHandler(pathPatterns);</span>
+	}
+
+
+	/**
+	 * Builder for {@link UrlHandlerFilter}.
+	 */
+	public interface Builder {
+
+		/**
+		 * Add a handler for URLs with a trailing slash.
+		 * @param pathPatterns path patterns to map the handler to, for example,
+		 * &lt;code&gt;&quot;/path/&amp;#42;&quot;&lt;/code&gt;, &lt;code&gt;&quot;/path/&amp;#42;&amp;#42;&quot;&lt;/code&gt;,
+		 * &lt;code&gt;&quot;/path/foo/&quot;&lt;/code&gt;.
+		 * @return a spec to configure the handler with
+		 */
+		TrailingSlashSpec trailingSlashHandler(String... pathPatterns);
+
+		/**
+		 * Build the {@link UrlHandlerFilter} instance.
+		 */
+		UrlHandlerFilter build();
+
+
+		/**
+		 * A spec to configure a trailing slash handler.
+		 */
+		interface TrailingSlashSpec {
+
+			/**
+			 * Configure a request consumer to be called just before the handler
+			 * is invoked when a URL with a trailing slash is matched.
+			 */
+			TrailingSlashSpec intercept(Consumer&lt;HttpServletRequest&gt; consumer);
+
+			/**
+			 * Handle requests by sending a redirect to the same URL but the
+			 * trailing slash trimmed.
+			 * @param status the redirect status to use
+			 * @return the top level {@link Builder}, which allows adding more
+			 * handlers and then building the Filter instance.
+			 */
+			Builder redirect(HttpStatus status);
+
+			/**
+			 * Handle the request by wrapping it in order to trim the trailing
+			 * slash, and delegating to the rest of the filter chain.
+			 * @return the top level {@link Builder}, which allows adding more
+			 * handlers and then building the Filter instance.
+			 */
+			Builder wrapRequest();
+		}
+	}
+
+
+	/**
+	 * Default {@link Builder} implementation.
+	 */
+<span class="nc" id="L177">	private static final class DefaultBuilder implements Builder {</span>
+
+<span class="nc" id="L179">		private final PathPatternParser patternParser = new PathPatternParser();</span>
+
+<span class="nc" id="L181">		private final MultiValueMap&lt;Handler, PathPattern&gt; handlers = new LinkedMultiValueMap&lt;&gt;();</span>
+
+		@Override
+		public TrailingSlashSpec trailingSlashHandler(String... patterns) {
+<span class="nc" id="L185">			return new DefaultTrailingSlashSpec(patterns);</span>
+		}
+
+		private DefaultBuilder addHandler(List&lt;PathPattern&gt; pathPatterns, Handler handler) {
+<span class="nc" id="L189">			pathPatterns.forEach(pattern -&gt; this.handlers.add(handler, pattern));</span>
+<span class="nc" id="L190">			return this;</span>
+		}
+
+		@Override
+		public UrlHandlerFilter build() {
+<span class="nc" id="L195">			return new UrlHandlerFilter(this.handlers);</span>
+		}
+
+		private final class DefaultTrailingSlashSpec implements TrailingSlashSpec {
+
+			private final List&lt;PathPattern&gt; pathPatterns;
+
+			private @Nullable Consumer&lt;HttpServletRequest&gt; interceptor;
+
+<span class="nc" id="L204">			private DefaultTrailingSlashSpec(String[] patterns) {</span>
+<span class="nc" id="L205">				this.pathPatterns = Arrays.stream(patterns)</span>
+<span class="nc bnc" id="L206" title="All 4 branches missed.">						.map(pattern -&gt; pattern.endsWith(&quot;**&quot;) || pattern.endsWith(&quot;/&quot;) ? pattern : pattern + &quot;/&quot;)</span>
+<span class="nc" id="L207">						.map(patternParser::parse)</span>
+<span class="nc" id="L208">						.toList();</span>
+<span class="nc" id="L209">			}</span>
+
+			@Override
+			public TrailingSlashSpec intercept(Consumer&lt;HttpServletRequest&gt; consumer) {
+<span class="nc bnc" id="L213" title="All 2 branches missed.">				this.interceptor = (this.interceptor != null ? this.interceptor.andThen(consumer) : consumer);</span>
+<span class="nc" id="L214">				return this;</span>
+			}
+
+			@Override
+			public Builder redirect(HttpStatus status) {
+<span class="nc" id="L219">				Handler handler = new RedirectTrailingSlashHandler(status, this.interceptor);</span>
+<span class="nc" id="L220">				return DefaultBuilder.this.addHandler(this.pathPatterns, handler);</span>
+			}
+
+			@Override
+			public Builder wrapRequest() {
+<span class="nc" id="L225">				Handler handler = new RequestWrappingTrailingSlashHandler(this.interceptor);</span>
+<span class="nc" id="L226">				return DefaultBuilder.this.addHandler(this.pathPatterns, handler);</span>
+			}
+		}
+	}
+
+
+
+	/**
+	 * Internal handler to encapsulate different ways to handle a request.
+	 */
+	private interface Handler {
+
+		/**
+		 * Whether the handler handles the given request.
+		 */
+		boolean supports(HttpServletRequest request, RequestPath path);
+
+		/**
+		 * Handle the request, possibly delegating to the rest of the filter chain.
+		 */
+		void handle(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+				throws ServletException, IOException;
+	}
+
+
+	/**
+	 * Base class for trailing slash {@link Handler} implementations.
+	 */
+	private abstract static class AbstractTrailingSlashHandler implements Handler {
+
+<span class="nc" id="L256">		private static final Consumer&lt;HttpServletRequest&gt; defaultInterceptor = request -&gt; {</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L258">				logger.trace(&quot;Handling trailing slash URL: &quot; +</span>
+<span class="nc" id="L259">						request.getMethod() + &quot; &quot; + request.getRequestURI());</span>
+			}
+<span class="nc" id="L261">		};</span>
+
+		private final Consumer&lt;HttpServletRequest&gt; interceptor;
+
+<span class="nc" id="L265">		protected AbstractTrailingSlashHandler(@Nullable Consumer&lt;HttpServletRequest&gt; interceptor) {</span>
+<span class="nc bnc" id="L266" title="All 2 branches missed.">			this.interceptor = (interceptor != null ? interceptor : defaultInterceptor);</span>
+<span class="nc" id="L267">		}</span>
+
+		@Override
+		public boolean supports(HttpServletRequest request, RequestPath path) {
+<span class="nc" id="L271">			List&lt;PathContainer.Element&gt; elements = path.pathWithinApplication().elements();</span>
+<span class="nc bnc" id="L272" title="All 4 branches missed.">			return (elements.size() &gt; 1 &amp;&amp; elements.get(elements.size() - 1).value().equals(&quot;/&quot;));</span>
+		}
+
+		@Override
+		public void handle(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+				throws ServletException, IOException {
+
+<span class="nc" id="L279">			this.interceptor.accept(request);</span>
+<span class="nc" id="L280">			handleInternal(request, response, chain);</span>
+<span class="nc" id="L281">		}</span>
+
+		protected abstract void handleInternal(
+				HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+				throws ServletException, IOException;
+
+		protected String trimTrailingSlash(String path) {
+<span class="nc bnc" id="L288" title="All 2 branches missed.">			int index = (StringUtils.hasLength(path) ? path.lastIndexOf('/') : -1);</span>
+<span class="nc bnc" id="L289" title="All 2 branches missed.">			return (index != -1 ? path.substring(0, index) : path);</span>
+		}
+	}
+
+
+	/**
+	 * Path handler that sends a redirect.
+	 */
+	private static final class RedirectTrailingSlashHandler extends AbstractTrailingSlashHandler {
+
+		private final HttpStatus httpStatus;
+
+		RedirectTrailingSlashHandler(HttpStatus httpStatus, @Nullable Consumer&lt;HttpServletRequest&gt; interceptor) {
+<span class="nc" id="L302">			super(interceptor);</span>
+<span class="nc" id="L303">			this.httpStatus = httpStatus;</span>
+<span class="nc" id="L304">		}</span>
+
+		@Override
+		public void handleInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+				throws IOException {
+
+<span class="nc" id="L310">			String location = trimTrailingSlash(request.getRequestURI());</span>
+<span class="nc bnc" id="L311" title="All 2 branches missed.">			if (StringUtils.hasText(request.getQueryString())) {</span>
+<span class="nc" id="L312">				location += &quot;?&quot; + request.getQueryString();</span>
+			}
+
+<span class="nc" id="L315">			response.resetBuffer();</span>
+<span class="nc" id="L316">			response.setStatus(this.httpStatus.value());</span>
+<span class="nc" id="L317">			response.setHeader(HttpHeaders.LOCATION, location);</span>
+<span class="nc" id="L318">			response.flushBuffer();</span>
+<span class="nc" id="L319">		}</span>
+	}
+
+
+	/**
+	 * Path handler that wraps the request and continues processing.
+	 */
+	private static final class RequestWrappingTrailingSlashHandler extends AbstractTrailingSlashHandler {
+
+		RequestWrappingTrailingSlashHandler(@Nullable Consumer&lt;HttpServletRequest&gt; interceptor) {
+<span class="nc" id="L329">			super(interceptor);</span>
+<span class="nc" id="L330">		}</span>
+
+		@Override
+		public void handleInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
+				throws ServletException, IOException {
+
+<span class="nc" id="L336">			String servletPath = request.getServletPath();</span>
+<span class="nc" id="L337">			String pathInfo = request.getPathInfo();</span>
+<span class="nc" id="L338">			boolean hasPathInfo = StringUtils.hasText(pathInfo);</span>
+
+<span class="nc" id="L340">			request = new TrailingSlashHttpServletRequest(</span>
+					request,
+<span class="nc" id="L342">					trimTrailingSlash(request.getRequestURI()),</span>
+<span class="nc" id="L343">					trimTrailingSlash(request.getRequestURL().toString()),</span>
+<span class="nc bnc" id="L344" title="All 2 branches missed.">					hasPathInfo ? servletPath : trimTrailingSlash(servletPath),</span>
+<span class="nc bnc" id="L345" title="All 2 branches missed.">					hasPathInfo ? trimTrailingSlash(pathInfo) : pathInfo);</span>
+
+<span class="nc" id="L347">			RequestPath previousPath = (RequestPath) request.getAttribute(ServletRequestPathUtils.PATH_ATTRIBUTE);</span>
+<span class="nc" id="L348">			ServletRequestPathUtils.clearParsedRequestPath(request);</span>
+			try {
+<span class="nc" id="L350">				chain.doFilter(request, response);</span>
+			}
+			finally {
+<span class="nc bnc" id="L353" title="All 2 branches missed.">				if (previousPath != null) {</span>
+<span class="nc" id="L354">					ServletRequestPathUtils.setParsedRequestPath(previousPath, request);</span>
+				}
+			}
+<span class="nc" id="L357">		}</span>
+	}
+
+
+	/**
+	 * Wraps the request to return modified path information.
+	 */
+	private static class TrailingSlashHttpServletRequest extends HttpServletRequestWrapper {
+
+		private final String requestURI;
+
+		private final StringBuffer requestURL;
+
+		private final String servletPath;
+
+		private final String pathInfo;
+
+		TrailingSlashHttpServletRequest(HttpServletRequest request,
+				String requestURI, String requestURL, String servletPath, String pathInfo) {
+
+<span class="nc" id="L377">			super(request);</span>
+<span class="nc" id="L378">			this.requestURI = requestURI;</span>
+<span class="nc" id="L379">			this.requestURL = new StringBuffer(requestURL);</span>
+<span class="nc" id="L380">			this.servletPath = servletPath;</span>
+<span class="nc" id="L381">			this.pathInfo = pathInfo;</span>
+<span class="nc" id="L382">		}</span>
+
+		@Override
+		public String getRequestURI() {
+<span class="nc bnc" id="L386" title="All 2 branches missed.">			return (isForward() ? getDelegate().getRequestURI() : this.requestURI);</span>
+		}
+
+		@Override
+		public StringBuffer getRequestURL() {
+<span class="nc bnc" id="L391" title="All 2 branches missed.">			return (isForward() ? getDelegate().getRequestURL() : this.requestURL);</span>
+		}
+
+		@Override
+		public String getServletPath() {
+<span class="nc bnc" id="L396" title="All 2 branches missed.">			return (isForward() ? getDelegate().getServletPath() : this.servletPath);</span>
+		}
+
+		@Override
+		public String getPathInfo() {
+<span class="nc bnc" id="L401" title="All 2 branches missed.">			return (isForward() ? getDelegate().getPathInfo() : this.pathInfo);</span>
+		}
+
+		private boolean isForward() {
+<span class="nc bnc" id="L405" title="All 2 branches missed.">			return (getDispatcherType() == DispatcherType.FORWARD);</span>
+		}
+
+		private HttpServletRequest getDelegate() {
+<span class="nc" id="L409">			return (HttpServletRequest) getRequest();</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

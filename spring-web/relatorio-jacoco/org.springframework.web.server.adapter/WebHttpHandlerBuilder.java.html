@@ -1,0 +1,488 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>WebHttpHandlerBuilder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.server.adapter</a> &gt; <span class="el_source">WebHttpHandlerBuilder.java</span></div><h1>WebHttpHandlerBuilder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.server.adapter;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+import java.util.function.Consumer;
+import java.util.function.Function;
+
+import io.micrometer.observation.ObservationRegistry;
+import org.jspecify.annotations.Nullable;
+import reactor.blockhound.BlockHound;
+import reactor.blockhound.integration.BlockHoundIntegration;
+
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.context.ApplicationContext;
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.http.codec.ServerCodecConfigurer;
+import org.springframework.http.server.reactive.HttpHandler;
+import org.springframework.http.server.reactive.HttpHandlerDecoratorFactory;
+import org.springframework.http.server.reactive.observation.DefaultServerRequestObservationConvention;
+import org.springframework.http.server.reactive.observation.ServerRequestObservationConvention;
+import org.springframework.util.Assert;
+import org.springframework.util.ObjectUtils;
+import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.server.WebExceptionHandler;
+import org.springframework.web.server.WebFilter;
+import org.springframework.web.server.WebHandler;
+import org.springframework.web.server.handler.ExceptionHandlingWebHandler;
+import org.springframework.web.server.handler.FilteringWebHandler;
+import org.springframework.web.server.i18n.LocaleContextResolver;
+import org.springframework.web.server.session.DefaultWebSessionManager;
+import org.springframework.web.server.session.WebSessionManager;
+
+/**
+ * This builder has two purposes:
+ *
+ * &lt;p&gt;One is to assemble a processing chain that consists of a target {@link WebHandler},
+ * then decorated with a set of {@link WebFilter WebFilters}, then further decorated with
+ * a set of {@link WebExceptionHandler WebExceptionHandlers}.
+ *
+ * &lt;p&gt;The second purpose is to adapt the resulting processing chain to an {@link HttpHandler}:
+ * the lowest-level reactive HTTP handling abstraction which can then be used with any of the
+ * supported runtimes. The adaptation is done with the help of {@link HttpWebHandlerAdapter}.
+ *
+ * &lt;p&gt;The processing chain can be assembled manually via builder methods, or detected from
+ * a Spring {@link ApplicationContext} via {@link #applicationContext}, or a mix of both.
+ *
+ * @author Rossen Stoyanchev
+ * @author Sebastien Deleuze
+ * @since 5.0
+ * @see HttpWebHandlerAdapter
+ */
+public final class WebHttpHandlerBuilder {
+
+	/** Well-known name for the target WebHandler in the bean factory. */
+	public static final String WEB_HANDLER_BEAN_NAME = &quot;webHandler&quot;;
+
+	/** Well-known name for the WebSessionManager in the bean factory. */
+	public static final String WEB_SESSION_MANAGER_BEAN_NAME = &quot;webSessionManager&quot;;
+
+	/** Well-known name for the ServerCodecConfigurer in the bean factory. */
+	public static final String SERVER_CODEC_CONFIGURER_BEAN_NAME = &quot;serverCodecConfigurer&quot;;
+
+	/** Well-known name for the LocaleContextResolver in the bean factory. */
+	public static final String LOCALE_CONTEXT_RESOLVER_BEAN_NAME = &quot;localeContextResolver&quot;;
+
+	/** Well-known name for the ForwardedHeaderTransformer in the bean factory. */
+	public static final String FORWARDED_HEADER_TRANSFORMER_BEAN_NAME = &quot;forwardedHeaderTransformer&quot;;
+
+	private final WebHandler webHandler;
+
+	private final @Nullable ApplicationContext applicationContext;
+
+<span class="nc" id="L90">	private final List&lt;WebFilter&gt; filters = new ArrayList&lt;&gt;();</span>
+
+<span class="nc" id="L92">	private final List&lt;WebExceptionHandler&gt; exceptionHandlers = new ArrayList&lt;&gt;();</span>
+
+	private @Nullable Function&lt;HttpHandler, HttpHandler&gt; httpHandlerDecorator;
+
+	private @Nullable WebSessionManager sessionManager;
+
+	private @Nullable ServerCodecConfigurer codecConfigurer;
+
+	private @Nullable LocaleContextResolver localeContextResolver;
+
+	private @Nullable ForwardedHeaderTransformer forwardedHeaderTransformer;
+
+	private @Nullable ObservationRegistry observationRegistry;
+
+	private @Nullable ServerRequestObservationConvention observationConvention;
+
+	private @Nullable Boolean defaultHtmlEscape;
+
+
+	/**
+	 * Private constructor to use when initialized from an ApplicationContext.
+	 */
+<span class="nc" id="L114">	private WebHttpHandlerBuilder(WebHandler webHandler, @Nullable ApplicationContext applicationContext) {</span>
+<span class="nc" id="L115">		Assert.notNull(webHandler, &quot;WebHandler must not be null&quot;);</span>
+<span class="nc" id="L116">		this.webHandler = webHandler;</span>
+<span class="nc" id="L117">		this.applicationContext = applicationContext;</span>
+<span class="nc" id="L118">	}</span>
+
+	/**
+	 * Copy constructor.
+	 */
+<span class="nc" id="L123">	private WebHttpHandlerBuilder(WebHttpHandlerBuilder other) {</span>
+<span class="nc" id="L124">		this.webHandler = other.webHandler;</span>
+<span class="nc" id="L125">		this.applicationContext = other.applicationContext;</span>
+<span class="nc" id="L126">		this.filters.addAll(other.filters);</span>
+<span class="nc" id="L127">		this.exceptionHandlers.addAll(other.exceptionHandlers);</span>
+<span class="nc" id="L128">		this.httpHandlerDecorator = other.httpHandlerDecorator;</span>
+<span class="nc" id="L129">		this.sessionManager = other.sessionManager;</span>
+<span class="nc" id="L130">		this.codecConfigurer = other.codecConfigurer;</span>
+<span class="nc" id="L131">		this.localeContextResolver = other.localeContextResolver;</span>
+<span class="nc" id="L132">		this.forwardedHeaderTransformer = other.forwardedHeaderTransformer;</span>
+<span class="nc" id="L133">		this.observationRegistry = other.observationRegistry;</span>
+<span class="nc" id="L134">		this.observationConvention = other.observationConvention;</span>
+<span class="nc" id="L135">		this.defaultHtmlEscape = other.defaultHtmlEscape;</span>
+<span class="nc" id="L136">	}</span>
+
+
+	/**
+	 * Static factory method to create a new builder instance.
+	 * @param webHandler the target handler for the request
+	 * @return the prepared builder
+	 */
+	public static WebHttpHandlerBuilder webHandler(WebHandler webHandler) {
+<span class="nc" id="L145">		return new WebHttpHandlerBuilder(webHandler, null);</span>
+	}
+
+	/**
+	 * Static factory method to create a new builder instance by detecting beans
+	 * in an {@link ApplicationContext}. The following are detected:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;{@link WebHandler} [1] -- looked up by the name
+	 * {@link #WEB_HANDLER_BEAN_NAME}.
+	 * &lt;li&gt;{@link WebFilter} [0..N] -- detected by type and ordered,
+	 * see {@link AnnotationAwareOrderComparator}.
+	 * &lt;li&gt;{@link WebExceptionHandler} [0..N] -- detected by type and
+	 * ordered.
+	 * &lt;li&gt;{@link HttpHandlerDecoratorFactory} [0..N] -- detected by type and
+	 * ordered.
+	 * &lt;li&gt;{@link ObservationRegistry} -- detected by type and
+	 * configured if unique.
+	 * &lt;li&gt;{@link ServerRequestObservationConvention} -- detected by type and
+	 * configured if unique.
+	 * &lt;li&gt;{@link WebSessionManager} [0..1] -- looked up by the name
+	 * {@link #WEB_SESSION_MANAGER_BEAN_NAME}.
+	 * &lt;li&gt;{@link ServerCodecConfigurer} [0..1] -- looked up by the name
+	 * {@link #SERVER_CODEC_CONFIGURER_BEAN_NAME}.
+	 * &lt;li&gt;{@link LocaleContextResolver} [0..1] -- looked up by the name
+	 * {@link #LOCALE_CONTEXT_RESOLVER_BEAN_NAME}.
+	 * &lt;/ul&gt;
+	 * @param context the application context to use for the lookup
+	 * @return the prepared builder
+	 */
+	public static WebHttpHandlerBuilder applicationContext(ApplicationContext context) {
+
+<span class="nc" id="L176">		WebHttpHandlerBuilder builder = new WebHttpHandlerBuilder(</span>
+<span class="nc" id="L177">				context.getBean(WEB_HANDLER_BEAN_NAME, WebHandler.class), context);</span>
+
+<span class="nc" id="L179">		List&lt;WebFilter&gt; webFilters = context</span>
+<span class="nc" id="L180">				.getBeanProvider(WebFilter.class)</span>
+<span class="nc" id="L181">				.orderedStream()</span>
+<span class="nc" id="L182">				.toList();</span>
+<span class="nc" id="L183">		builder.filters(filters -&gt; filters.addAll(webFilters));</span>
+
+<span class="nc" id="L185">		List&lt;WebExceptionHandler&gt; exceptionHandlers = context</span>
+<span class="nc" id="L186">				.getBeanProvider(WebExceptionHandler.class)</span>
+<span class="nc" id="L187">				.orderedStream()</span>
+<span class="nc" id="L188">				.toList();</span>
+<span class="nc" id="L189">		builder.exceptionHandlers(handlers -&gt; handlers.addAll(exceptionHandlers));</span>
+
+<span class="nc" id="L191">		context.getBeanProvider(HttpHandlerDecoratorFactory.class)</span>
+<span class="nc" id="L192">				.orderedStream()</span>
+<span class="nc" id="L193">				.forEach(builder::httpHandlerDecorator);</span>
+
+<span class="nc" id="L195">		context.getBeanProvider(ObservationRegistry.class).ifUnique(builder::observationRegistry);</span>
+<span class="nc" id="L196">		context.getBeanProvider(ServerRequestObservationConvention.class).ifAvailable(builder::observationConvention);</span>
+
+		try {
+<span class="nc" id="L199">			builder.sessionManager(</span>
+<span class="nc" id="L200">					context.getBean(WEB_SESSION_MANAGER_BEAN_NAME, WebSessionManager.class));</span>
+		}
+<span class="nc" id="L202">		catch (NoSuchBeanDefinitionException ex) {</span>
+			// Fall back on default
+<span class="nc" id="L204">		}</span>
+
+		try {
+<span class="nc" id="L207">			builder.codecConfigurer(</span>
+<span class="nc" id="L208">					context.getBean(SERVER_CODEC_CONFIGURER_BEAN_NAME, ServerCodecConfigurer.class));</span>
+		}
+<span class="nc" id="L210">		catch (NoSuchBeanDefinitionException ex) {</span>
+			// Fall back on default
+<span class="nc" id="L212">		}</span>
+
+		try {
+<span class="nc" id="L215">			builder.localeContextResolver(</span>
+<span class="nc" id="L216">					context.getBean(LOCALE_CONTEXT_RESOLVER_BEAN_NAME, LocaleContextResolver.class));</span>
+		}
+<span class="nc" id="L218">		catch (NoSuchBeanDefinitionException ex) {</span>
+			// Fall back on default
+<span class="nc" id="L220">		}</span>
+
+		try {
+<span class="nc" id="L223">			builder.forwardedHeaderTransformer(</span>
+<span class="nc" id="L224">					context.getBean(FORWARDED_HEADER_TRANSFORMER_BEAN_NAME, ForwardedHeaderTransformer.class));</span>
+		}
+<span class="nc" id="L226">		catch (NoSuchBeanDefinitionException ex) {</span>
+			// Fall back on default
+<span class="nc" id="L228">		}</span>
+
+<span class="nc" id="L230">		return builder;</span>
+	}
+
+
+	/**
+	 * Add the given filter(s).
+	 * @param filters the filter(s) to add that's
+	 */
+	public WebHttpHandlerBuilder filter(WebFilter... filters) {
+<span class="nc bnc" id="L239" title="All 2 branches missed.">		if (!ObjectUtils.isEmpty(filters)) {</span>
+<span class="nc" id="L240">			this.filters.addAll(Arrays.asList(filters));</span>
+		}
+<span class="nc" id="L242">		return this;</span>
+	}
+
+	/**
+	 * Manipulate the &quot;live&quot; list of currently configured filters.
+	 * @param consumer the consumer to use
+	 */
+	public WebHttpHandlerBuilder filters(Consumer&lt;List&lt;WebFilter&gt;&gt; consumer) {
+<span class="nc" id="L250">		consumer.accept(this.filters);</span>
+<span class="nc" id="L251">		return this;</span>
+	}
+
+	/**
+	 * Add the given exception handler(s).
+	 * @param handlers the exception handler(s)
+	 */
+	public WebHttpHandlerBuilder exceptionHandler(WebExceptionHandler... handlers) {
+<span class="nc bnc" id="L259" title="All 2 branches missed.">		if (!ObjectUtils.isEmpty(handlers)) {</span>
+<span class="nc" id="L260">			this.exceptionHandlers.addAll(Arrays.asList(handlers));</span>
+		}
+<span class="nc" id="L262">		return this;</span>
+	}
+
+	/**
+	 * Manipulate the &quot;live&quot; list of currently configured exception handlers.
+	 * @param consumer the consumer to use
+	 */
+	public WebHttpHandlerBuilder exceptionHandlers(Consumer&lt;List&lt;WebExceptionHandler&gt;&gt; consumer) {
+<span class="nc" id="L270">		consumer.accept(this.exceptionHandlers);</span>
+<span class="nc" id="L271">		return this;</span>
+	}
+
+	/**
+	 * Configure a {@link Function} to decorate the {@link HttpHandler} returned
+	 * by this builder which effectively wraps the entire
+	 * {@link WebExceptionHandler} - {@link WebFilter} - {@link WebHandler}
+	 * processing chain. This provides access to the request and response before
+	 * the entire chain and likewise the ability to observe the result of
+	 * the entire chain.
+	 * @param handlerDecorator the decorator to apply
+	 * @since 5.3
+	 */
+	public WebHttpHandlerBuilder httpHandlerDecorator(Function&lt;HttpHandler, HttpHandler&gt; handlerDecorator) {
+<span class="nc bnc" id="L285" title="All 2 branches missed.">		this.httpHandlerDecorator = (this.httpHandlerDecorator != null ?</span>
+<span class="nc" id="L286">				handlerDecorator.andThen(this.httpHandlerDecorator) : handlerDecorator);</span>
+<span class="nc" id="L287">		return this;</span>
+	}
+
+	/**
+	 * Whether a decorator for {@link HttpHandler} is configured or not via
+	 * {@link #httpHandlerDecorator(Function)}.
+	 * @since 5.3
+	 */
+	public boolean hasHttpHandlerDecorator() {
+<span class="nc bnc" id="L296" title="All 2 branches missed.">		return (this.httpHandlerDecorator != null);</span>
+	}
+
+	/**
+	 * Configure the {@link WebSessionManager} to set on the
+	 * {@link ServerWebExchange WebServerExchange}.
+	 * &lt;p&gt;By default {@link DefaultWebSessionManager} is used.
+	 * @param manager the session manager
+	 * @see HttpWebHandlerAdapter#setSessionManager(WebSessionManager)
+	 */
+	public WebHttpHandlerBuilder sessionManager(WebSessionManager manager) {
+<span class="nc" id="L307">		this.sessionManager = manager;</span>
+<span class="nc" id="L308">		return this;</span>
+	}
+
+	/**
+	 * Whether a {@code WebSessionManager} is configured or not, either detected from an
+	 * {@code ApplicationContext} or explicitly configured via {@link #sessionManager}.
+	 * @since 5.0.9
+	 */
+	public boolean hasSessionManager() {
+<span class="nc bnc" id="L317" title="All 2 branches missed.">		return (this.sessionManager != null);</span>
+	}
+
+	/**
+	 * Configure the {@link ServerCodecConfigurer} to set on the {@code WebServerExchange}.
+	 * @param codecConfigurer the codec configurer
+	 */
+	public WebHttpHandlerBuilder codecConfigurer(ServerCodecConfigurer codecConfigurer) {
+<span class="nc" id="L325">		this.codecConfigurer = codecConfigurer;</span>
+<span class="nc" id="L326">		return this;</span>
+	}
+
+
+	/**
+	 * Whether a {@code ServerCodecConfigurer} is configured or not, either detected from an
+	 * {@code ApplicationContext} or explicitly configured via {@link #codecConfigurer}.
+	 * @since 5.0.9
+	 */
+	public boolean hasCodecConfigurer() {
+<span class="nc bnc" id="L336" title="All 2 branches missed.">		return (this.codecConfigurer != null);</span>
+	}
+
+	/**
+	 * Configure the {@link LocaleContextResolver} to set on the
+	 * {@link ServerWebExchange WebServerExchange}.
+	 * @param localeContextResolver the locale context resolver
+	 */
+	public WebHttpHandlerBuilder localeContextResolver(LocaleContextResolver localeContextResolver) {
+<span class="nc" id="L345">		this.localeContextResolver = localeContextResolver;</span>
+<span class="nc" id="L346">		return this;</span>
+	}
+
+	/**
+	 * Whether a {@code LocaleContextResolver} is configured or not, either detected from an
+	 * {@code ApplicationContext} or explicitly configured via {@link #localeContextResolver}.
+	 * @since 5.0.9
+	 */
+	public boolean hasLocaleContextResolver() {
+<span class="nc bnc" id="L355" title="All 2 branches missed.">		return (this.localeContextResolver != null);</span>
+	}
+
+	/**
+	 * Configure the {@link ForwardedHeaderTransformer} for extracting and/or
+	 * removing forwarded headers.
+	 * @param transformer the transformer
+	 * @since 5.1
+	 */
+	public WebHttpHandlerBuilder forwardedHeaderTransformer(ForwardedHeaderTransformer transformer) {
+<span class="nc" id="L365">		this.forwardedHeaderTransformer = transformer;</span>
+<span class="nc" id="L366">		return this;</span>
+	}
+
+	/**
+	 * Whether a {@code ForwardedHeaderTransformer} is configured or not, either
+	 * detected from an {@code ApplicationContext} or explicitly configured via
+	 * {@link #forwardedHeaderTransformer(ForwardedHeaderTransformer)}.
+	 * @since 5.1
+	 */
+	public boolean hasForwardedHeaderTransformer() {
+<span class="nc bnc" id="L376" title="All 2 branches missed.">		return (this.forwardedHeaderTransformer != null);</span>
+	}
+
+	/**
+	 * Configure an {@link ObservationRegistry} for recording server exchange observations.
+	 * By default, a {@link ObservationRegistry#NOOP no-op} registry will be configured.
+	 * @param observationRegistry the observation registry
+	 * @since 6.1
+	 */
+	public WebHttpHandlerBuilder observationRegistry(ObservationRegistry observationRegistry) {
+<span class="nc" id="L386">		this.observationRegistry = observationRegistry;</span>
+<span class="nc" id="L387">		return this;</span>
+	}
+
+	/**
+	 * Configure a {@link ServerRequestObservationConvention} to use for server observations.
+	 * By default, a {@link DefaultServerRequestObservationConvention} will be used.
+	 * @param observationConvention the convention to use for all recorded observations
+	 * @since 6.1
+	 */
+	public WebHttpHandlerBuilder observationConvention(ServerRequestObservationConvention observationConvention) {
+<span class="nc" id="L397">		this.observationConvention = observationConvention;</span>
+<span class="nc" id="L398">		return this;</span>
+	}
+
+	/**
+	 * Configure whether default HTML escaping is enabled for the web application.
+	 * The setting is then exposed as the exchanger attribute
+	 * {@link ServerWebExchange#HTML_ESCAPE_ATTRIBUTE}.
+	 * &lt;p&gt;This method differentiates between no setting specified at all and
+	 * an actual boolean value specified, allowing to have a context-specific
+	 * default in case of no setting at the global level.
+	 * @param defaultHtmlEscape whether to enable default HTML escaping
+	 * @since 7.0.6
+	 */
+	public WebHttpHandlerBuilder defaultHtmlEscape(@Nullable Boolean defaultHtmlEscape) {
+<span class="nc" id="L412">		this.defaultHtmlEscape = defaultHtmlEscape;</span>
+<span class="nc" id="L413">		return this;</span>
+	}
+
+	/**
+	 * Whether HTML escaping is enabled for the web application.
+	 * @since 7.0.6
+	 */
+	public @Nullable Boolean getDefaultHtmlEscape() {
+<span class="nc" id="L421">		return this.defaultHtmlEscape;</span>
+	}
+
+	/**
+	 * Build the {@link HttpHandler}.
+	 */
+	public HttpHandler build() {
+<span class="nc" id="L428">		WebHandler decorated = new FilteringWebHandler(this.webHandler, this.filters);</span>
+<span class="nc" id="L429">		decorated = new ExceptionHandlingWebHandler(decorated, this.exceptionHandlers);</span>
+
+<span class="nc" id="L431">		HttpWebHandlerAdapter adapted = new HttpWebHandlerAdapter(decorated);</span>
+<span class="nc bnc" id="L432" title="All 2 branches missed.">		if (this.sessionManager != null) {</span>
+<span class="nc" id="L433">			adapted.setSessionManager(this.sessionManager);</span>
+		}
+<span class="nc bnc" id="L435" title="All 2 branches missed.">		if (this.codecConfigurer != null) {</span>
+<span class="nc" id="L436">			adapted.setCodecConfigurer(this.codecConfigurer);</span>
+		}
+<span class="nc bnc" id="L438" title="All 2 branches missed.">		if (this.localeContextResolver != null) {</span>
+<span class="nc" id="L439">			adapted.setLocaleContextResolver(this.localeContextResolver);</span>
+		}
+<span class="nc bnc" id="L441" title="All 2 branches missed.">		if (this.forwardedHeaderTransformer != null) {</span>
+<span class="nc" id="L442">			adapted.setForwardedHeaderTransformer(this.forwardedHeaderTransformer);</span>
+		}
+<span class="nc bnc" id="L444" title="All 2 branches missed.">		if (this.observationRegistry != null) {</span>
+<span class="nc" id="L445">			adapted.setObservationRegistry(this.observationRegistry);</span>
+		}
+<span class="nc bnc" id="L447" title="All 2 branches missed.">		if (this.observationConvention != null) {</span>
+<span class="nc" id="L448">			adapted.setObservationConvention(this.observationConvention);</span>
+		}
+<span class="nc bnc" id="L450" title="All 2 branches missed.">		if (this.applicationContext != null) {</span>
+<span class="nc" id="L451">			adapted.setApplicationContext(this.applicationContext);</span>
+		}
+<span class="nc bnc" id="L453" title="All 2 branches missed.">		if (this.defaultHtmlEscape != null) {</span>
+<span class="nc" id="L454">			adapted.setDefaultHtmlEscape(this.defaultHtmlEscape);</span>
+		}
+<span class="nc" id="L456">		adapted.afterPropertiesSet();</span>
+
+<span class="nc bnc" id="L458" title="All 2 branches missed.">		return (this.httpHandlerDecorator != null ? this.httpHandlerDecorator.apply(adapted) : adapted);</span>
+	}
+
+	/**
+	 * Clone this {@link WebHttpHandlerBuilder}.
+	 * @return the cloned builder instance
+	 */
+	@Override
+	public WebHttpHandlerBuilder clone() {
+<span class="nc" id="L467">		return new WebHttpHandlerBuilder(this);</span>
+	}
+
+
+	/**
+	 * {@code BlockHoundIntegration} for spring-web classes.
+	 * @since 5.3.6
+	 */
+<span class="nc" id="L475">	public static class SpringWebBlockHoundIntegration implements BlockHoundIntegration {</span>
+
+		@Override
+		public void applyTo(BlockHound.Builder builder) {
+
+			// Avoid hard references potentially anywhere in spring-web (no need for structural dependency)
+
+<span class="nc" id="L482">			builder.allowBlockingCallsInside(&quot;org.springframework.http.MediaTypeFactory&quot;, &quot;&lt;clinit&gt;&quot;);</span>
+<span class="nc" id="L483">			builder.allowBlockingCallsInside(&quot;org.springframework.web.util.HtmlUtils&quot;, &quot;&lt;clinit&gt;&quot;);</span>
+<span class="nc" id="L484">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

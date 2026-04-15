@@ -1,0 +1,1061 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>InternalSpelExpressionParser.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-expression</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.standard</a> &gt; <span class="el_source">InternalSpelExpressionParser.java</span></div><h1>InternalSpelExpressionParser.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.standard;
+
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.List;
+import java.util.Locale;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.regex.Pattern;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.expression.ParseException;
+import org.springframework.expression.ParserContext;
+import org.springframework.expression.common.TemplateAwareExpressionParser;
+import org.springframework.expression.spel.InternalParseException;
+import org.springframework.expression.spel.SpelEvaluationException;
+import org.springframework.expression.spel.SpelMessage;
+import org.springframework.expression.spel.SpelParseException;
+import org.springframework.expression.spel.SpelParserConfiguration;
+import org.springframework.expression.spel.ast.Assign;
+import org.springframework.expression.spel.ast.BeanReference;
+import org.springframework.expression.spel.ast.BooleanLiteral;
+import org.springframework.expression.spel.ast.CompoundExpression;
+import org.springframework.expression.spel.ast.ConstructorReference;
+import org.springframework.expression.spel.ast.Elvis;
+import org.springframework.expression.spel.ast.FunctionReference;
+import org.springframework.expression.spel.ast.Identifier;
+import org.springframework.expression.spel.ast.Indexer;
+import org.springframework.expression.spel.ast.InlineList;
+import org.springframework.expression.spel.ast.InlineMap;
+import org.springframework.expression.spel.ast.Literal;
+import org.springframework.expression.spel.ast.MethodReference;
+import org.springframework.expression.spel.ast.NullLiteral;
+import org.springframework.expression.spel.ast.OpAnd;
+import org.springframework.expression.spel.ast.OpDec;
+import org.springframework.expression.spel.ast.OpDivide;
+import org.springframework.expression.spel.ast.OpEQ;
+import org.springframework.expression.spel.ast.OpGE;
+import org.springframework.expression.spel.ast.OpGT;
+import org.springframework.expression.spel.ast.OpInc;
+import org.springframework.expression.spel.ast.OpLE;
+import org.springframework.expression.spel.ast.OpLT;
+import org.springframework.expression.spel.ast.OpMinus;
+import org.springframework.expression.spel.ast.OpModulus;
+import org.springframework.expression.spel.ast.OpMultiply;
+import org.springframework.expression.spel.ast.OpNE;
+import org.springframework.expression.spel.ast.OpOr;
+import org.springframework.expression.spel.ast.OpPlus;
+import org.springframework.expression.spel.ast.OperatorBetween;
+import org.springframework.expression.spel.ast.OperatorInstanceof;
+import org.springframework.expression.spel.ast.OperatorMatches;
+import org.springframework.expression.spel.ast.OperatorNot;
+import org.springframework.expression.spel.ast.OperatorPower;
+import org.springframework.expression.spel.ast.Projection;
+import org.springframework.expression.spel.ast.PropertyOrFieldReference;
+import org.springframework.expression.spel.ast.QualifiedIdentifier;
+import org.springframework.expression.spel.ast.Selection;
+import org.springframework.expression.spel.ast.SpelNodeImpl;
+import org.springframework.expression.spel.ast.StringLiteral;
+import org.springframework.expression.spel.ast.Ternary;
+import org.springframework.expression.spel.ast.TypeReference;
+import org.springframework.expression.spel.ast.VariableReference;
+import org.springframework.lang.Contract;
+import org.springframework.util.StringUtils;
+
+/**
+ * Handwritten SpEL parser. Instances are reusable but are not thread-safe.
+ *
+ * @author Andy Clement
+ * @author Juergen Hoeller
+ * @author Phillip Webb
+ * @author Sam Brannen
+ * @since 3.0
+ */
+class InternalSpelExpressionParser extends TemplateAwareExpressionParser {
+
+<span class="fc" id="L96">	private static final Pattern VALID_QUALIFIED_ID_PATTERN = Pattern.compile(&quot;[\\p{L}\\p{N}_$]+&quot;);</span>
+
+	private final SpelParserConfiguration configuration;
+
+	// For rules that build nodes, they are stacked here for return
+<span class="fc" id="L101">	private final Deque&lt;SpelNodeImpl&gt; constructedNodes = new ArrayDeque&lt;&gt;();</span>
+
+	// Shared cache for compiled regex patterns
+<span class="fc" id="L104">	private final ConcurrentMap&lt;String, Pattern&gt; patternCache = new ConcurrentHashMap&lt;&gt;();</span>
+
+	// The expression being parsed
+<span class="fc" id="L107">	private String expressionString = &quot;&quot;;</span>
+
+	// The token stream constructed from that expression string
+<span class="fc" id="L110">	private List&lt;Token&gt; tokenStream = Collections.emptyList();</span>
+
+	// length of a populated token stream
+	private int tokenStreamLength;
+
+	// Current location in the token stream when processing tokens
+	private int tokenStreamPointer;
+
+
+	/**
+	 * Create a parser with some configured behavior.
+	 * @param configuration custom configuration options
+	 */
+<span class="fc" id="L123">	public InternalSpelExpressionParser(SpelParserConfiguration configuration) {</span>
+<span class="fc" id="L124">		this.configuration = configuration;</span>
+<span class="fc" id="L125">	}</span>
+
+
+	@Override
+	protected SpelExpression doParseExpression(String expressionString, @Nullable ParserContext context)
+			throws ParseException {
+
+<span class="fc" id="L132">		checkExpressionLength(expressionString);</span>
+
+		try {
+<span class="fc" id="L135">			this.expressionString = expressionString;</span>
+<span class="fc" id="L136">			Tokenizer tokenizer = new Tokenizer(expressionString);</span>
+<span class="fc" id="L137">			this.tokenStream = tokenizer.process();</span>
+<span class="fc" id="L138">			this.tokenStreamLength = this.tokenStream.size();</span>
+<span class="fc" id="L139">			this.tokenStreamPointer = 0;</span>
+<span class="fc" id="L140">			this.constructedNodes.clear();</span>
+<span class="fc" id="L141">			SpelNodeImpl ast = eatExpression();</span>
+<span class="fc bfc" id="L142" title="All 2 branches covered.">			if (ast == null) {</span>
+<span class="fc" id="L143">				throw new SpelParseException(this.expressionString, 0, SpelMessage.OOD);</span>
+			}
+<span class="fc" id="L145">			Token t = peekToken();</span>
+<span class="fc bfc" id="L146" title="All 2 branches covered.">			if (t != null) {</span>
+<span class="fc" id="L147">				throw new SpelParseException(this.expressionString, t.startPos, SpelMessage.MORE_INPUT, toString(nextToken()));</span>
+			}
+<span class="fc" id="L149">			return new SpelExpression(expressionString, ast, this.configuration);</span>
+		}
+<span class="fc" id="L151">		catch (InternalParseException ex) {</span>
+<span class="fc" id="L152">			throw ex.getCause();</span>
+		}
+	}
+
+	private void checkExpressionLength(String string) {
+<span class="fc" id="L157">		int maxLength = this.configuration.getMaximumExpressionLength();</span>
+<span class="fc bfc" id="L158" title="All 2 branches covered.">		if (string.length() &gt; maxLength) {</span>
+<span class="fc" id="L159">			throw new SpelEvaluationException(SpelMessage.MAX_EXPRESSION_LENGTH_EXCEEDED, maxLength);</span>
+		}
+<span class="fc" id="L161">	}</span>
+
+	//	expression
+	//    : logicalOrExpression
+	//      ( (ASSIGN^ logicalOrExpression)
+	//	    | (DEFAULT^ logicalOrExpression)
+	//	    | (QMARK^ expression COLON! expression)
+	//      | (ELVIS^ expression))?;
+	@SuppressWarnings(&quot;NullAway&quot;) // Not null assertion performed in SpelNodeImpl constructor
+	private @Nullable SpelNodeImpl eatExpression() {
+<span class="fc" id="L171">		SpelNodeImpl expr = eatLogicalOrExpression();</span>
+<span class="fc" id="L172">		Token t = peekToken();</span>
+<span class="fc bfc" id="L173" title="All 2 branches covered.">		if (t != null) {</span>
+<span class="fc bfc" id="L174" title="All 2 branches covered.">			if (t.kind == TokenKind.ASSIGN) {  // a=b</span>
+<span class="fc bfc" id="L175" title="All 2 branches covered.">				if (expr == null) {</span>
+<span class="fc" id="L176">					expr = new NullLiteral(t.startPos - 1, t.endPos - 1);</span>
+				}
+<span class="fc" id="L178">				nextToken();</span>
+<span class="fc" id="L179">				SpelNodeImpl assignedValue = eatLogicalOrExpression();</span>
+<span class="fc" id="L180">				return new Assign(t.startPos, t.endPos, expr, assignedValue);</span>
+			}
+<span class="fc bfc" id="L182" title="All 2 branches covered.">			if (t.kind == TokenKind.ELVIS) {  // a?:b (a if it isn't null, otherwise b)</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">				if (expr == null) {</span>
+<span class="fc" id="L184">					expr = new NullLiteral(t.startPos - 1, t.endPos - 2);</span>
+				}
+<span class="fc" id="L186">				nextToken();  // elvis has left the building</span>
+<span class="fc" id="L187">				SpelNodeImpl valueIfNull = eatExpression();</span>
+<span class="fc bfc" id="L188" title="All 2 branches covered.">				if (valueIfNull == null) {</span>
+<span class="fc" id="L189">					valueIfNull = new NullLiteral(t.startPos + 1, t.endPos + 1);</span>
+				}
+<span class="fc" id="L191">				return new Elvis(t.startPos, t.endPos, expr, valueIfNull);</span>
+			}
+<span class="fc bfc" id="L193" title="All 2 branches covered.">			if (t.kind == TokenKind.QMARK) {  // a?b:c</span>
+<span class="fc bfc" id="L194" title="All 2 branches covered.">				if (expr == null) {</span>
+<span class="fc" id="L195">					expr = new NullLiteral(t.startPos - 1, t.endPos - 1);</span>
+				}
+<span class="fc" id="L197">				nextToken();</span>
+<span class="fc" id="L198">				SpelNodeImpl ifTrueExprValue = eatExpression();</span>
+<span class="fc" id="L199">				eatToken(TokenKind.COLON);</span>
+<span class="fc" id="L200">				SpelNodeImpl ifFalseExprValue = eatExpression();</span>
+<span class="fc" id="L201">				return new Ternary(t.startPos, t.endPos, expr, ifTrueExprValue, ifFalseExprValue);</span>
+			}
+		}
+<span class="fc" id="L204">		return expr;</span>
+	}
+
+	//logicalOrExpression : logicalAndExpression (OR^ logicalAndExpression)*;
+	private @Nullable SpelNodeImpl eatLogicalOrExpression() {
+<span class="fc" id="L209">		SpelNodeImpl expr = eatLogicalAndExpression();</span>
+<span class="fc bfc" id="L210" title="All 4 branches covered.">		while (peekIdentifierToken(&quot;or&quot;) || peekToken(TokenKind.SYMBOLIC_OR)) {</span>
+<span class="fc" id="L211">			Token t = takeToken();  //consume OR</span>
+<span class="fc" id="L212">			SpelNodeImpl rhExpr = eatLogicalAndExpression();</span>
+<span class="fc" id="L213">			checkOperands(t, expr, rhExpr);</span>
+<span class="fc" id="L214">			expr = new OpOr(t.startPos, t.endPos, expr, rhExpr);</span>
+<span class="fc" id="L215">		}</span>
+<span class="fc" id="L216">		return expr;</span>
+	}
+
+	// logicalAndExpression : relationalExpression (AND^ relationalExpression)*;
+	private @Nullable SpelNodeImpl eatLogicalAndExpression() {
+<span class="fc" id="L221">		SpelNodeImpl expr = eatRelationalExpression();</span>
+<span class="fc bfc" id="L222" title="All 4 branches covered.">		while (peekIdentifierToken(&quot;and&quot;) || peekToken(TokenKind.SYMBOLIC_AND)) {</span>
+<span class="fc" id="L223">			Token t = takeToken();  // consume 'AND'</span>
+<span class="fc" id="L224">			SpelNodeImpl rhExpr = eatRelationalExpression();</span>
+<span class="fc" id="L225">			checkOperands(t, expr, rhExpr);</span>
+<span class="fc" id="L226">			expr = new OpAnd(t.startPos, t.endPos, expr, rhExpr);</span>
+<span class="fc" id="L227">		}</span>
+<span class="fc" id="L228">		return expr;</span>
+	}
+
+	// relationalExpression : sumExpression (relationalOperator^ sumExpression)?;
+	private @Nullable SpelNodeImpl eatRelationalExpression() {
+<span class="fc" id="L233">		SpelNodeImpl expr = eatSumExpression();</span>
+<span class="fc" id="L234">		Token relationalOperatorToken = maybeEatRelationalOperator();</span>
+<span class="fc bfc" id="L235" title="All 2 branches covered.">		if (relationalOperatorToken != null) {</span>
+<span class="fc" id="L236">			Token t = takeToken();  // consume relational operator token</span>
+<span class="fc" id="L237">			SpelNodeImpl rhExpr = eatSumExpression();</span>
+<span class="fc" id="L238">			checkOperands(t, expr, rhExpr);</span>
+<span class="fc" id="L239">			TokenKind tk = relationalOperatorToken.kind;</span>
+
+<span class="fc bfc" id="L241" title="All 2 branches covered.">			if (relationalOperatorToken.isNumericRelationalOperator()) {</span>
+<span class="fc bfc" id="L242" title="All 2 branches covered.">				if (tk == TokenKind.GT) {</span>
+<span class="fc" id="L243">					return new OpGT(t.startPos, t.endPos, expr, rhExpr);</span>
+				}
+<span class="fc bfc" id="L245" title="All 2 branches covered.">				if (tk == TokenKind.LT) {</span>
+<span class="fc" id="L246">					return new OpLT(t.startPos, t.endPos, expr, rhExpr);</span>
+				}
+<span class="fc bfc" id="L248" title="All 2 branches covered.">				if (tk == TokenKind.LE) {</span>
+<span class="fc" id="L249">					return new OpLE(t.startPos, t.endPos, expr, rhExpr);</span>
+				}
+<span class="fc bfc" id="L251" title="All 2 branches covered.">				if (tk == TokenKind.GE) {</span>
+<span class="fc" id="L252">					return new OpGE(t.startPos, t.endPos, expr, rhExpr);</span>
+				}
+<span class="fc bfc" id="L254" title="All 2 branches covered.">				if (tk == TokenKind.EQ) {</span>
+<span class="fc" id="L255">					return new OpEQ(t.startPos, t.endPos, expr, rhExpr);</span>
+				}
+<span class="pc bpc" id="L257" title="1 of 2 branches missed.">				if (tk == TokenKind.NE) {</span>
+<span class="fc" id="L258">					return new OpNE(t.startPos, t.endPos, expr, rhExpr);</span>
+				}
+			}
+
+<span class="fc bfc" id="L262" title="All 2 branches covered.">			if (tk == TokenKind.INSTANCEOF) {</span>
+<span class="fc" id="L263">				return new OperatorInstanceof(t.startPos, t.endPos, expr, rhExpr);</span>
+			}
+<span class="fc bfc" id="L265" title="All 2 branches covered.">			if (tk == TokenKind.MATCHES) {</span>
+<span class="fc" id="L266">				return new OperatorMatches(this.patternCache, t.startPos, t.endPos, expr, rhExpr);</span>
+			}
+<span class="pc bpc" id="L268" title="1 of 2 branches missed.">			if (tk == TokenKind.BETWEEN) {</span>
+<span class="fc" id="L269">				return new OperatorBetween(t.startPos, t.endPos, expr, rhExpr);</span>
+			}
+		}
+<span class="fc" id="L272">		return expr;</span>
+	}
+
+	//sumExpression: productExpression ( (PLUS^ | MINUS^) productExpression)*;
+	@SuppressWarnings(&quot;NullAway&quot;) // Not null assertion performed in SpelNodeImpl constructor
+	private @Nullable SpelNodeImpl eatSumExpression() {
+<span class="fc" id="L278">		SpelNodeImpl expr = eatProductExpression();</span>
+<span class="fc bfc" id="L279" title="All 2 branches covered.">		while (peekToken(TokenKind.PLUS, TokenKind.MINUS, TokenKind.INC)) {</span>
+<span class="fc" id="L280">			Token t = takeToken();  //consume PLUS or MINUS or INC</span>
+<span class="fc" id="L281">			SpelNodeImpl rhExpr = eatProductExpression();</span>
+<span class="fc" id="L282">			checkRightOperand(t, rhExpr);</span>
+<span class="fc bfc" id="L283" title="All 2 branches covered.">			if (t.kind == TokenKind.PLUS) {</span>
+<span class="fc" id="L284">				expr = new OpPlus(t.startPos, t.endPos, expr, rhExpr);</span>
+			}
+<span class="pc bpc" id="L286" title="1 of 2 branches missed.">			else if (t.kind == TokenKind.MINUS) {</span>
+<span class="fc" id="L287">				expr = new OpMinus(t.startPos, t.endPos, expr, rhExpr);</span>
+			}
+<span class="fc" id="L289">		}</span>
+<span class="fc" id="L290">		return expr;</span>
+	}
+
+	// productExpression: powerExpr ((STAR^ | DIV^| MOD^) powerExpr)* ;
+	private @Nullable SpelNodeImpl eatProductExpression() {
+<span class="fc" id="L295">		SpelNodeImpl expr = eatPowerIncDecExpression();</span>
+<span class="fc bfc" id="L296" title="All 2 branches covered.">		while (peekToken(TokenKind.STAR, TokenKind.DIV, TokenKind.MOD)) {</span>
+<span class="fc" id="L297">			Token t = takeToken();  // consume STAR/DIV/MOD</span>
+<span class="fc" id="L298">			SpelNodeImpl rhExpr = eatPowerIncDecExpression();</span>
+<span class="fc" id="L299">			checkOperands(t, expr, rhExpr);</span>
+<span class="fc bfc" id="L300" title="All 2 branches covered.">			if (t.kind == TokenKind.STAR) {</span>
+<span class="fc" id="L301">				expr = new OpMultiply(t.startPos, t.endPos, expr, rhExpr);</span>
+			}
+<span class="fc bfc" id="L303" title="All 2 branches covered.">			else if (t.kind == TokenKind.DIV) {</span>
+<span class="fc" id="L304">				expr = new OpDivide(t.startPos, t.endPos, expr, rhExpr);</span>
+			}
+<span class="pc bpc" id="L306" title="1 of 2 branches missed.">			else if (t.kind == TokenKind.MOD) {</span>
+<span class="fc" id="L307">				expr = new OpModulus(t.startPos, t.endPos, expr, rhExpr);</span>
+			}
+<span class="fc" id="L309">		}</span>
+<span class="fc" id="L310">		return expr;</span>
+	}
+
+	// powerExpr  : unaryExpression (POWER^ unaryExpression)? (INC || DEC) ;
+	@SuppressWarnings(&quot;NullAway&quot;) // Not null assertion performed in SpelNodeImpl constructor
+	private @Nullable SpelNodeImpl eatPowerIncDecExpression() {
+<span class="fc" id="L316">		SpelNodeImpl expr = eatUnaryExpression();</span>
+<span class="fc bfc" id="L317" title="All 2 branches covered.">		if (peekToken(TokenKind.POWER)) {</span>
+<span class="fc" id="L318">			Token t = takeToken();  //consume POWER</span>
+<span class="fc" id="L319">			SpelNodeImpl rhExpr = eatUnaryExpression();</span>
+<span class="fc" id="L320">			checkRightOperand(t, rhExpr);</span>
+<span class="fc" id="L321">			return new OperatorPower(t.startPos, t.endPos, expr, rhExpr);</span>
+		}
+<span class="fc bfc" id="L323" title="All 4 branches covered.">		if (expr != null &amp;&amp; peekToken(TokenKind.INC, TokenKind.DEC)) {</span>
+<span class="fc" id="L324">			Token t = takeToken();  //consume INC/DEC</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">			if (t.getKind() == TokenKind.INC) {</span>
+<span class="fc" id="L326">				return new OpInc(t.startPos, t.endPos, true, expr);</span>
+			}
+<span class="fc" id="L328">			return new OpDec(t.startPos, t.endPos, true, expr);</span>
+		}
+<span class="fc" id="L330">		return expr;</span>
+	}
+
+	// unaryExpression: (PLUS^ | MINUS^ | BANG^ | INC^ | DEC^) unaryExpression | primaryExpression ;
+	@SuppressWarnings(&quot;NullAway&quot;) // Not null assertion performed in SpelNodeImpl constructor
+	private @Nullable SpelNodeImpl eatUnaryExpression() {
+<span class="fc bfc" id="L336" title="All 2 branches covered.">		if (peekToken(TokenKind.NOT, TokenKind.PLUS, TokenKind.MINUS)) {</span>
+<span class="fc" id="L337">			Token t = takeToken();</span>
+<span class="fc" id="L338">			SpelNodeImpl expr = eatUnaryExpression();</span>
+<span class="fc bfc" id="L339" title="All 2 branches covered.">			if (expr == null) {</span>
+<span class="fc" id="L340">				throw internalException(t.startPos, SpelMessage.OOD);</span>
+			}
+<span class="fc bfc" id="L342" title="All 2 branches covered.">			if (t.kind == TokenKind.NOT) {</span>
+<span class="fc" id="L343">				return new OperatorNot(t.startPos, t.endPos, expr);</span>
+			}
+<span class="fc bfc" id="L345" title="All 2 branches covered.">			if (t.kind == TokenKind.PLUS) {</span>
+<span class="fc" id="L346">				return new OpPlus(t.startPos, t.endPos, expr);</span>
+			}
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">			if (t.kind == TokenKind.MINUS) {</span>
+<span class="fc" id="L349">				return new OpMinus(t.startPos, t.endPos, expr);</span>
+			}
+		}
+<span class="fc bfc" id="L352" title="All 2 branches covered.">		if (peekToken(TokenKind.INC, TokenKind.DEC)) {</span>
+<span class="fc" id="L353">			Token t = takeToken();</span>
+<span class="fc" id="L354">			SpelNodeImpl expr = eatUnaryExpression();</span>
+<span class="fc bfc" id="L355" title="All 2 branches covered.">			if (t.getKind() == TokenKind.INC) {</span>
+<span class="fc" id="L356">				return new OpInc(t.startPos, t.endPos, false, expr);</span>
+			}
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">			if (t.kind == TokenKind.DEC) {</span>
+<span class="fc" id="L359">				return new OpDec(t.startPos, t.endPos, false, expr);</span>
+			}
+		}
+<span class="fc" id="L362">		return eatPrimaryExpression();</span>
+	}
+
+	// primaryExpression : startNode (node)? -&gt; ^(EXPRESSION startNode (node)?);
+	private @Nullable SpelNodeImpl eatPrimaryExpression() {
+<span class="fc" id="L367">		SpelNodeImpl start = eatStartNode();  // always a start node</span>
+<span class="fc" id="L368">		List&lt;SpelNodeImpl&gt; nodes = null;</span>
+<span class="fc" id="L369">		SpelNodeImpl node = eatNode();</span>
+<span class="fc bfc" id="L370" title="All 2 branches covered.">		while (node != null) {</span>
+<span class="fc bfc" id="L371" title="All 2 branches covered.">			if (nodes == null) {</span>
+<span class="fc" id="L372">				nodes = new ArrayList&lt;&gt;(4);</span>
+<span class="fc" id="L373">				nodes.add(start);</span>
+			}
+<span class="fc" id="L375">			nodes.add(node);</span>
+<span class="fc" id="L376">			node = eatNode();</span>
+		}
+<span class="fc bfc" id="L378" title="All 4 branches covered.">		if (start == null || nodes == null) {</span>
+<span class="fc" id="L379">			return start;</span>
+		}
+<span class="fc" id="L381">		return new CompoundExpression(start.getStartPosition(), nodes.get(nodes.size() - 1).getEndPosition(),</span>
+<span class="fc" id="L382">				nodes.toArray(new SpelNodeImpl[0]));</span>
+	}
+
+	// node : ((DOT dottedNode) | (SAFE_NAVI dottedNode) | nonDottedNode)+;
+	private @Nullable SpelNodeImpl eatNode() {
+<span class="fc bfc" id="L387" title="All 2 branches covered.">		return (peekToken(TokenKind.DOT, TokenKind.SAFE_NAVI) ? eatDottedNode() : eatNonDottedNode());</span>
+	}
+
+	// nonDottedNode: indexer;
+	private @Nullable SpelNodeImpl eatNonDottedNode() {
+<span class="fc bfc" id="L392" title="All 2 branches covered.">		if (peekToken(TokenKind.LSQUARE)) {</span>
+<span class="pc bpc" id="L393" title="1 of 2 branches missed.">			if (maybeEatIndexer(false)) {</span>
+<span class="fc" id="L394">				return pop();</span>
+			}
+		}
+<span class="fc" id="L397">		return null;</span>
+	}
+
+	//dottedNode
+	// : ((methodOrProperty
+	//	  | functionOrVar
+	//    | projection
+	//    | selection
+	//    | firstSelection
+	//    | lastSelection
+	//    ))
+	//	;
+	private SpelNodeImpl eatDottedNode() {
+<span class="fc" id="L410">		Token t = takeToken();  // it was a '.' or a '?.'</span>
+<span class="fc bfc" id="L411" title="All 2 branches covered.">		boolean nullSafeNavigation = (t.kind == TokenKind.SAFE_NAVI);</span>
+<span class="fc bfc" id="L412" title="All 4 branches covered.">		if (maybeEatMethodOrProperty(nullSafeNavigation) || maybeEatFunctionOrVar() ||</span>
+<span class="fc bfc" id="L413" title="All 4 branches covered.">				maybeEatProjection(nullSafeNavigation) || maybeEatSelection(nullSafeNavigation) ||</span>
+<span class="fc bfc" id="L414" title="All 2 branches covered.">				maybeEatIndexer(nullSafeNavigation)) {</span>
+<span class="fc" id="L415">			return pop();</span>
+		}
+<span class="fc bfc" id="L417" title="All 2 branches covered.">		if (peekToken() == null) {</span>
+<span class="fc" id="L418">			throw internalException(t.startPos, SpelMessage.OOD);</span>
+		}
+		else {
+<span class="fc" id="L421">			throw internalException(t.startPos, SpelMessage.UNEXPECTED_DATA_AFTER_DOT, toString(peekToken()));</span>
+		}
+	}
+
+	// functionOrVar
+	// : (POUND ID LPAREN) =&gt; function
+	// | var
+	//
+	// function : POUND id=ID methodArgs -&gt; ^(FUNCTIONREF[$id] methodArgs);
+	// var : POUND id=ID -&gt; ^(VARIABLEREF[$id]);
+	private boolean maybeEatFunctionOrVar() {
+<span class="fc bfc" id="L432" title="All 2 branches covered.">		if (!peekToken(TokenKind.HASH)) {</span>
+<span class="fc" id="L433">			return false;</span>
+		}
+<span class="fc" id="L435">		Token t = takeToken();</span>
+<span class="fc" id="L436">		Token functionOrVariableName = eatToken(TokenKind.IDENTIFIER);</span>
+<span class="fc" id="L437">		SpelNodeImpl[] args = maybeEatMethodArgs();</span>
+<span class="fc bfc" id="L438" title="All 2 branches covered.">		if (args == null) {</span>
+<span class="fc" id="L439">			push(new VariableReference(functionOrVariableName.stringValue(),</span>
+					t.startPos, functionOrVariableName.endPos));
+<span class="fc" id="L441">			return true;</span>
+		}
+
+<span class="fc" id="L444">		push(new FunctionReference(functionOrVariableName.stringValue(),</span>
+				t.startPos, functionOrVariableName.endPos, args));
+<span class="fc" id="L446">		return true;</span>
+	}
+
+	// methodArgs : LPAREN! (argument (COMMA! argument)* (COMMA!)?)? RPAREN!;
+	private SpelNodeImpl @Nullable [] maybeEatMethodArgs() {
+<span class="fc bfc" id="L451" title="All 2 branches covered.">		if (!peekToken(TokenKind.LPAREN)) {</span>
+<span class="fc" id="L452">			return null;</span>
+		}
+<span class="fc" id="L454">		List&lt;SpelNodeImpl&gt; args = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L455">		consumeArguments(args);</span>
+<span class="fc" id="L456">		eatToken(TokenKind.RPAREN);</span>
+<span class="fc" id="L457">		return args.toArray(new SpelNodeImpl[0]);</span>
+	}
+
+	private void eatConstructorArgs(List&lt;SpelNodeImpl&gt; accumulatedArguments) {
+<span class="fc bfc" id="L461" title="All 2 branches covered.">		if (!peekToken(TokenKind.LPAREN)) {</span>
+<span class="fc" id="L462">			throw internalException(positionOf(peekToken()), SpelMessage.MISSING_CONSTRUCTOR_ARGS);</span>
+		}
+<span class="fc" id="L464">		consumeArguments(accumulatedArguments);</span>
+<span class="fc" id="L465">		eatToken(TokenKind.RPAREN);</span>
+<span class="fc" id="L466">	}</span>
+
+	/**
+	 * Used for consuming arguments for either a method or a constructor call.
+	 */
+	private void consumeArguments(List&lt;SpelNodeImpl&gt; accumulatedArguments) {
+<span class="fc" id="L472">		Token t = peekToken();</span>
+<span class="pc bpc" id="L473" title="1 of 2 branches missed.">		if (t == null) {</span>
+<span class="nc" id="L474">			return;</span>
+		}
+<span class="fc" id="L476">		int pos = t.startPos;</span>
+		Token next;
+		do {
+<span class="fc" id="L479">			nextToken();  // consume (first time through) or comma (subsequent times)</span>
+<span class="fc" id="L480">			t = peekToken();</span>
+<span class="fc bfc" id="L481" title="All 2 branches covered.">			if (t == null) {</span>
+<span class="fc" id="L482">				throw internalException(pos, SpelMessage.RUN_OUT_OF_ARGUMENTS);</span>
+			}
+<span class="fc bfc" id="L484" title="All 2 branches covered.">			if (t.kind != TokenKind.RPAREN) {</span>
+<span class="fc" id="L485">				accumulatedArguments.add(eatExpression());</span>
+			}
+<span class="fc" id="L487">			next = peekToken();</span>
+		}
+<span class="fc bfc" id="L489" title="All 4 branches covered.">		while (next != null &amp;&amp; next.kind == TokenKind.COMMA);</span>
+
+<span class="fc bfc" id="L491" title="All 2 branches covered.">		if (next == null) {</span>
+<span class="fc" id="L492">			throw internalException(pos, SpelMessage.RUN_OUT_OF_ARGUMENTS);</span>
+		}
+<span class="fc" id="L494">	}</span>
+
+	private int positionOf(@Nullable Token t) {
+<span class="pc bpc" id="L497" title="1 of 2 branches missed.">		if (t == null) {</span>
+			// if null assume the problem is because the right token was
+			// not found at the end of the expression
+<span class="fc" id="L500">			return this.expressionString.length();</span>
+		}
+<span class="nc" id="L502">		return t.startPos;</span>
+	}
+
+	//startNode
+	// : parenExpr | literal
+	//	    | type
+	//	    | methodOrProperty
+	//	    | functionOrVar
+	//	    | projection
+	//	    | selection
+	//	    | firstSelection
+	//	    | lastSelection
+	//	    | indexer
+	//	    | constructor
+	private @Nullable SpelNodeImpl eatStartNode() {
+<span class="fc bfc" id="L517" title="All 2 branches covered.">		if (maybeEatLiteral()) {</span>
+<span class="fc" id="L518">			return pop();</span>
+		}
+<span class="fc bfc" id="L520" title="All 2 branches covered.">		else if (maybeEatParenExpression()) {</span>
+<span class="fc" id="L521">			return pop();</span>
+		}
+<span class="fc bfc" id="L523" title="All 6 branches covered.">		else if (maybeEatTypeReference() || maybeEatNullReference() || maybeEatConstructorReference() ||</span>
+<span class="fc bfc" id="L524" title="All 4 branches covered.">				maybeEatMethodOrProperty(false) || maybeEatFunctionOrVar()) {</span>
+<span class="fc" id="L525">			return pop();</span>
+		}
+<span class="fc bfc" id="L527" title="All 2 branches covered.">		else if (maybeEatBeanReference()) {</span>
+<span class="fc" id="L528">			return pop();</span>
+		}
+<span class="fc bfc" id="L530" title="All 6 branches covered.">		else if (maybeEatProjection(false) || maybeEatSelection(false) || maybeEatIndexer(false)) {</span>
+<span class="fc" id="L531">			return pop();</span>
+		}
+<span class="fc bfc" id="L533" title="All 2 branches covered.">		else if (maybeEatInlineListOrMap()) {</span>
+<span class="fc" id="L534">			return pop();</span>
+		}
+		else {
+<span class="fc" id="L537">			return null;</span>
+		}
+	}
+
+	// parse: @beanname @'bean.name'
+	// quoted if dotted
+	private boolean maybeEatBeanReference() {
+<span class="fc bfc" id="L544" title="All 4 branches covered.">		if (peekToken(TokenKind.BEAN_REF) || peekToken(TokenKind.FACTORY_BEAN_REF)) {</span>
+<span class="fc" id="L545">			Token beanRefToken = takeToken();</span>
+<span class="fc" id="L546">			Token beanNameToken = null;</span>
+<span class="fc" id="L547">			String beanName = null;</span>
+<span class="fc bfc" id="L548" title="All 2 branches covered.">			if (peekToken(TokenKind.IDENTIFIER)) {</span>
+<span class="fc" id="L549">				beanNameToken = eatToken(TokenKind.IDENTIFIER);</span>
+<span class="fc" id="L550">				beanName = beanNameToken.stringValue();</span>
+			}
+<span class="fc bfc" id="L552" title="All 2 branches covered.">			else if (peekToken(TokenKind.LITERAL_STRING)) {</span>
+<span class="fc" id="L553">				beanNameToken = eatToken(TokenKind.LITERAL_STRING);</span>
+<span class="fc" id="L554">				beanName = beanNameToken.stringValue();</span>
+<span class="fc" id="L555">				beanName = beanName.substring(1, beanName.length() - 1);</span>
+			}
+			else {
+<span class="fc" id="L558">				throw internalException(beanRefToken.startPos, SpelMessage.INVALID_BEAN_REFERENCE);</span>
+			}
+			BeanReference beanReference;
+<span class="fc bfc" id="L561" title="All 2 branches covered.">			if (beanRefToken.getKind() == TokenKind.FACTORY_BEAN_REF) {</span>
+<span class="fc" id="L562">				String beanNameString = String.valueOf(TokenKind.FACTORY_BEAN_REF.tokenChars) + beanName;</span>
+<span class="fc" id="L563">				beanReference = new BeanReference(beanRefToken.startPos, beanNameToken.endPos, beanNameString);</span>
+<span class="fc" id="L564">			}</span>
+			else {
+<span class="fc" id="L566">				beanReference = new BeanReference(beanNameToken.startPos, beanNameToken.endPos, beanName);</span>
+			}
+<span class="fc" id="L568">			this.constructedNodes.push(beanReference);</span>
+<span class="fc" id="L569">			return true;</span>
+		}
+<span class="fc" id="L571">		return false;</span>
+	}
+
+	private boolean maybeEatTypeReference() {
+<span class="fc bfc" id="L575" title="All 2 branches covered.">		if (peekToken(TokenKind.IDENTIFIER)) {</span>
+<span class="fc" id="L576">			Token typeName = peekToken();</span>
+<span class="pc bpc" id="L577" title="1 of 4 branches missed.">			if (typeName == null || !&quot;T&quot;.equals(typeName.stringValue())) {</span>
+<span class="fc" id="L578">				return false;</span>
+			}
+			// It looks like a type reference but is T being used as a map key?
+<span class="fc" id="L581">			Token t = takeToken();</span>
+<span class="fc bfc" id="L582" title="All 2 branches covered.">			if (peekToken(TokenKind.RSQUARE)) {</span>
+				// looks like 'T]' (T is map key)
+<span class="fc" id="L584">				push(new PropertyOrFieldReference(false, t.stringValue(), t.startPos, t.endPos));</span>
+<span class="fc" id="L585">				return true;</span>
+			}
+<span class="fc" id="L587">			eatToken(TokenKind.LPAREN);</span>
+<span class="fc" id="L588">			SpelNodeImpl node = eatPossiblyQualifiedId();</span>
+			// dotted qualified id
+			// Are there array dimensions?
+<span class="fc" id="L591">			int dims = 0;</span>
+<span class="fc bfc" id="L592" title="All 2 branches covered.">			while (peekToken(TokenKind.LSQUARE, true)) {</span>
+<span class="fc" id="L593">				eatToken(TokenKind.RSQUARE);</span>
+<span class="fc" id="L594">				dims++;</span>
+			}
+<span class="fc" id="L596">			eatToken(TokenKind.RPAREN);</span>
+<span class="fc" id="L597">			this.constructedNodes.push(new TypeReference(typeName.startPos, typeName.endPos, node, dims));</span>
+<span class="fc" id="L598">			return true;</span>
+		}
+<span class="fc" id="L600">		return false;</span>
+	}
+
+	private boolean maybeEatNullReference() {
+<span class="fc bfc" id="L604" title="All 2 branches covered.">		if (peekToken(TokenKind.IDENTIFIER)) {</span>
+<span class="fc" id="L605">			Token nullToken = peekToken();</span>
+<span class="pc bpc" id="L606" title="1 of 4 branches missed.">			if (nullToken == null || !&quot;null&quot;.equalsIgnoreCase(nullToken.stringValue())) {</span>
+<span class="fc" id="L607">				return false;</span>
+			}
+<span class="fc" id="L609">			nextToken();</span>
+<span class="fc" id="L610">			this.constructedNodes.push(new NullLiteral(nullToken.startPos, nullToken.endPos));</span>
+<span class="fc" id="L611">			return true;</span>
+		}
+<span class="fc" id="L613">		return false;</span>
+	}
+
+	//projection: PROJECT^ expression RCURLY!;
+	private boolean maybeEatProjection(boolean nullSafeNavigation) {
+<span class="fc" id="L618">		Token t = peekToken();</span>
+<span class="fc bfc" id="L619" title="All 4 branches covered.">		if (t == null || !peekToken(TokenKind.PROJECT, true)) {</span>
+<span class="fc" id="L620">			return false;</span>
+		}
+<span class="fc" id="L622">		SpelNodeImpl expr = eatExpression();</span>
+<span class="pc bpc" id="L623" title="1 of 2 branches missed.">		if (expr == null) {</span>
+<span class="nc" id="L624">			throw internalException(t.startPos, SpelMessage.OOD);</span>
+		}
+<span class="fc" id="L626">		eatToken(TokenKind.RSQUARE);</span>
+<span class="fc" id="L627">		this.constructedNodes.push(new Projection(nullSafeNavigation, t.startPos, t.endPos, expr));</span>
+<span class="fc" id="L628">		return true;</span>
+	}
+
+	// list = LCURLY (element (COMMA element)*) RCURLY
+	// map  = LCURLY (key ':' value (COMMA key ':' value)*) RCURLY
+	private boolean maybeEatInlineListOrMap() {
+<span class="fc" id="L634">		Token t = peekToken();</span>
+<span class="fc bfc" id="L635" title="All 4 branches covered.">		if (t == null || !peekToken(TokenKind.LCURLY, true)) {</span>
+<span class="fc" id="L636">			return false;</span>
+		}
+<span class="fc" id="L638">		SpelNodeImpl expr = null;</span>
+<span class="fc" id="L639">		Token closingCurly = peekToken();</span>
+<span class="pc bpc" id="L640" title="1 of 4 branches missed.">		if (closingCurly != null &amp;&amp; peekToken(TokenKind.RCURLY, true)) {</span>
+			// empty list '{}'
+<span class="fc" id="L642">			expr = new InlineList(t.startPos, closingCurly.endPos);</span>
+		}
+<span class="fc bfc" id="L644" title="All 2 branches covered.">		else if (peekToken(TokenKind.COLON, true)) {</span>
+<span class="fc" id="L645">			closingCurly = eatToken(TokenKind.RCURLY);</span>
+			// empty map '{:}'
+<span class="fc" id="L647">			expr = new InlineMap(t.startPos, closingCurly.endPos);</span>
+		}
+		else {
+<span class="fc" id="L650">			SpelNodeImpl firstExpression = eatExpression();</span>
+			// Next is either:
+			// '}' - end of list
+			// ',' - more expressions in this list
+			// ':' - this is a map!
+<span class="fc bfc" id="L655" title="All 2 branches covered.">			if (peekToken(TokenKind.RCURLY)) {  // list with one item in it</span>
+<span class="fc" id="L656">				List&lt;SpelNodeImpl&gt; elements = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L657">				elements.add(firstExpression);</span>
+<span class="fc" id="L658">				closingCurly = eatToken(TokenKind.RCURLY);</span>
+<span class="fc" id="L659">				expr = new InlineList(t.startPos, closingCurly.endPos, elements.toArray(new SpelNodeImpl[0]));</span>
+<span class="fc" id="L660">			}</span>
+<span class="fc bfc" id="L661" title="All 2 branches covered.">			else if (peekToken(TokenKind.COMMA, true)) {  // multi-item list</span>
+<span class="fc" id="L662">				List&lt;SpelNodeImpl&gt; elements = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L663">				elements.add(firstExpression);</span>
+				do {
+<span class="fc" id="L665">					elements.add(eatExpression());</span>
+				}
+<span class="fc bfc" id="L667" title="All 2 branches covered.">				while (peekToken(TokenKind.COMMA, true));</span>
+<span class="fc" id="L668">				closingCurly = eatToken(TokenKind.RCURLY);</span>
+<span class="fc" id="L669">				expr = new InlineList(t.startPos, closingCurly.endPos, elements.toArray(new SpelNodeImpl[0]));</span>
+
+<span class="fc" id="L671">			}</span>
+<span class="fc bfc" id="L672" title="All 2 branches covered.">			else if (peekToken(TokenKind.COLON, true)) {  // map!</span>
+<span class="fc" id="L673">				List&lt;SpelNodeImpl&gt; elements = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L674">				elements.add(firstExpression);</span>
+<span class="fc" id="L675">				elements.add(eatExpression());</span>
+<span class="fc bfc" id="L676" title="All 2 branches covered.">				while (peekToken(TokenKind.COMMA, true)) {</span>
+<span class="fc" id="L677">					elements.add(eatExpression());</span>
+<span class="fc" id="L678">					eatToken(TokenKind.COLON);</span>
+<span class="fc" id="L679">					elements.add(eatExpression());</span>
+				}
+<span class="fc" id="L681">				closingCurly = eatToken(TokenKind.RCURLY);</span>
+<span class="fc" id="L682">				expr = new InlineMap(t.startPos, closingCurly.endPos, elements.toArray(new SpelNodeImpl[0]));</span>
+<span class="fc" id="L683">			}</span>
+			else {
+<span class="fc" id="L685">				throw internalException(t.startPos, SpelMessage.OOD);</span>
+			}
+		}
+<span class="fc" id="L688">		this.constructedNodes.push(expr);</span>
+<span class="fc" id="L689">		return true;</span>
+	}
+
+	private boolean maybeEatIndexer(boolean nullSafeNavigation) {
+<span class="fc" id="L693">		Token t = peekToken();</span>
+<span class="fc bfc" id="L694" title="All 4 branches covered.">		if (t == null || !peekToken(TokenKind.LSQUARE, true)) {</span>
+<span class="fc" id="L695">			return false;</span>
+		}
+<span class="fc" id="L697">		SpelNodeImpl expr = eatExpression();</span>
+<span class="pc bpc" id="L698" title="1 of 2 branches missed.">		if (expr == null) {</span>
+<span class="nc" id="L699">			throw internalException(t.startPos, SpelMessage.MISSING_SELECTION_EXPRESSION);</span>
+		}
+<span class="fc" id="L701">		eatToken(TokenKind.RSQUARE);</span>
+<span class="fc" id="L702">		this.constructedNodes.push(new Indexer(nullSafeNavigation, t.startPos, t.endPos, expr));</span>
+<span class="fc" id="L703">		return true;</span>
+	}
+
+	private boolean maybeEatSelection(boolean nullSafeNavigation) {
+<span class="fc" id="L707">		Token t = peekToken();</span>
+<span class="fc bfc" id="L708" title="All 4 branches covered.">		if (t == null || !peekSelectToken()) {</span>
+<span class="fc" id="L709">			return false;</span>
+		}
+<span class="fc" id="L711">		nextToken();</span>
+<span class="fc" id="L712">		SpelNodeImpl expr = eatExpression();</span>
+<span class="fc bfc" id="L713" title="All 2 branches covered.">		if (expr == null) {</span>
+<span class="fc" id="L714">			throw internalException(t.startPos, SpelMessage.MISSING_SELECTION_EXPRESSION);</span>
+		}
+<span class="fc" id="L716">		eatToken(TokenKind.RSQUARE);</span>
+<span class="fc bfc" id="L717" title="All 2 branches covered.">		if (t.kind == TokenKind.SELECT_FIRST) {</span>
+<span class="fc" id="L718">			this.constructedNodes.push(new Selection(nullSafeNavigation, Selection.FIRST, t.startPos, t.endPos, expr));</span>
+		}
+<span class="fc bfc" id="L720" title="All 2 branches covered.">		else if (t.kind == TokenKind.SELECT_LAST) {</span>
+<span class="fc" id="L721">			this.constructedNodes.push(new Selection(nullSafeNavigation, Selection.LAST, t.startPos, t.endPos, expr));</span>
+		}
+		else {
+<span class="fc" id="L724">			this.constructedNodes.push(new Selection(nullSafeNavigation, Selection.ALL, t.startPos, t.endPos, expr));</span>
+		}
+<span class="fc" id="L726">		return true;</span>
+	}
+
+	/**
+	 * Eat an identifier, possibly qualified (meaning that it is dotted).
+	 */
+	private SpelNodeImpl eatPossiblyQualifiedId() {
+<span class="fc" id="L733">		Deque&lt;SpelNodeImpl&gt; qualifiedIdPieces = new ArrayDeque&lt;&gt;();</span>
+<span class="fc" id="L734">		Token node = peekToken();</span>
+<span class="fc bfc" id="L735" title="All 2 branches covered.">		while (isValidQualifiedId(node)) {</span>
+<span class="fc" id="L736">			nextToken();</span>
+<span class="fc bfc" id="L737" title="All 2 branches covered.">			if (node.kind != TokenKind.DOT) {</span>
+<span class="fc" id="L738">				qualifiedIdPieces.add(new Identifier(node.stringValue(), node.startPos, node.endPos));</span>
+			}
+<span class="fc" id="L740">			node = peekToken();</span>
+		}
+<span class="fc bfc" id="L742" title="All 2 branches covered.">		if (qualifiedIdPieces.isEmpty()) {</span>
+<span class="pc bpc" id="L743" title="1 of 2 branches missed.">			if (node == null) {</span>
+<span class="nc" id="L744">				throw internalException( this.expressionString.length(), SpelMessage.OOD);</span>
+			}
+<span class="fc" id="L746">			throw internalException(node.startPos, SpelMessage.NOT_EXPECTED_TOKEN,</span>
+<span class="fc" id="L747">					&quot;qualified ID&quot;, node.getKind().toString().toLowerCase(Locale.ROOT));</span>
+		}
+<span class="fc" id="L749">		return new QualifiedIdentifier(qualifiedIdPieces.getFirst().getStartPosition(),</span>
+<span class="fc" id="L750">				qualifiedIdPieces.getLast().getEndPosition(), qualifiedIdPieces.toArray(new SpelNodeImpl[0]));</span>
+	}
+
+	@Contract(&quot;null -&gt; false&quot;)
+	private boolean isValidQualifiedId(@Nullable Token node) {
+<span class="fc bfc" id="L755" title="All 4 branches covered.">		if (node == null || node.kind == TokenKind.LITERAL_STRING) {</span>
+<span class="fc" id="L756">			return false;</span>
+		}
+<span class="fc bfc" id="L758" title="All 4 branches covered.">		if (node.kind == TokenKind.DOT || node.kind == TokenKind.IDENTIFIER) {</span>
+<span class="fc" id="L759">			return true;</span>
+		}
+<span class="fc" id="L761">		String value = node.stringValue();</span>
+<span class="pc bpc" id="L762" title="1 of 4 branches missed.">		return (StringUtils.hasLength(value) &amp;&amp; VALID_QUALIFIED_ID_PATTERN.matcher(value).matches());</span>
+	}
+
+	// This is complicated due to the support for dollars in identifiers.
+	// Dollars are normally separate tokens but there we want to combine
+	// a series of identifiers and dollars into a single identifier.
+	private boolean maybeEatMethodOrProperty(boolean nullSafeNavigation) {
+<span class="fc bfc" id="L769" title="All 2 branches covered.">		if (peekToken(TokenKind.IDENTIFIER)) {</span>
+<span class="fc" id="L770">			Token methodOrPropertyName = takeToken();</span>
+<span class="fc" id="L771">			SpelNodeImpl[] args = maybeEatMethodArgs();</span>
+<span class="fc bfc" id="L772" title="All 2 branches covered.">			if (args == null) {</span>
+				// property
+<span class="fc" id="L774">				push(new PropertyOrFieldReference(nullSafeNavigation, methodOrPropertyName.stringValue(),</span>
+						methodOrPropertyName.startPos, methodOrPropertyName.endPos));
+<span class="fc" id="L776">				return true;</span>
+			}
+			// method reference
+<span class="fc" id="L779">			push(new MethodReference(nullSafeNavigation, methodOrPropertyName.stringValue(),</span>
+					methodOrPropertyName.startPos, methodOrPropertyName.endPos, args));
+<span class="fc" id="L781">			return true;</span>
+		}
+<span class="fc" id="L783">		return false;</span>
+	}
+
+	//constructor
+    //:	('new' qualifiedId LPAREN) =&gt; 'new' qualifiedId ctorArgs -&gt; ^(CONSTRUCTOR qualifiedId ctorArgs)
+	private boolean maybeEatConstructorReference() {
+<span class="fc bfc" id="L789" title="All 2 branches covered.">		if (peekIdentifierToken(&quot;new&quot;)) {</span>
+<span class="fc" id="L790">			Token newToken = takeToken();</span>
+			// It looks like a constructor reference but is NEW being used as a map key?
+<span class="fc bfc" id="L792" title="All 2 branches covered.">			if (peekToken(TokenKind.RSQUARE)) {</span>
+				// looks like 'NEW]' (so NEW used as map key)
+<span class="fc" id="L794">				push(new PropertyOrFieldReference(false, newToken.stringValue(), newToken.startPos, newToken.endPos));</span>
+<span class="fc" id="L795">				return true;</span>
+			}
+<span class="fc" id="L797">			SpelNodeImpl possiblyQualifiedConstructorName = eatPossiblyQualifiedId();</span>
+<span class="fc" id="L798">			List&lt;SpelNodeImpl&gt; nodes = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L799">			nodes.add(possiblyQualifiedConstructorName);</span>
+<span class="fc bfc" id="L800" title="All 2 branches covered.">			if (peekToken(TokenKind.LSQUARE)) {</span>
+				// array initializer
+<span class="fc" id="L802">				List&lt;SpelNodeImpl&gt; dimensions = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L803" title="All 2 branches covered.">				while (peekToken(TokenKind.LSQUARE, true)) {</span>
+<span class="fc bfc" id="L804" title="All 2 branches covered.">					if (!peekToken(TokenKind.RSQUARE)) {</span>
+<span class="fc" id="L805">						dimensions.add(eatExpression());</span>
+					}
+					else {
+						// A missing array dimension is tracked as null and will be
+						// rejected later during evaluation.
+<span class="fc" id="L810">						dimensions.add(null);</span>
+					}
+<span class="fc" id="L812">					eatToken(TokenKind.RSQUARE);</span>
+				}
+<span class="fc bfc" id="L814" title="All 2 branches covered.">				if (maybeEatInlineListOrMap()) {</span>
+<span class="fc" id="L815">					nodes.add(pop());</span>
+				}
+<span class="fc" id="L817">				push(new ConstructorReference(newToken.startPos, newToken.endPos,</span>
+<span class="fc" id="L818">						dimensions.toArray(new SpelNodeImpl[0]), nodes.toArray(new SpelNodeImpl[0])));</span>
+<span class="fc" id="L819">			}</span>
+			else {
+				// regular constructor invocation
+<span class="fc" id="L822">				eatConstructorArgs(nodes);</span>
+<span class="fc" id="L823">				push(new ConstructorReference(newToken.startPos, newToken.endPos, nodes.toArray(new SpelNodeImpl[0])));</span>
+			}
+<span class="fc" id="L825">			return true;</span>
+		}
+<span class="fc" id="L827">		return false;</span>
+	}
+
+	private void push(SpelNodeImpl newNode) {
+<span class="fc" id="L831">		this.constructedNodes.push(newNode);</span>
+<span class="fc" id="L832">	}</span>
+
+	private SpelNodeImpl pop() {
+<span class="fc" id="L835">		return this.constructedNodes.pop();</span>
+	}
+
+	//	literal
+	//  : INTEGER_LITERAL
+	//	| boolLiteral
+	//	| STRING_LITERAL
+	//  | HEXADECIMAL_INTEGER_LITERAL
+	//  | REAL_LITERAL
+	//	| DQ_STRING_LITERAL
+	//	| NULL_LITERAL
+	private boolean maybeEatLiteral() {
+<span class="fc" id="L847">		Token t = peekToken();</span>
+<span class="fc bfc" id="L848" title="All 2 branches covered.">		if (t == null) {</span>
+<span class="fc" id="L849">			return false;</span>
+		}
+<span class="fc bfc" id="L851" title="All 2 branches covered.">		if (t.kind == TokenKind.LITERAL_INT) {</span>
+<span class="fc" id="L852">			push(Literal.getIntLiteral(t.stringValue(), t.startPos, t.endPos, 10));</span>
+		}
+<span class="fc bfc" id="L854" title="All 2 branches covered.">		else if (t.kind == TokenKind.LITERAL_LONG) {</span>
+<span class="fc" id="L855">			push(Literal.getLongLiteral(t.stringValue(), t.startPos, t.endPos, 10));</span>
+		}
+<span class="fc bfc" id="L857" title="All 2 branches covered.">		else if (t.kind == TokenKind.LITERAL_HEXINT) {</span>
+<span class="fc" id="L858">			push(Literal.getIntLiteral(t.stringValue(), t.startPos, t.endPos, 16));</span>
+		}
+<span class="fc bfc" id="L860" title="All 2 branches covered.">		else if (t.kind == TokenKind.LITERAL_HEXLONG) {</span>
+<span class="fc" id="L861">			push(Literal.getLongLiteral(t.stringValue(), t.startPos, t.endPos, 16));</span>
+		}
+<span class="fc bfc" id="L863" title="All 2 branches covered.">		else if (t.kind == TokenKind.LITERAL_REAL) {</span>
+<span class="fc" id="L864">			push(Literal.getRealLiteral(t.stringValue(), t.startPos, t.endPos, false));</span>
+		}
+<span class="fc bfc" id="L866" title="All 2 branches covered.">		else if (t.kind == TokenKind.LITERAL_REAL_FLOAT) {</span>
+<span class="fc" id="L867">			push(Literal.getRealLiteral(t.stringValue(), t.startPos, t.endPos, true));</span>
+		}
+<span class="fc bfc" id="L869" title="All 2 branches covered.">		else if (peekIdentifierToken(&quot;true&quot;)) {</span>
+<span class="fc" id="L870">			push(new BooleanLiteral(t.stringValue(), t.startPos, t.endPos, true));</span>
+		}
+<span class="fc bfc" id="L872" title="All 2 branches covered.">		else if (peekIdentifierToken(&quot;false&quot;)) {</span>
+<span class="fc" id="L873">			push(new BooleanLiteral(t.stringValue(), t.startPos, t.endPos, false));</span>
+		}
+<span class="fc bfc" id="L875" title="All 2 branches covered.">		else if (t.kind == TokenKind.LITERAL_STRING) {</span>
+<span class="fc" id="L876">			push(new StringLiteral(t.stringValue(), t.startPos, t.endPos, t.stringValue()));</span>
+		}
+		else {
+<span class="fc" id="L879">			return false;</span>
+		}
+<span class="fc" id="L881">		nextToken();</span>
+<span class="fc" id="L882">		return true;</span>
+	}
+
+	//parenExpr : LPAREN! expression RPAREN!;
+	private boolean maybeEatParenExpression() {
+<span class="fc bfc" id="L887" title="All 2 branches covered.">		if (peekToken(TokenKind.LPAREN)) {</span>
+<span class="fc" id="L888">			Token t = nextToken();</span>
+<span class="pc bpc" id="L889" title="1 of 2 branches missed.">			if (t == null) {</span>
+<span class="nc" id="L890">				return false;</span>
+			}
+<span class="fc" id="L892">			SpelNodeImpl expr = eatExpression();</span>
+<span class="fc bfc" id="L893" title="All 2 branches covered.">			if (expr == null) {</span>
+<span class="fc" id="L894">				throw internalException(t.startPos, SpelMessage.OOD);</span>
+			}
+<span class="fc" id="L896">			eatToken(TokenKind.RPAREN);</span>
+<span class="fc" id="L897">			push(expr);</span>
+<span class="fc" id="L898">			return true;</span>
+		}
+		else {
+<span class="fc" id="L901">			return false;</span>
+		}
+	}
+
+	// relationalOperator
+	// : EQUAL | NOT_EQUAL | LESS_THAN | LESS_THAN_OR_EQUAL | GREATER_THAN
+	// | GREATER_THAN_OR_EQUAL | INSTANCEOF | BETWEEN | MATCHES
+	private @Nullable Token maybeEatRelationalOperator() {
+<span class="fc" id="L909">		Token t = peekToken();</span>
+<span class="fc bfc" id="L910" title="All 2 branches covered.">		if (t == null) {</span>
+<span class="fc" id="L911">			return null;</span>
+		}
+<span class="fc bfc" id="L913" title="All 2 branches covered.">		if (t.isNumericRelationalOperator()) {</span>
+<span class="fc" id="L914">			return t;</span>
+		}
+<span class="fc bfc" id="L916" title="All 2 branches covered.">		if (t.isIdentifier()) {</span>
+<span class="fc" id="L917">			String idString = t.stringValue();</span>
+<span class="fc bfc" id="L918" title="All 2 branches covered.">			if (idString.equalsIgnoreCase(&quot;instanceof&quot;)) {</span>
+<span class="fc" id="L919">				return t.asInstanceOfToken();</span>
+			}
+<span class="fc bfc" id="L921" title="All 2 branches covered.">			if (idString.equalsIgnoreCase(&quot;matches&quot;)) {</span>
+<span class="fc" id="L922">				return t.asMatchesToken();</span>
+			}
+<span class="fc bfc" id="L924" title="All 2 branches covered.">			if (idString.equalsIgnoreCase(&quot;between&quot;)) {</span>
+<span class="fc" id="L925">				return t.asBetweenToken();</span>
+			}
+		}
+<span class="fc" id="L928">		return null;</span>
+	}
+
+	private Token eatToken(TokenKind expectedKind) {
+<span class="fc" id="L932">		Token t = nextToken();</span>
+<span class="fc bfc" id="L933" title="All 2 branches covered.">		if (t == null) {</span>
+<span class="fc" id="L934">			int pos = this.expressionString.length();</span>
+<span class="fc" id="L935">			throw internalException(pos, SpelMessage.OOD);</span>
+		}
+<span class="pc bpc" id="L937" title="1 of 2 branches missed.">		if (t.kind != expectedKind) {</span>
+<span class="nc" id="L938">			throw internalException(t.startPos, SpelMessage.NOT_EXPECTED_TOKEN,</span>
+<span class="nc" id="L939">					expectedKind.toString().toLowerCase(Locale.ROOT), t.getKind().toString().toLowerCase(Locale.ROOT));</span>
+		}
+<span class="fc" id="L941">		return t;</span>
+	}
+
+	private boolean peekToken(TokenKind desiredTokenKind) {
+<span class="fc" id="L945">		return peekToken(desiredTokenKind, false);</span>
+	}
+
+	private boolean peekToken(TokenKind desiredTokenKind, boolean consumeIfMatched) {
+<span class="fc" id="L949">		Token t = peekToken();</span>
+<span class="fc bfc" id="L950" title="All 2 branches covered.">		if (t == null) {</span>
+<span class="fc" id="L951">			return false;</span>
+		}
+<span class="fc bfc" id="L953" title="All 2 branches covered.">		if (t.kind == desiredTokenKind) {</span>
+<span class="fc bfc" id="L954" title="All 2 branches covered.">			if (consumeIfMatched) {</span>
+<span class="fc" id="L955">				this.tokenStreamPointer++;</span>
+			}
+<span class="fc" id="L957">			return true;</span>
+		}
+
+<span class="fc bfc" id="L960" title="All 2 branches covered.">		if (desiredTokenKind == TokenKind.IDENTIFIER) {</span>
+			// Might be one of the textual forms of the operators (for example, NE for != ) -
+			// in which case we can treat it as an identifier. The list is represented here:
+			// Tokenizer.ALTERNATIVE_OPERATOR_NAMES and those ones are in order in the TokenKind enum.
+<span class="fc bfc" id="L964" title="All 6 branches covered.">			if (t.kind.ordinal() &gt;= TokenKind.DIV.ordinal() &amp;&amp; t.kind.ordinal() &lt;= TokenKind.NOT.ordinal() &amp;&amp;</span>
+					t.data != null) {
+				// if t.data were null, we'd know it wasn't the textual form, it was the symbol form
+<span class="fc" id="L967">				return true;</span>
+			}
+		}
+<span class="fc" id="L970">		return false;</span>
+	}
+
+	private boolean peekToken(TokenKind possible1, TokenKind possible2) {
+<span class="fc" id="L974">		Token t = peekToken();</span>
+<span class="fc bfc" id="L975" title="All 2 branches covered.">		if (t == null) {</span>
+<span class="fc" id="L976">			return false;</span>
+		}
+<span class="fc bfc" id="L978" title="All 4 branches covered.">		return (t.kind == possible1 || t.kind == possible2);</span>
+	}
+
+	private boolean peekToken(TokenKind possible1, TokenKind possible2, TokenKind possible3) {
+<span class="fc" id="L982">		Token t = peekToken();</span>
+<span class="fc bfc" id="L983" title="All 2 branches covered.">		if (t == null) {</span>
+<span class="fc" id="L984">			return false;</span>
+		}
+<span class="fc bfc" id="L986" title="All 6 branches covered.">		return (t.kind == possible1 || t.kind == possible2 || t.kind == possible3);</span>
+	}
+
+	private boolean peekIdentifierToken(String identifierString) {
+<span class="fc" id="L990">		Token t = peekToken();</span>
+<span class="fc bfc" id="L991" title="All 2 branches covered.">		if (t == null) {</span>
+<span class="fc" id="L992">			return false;</span>
+		}
+<span class="fc bfc" id="L994" title="All 4 branches covered.">		return (t.kind == TokenKind.IDENTIFIER &amp;&amp; identifierString.equalsIgnoreCase(t.stringValue()));</span>
+	}
+
+	private boolean peekSelectToken() {
+<span class="fc" id="L998">		Token t = peekToken();</span>
+<span class="pc bpc" id="L999" title="1 of 2 branches missed.">		if (t == null) {</span>
+<span class="nc" id="L1000">			return false;</span>
+		}
+<span class="fc bfc" id="L1002" title="All 6 branches covered.">		return (t.kind == TokenKind.SELECT || t.kind == TokenKind.SELECT_FIRST || t.kind == TokenKind.SELECT_LAST);</span>
+	}
+
+	private Token takeToken() {
+<span class="pc bpc" id="L1006" title="1 of 2 branches missed.">		if (this.tokenStreamPointer &gt;= this.tokenStreamLength) {</span>
+<span class="nc" id="L1007">			throw new IllegalStateException(&quot;No token&quot;);</span>
+		}
+<span class="fc" id="L1009">		return this.tokenStream.get(this.tokenStreamPointer++);</span>
+	}
+
+	private @Nullable Token nextToken() {
+<span class="fc bfc" id="L1013" title="All 2 branches covered.">		if (this.tokenStreamPointer &gt;= this.tokenStreamLength) {</span>
+<span class="fc" id="L1014">			return null;</span>
+		}
+<span class="fc" id="L1016">		return this.tokenStream.get(this.tokenStreamPointer++);</span>
+	}
+
+	private @Nullable Token peekToken() {
+<span class="fc bfc" id="L1020" title="All 2 branches covered.">		if (this.tokenStreamPointer &gt;= this.tokenStreamLength) {</span>
+<span class="fc" id="L1021">			return null;</span>
+		}
+<span class="fc" id="L1023">		return this.tokenStream.get(this.tokenStreamPointer);</span>
+	}
+
+	public String toString(@Nullable Token t) {
+<span class="pc bpc" id="L1027" title="1 of 2 branches missed.">		if (t == null) {</span>
+<span class="nc" id="L1028">			return &quot;&quot;;</span>
+		}
+<span class="pc bpc" id="L1030" title="1 of 2 branches missed.">		if (t.getKind().hasPayload()) {</span>
+<span class="fc" id="L1031">			return t.stringValue();</span>
+		}
+<span class="nc" id="L1033">		return t.kind.toString().toLowerCase(Locale.ROOT);</span>
+	}
+
+	@Contract(&quot;_, null, _ -&gt; fail; _, _, null -&gt; fail&quot;)
+	private void checkOperands(Token token, @Nullable SpelNodeImpl left, @Nullable SpelNodeImpl right) {
+<span class="fc" id="L1038">		checkLeftOperand(token, left);</span>
+<span class="fc" id="L1039">		checkRightOperand(token, right);</span>
+<span class="fc" id="L1040">	}</span>
+
+	@Contract(&quot;_, null -&gt; fail&quot;)
+	private void checkLeftOperand(Token token, @Nullable SpelNodeImpl operandExpression) {
+<span class="fc bfc" id="L1044" title="All 2 branches covered.">		if (operandExpression == null) {</span>
+<span class="fc" id="L1045">			throw internalException(token.startPos, SpelMessage.LEFT_OPERAND_PROBLEM);</span>
+		}
+<span class="fc" id="L1047">	}</span>
+
+	@Contract(&quot;_, null -&gt; fail&quot;)
+	private void checkRightOperand(Token token, @Nullable SpelNodeImpl operandExpression) {
+<span class="fc bfc" id="L1051" title="All 2 branches covered.">		if (operandExpression == null) {</span>
+<span class="fc" id="L1052">			throw internalException(token.startPos, SpelMessage.RIGHT_OPERAND_PROBLEM);</span>
+		}
+<span class="fc" id="L1054">	}</span>
+
+	private InternalParseException internalException(int startPos, SpelMessage message, Object... inserts) {
+<span class="fc" id="L1057">		return new InternalParseException(new SpelParseException(this.expressionString, startPos, message, inserts));</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

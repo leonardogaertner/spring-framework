@@ -1,0 +1,196 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>HttpComponentsClientHttpConnector.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.client.reactive</a> &gt; <span class="el_source">HttpComponentsClientHttpConnector.java</span></div><h1>HttpComponentsClientHttpConnector.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.client.reactive;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.net.URI;
+import java.nio.ByteBuffer;
+import java.util.concurrent.CancellationException;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+
+import org.apache.hc.client5.http.impl.async.CloseableHttpAsyncClient;
+import org.apache.hc.client5.http.impl.async.HttpAsyncClients;
+import org.apache.hc.client5.http.protocol.HttpClientContext;
+import org.apache.hc.core5.concurrent.FutureCallback;
+import org.apache.hc.core5.http.HttpResponse;
+import org.apache.hc.core5.http.HttpStreamResetException;
+import org.apache.hc.core5.http.Message;
+import org.apache.hc.core5.http.nio.AsyncRequestProducer;
+import org.apache.hc.core5.reactive.ReactiveResponseConsumer;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Mono;
+import reactor.core.publisher.MonoSink;
+
+import org.springframework.core.io.buffer.DataBufferFactory;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.http.HttpMethod;
+import org.springframework.util.Assert;
+
+/**
+ * {@link ClientHttpConnector} implementation for the Apache HttpComponents HttpClient 5.x.
+ *
+ * @author Martin Tarjányi
+ * @author Arjen Poutsma
+ * @since 5.3
+ * @see &lt;a href=&quot;https://hc.apache.org/index.html&quot;&gt;Apache HttpComponents&lt;/a&gt;
+ */
+public class HttpComponentsClientHttpConnector implements ClientHttpConnector, Closeable {
+
+	private final CloseableHttpAsyncClient client;
+
+	private final BiFunction&lt;HttpMethod, URI, ? extends HttpClientContext&gt; contextProvider;
+
+<span class="nc" id="L59">	private DataBufferFactory dataBufferFactory = DefaultDataBufferFactory.sharedInstance;</span>
+
+
+	/**
+	 * Default constructor that creates and starts a new instance of {@link CloseableHttpAsyncClient}.
+	 */
+	public HttpComponentsClientHttpConnector() {
+<span class="nc" id="L66">		this(HttpAsyncClients.createDefault());</span>
+<span class="nc" id="L67">	}</span>
+
+	/**
+	 * Constructor with a pre-configured {@link CloseableHttpAsyncClient} instance.
+	 * @param client the client to use
+	 */
+	public HttpComponentsClientHttpConnector(CloseableHttpAsyncClient client) {
+<span class="nc" id="L74">		this(client, (method, uri) -&gt; HttpClientContext.create());</span>
+<span class="nc" id="L75">	}</span>
+
+	/**
+	 * Constructor with a pre-configured {@link CloseableHttpAsyncClient} instance
+	 * and a {@link HttpClientContext} supplier lambda which is called before each request
+	 * and passed to the client.
+	 * @param client the client to use
+	 * @param contextProvider a {@link HttpClientContext} supplier
+	 */
+	public HttpComponentsClientHttpConnector(CloseableHttpAsyncClient client,
+<span class="nc" id="L85">			BiFunction&lt;HttpMethod, URI, ? extends HttpClientContext&gt; contextProvider) {</span>
+
+<span class="nc" id="L87">		Assert.notNull(client, &quot;Client must not be null&quot;);</span>
+<span class="nc" id="L88">		Assert.notNull(contextProvider, &quot;ContextProvider must not be null&quot;);</span>
+
+<span class="nc" id="L90">		this.contextProvider = contextProvider;</span>
+<span class="nc" id="L91">		this.client = client;</span>
+<span class="nc" id="L92">		this.client.start();</span>
+<span class="nc" id="L93">	}</span>
+
+
+	/**
+	 * Set the buffer factory to use.
+	 */
+	public void setBufferFactory(DataBufferFactory bufferFactory) {
+<span class="nc" id="L100">		this.dataBufferFactory = bufferFactory;</span>
+<span class="nc" id="L101">	}</span>
+
+
+	@Override
+	public Mono&lt;ClientHttpResponse&gt; connect(HttpMethod method, URI uri,
+			Function&lt;? super ClientHttpRequest, Mono&lt;Void&gt;&gt; requestCallback) {
+
+<span class="nc" id="L108">		HttpClientContext context = this.contextProvider.apply(method, uri);</span>
+
+<span class="nc" id="L110">		HttpComponentsClientHttpRequest request =</span>
+				new HttpComponentsClientHttpRequest(method, uri, context, this.dataBufferFactory);
+
+<span class="nc" id="L113">		return requestCallback.apply(request).then(Mono.defer(() -&gt; execute(request, context)));</span>
+	}
+
+	private Mono&lt;ClientHttpResponse&gt; execute(HttpComponentsClientHttpRequest request, HttpClientContext context) {
+<span class="nc" id="L117">		AsyncRequestProducer requestProducer = request.toRequestProducer();</span>
+
+<span class="nc" id="L119">		return Mono.create(sink -&gt; {</span>
+<span class="nc" id="L120">			ReactiveResponseConsumer reactiveResponseConsumer =</span>
+					new ReactiveResponseConsumer(new ResponseCallback(sink, this.dataBufferFactory, context));
+<span class="nc" id="L122">			this.client.execute(requestProducer, reactiveResponseConsumer, context, new ResultCallback(sink));</span>
+<span class="nc" id="L123">		});</span>
+	}
+
+	@Override
+	public void close() throws IOException {
+<span class="nc" id="L128">		this.client.close();</span>
+<span class="nc" id="L129">	}</span>
+
+
+	/**
+	 * Callback that invoked when a response is received.
+	 */
+	private static class ResponseCallback implements FutureCallback&lt;Message&lt;HttpResponse, Publisher&lt;ByteBuffer&gt;&gt;&gt; {
+
+		private final MonoSink&lt;ClientHttpResponse&gt; sink;
+
+		private final DataBufferFactory dataBufferFactory;
+
+		private final HttpClientContext context;
+
+		public ResponseCallback(MonoSink&lt;ClientHttpResponse&gt; sink,
+<span class="nc" id="L144">				DataBufferFactory dataBufferFactory, HttpClientContext context) {</span>
+
+<span class="nc" id="L146">			this.sink = sink;</span>
+<span class="nc" id="L147">			this.dataBufferFactory = dataBufferFactory;</span>
+<span class="nc" id="L148">			this.context = context;</span>
+<span class="nc" id="L149">		}</span>
+
+		@Override
+		public void completed(Message&lt;HttpResponse, Publisher&lt;ByteBuffer&gt;&gt; result) {
+<span class="nc" id="L153">			this.sink.success(new HttpComponentsClientHttpResponse(this.dataBufferFactory, result, this.context));</span>
+<span class="nc" id="L154">		}</span>
+
+		@Override
+		public void failed(Exception ex) {
+<span class="nc bnc" id="L158" title="All 4 branches missed.">			this.sink.error(ex instanceof HttpStreamResetException &amp;&amp; ex.getCause() != null ? ex.getCause() : ex);</span>
+<span class="nc" id="L159">		}</span>
+
+		@Override
+		public void cancelled() {
+<span class="nc" id="L163">			this.sink.error(new CancellationException());</span>
+<span class="nc" id="L164">		}</span>
+	}
+
+
+	/**
+	 * Callback that invoked when a request is executed.
+	 */
+	private static class ResultCallback implements FutureCallback&lt;Void&gt; {
+
+		private final MonoSink&lt;?&gt; sink;
+
+<span class="nc" id="L175">		public ResultCallback(MonoSink&lt;?&gt; sink) {</span>
+<span class="nc" id="L176">			this.sink = sink;</span>
+<span class="nc" id="L177">		}</span>
+
+		@Override
+		public void completed(Void result) {
+<span class="nc" id="L181">			this.sink.success();</span>
+<span class="nc" id="L182">		}</span>
+
+		@Override
+		public void failed(Exception ex) {
+<span class="nc bnc" id="L186" title="All 4 branches missed.">			this.sink.error(ex instanceof HttpStreamResetException &amp;&amp; ex.getCause() != null ? ex.getCause() : ex);</span>
+<span class="nc" id="L187">		}</span>
+
+		@Override
+		public void cancelled() {
+<span class="nc" id="L191">			this.sink.error(new CancellationException());</span>
+<span class="nc" id="L192">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

@@ -1,0 +1,142 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>IsolationLevelDataSourceRouter.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.datasource.lookup</a> &gt; <span class="el_source">IsolationLevelDataSourceRouter.java</span></div><h1>IsolationLevelDataSourceRouter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.datasource.lookup;
+
+import java.util.Map;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.util.Assert;
+
+/**
+ * DataSource that routes to one of various target DataSources based on the
+ * current transaction isolation level. The target DataSources need to be
+ * configured with the isolation level name as key, as defined on the
+ * {@link org.springframework.transaction.TransactionDefinition TransactionDefinition}
+ * interface.
+ *
+ * &lt;p&gt;This is particularly useful in combination with JTA transaction management
+ * (typically through Spring's {@link org.springframework.transaction.jta.JtaTransactionManager}).
+ * Standard JTA does not support transaction-specific isolation levels. Some JTA
+ * providers support isolation levels as a vendor-specific extension (for example, WebLogic),
+ * which is the preferred way of addressing this. As an alternative (for example, on WebSphere),
+ * the target database can be represented through multiple JNDI DataSources, each
+ * configured with a different isolation level (for the entire DataSource).
+ * {@code IsolationLevelDataSourceRouter} allows to transparently switch to the
+ * appropriate DataSource based on the current transaction's isolation level.
+ *
+ * &lt;p&gt;For example, the configuration can look like the following, assuming that
+ * the target DataSources are defined as individual Spring beans with names
+ * &quot;myRepeatableReadDataSource&quot;, &quot;mySerializableDataSource&quot;, and &quot;myDefaultDataSource&quot;:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;bean id=&quot;dataSourceRouter&quot; class=&quot;org.springframework.jdbc.datasource.lookup.IsolationLevelDataSourceRouter&quot;&amp;gt;
+ *   &amp;lt;property name=&quot;targetDataSources&quot;&amp;gt;
+ *     &amp;lt;map&amp;gt;
+ *       &amp;lt;entry key=&quot;ISOLATION_REPEATABLE_READ&quot; value-ref=&quot;myRepeatableReadDataSource&quot;/&amp;gt;
+ *       &amp;lt;entry key=&quot;ISOLATION_SERIALIZABLE&quot; value-ref=&quot;mySerializableDataSource&quot;/&amp;gt;
+ *     &amp;lt;/map&amp;gt;
+ *   &amp;lt;/property&amp;gt;
+ *   &amp;lt;property name=&quot;defaultTargetDataSource&quot; ref=&quot;myDefaultDataSource&quot;/&amp;gt;
+ * &amp;lt;/bean&amp;gt;&lt;/pre&gt;
+ *
+ * Alternatively, the keyed values can also be data source names, to be resolved
+ * through a {@link #setDataSourceLookup DataSourceLookup}: by default, JNDI
+ * names for a standard JNDI lookup. This allows for a single concise definition
+ * without the need for separate DataSource bean definitions.
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;bean id=&quot;dataSourceRouter&quot; class=&quot;org.springframework.jdbc.datasource.lookup.IsolationLevelDataSourceRouter&quot;&amp;gt;
+ *   &amp;lt;property name=&quot;targetDataSources&quot;&amp;gt;
+ *     &amp;lt;map&amp;gt;
+ *       &amp;lt;entry key=&quot;ISOLATION_REPEATABLE_READ&quot; value=&quot;java:comp/env/jdbc/myrrds&quot;/&amp;gt;
+ *       &amp;lt;entry key=&quot;ISOLATION_SERIALIZABLE&quot; value=&quot;java:comp/env/jdbc/myserds&quot;/&amp;gt;
+ *     &amp;lt;/map&amp;gt;
+ *   &amp;lt;/property&amp;gt;
+ *   &amp;lt;property name=&quot;defaultTargetDataSource&quot; value=&quot;java:comp/env/jdbc/mydefds&quot;/&amp;gt;
+ * &amp;lt;/bean&amp;gt;&lt;/pre&gt;
+ *
+ * Note: If you are using this router in combination with Spring's
+ * {@link org.springframework.transaction.jta.JtaTransactionManager},
+ * don't forget to switch the &quot;allowCustomIsolationLevels&quot; flag to &quot;true&quot;.
+ * (By default, JtaTransactionManager will only accept a default isolation level
+ * because of the lack of isolation level support in standard JTA itself.)
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * &amp;lt;bean id=&quot;transactionManager&quot; class=&quot;org.springframework.transaction.jta.JtaTransactionManager&quot;&amp;gt;
+ *   &amp;lt;property name=&quot;allowCustomIsolationLevels&quot; value=&quot;true&quot;/&amp;gt;
+ * &amp;lt;/bean&amp;gt;&lt;/pre&gt;
+ *
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 2.0.1
+ * @see #setTargetDataSources
+ * @see #setDefaultTargetDataSource
+ * @see org.springframework.transaction.TransactionDefinition#ISOLATION_READ_UNCOMMITTED
+ * @see org.springframework.transaction.TransactionDefinition#ISOLATION_READ_COMMITTED
+ * @see org.springframework.transaction.TransactionDefinition#ISOLATION_REPEATABLE_READ
+ * @see org.springframework.transaction.TransactionDefinition#ISOLATION_SERIALIZABLE
+ * @see org.springframework.transaction.jta.JtaTransactionManager
+ */
+<span class="fc" id="L97">public class IsolationLevelDataSourceRouter extends AbstractRoutingDataSource {</span>
+
+	/**
+	 * Map of constant names to constant values for the isolation constants
+	 * defined in {@link TransactionDefinition}.
+	 */
+<span class="fc" id="L103">	static final Map&lt;String, Integer&gt; constants = Map.of(</span>
+<span class="fc" id="L104">			&quot;ISOLATION_DEFAULT&quot;, TransactionDefinition.ISOLATION_DEFAULT,</span>
+<span class="fc" id="L105">			&quot;ISOLATION_READ_UNCOMMITTED&quot;, TransactionDefinition.ISOLATION_READ_UNCOMMITTED,</span>
+<span class="fc" id="L106">			&quot;ISOLATION_READ_COMMITTED&quot;, TransactionDefinition.ISOLATION_READ_COMMITTED,</span>
+<span class="fc" id="L107">			&quot;ISOLATION_REPEATABLE_READ&quot;, TransactionDefinition.ISOLATION_REPEATABLE_READ,</span>
+<span class="fc" id="L108">			&quot;ISOLATION_SERIALIZABLE&quot;, TransactionDefinition.ISOLATION_SERIALIZABLE</span>
+		);
+
+
+	/**
+	 * Supports Integer values for the isolation level constants
+	 * as well as isolation level names as defined on the
+	 * {@link org.springframework.transaction.TransactionDefinition TransactionDefinition interface}.
+	 */
+	@Override
+	protected Object resolveSpecifiedLookupKey(Object lookupKey) {
+<span class="fc bfc" id="L119" title="All 2 branches covered.">		if (lookupKey instanceof Integer isolationLevel) {</span>
+<span class="fc" id="L120">			Assert.isTrue(constants.containsValue(isolationLevel),</span>
+					&quot;Only values of isolation constants allowed&quot;);
+<span class="fc" id="L122">			return isolationLevel;</span>
+		}
+<span class="fc bfc" id="L124" title="All 2 branches covered.">		else if (lookupKey instanceof String constantName) {</span>
+<span class="fc" id="L125">			Assert.hasText(constantName, &quot;'lookupKey' must not be null or blank&quot;);</span>
+<span class="fc" id="L126">			Integer isolationLevel = constants.get(constantName);</span>
+<span class="fc" id="L127">			Assert.notNull(isolationLevel, &quot;Only isolation constants allowed&quot;);</span>
+<span class="fc" id="L128">			return isolationLevel;</span>
+		}
+		else {
+<span class="fc" id="L131">			throw new IllegalArgumentException(</span>
+					&quot;Invalid lookup key - needs to be isolation level Integer or isolation level name String: &quot; + lookupKey);
+		}
+	}
+
+	@Override
+	protected @Nullable Object determineCurrentLookupKey() {
+<span class="fc" id="L138">		return TransactionSynchronizationManager.getCurrentTransactionIsolationLevel();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

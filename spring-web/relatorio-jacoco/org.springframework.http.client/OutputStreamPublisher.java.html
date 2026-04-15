@@ -1,0 +1,386 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OutputStreamPublisher.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.client</a> &gt; <span class="el_source">OutputStreamPublisher.java</span></div><h1>OutputStreamPublisher.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.client;
+
+import java.io.BufferedOutputStream;
+import java.io.IOException;
+import java.io.OutputStream;
+import java.util.Objects;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Flow;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.concurrent.locks.LockSupport;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.util.Assert;
+
+/**
+ * Bridges between {@link OutputStream} and {@link Flow.Publisher Flow.Publisher&amp;lt;T&amp;gt;}.
+ *
+ * &lt;p&gt;When there is demand on the Reactive Streams subscription, any write to
+ * the OutputStream is mapped to a buffer and published to the subscriber.
+ * If there is no demand, writes block until demand materializes.
+ * If the subscription is cancelled, further writes raise {@code IOException}.
+ *
+ * &lt;p&gt;Note that this class has a near duplicate in
+ * {@link org.springframework.core.io.buffer.OutputStreamPublisher}.
+ *
+ * @author Oleh Dokuka
+ * @author Arjen Poutsma
+ * @since 6.1
+ * @param &lt;T&gt; the published byte buffer type
+ */
+final class OutputStreamPublisher&lt;T&gt; implements Flow.Publisher&lt;T&gt; {
+
+	private static final int DEFAULT_CHUNK_SIZE = 1024;
+
+
+	private final OutputStreamHandler outputStreamHandler;
+
+	private final ByteMapper&lt;T&gt; byteMapper;
+
+	private final Executor executor;
+
+	private final int chunkSize;
+
+
+	/**
+	 * Create an instance.
+	 * @param outputStreamHandler invoked when the first buffer is requested
+	 * @param byteMapper maps written bytes to {@code T}
+	 * @param executor used to invoke the {@code outputStreamHandler}
+	 * @param chunkSize the chunk sizes to be produced by the publisher
+	 */
+	OutputStreamPublisher(
+			OutputStreamHandler outputStreamHandler, ByteMapper&lt;T&gt; byteMapper,
+<span class="nc" id="L72">			Executor executor, @Nullable Integer chunkSize) {</span>
+
+<span class="nc" id="L74">		Assert.notNull(outputStreamHandler, &quot;OutputStreamHandler must not be null&quot;);</span>
+<span class="nc" id="L75">		Assert.notNull(byteMapper, &quot;ByteMapper must not be null&quot;);</span>
+<span class="nc" id="L76">		Assert.notNull(executor, &quot;Executor must not be null&quot;);</span>
+<span class="nc bnc" id="L77" title="All 4 branches missed.">		Assert.isTrue(chunkSize == null || chunkSize &gt; 0, &quot;ChunkSize must be larger than 0&quot;);</span>
+
+<span class="nc" id="L79">		this.outputStreamHandler = outputStreamHandler;</span>
+<span class="nc" id="L80">		this.byteMapper = byteMapper;</span>
+<span class="nc" id="L81">		this.executor = executor;</span>
+<span class="nc bnc" id="L82" title="All 2 branches missed.">		this.chunkSize = (chunkSize != null ? chunkSize : DEFAULT_CHUNK_SIZE);</span>
+<span class="nc" id="L83">	}</span>
+
+
+	@Override
+	public void subscribe(Flow.Subscriber&lt;? super T&gt; subscriber) {
+		// We don't use Assert.notNull(), because a NullPointerException is required
+		// for Reactive Streams compliance.
+<span class="nc" id="L90">		Objects.requireNonNull(subscriber, &quot;Subscriber must not be null&quot;);</span>
+
+<span class="nc" id="L92">		OutputStreamSubscription&lt;T&gt; subscription = new OutputStreamSubscription&lt;&gt;(</span>
+				subscriber, this.outputStreamHandler, this.byteMapper, this.chunkSize);
+
+<span class="nc" id="L95">		subscriber.onSubscribe(subscription);</span>
+<span class="nc" id="L96">		this.executor.execute(subscription::invokeHandler);</span>
+<span class="nc" id="L97">	}</span>
+
+
+	/**
+	 * Contract to provide callback access to the {@link OutputStream}.
+	 */
+	@FunctionalInterface
+	public interface OutputStreamHandler {
+
+		void handle(OutputStream outputStream) throws Exception;
+
+	}
+
+
+	/**
+	 * Maps from bytes to byte buffers.
+	 * @param &lt;T&gt; the type of byte buffer to map to
+	 */
+	public interface ByteMapper&lt;T&gt; {
+
+		T map(int b);
+
+		T map(byte[] b, int off, int len);
+
+	}
+
+
+	private static final class OutputStreamSubscription&lt;T&gt; extends OutputStream implements Flow.Subscription {
+
+<span class="nc" id="L126">		private static final Object READY = new Object();</span>
+
+		private final Flow.Subscriber&lt;? super T&gt; actual;
+
+		private final OutputStreamHandler outputStreamHandler;
+
+		private final ByteMapper&lt;T&gt; byteMapper;
+
+		private final int chunkSize;
+
+<span class="nc" id="L136">		private final AtomicLong requested = new AtomicLong();</span>
+
+<span class="nc" id="L138">		private final AtomicReference&lt;@Nullable Object&gt; parkedThread = new AtomicReference&lt;&gt;();</span>
+
+		private volatile @Nullable Throwable error;
+
+		private long produced;
+
+		OutputStreamSubscription(
+				Flow.Subscriber&lt;? super T&gt; actual, OutputStreamHandler outputStreamHandler,
+<span class="nc" id="L146">				ByteMapper&lt;T&gt; byteMapper, int chunkSize) {</span>
+
+<span class="nc" id="L148">			this.actual = actual;</span>
+<span class="nc" id="L149">			this.outputStreamHandler = outputStreamHandler;</span>
+<span class="nc" id="L150">			this.byteMapper = byteMapper;</span>
+<span class="nc" id="L151">			this.chunkSize = chunkSize;</span>
+<span class="nc" id="L152">		}</span>
+
+		@Override
+		public void write(int b) throws IOException {
+<span class="nc" id="L156">			checkDemandAndAwaitIfNeeded();</span>
+<span class="nc" id="L157">			T next = this.byteMapper.map(b);</span>
+<span class="nc" id="L158">			this.actual.onNext(next);</span>
+<span class="nc" id="L159">			this.produced++;</span>
+<span class="nc" id="L160">		}</span>
+
+		@Override
+		public void write(byte[] b) throws IOException {
+<span class="nc" id="L164">			write(b, 0, b.length);</span>
+<span class="nc" id="L165">		}</span>
+
+		@Override
+		public void write(byte[] b, int off, int len) throws IOException {
+<span class="nc" id="L169">			checkDemandAndAwaitIfNeeded();</span>
+<span class="nc" id="L170">			T next = this.byteMapper.map(b, off, len);</span>
+<span class="nc" id="L171">			this.actual.onNext(next);</span>
+<span class="nc" id="L172">			this.produced++;</span>
+<span class="nc" id="L173">		}</span>
+
+		private void checkDemandAndAwaitIfNeeded() throws IOException {
+<span class="nc" id="L176">			long r = this.requested.get();</span>
+
+<span class="nc bnc" id="L178" title="All 4 branches missed.">			if (isTerminated(r) || isCancelled(r)) {</span>
+<span class="nc" id="L179">				throw new IOException(&quot;Subscription has been terminated&quot;);</span>
+			}
+
+<span class="nc" id="L182">			long p = this.produced;</span>
+<span class="nc bnc" id="L183" title="All 2 branches missed.">			if (p == r) {</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">				if (p &gt; 0) {</span>
+<span class="nc" id="L185">					r = tryProduce(p);</span>
+<span class="nc" id="L186">					this.produced = 0;</span>
+				}
+
+				while (true) {
+<span class="nc bnc" id="L190" title="All 4 branches missed.">					if (isTerminated(r) || isCancelled(r)) {</span>
+<span class="nc" id="L191">						throw new IOException(&quot;Subscription has been terminated&quot;);</span>
+					}
+
+<span class="nc bnc" id="L194" title="All 2 branches missed.">					if (r != 0) {</span>
+<span class="nc" id="L195">						return;</span>
+					}
+
+<span class="nc" id="L198">					await();</span>
+
+<span class="nc" id="L200">					r = this.requested.get();</span>
+				}
+			}
+<span class="nc" id="L203">		}</span>
+
+		private void invokeHandler() {
+			// assume sync write within try-with-resource block
+
+			// use BufferedOutputStream, so that written bytes are buffered
+			// before publishing as byte buffer
+<span class="nc" id="L210">			try (OutputStream outputStream = new BufferedOutputStream(this, this.chunkSize)) {</span>
+<span class="nc" id="L211">				this.outputStreamHandler.handle(outputStream);</span>
+			}
+<span class="nc" id="L213">			catch (Exception ex) {</span>
+<span class="nc" id="L214">				long previousState = tryTerminate();</span>
+<span class="nc bnc" id="L215" title="All 2 branches missed.">				if (isCancelled(previousState)) {</span>
+<span class="nc" id="L216">					return;</span>
+				}
+<span class="nc bnc" id="L218" title="All 2 branches missed.">				if (isTerminated(previousState)) {</span>
+					// failure due to illegal requestN
+<span class="nc" id="L220">					Throwable error = this.error;</span>
+<span class="nc bnc" id="L221" title="All 2 branches missed.">					if (error != null) {</span>
+<span class="nc" id="L222">						this.actual.onError(error);</span>
+<span class="nc" id="L223">						return;</span>
+					}
+				}
+<span class="nc" id="L226">				this.actual.onError(ex);</span>
+<span class="nc" id="L227">				return;</span>
+<span class="nc" id="L228">			}</span>
+
+<span class="nc" id="L230">			long previousState = tryTerminate();</span>
+<span class="nc bnc" id="L231" title="All 2 branches missed.">			if (isCancelled(previousState)) {</span>
+<span class="nc" id="L232">				return;</span>
+			}
+<span class="nc bnc" id="L234" title="All 2 branches missed.">			if (isTerminated(previousState)) {</span>
+				// failure due to illegal requestN
+<span class="nc" id="L236">				Throwable error = this.error;</span>
+<span class="nc bnc" id="L237" title="All 2 branches missed.">				if (error != null) {</span>
+<span class="nc" id="L238">					this.actual.onError(error);</span>
+<span class="nc" id="L239">					return;</span>
+				}
+			}
+<span class="nc" id="L242">			this.actual.onComplete();</span>
+<span class="nc" id="L243">		}</span>
+
+
+		@Override
+		public void request(long n) {
+<span class="nc bnc" id="L248" title="All 2 branches missed.">			if (n &lt;= 0) {</span>
+<span class="nc" id="L249">				this.error = new IllegalArgumentException(&quot;request should be a positive number&quot;);</span>
+<span class="nc" id="L250">				long previousState = tryTerminate();</span>
+<span class="nc bnc" id="L251" title="All 4 branches missed.">				if (isTerminated(previousState) || isCancelled(previousState)) {</span>
+<span class="nc" id="L252">					return;</span>
+				}
+<span class="nc bnc" id="L254" title="All 2 branches missed.">				if (previousState &gt; 0) {</span>
+					// error should eventually be observed and propagated
+<span class="nc" id="L256">					return;</span>
+				}
+				// resume parked thread, so it can observe error and propagate it
+<span class="nc" id="L259">				resume();</span>
+<span class="nc" id="L260">				return;</span>
+			}
+
+<span class="nc bnc" id="L263" title="All 2 branches missed.">			if (addCap(n) == 0) {</span>
+				// resume parked thread so it can continue the work
+<span class="nc" id="L265">				resume();</span>
+			}
+<span class="nc" id="L267">		}</span>
+
+		@Override
+		public void cancel() {
+<span class="nc" id="L271">			long previousState = tryCancel();</span>
+<span class="nc bnc" id="L272" title="All 4 branches missed.">			if (isCancelled(previousState) || previousState &gt; 0) {</span>
+<span class="nc" id="L273">				return;</span>
+			}
+
+			// resume parked thread, so it can be unblocked and close all the resources
+<span class="nc" id="L277">			resume();</span>
+<span class="nc" id="L278">		}</span>
+
+		private void await() {
+<span class="nc" id="L281">			Thread toUnpark = Thread.currentThread();</span>
+
+			while (true) {
+<span class="nc" id="L284">				Object current = this.parkedThread.get();</span>
+<span class="nc bnc" id="L285" title="All 2 branches missed.">				if (current == READY) {</span>
+<span class="nc" id="L286">					break;</span>
+				}
+
+<span class="nc bnc" id="L289" title="All 4 branches missed.">				if (current != null &amp;&amp; current != toUnpark) {</span>
+<span class="nc" id="L290">					throw new IllegalStateException(&quot;Only one (Virtual)Thread can await!&quot;);</span>
+				}
+
+<span class="nc bnc" id="L293" title="All 2 branches missed.">				if (this.parkedThread.compareAndSet(null, toUnpark)) {</span>
+<span class="nc" id="L294">					LockSupport.park();</span>
+					// we don't just break here because park() can wake up spuriously
+					// if we got a proper resume, get() == READY and the loop will quit above
+				}
+<span class="nc" id="L298">			}</span>
+			// clear the resume indicator so that the next await call will park without a resume()
+<span class="nc" id="L300">			this.parkedThread.lazySet(null);</span>
+<span class="nc" id="L301">		}</span>
+
+		private void resume() {
+<span class="nc bnc" id="L304" title="All 2 branches missed.">			if (this.parkedThread.get() != READY) {</span>
+<span class="nc" id="L305">				Object old = this.parkedThread.getAndSet(READY);</span>
+<span class="nc bnc" id="L306" title="All 2 branches missed.">				if (old != READY) {</span>
+<span class="nc" id="L307">					LockSupport.unpark((Thread)old);</span>
+				}
+			}
+<span class="nc" id="L310">		}</span>
+
+		private long tryCancel() {
+			while (true) {
+<span class="nc" id="L314">				long r = this.requested.get();</span>
+<span class="nc bnc" id="L315" title="All 2 branches missed.">				if (isCancelled(r)) {</span>
+<span class="nc" id="L316">					return r;</span>
+				}
+<span class="nc bnc" id="L318" title="All 2 branches missed.">				if (this.requested.compareAndSet(r, Long.MIN_VALUE)) {</span>
+<span class="nc" id="L319">					return r;</span>
+				}
+<span class="nc" id="L321">			}</span>
+		}
+
+		private long tryTerminate() {
+			while (true) {
+<span class="nc" id="L326">				long r = this.requested.get();</span>
+<span class="nc bnc" id="L327" title="All 4 branches missed.">				if (isCancelled(r) || isTerminated(r)) {</span>
+<span class="nc" id="L328">					return r;</span>
+				}
+<span class="nc bnc" id="L330" title="All 2 branches missed.">				if (this.requested.compareAndSet(r, Long.MIN_VALUE | Long.MAX_VALUE)) {</span>
+<span class="nc" id="L331">					return r;</span>
+				}
+<span class="nc" id="L333">			}</span>
+		}
+
+		private long tryProduce(long n) {
+			while (true) {
+<span class="nc" id="L338">				long current = this.requested.get();</span>
+<span class="nc bnc" id="L339" title="All 4 branches missed.">				if (isTerminated(current) || isCancelled(current)) {</span>
+<span class="nc" id="L340">					return current;</span>
+				}
+<span class="nc bnc" id="L342" title="All 2 branches missed.">				if (current == Long.MAX_VALUE) {</span>
+<span class="nc" id="L343">					return Long.MAX_VALUE;</span>
+				}
+<span class="nc" id="L345">				long update = current - n;</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">				if (update &lt; 0L) {</span>
+<span class="nc" id="L347">					update = 0L;</span>
+				}
+<span class="nc bnc" id="L349" title="All 2 branches missed.">				if (this.requested.compareAndSet(current, update)) {</span>
+<span class="nc" id="L350">					return update;</span>
+				}
+<span class="nc" id="L352">			}</span>
+		}
+
+		private long addCap(long n) {
+			while (true) {
+<span class="nc" id="L357">				long r = this.requested.get();</span>
+<span class="nc bnc" id="L358" title="All 6 branches missed.">				if (isTerminated(r) || isCancelled(r) || r == Long.MAX_VALUE) {</span>
+<span class="nc" id="L359">					return r;</span>
+				}
+<span class="nc" id="L361">				long u = addCap(r, n);</span>
+<span class="nc bnc" id="L362" title="All 2 branches missed.">				if (this.requested.compareAndSet(r, u)) {</span>
+<span class="nc" id="L363">					return r;</span>
+				}
+<span class="nc" id="L365">			}</span>
+		}
+
+		private static boolean isTerminated(long state) {
+<span class="nc bnc" id="L369" title="All 2 branches missed.">			return state == (Long.MIN_VALUE | Long.MAX_VALUE);</span>
+		}
+
+		private static boolean isCancelled(long state) {
+<span class="nc bnc" id="L373" title="All 2 branches missed.">			return state == Long.MIN_VALUE;</span>
+		}
+
+		private static long addCap(long a, long b) {
+<span class="nc" id="L377">			long res = a + b;</span>
+<span class="nc bnc" id="L378" title="All 2 branches missed.">			if (res &lt; 0L) {</span>
+<span class="nc" id="L379">				return Long.MAX_VALUE;</span>
+			}
+<span class="nc" id="L381">			return res;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

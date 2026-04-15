@@ -1,0 +1,764 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>DefaultLifecycleProcessor.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.context.support</a> &gt; <span class="el_source">DefaultLifecycleProcessor.java</span></div><h1>DefaultLifecycleProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.context.support;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.CyclicBarrier;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.Executor;
+import java.util.concurrent.TimeUnit;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.crac.CheckpointException;
+import org.crac.Core;
+import org.crac.RestoreException;
+import org.crac.management.CRaCMXBean;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.BeanFactoryUtils;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.context.ApplicationContextException;
+import org.springframework.context.Lifecycle;
+import org.springframework.context.LifecycleProcessor;
+import org.springframework.context.Phased;
+import org.springframework.context.SmartLifecycle;
+import org.springframework.core.NativeDetector;
+import org.springframework.core.SpringProperties;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+
+/**
+ * Spring's default implementation of the {@link LifecycleProcessor} strategy.
+ *
+ * &lt;p&gt;Provides interaction with {@link Lifecycle} and {@link SmartLifecycle} beans in
+ * groups for specific phases, on startup/shutdown as well as for explicit start/stop
+ * interactions on a {@link org.springframework.context.ConfigurableApplicationContext}.
+ *
+ * &lt;p&gt;As of 6.1, this also includes support for JVM checkpoint/restore (Project CRaC)
+ * when the {@code org.crac:crac} dependency is on the classpath. All running beans
+ * will get stopped and restarted according to the CRaC checkpoint/restore callbacks.
+ *
+ * &lt;p&gt;As of 6.2, this processor can be configured with custom timeouts for specific
+ * shutdown phases, applied to {@link SmartLifecycle#stop(Runnable)} implementations.
+ * As of 6.2.6, there is also support for the concurrent startup of specific phases
+ * with individual timeouts, triggering the {@link SmartLifecycle#start()} callbacks
+ * of all associated beans asynchronously and then waiting for all of them to return,
+ * as an alternative to the default sequential startup of beans without a timeout.
+ *
+ * @author Mark Fisher
+ * @author Juergen Hoeller
+ * @author Sebastien Deleuze
+ * @since 3.0
+ * @see SmartLifecycle#getPhase()
+ * @see #setConcurrentStartupForPhase
+ * @see #setTimeoutForShutdownPhase
+ */
+public class DefaultLifecycleProcessor implements LifecycleProcessor, BeanFactoryAware {
+
+	/**
+	 * Property name for a common context checkpoint: {@value}.
+	 * @since 6.1
+	 * @see #ON_REFRESH_VALUE
+	 * @see org.crac.Core#checkpointRestore()
+	 */
+	public static final String CHECKPOINT_PROPERTY_NAME = &quot;spring.context.checkpoint&quot;;
+
+	/**
+	 * Property name for terminating the JVM when the context reaches a specific phase: {@value}.
+	 * @since 6.1
+	 * @see #ON_REFRESH_VALUE
+	 */
+	public static final String EXIT_PROPERTY_NAME = &quot;spring.context.exit&quot;;
+
+	/**
+	 * Recognized value for the context checkpoint and exit properties: {@value}.
+	 * @since 6.1
+	 * @see #CHECKPOINT_PROPERTY_NAME
+	 * @see #EXIT_PROPERTY_NAME
+	 */
+	public static final String ON_REFRESH_VALUE = &quot;onRefresh&quot;;
+
+
+<span class="fc" id="L112">	private static boolean checkpointOnRefresh =</span>
+<span class="fc" id="L113">			ON_REFRESH_VALUE.equalsIgnoreCase(SpringProperties.getProperty(CHECKPOINT_PROPERTY_NAME));</span>
+
+<span class="fc" id="L115">	private static final boolean exitOnRefresh =</span>
+<span class="fc" id="L116">			ON_REFRESH_VALUE.equalsIgnoreCase(SpringProperties.getProperty(EXIT_PROPERTY_NAME));</span>
+
+<span class="fc" id="L118">	private final Log logger = LogFactory.getLog(getClass());</span>
+
+<span class="fc" id="L120">	private final Map&lt;Integer, Long&gt; concurrentStartupForPhases = new ConcurrentHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L122">	private final Map&lt;Integer, Long&gt; timeoutsForShutdownPhases = new ConcurrentHashMap&lt;&gt;();</span>
+
+<span class="fc" id="L124">	private volatile long timeoutPerShutdownPhase = 10000;</span>
+
+	private volatile boolean running;
+
+	private volatile @Nullable ConfigurableListableBeanFactory beanFactory;
+
+	private volatile @Nullable Set&lt;String&gt; stoppedBeans;
+
+	// Just for keeping a strong reference to the registered CRaC Resource, if any
+	private @Nullable Object cracResource;
+
+
+<span class="fc" id="L136">	public DefaultLifecycleProcessor() {</span>
+<span class="pc bpc" id="L137" title="1 of 4 branches missed.">		if (!NativeDetector.inNativeImage() &amp;&amp; ClassUtils.isPresent(&quot;org.crac.Core&quot;, getClass().getClassLoader())) {</span>
+<span class="fc" id="L138">			this.cracResource = new CracDelegate().registerResource();</span>
+		}
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">		else if (checkpointOnRefresh) {</span>
+<span class="nc" id="L141">			throw new IllegalStateException(</span>
+					&quot;Checkpoint on refresh requires a CRaC-enabled JVM and 'org.crac:crac' on the classpath&quot;);
+		}
+<span class="fc" id="L144">	}</span>
+
+
+	/**
+	 * Switch to concurrent startup for each given phase (group of {@link SmartLifecycle}
+	 * beans with the same 'phase' value) with corresponding timeouts.
+	 * &lt;p&gt;&lt;b&gt;Note: By default, the startup for every phase will be sequential without
+	 * a timeout. Calling this setter with timeouts for the given phases switches to a
+	 * mode where the beans in these phases will be started concurrently, cancelling
+	 * the startup if the corresponding timeout is not met for any of these phases.&lt;/b&gt;
+	 * &lt;p&gt;For an actual concurrent startup, a bootstrap {@code Executor} needs to be
+	 * set for the application context, typically through a &quot;bootstrapExecutor&quot; bean.
+	 * @param phasesWithTimeouts a map of phase values (matching
+	 * {@link SmartLifecycle#getPhase()}) and corresponding timeout values
+	 * (in milliseconds)
+	 * @since 6.2.6
+	 * @see SmartLifecycle#getPhase()
+	 * @see org.springframework.beans.factory.config.ConfigurableBeanFactory#getBootstrapExecutor()
+	 */
+	public void setConcurrentStartupForPhases(Map&lt;Integer, Long&gt; phasesWithTimeouts) {
+<span class="fc" id="L164">		this.concurrentStartupForPhases.putAll(phasesWithTimeouts);</span>
+<span class="fc" id="L165">	}</span>
+
+	/**
+	 * Switch to concurrent startup for a specific phase (group of {@link SmartLifecycle}
+	 * beans with the same 'phase' value) with a corresponding timeout.
+	 * &lt;p&gt;&lt;b&gt;Note: By default, the startup for every phase will be sequential without
+	 * a timeout. Calling this setter with a timeout for the given phase switches to a
+	 * mode where the beans in this phase will be started concurrently, cancelling
+	 * the startup if the corresponding timeout is not met for this phase.&lt;/b&gt;
+	 * &lt;p&gt;For an actual concurrent startup, a bootstrap {@code Executor} needs to be
+	 * set for the application context, typically through a &quot;bootstrapExecutor&quot; bean.
+	 * @param phase the phase value (matching {@link SmartLifecycle#getPhase()})
+	 * @param timeout the corresponding timeout value (in milliseconds)
+	 * @since 6.2.6
+	 * @see SmartLifecycle#getPhase()
+	 * @see org.springframework.beans.factory.config.ConfigurableBeanFactory#getBootstrapExecutor()
+	 */
+	public void setConcurrentStartupForPhase(int phase, long timeout) {
+<span class="nc" id="L183">		this.concurrentStartupForPhases.put(phase, timeout);</span>
+<span class="nc" id="L184">	}</span>
+
+	/**
+	 * Specify the maximum time allotted for the shutdown of each given phase
+	 * (group of {@link SmartLifecycle} beans with the same 'phase' value).
+	 * &lt;p&gt;In case of no specific timeout configured, the default timeout per
+	 * shutdown phase will apply: 10000 milliseconds (10 seconds) as of 6.2.
+	 * @param phasesWithTimeouts a map of phase values (matching
+	 * {@link SmartLifecycle#getPhase()}) and corresponding timeout values
+	 * (in milliseconds)
+	 * @since 6.2
+	 * @see SmartLifecycle#getPhase()
+	 * @see #setTimeoutPerShutdownPhase
+	 */
+	public void setTimeoutsForShutdownPhases(Map&lt;Integer, Long&gt; phasesWithTimeouts) {
+<span class="nc" id="L199">		this.timeoutsForShutdownPhases.putAll(phasesWithTimeouts);</span>
+<span class="nc" id="L200">	}</span>
+
+	/**
+	 * Specify the maximum time allotted for the shutdown of a specific phase
+	 * (group of {@link SmartLifecycle} beans with the same 'phase' value).
+	 * &lt;p&gt;In case of no specific timeout configured, the default timeout per
+	 * shutdown phase will apply: 10000 milliseconds (10 seconds) as of 6.2.
+	 * @param phase the phase value (matching {@link SmartLifecycle#getPhase()})
+	 * @param timeout the corresponding timeout value (in milliseconds)
+	 * @since 6.2
+	 * @see SmartLifecycle#getPhase()
+	 * @see #setTimeoutPerShutdownPhase
+	 */
+	public void setTimeoutForShutdownPhase(int phase, long timeout) {
+<span class="nc" id="L214">		this.timeoutsForShutdownPhases.put(phase, timeout);</span>
+<span class="nc" id="L215">	}</span>
+
+	/**
+	 * Specify the maximum time allotted in milliseconds for the shutdown of any
+	 * phase (group of {@link SmartLifecycle} beans with the same 'phase' value).
+	 * &lt;p&gt;The default value is 10000 milliseconds (10 seconds) as of 6.2.
+	 * @see SmartLifecycle#getPhase()
+	 */
+	public void setTimeoutPerShutdownPhase(long timeoutPerShutdownPhase) {
+<span class="fc" id="L224">		this.timeoutPerShutdownPhase = timeoutPerShutdownPhase;</span>
+<span class="fc" id="L225">	}</span>
+
+	@Override
+	public void setBeanFactory(BeanFactory beanFactory) {
+<span class="pc bpc" id="L229" title="1 of 2 branches missed.">		if (!(beanFactory instanceof ConfigurableListableBeanFactory clbf)) {</span>
+<span class="nc" id="L230">			throw new IllegalArgumentException(</span>
+					&quot;DefaultLifecycleProcessor requires a ConfigurableListableBeanFactory: &quot; + beanFactory);
+		}
+<span class="pc bpc" id="L233" title="1 of 4 branches missed.">		if (!this.concurrentStartupForPhases.isEmpty() &amp;&amp; clbf.getBootstrapExecutor() == null) {</span>
+<span class="nc" id="L234">			throw new IllegalStateException(&quot;'bootstrapExecutor' needs to be configured for concurrent startup&quot;);</span>
+		}
+<span class="fc" id="L236">		this.beanFactory = clbf;</span>
+<span class="fc" id="L237">	}</span>
+
+	private ConfigurableListableBeanFactory getBeanFactory() {
+<span class="fc" id="L240">		ConfigurableListableBeanFactory beanFactory = this.beanFactory;</span>
+<span class="pc bpc" id="L241" title="1 of 2 branches missed.">		Assert.state(beanFactory != null, &quot;No BeanFactory available&quot;);</span>
+<span class="fc" id="L242">		return beanFactory;</span>
+	}
+
+	private Executor getBootstrapExecutor() {
+<span class="fc" id="L246">		Executor executor = getBeanFactory().getBootstrapExecutor();</span>
+<span class="pc bpc" id="L247" title="1 of 2 branches missed.">		Assert.state(executor != null, &quot;No 'bootstrapExecutor' available&quot;);</span>
+<span class="fc" id="L248">		return executor;</span>
+	}
+
+	private @Nullable Long determineConcurrentStartup(int phase) {
+<span class="fc" id="L252">		return this.concurrentStartupForPhases.get(phase);</span>
+	}
+
+	private long determineShutdownTimeout(int phase) {
+<span class="fc" id="L256">		Long timeout = this.timeoutsForShutdownPhases.get(phase);</span>
+<span class="pc bpc" id="L257" title="1 of 2 branches missed.">		return (timeout != null ? timeout : this.timeoutPerShutdownPhase);</span>
+	}
+
+
+	// Lifecycle implementation
+
+	/**
+	 * Start all registered beans that implement {@link Lifecycle} and are &lt;i&gt;not&lt;/i&gt;
+	 * already running. Any bean that implements {@link SmartLifecycle} will be
+	 * started within its 'phase', and all phases will be ordered from lowest to
+	 * highest value. All beans that do not implement {@link SmartLifecycle} will be
+	 * started in the default phase 0. A bean declared as a dependency of another bean
+	 * will be started before the dependent bean regardless of the declared phase.
+	 */
+	@Override
+	public void start() {
+<span class="fc" id="L273">		this.stoppedBeans = null;</span>
+<span class="fc" id="L274">		startBeans(false);</span>
+		// If any bean failed to explicitly start, the exception propagates here.
+		// The caller may choose to subsequently call stop() if appropriate.
+<span class="fc" id="L277">		this.running = true;</span>
+<span class="fc" id="L278">	}</span>
+
+	/**
+	 * Stop all registered beans that implement {@link Lifecycle} and &lt;i&gt;are&lt;/i&gt;
+	 * currently running. Any bean that implements {@link SmartLifecycle} will be
+	 * stopped within its 'phase', and all phases will be ordered from highest to
+	 * lowest value. All beans that do not implement {@link SmartLifecycle} will be
+	 * stopped in the default phase 0. A bean declared as dependent on another bean
+	 * will be stopped before the dependency bean regardless of the declared phase.
+	 */
+	@Override
+	public void stop() {
+<span class="fc" id="L290">		stopBeans(false);</span>
+<span class="fc" id="L291">		this.running = false;</span>
+<span class="fc" id="L292">	}</span>
+
+	@Override
+	public void onRefresh() {
+<span class="pc bpc" id="L296" title="1 of 2 branches missed.">		if (checkpointOnRefresh) {</span>
+<span class="nc" id="L297">			checkpointOnRefresh = false;</span>
+<span class="nc" id="L298">			new CracDelegate().checkpointRestore();</span>
+		}
+<span class="pc bpc" id="L300" title="1 of 2 branches missed.">		if (exitOnRefresh) {</span>
+<span class="nc" id="L301">			Runtime.getRuntime().halt(0);</span>
+		}
+
+<span class="fc" id="L304">		this.stoppedBeans = null;</span>
+		try {
+<span class="fc" id="L306">			startBeans(true);</span>
+		}
+<span class="fc" id="L308">		catch (ApplicationContextException ex) {</span>
+			// Some bean failed to auto-start within context refresh:
+			// stop already started beans on context refresh failure.
+<span class="fc" id="L311">			stopBeans(false);</span>
+<span class="fc" id="L312">			throw ex;</span>
+<span class="fc" id="L313">		}</span>
+<span class="fc" id="L314">		this.running = true;</span>
+<span class="fc" id="L315">	}</span>
+
+	@Override
+	public void onRestart() {
+<span class="fc" id="L319">		this.stoppedBeans = null;</span>
+<span class="fc bfc" id="L320" title="All 2 branches covered.">		if (this.running) {</span>
+<span class="fc" id="L321">			stopBeans(true);</span>
+		}
+<span class="fc" id="L323">		startBeans(true);</span>
+<span class="fc" id="L324">		this.running = true;</span>
+<span class="fc" id="L325">	}</span>
+
+	@Override
+	public void onPause() {
+<span class="pc bpc" id="L329" title="1 of 2 branches missed.">		if (this.running) {</span>
+<span class="fc" id="L330">			stopBeans(true);</span>
+<span class="fc" id="L331">			this.running = false;</span>
+		}
+<span class="fc" id="L333">	}</span>
+
+	@Override
+	public void onClose() {
+<span class="fc" id="L337">		stopBeans(false);</span>
+<span class="fc" id="L338">		this.running = false;</span>
+<span class="fc" id="L339">	}</span>
+
+	@Override
+	public boolean isRunning() {
+<span class="fc" id="L343">		return this.running;</span>
+	}
+
+
+	// Internal helpers
+
+	void stopForRestart() {
+<span class="pc bpc" id="L350" title="1 of 2 branches missed.">		if (this.running) {</span>
+<span class="fc" id="L351">			this.stoppedBeans = ConcurrentHashMap.newKeySet();</span>
+<span class="fc" id="L352">			stopBeans(false);</span>
+<span class="fc" id="L353">			this.running = false;</span>
+		}
+<span class="fc" id="L355">	}</span>
+
+	void restartAfterStop() {
+<span class="pc bpc" id="L358" title="1 of 2 branches missed.">		if (this.stoppedBeans != null) {</span>
+<span class="fc" id="L359">			startBeans(true);</span>
+<span class="fc" id="L360">			this.stoppedBeans = null;</span>
+<span class="fc" id="L361">			this.running = true;</span>
+		}
+<span class="fc" id="L363">	}</span>
+
+	private void startBeans(boolean autoStartupOnly) {
+<span class="fc" id="L366">		Map&lt;String, Lifecycle&gt; lifecycleBeans = getLifecycleBeans();</span>
+<span class="fc" id="L367">		Map&lt;Integer, LifecycleGroup&gt; phases = new TreeMap&lt;&gt;();</span>
+
+<span class="fc" id="L369">		lifecycleBeans.forEach((beanName, bean) -&gt; {</span>
+<span class="fc bfc" id="L370" title="All 4 branches covered.">			if (!autoStartupOnly || isAutoStartupCandidate(beanName, bean)) {</span>
+<span class="fc" id="L371">				int startupPhase = getPhase(bean);</span>
+<span class="fc" id="L372">				phases.computeIfAbsent(</span>
+<span class="fc" id="L373">						startupPhase, phase -&gt; new LifecycleGroup(phase, lifecycleBeans, autoStartupOnly, false))</span>
+<span class="fc" id="L374">							.add(beanName, bean);</span>
+			}
+<span class="fc" id="L376">		});</span>
+
+<span class="fc bfc" id="L378" title="All 2 branches covered.">		if (!phases.isEmpty()) {</span>
+<span class="fc" id="L379">			phases.values().forEach(LifecycleGroup::start);</span>
+		}
+<span class="fc" id="L381">	}</span>
+
+	private boolean isAutoStartupCandidate(String beanName, Lifecycle bean) {
+<span class="fc" id="L384">		Set&lt;String&gt; stoppedBeans = this.stoppedBeans;</span>
+<span class="fc bfc" id="L385" title="All 2 branches covered.">		return (stoppedBeans != null ? stoppedBeans.contains(beanName) :</span>
+<span class="fc bfc" id="L386" title="All 4 branches covered.">				(bean instanceof SmartLifecycle smartLifecycle &amp;&amp; smartLifecycle.isAutoStartup()));</span>
+	}
+
+	/**
+	 * Start the specified bean as part of the given set of Lifecycle beans,
+	 * making sure that any beans that it depends on are started first.
+	 * @param lifecycleBeans a Map with bean name as key and Lifecycle instance as value
+	 * @param beanName the name of the bean to start
+	 */
+	private void doStart(Map&lt;String, ? extends Lifecycle&gt; lifecycleBeans, String beanName,
+			boolean autoStartupOnly, @Nullable List&lt;CompletableFuture&lt;?&gt;&gt; futures) {
+
+<span class="fc" id="L398">		Lifecycle bean = lifecycleBeans.remove(beanName);</span>
+<span class="pc bpc" id="L399" title="1 of 4 branches missed.">		if (bean != null &amp;&amp; bean != this) {</span>
+<span class="fc" id="L400">			String[] dependenciesForBean = getBeanFactory().getDependenciesForBean(beanName);</span>
+<span class="fc bfc" id="L401" title="All 2 branches covered.">			for (String dependency : dependenciesForBean) {</span>
+<span class="fc" id="L402">				doStart(lifecycleBeans, dependency, autoStartupOnly, futures);</span>
+			}
+<span class="fc bfc" id="L404" title="All 6 branches covered.">			if (!bean.isRunning() &amp;&amp; (!autoStartupOnly || toBeStarted(beanName, bean))) {</span>
+<span class="fc bfc" id="L405" title="All 2 branches covered.">				if (futures != null) {</span>
+<span class="fc" id="L406">					futures.add(CompletableFuture.runAsync(() -&gt; doStart(beanName, bean), getBootstrapExecutor()));</span>
+				}
+				else {
+<span class="fc" id="L409">					doStart(beanName, bean);</span>
+				}
+			}
+		}
+<span class="fc" id="L413">	}</span>
+
+	private void doStart(String beanName, Lifecycle bean) {
+<span class="pc bpc" id="L416" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L417">			logger.trace(&quot;Starting bean '&quot; + beanName + &quot;' of type [&quot; + bean.getClass().getName() + &quot;]&quot;);</span>
+		}
+		try {
+<span class="fc" id="L420">			bean.start();</span>
+		}
+<span class="fc" id="L422">		catch (Throwable ex) {</span>
+<span class="fc" id="L423">			throw new ApplicationContextException(&quot;Failed to start bean '&quot; + beanName + &quot;'&quot;, ex);</span>
+<span class="fc" id="L424">		}</span>
+<span class="pc bpc" id="L425" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L426">			logger.debug(&quot;Successfully started bean '&quot; + beanName + &quot;'&quot;);</span>
+		}
+<span class="fc" id="L428">	}</span>
+
+	private boolean toBeStarted(String beanName, Lifecycle bean) {
+<span class="fc" id="L431">		Set&lt;String&gt; stoppedBeans = this.stoppedBeans;</span>
+<span class="fc bfc" id="L432" title="All 2 branches covered.">		return (stoppedBeans != null ? stoppedBeans.contains(beanName) :</span>
+<span class="fc bfc" id="L433" title="All 4 branches covered.">				(!(bean instanceof SmartLifecycle smartLifecycle) || smartLifecycle.isAutoStartup()));</span>
+	}
+
+	private void stopBeans(boolean pauseableOnly) {
+<span class="fc" id="L437">		Map&lt;String, Lifecycle&gt; lifecycleBeans = getLifecycleBeans();</span>
+<span class="fc" id="L438">		Map&lt;Integer, LifecycleGroup&gt; phases = new TreeMap&lt;&gt;(Comparator.reverseOrder());</span>
+
+<span class="fc" id="L440">		lifecycleBeans.forEach((beanName, bean) -&gt; {</span>
+<span class="fc" id="L441">			int shutdownPhase = getPhase(bean);</span>
+<span class="fc" id="L442">			phases.computeIfAbsent(</span>
+<span class="fc" id="L443">					shutdownPhase, phase -&gt; new LifecycleGroup(phase, lifecycleBeans, false, pauseableOnly))</span>
+<span class="fc" id="L444">						.add(beanName, bean);</span>
+<span class="fc" id="L445">		});</span>
+
+<span class="fc bfc" id="L447" title="All 2 branches covered.">		if (!phases.isEmpty()) {</span>
+<span class="fc" id="L448">			phases.values().forEach(LifecycleGroup::stop);</span>
+		}
+<span class="fc" id="L450">	}</span>
+
+	/**
+	 * Stop the specified bean as part of the given set of Lifecycle beans,
+	 * making sure that any beans that depends on it are stopped first.
+	 * @param lifecycleBeans a Map with bean name as key and Lifecycle instance as value
+	 * @param beanName the name of the bean to stop
+	 */
+	private void doStop(Map&lt;String, ? extends Lifecycle&gt; lifecycleBeans, final String beanName,
+			boolean pauseableOnly, final CountDownLatch latch, final Set&lt;String&gt; countDownBeanNames) {
+
+<span class="fc" id="L461">		Lifecycle bean = lifecycleBeans.remove(beanName);</span>
+<span class="fc bfc" id="L462" title="All 2 branches covered.">		if (bean != null) {</span>
+<span class="fc" id="L463">			String[] dependentBeans = getBeanFactory().getDependentBeans(beanName);</span>
+<span class="fc bfc" id="L464" title="All 2 branches covered.">			for (String dependentBean : dependentBeans) {</span>
+<span class="fc" id="L465">				doStop(lifecycleBeans, dependentBean, pauseableOnly, latch, countDownBeanNames);</span>
+			}
+			try {
+<span class="fc bfc" id="L468" title="All 2 branches covered.">				if (bean.isRunning()) {</span>
+<span class="fc" id="L469">					Set&lt;String&gt; stoppedBeans = this.stoppedBeans;</span>
+<span class="fc bfc" id="L470" title="All 2 branches covered.">					if (stoppedBeans != null) {</span>
+<span class="fc" id="L471">						stoppedBeans.add(beanName);</span>
+					}
+<span class="fc bfc" id="L473" title="All 2 branches covered.">					if (bean instanceof SmartLifecycle smartLifecycle) {</span>
+<span class="fc bfc" id="L474" title="All 4 branches covered.">						if (!pauseableOnly || smartLifecycle.isPauseable()) {</span>
+<span class="pc bpc" id="L475" title="1 of 2 branches missed.">							if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L476">								logger.trace(&quot;Asking bean '&quot; + beanName + &quot;' of type [&quot; +</span>
+<span class="nc" id="L477">										bean.getClass().getName() + &quot;] to stop&quot;);</span>
+							}
+<span class="fc" id="L479">							countDownBeanNames.add(beanName);</span>
+<span class="fc" id="L480">							smartLifecycle.stop(() -&gt; {</span>
+<span class="fc" id="L481">								latch.countDown();</span>
+<span class="fc" id="L482">								countDownBeanNames.remove(beanName);</span>
+<span class="pc bpc" id="L483" title="1 of 2 branches missed.">								if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L484">									logger.debug(&quot;Bean '&quot; + beanName + &quot;' completed its stop procedure&quot;);</span>
+								}
+<span class="fc" id="L486">							});</span>
+						}
+						else {
+							// Don't wait for beans that aren't pauseable...
+<span class="fc" id="L490">							latch.countDown();</span>
+						}
+					}
+<span class="pc bpc" id="L493" title="1 of 2 branches missed.">					else if (!pauseableOnly) {</span>
+<span class="pc bpc" id="L494" title="1 of 2 branches missed.">						if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L495">							logger.trace(&quot;Stopping bean '&quot; + beanName + &quot;' of type [&quot; +</span>
+<span class="nc" id="L496">									bean.getClass().getName() + &quot;]&quot;);</span>
+						}
+<span class="fc" id="L498">						bean.stop();</span>
+<span class="pc bpc" id="L499" title="1 of 2 branches missed.">						if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L500">							logger.debug(&quot;Successfully stopped bean '&quot; + beanName + &quot;'&quot;);</span>
+						}
+					}
+<span class="fc" id="L503">				}</span>
+<span class="fc bfc" id="L504" title="All 2 branches covered.">				else if (bean instanceof SmartLifecycle) {</span>
+					// Don't wait for beans that aren't running...
+<span class="fc" id="L506">					latch.countDown();</span>
+				}
+			}
+<span class="nc" id="L509">			catch (Throwable ex) {</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">				if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L511">					logger.warn(&quot;Failed to stop bean '&quot; + beanName + &quot;'&quot;, ex);</span>
+				}
+<span class="nc bnc" id="L513" title="All 2 branches missed.">				if (bean instanceof SmartLifecycle) {</span>
+<span class="nc" id="L514">					latch.countDown();</span>
+				}
+<span class="fc" id="L516">			}</span>
+		}
+<span class="fc" id="L518">	}</span>
+
+
+	// Overridable hooks
+
+	/**
+	 * Retrieve all applicable Lifecycle beans: all singletons that have already been created,
+	 * as well as all SmartLifecycle beans (even if they are marked as lazy-init).
+	 * @return the Map of applicable beans, with bean names as keys and bean instances as values
+	 */
+	protected Map&lt;String, Lifecycle&gt; getLifecycleBeans() {
+<span class="fc" id="L529">		ConfigurableListableBeanFactory beanFactory = getBeanFactory();</span>
+<span class="fc" id="L530">		Map&lt;String, Lifecycle&gt; beans = new LinkedHashMap&lt;&gt;();</span>
+<span class="fc" id="L531">		String[] beanNames = beanFactory.getBeanNamesForType(Lifecycle.class, false, false);</span>
+<span class="fc bfc" id="L532" title="All 2 branches covered.">		for (String beanName : beanNames) {</span>
+<span class="fc" id="L533">			String beanNameToRegister = BeanFactoryUtils.transformedBeanName(beanName);</span>
+<span class="fc" id="L534">			boolean isFactoryBean = beanFactory.isFactoryBean(beanNameToRegister);</span>
+<span class="fc bfc" id="L535" title="All 2 branches covered.">			String beanNameToCheck = (isFactoryBean ? BeanFactory.FACTORY_BEAN_PREFIX + beanName : beanName);</span>
+<span class="fc bfc" id="L536" title="All 4 branches covered.">			if ((beanFactory.containsSingleton(beanNameToRegister) &amp;&amp;</span>
+<span class="fc bfc" id="L537" title="All 2 branches covered.">					(!isFactoryBean || matchesBeanType(Lifecycle.class, beanNameToCheck, beanFactory))) ||</span>
+<span class="fc bfc" id="L538" title="All 2 branches covered.">					matchesBeanType(SmartLifecycle.class, beanNameToCheck, beanFactory)) {</span>
+<span class="fc" id="L539">				Object bean = beanFactory.getBean(beanNameToCheck);</span>
+<span class="fc bfc" id="L540" title="All 4 branches covered.">				if (bean != this &amp;&amp; bean instanceof Lifecycle lifecycle) {</span>
+<span class="fc" id="L541">					beans.put(beanNameToRegister, lifecycle);</span>
+				}
+			}
+		}
+<span class="fc" id="L545">		return beans;</span>
+	}
+
+	private boolean matchesBeanType(Class&lt;?&gt; targetType, String beanName, BeanFactory beanFactory) {
+<span class="fc" id="L549">		Class&lt;?&gt; beanType = beanFactory.getType(beanName);</span>
+<span class="pc bpc" id="L550" title="1 of 4 branches missed.">		return (beanType != null &amp;&amp; targetType.isAssignableFrom(beanType));</span>
+	}
+
+	/**
+	 * Determine the lifecycle phase of the given bean.
+	 * &lt;p&gt;The default implementation checks for the {@link Phased} interface, using
+	 * a default of 0 otherwise. Can be overridden to apply other/further policies.
+	 * @param bean the bean to introspect
+	 * @return the phase (an integer value)
+	 * @see Phased#getPhase()
+	 * @see SmartLifecycle
+	 */
+	protected int getPhase(Lifecycle bean) {
+<span class="fc bfc" id="L563" title="All 2 branches covered.">		return (bean instanceof Phased phased ? phased.getPhase() : 0);</span>
+	}
+
+
+	/**
+	 * Helper class for maintaining a group of Lifecycle beans that should be started
+	 * and stopped together based on their 'phase' value (or the default value of 0).
+	 * The group is expected to be created in an ad-hoc fashion and group members are
+	 * expected to always have the same 'phase' value.
+	 */
+	private class LifecycleGroup {
+
+		private final int phase;
+
+		private final Map&lt;String, ? extends Lifecycle&gt; lifecycleBeans;
+
+		private final boolean autoStartupOnly;
+
+		private final boolean pauseableOnly;
+
+<span class="fc" id="L583">		private final List&lt;LifecycleGroupMember&gt; members = new ArrayList&lt;&gt;();</span>
+
+		private int smartMemberCount;
+
+		public LifecycleGroup(int phase, Map&lt;String, ? extends Lifecycle&gt; lifecycleBeans,
+<span class="fc" id="L588">				boolean autoStartupOnly, boolean pauseableOnly) {</span>
+
+<span class="fc" id="L590">			this.phase = phase;</span>
+<span class="fc" id="L591">			this.lifecycleBeans = lifecycleBeans;</span>
+<span class="fc" id="L592">			this.autoStartupOnly = autoStartupOnly;</span>
+<span class="fc" id="L593">			this.pauseableOnly = pauseableOnly;</span>
+<span class="fc" id="L594">		}</span>
+
+		public void add(String name, Lifecycle bean) {
+<span class="fc" id="L597">			this.members.add(new LifecycleGroupMember(name, bean));</span>
+<span class="fc bfc" id="L598" title="All 2 branches covered.">			if (bean instanceof SmartLifecycle) {</span>
+<span class="fc" id="L599">				this.smartMemberCount++;</span>
+			}
+<span class="fc" id="L601">		}</span>
+
+		public void start() {
+<span class="pc bpc" id="L604" title="1 of 2 branches missed.">			if (this.members.isEmpty()) {</span>
+<span class="nc" id="L605">				return;</span>
+			}
+<span class="pc bpc" id="L607" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L608">				logger.debug(&quot;Starting beans in phase &quot; + this.phase);</span>
+			}
+<span class="fc" id="L610">			Long concurrentStartup = determineConcurrentStartup(this.phase);</span>
+<span class="fc bfc" id="L611" title="All 2 branches covered.">			List&lt;CompletableFuture&lt;?&gt;&gt; futures = (concurrentStartup != null ? new ArrayList&lt;&gt;() : null);</span>
+<span class="fc bfc" id="L612" title="All 2 branches covered.">			for (LifecycleGroupMember member : this.members) {</span>
+<span class="fc" id="L613">				doStart(this.lifecycleBeans, member.name, this.autoStartupOnly, futures);</span>
+<span class="fc" id="L614">			}</span>
+<span class="pc bpc" id="L615" title="1 of 4 branches missed.">			if (concurrentStartup != null &amp;&amp; !CollectionUtils.isEmpty(futures)) {</span>
+				try {
+<span class="fc" id="L617">					CompletableFuture.allOf(futures.toArray(new CompletableFuture&lt;?&gt;[0]))</span>
+<span class="fc" id="L618">							.get(concurrentStartup, TimeUnit.MILLISECONDS);</span>
+				}
+<span class="nc" id="L620">				catch (Exception ex) {</span>
+<span class="nc bnc" id="L621" title="All 2 branches missed.">					if (ex instanceof ExecutionException exEx) {</span>
+<span class="nc" id="L622">						Throwable cause = exEx.getCause();</span>
+<span class="nc bnc" id="L623" title="All 2 branches missed.">						if (cause instanceof ApplicationContextException acEx) {</span>
+<span class="nc" id="L624">							throw acEx;</span>
+						}
+					}
+<span class="nc" id="L627">					throw new ApplicationContextException(&quot;Failed to start beans in phase &quot; + this.phase +</span>
+							&quot; within timeout of &quot; + concurrentStartup + &quot;ms&quot;, ex);
+<span class="fc" id="L629">				}</span>
+			}
+<span class="fc" id="L631">		}</span>
+
+		public void stop() {
+<span class="pc bpc" id="L634" title="1 of 2 branches missed.">			if (this.members.isEmpty()) {</span>
+<span class="nc" id="L635">				return;</span>
+			}
+<span class="pc bpc" id="L637" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L638">				logger.debug(&quot;Stopping beans in phase &quot; + this.phase);</span>
+			}
+<span class="fc" id="L640">			CountDownLatch latch = new CountDownLatch(this.smartMemberCount);</span>
+<span class="fc" id="L641">			Set&lt;String&gt; countDownBeanNames = Collections.synchronizedSet(new LinkedHashSet&lt;&gt;());</span>
+<span class="fc" id="L642">			Set&lt;String&gt; lifecycleBeanNames = new HashSet&lt;&gt;(this.lifecycleBeans.keySet());</span>
+<span class="fc bfc" id="L643" title="All 2 branches covered.">			for (LifecycleGroupMember member : this.members) {</span>
+<span class="fc bfc" id="L644" title="All 2 branches covered.">				if (lifecycleBeanNames.contains(member.name)) {</span>
+<span class="fc" id="L645">					doStop(this.lifecycleBeans, member.name, this.pauseableOnly, latch, countDownBeanNames);</span>
+				}
+<span class="fc bfc" id="L647" title="All 2 branches covered.">				else if (member.bean instanceof SmartLifecycle) {</span>
+					// Already removed: must have been a dependent bean from another phase
+<span class="fc" id="L649">					latch.countDown();</span>
+				}
+<span class="fc" id="L651">			}</span>
+			try {
+<span class="fc" id="L653">				long shutdownTimeout = determineShutdownTimeout(this.phase);</span>
+<span class="fc bfc" id="L654" title="All 2 branches covered.">				if (!latch.await(shutdownTimeout, TimeUnit.MILLISECONDS)) {</span>
+					// Count is still &gt;0 after timeout
+<span class="pc bpc" id="L656" title="2 of 4 branches missed.">					if (!countDownBeanNames.isEmpty() &amp;&amp; logger.isInfoEnabled()) {</span>
+<span class="nc" id="L657">						logger.info(&quot;Shutdown phase &quot; + this.phase + &quot; ends with &quot; + countDownBeanNames.size() +</span>
+<span class="nc bnc" id="L658" title="All 2 branches missed.">								&quot; bean&quot; + (countDownBeanNames.size() &gt; 1 ? &quot;s&quot; : &quot;&quot;) +</span>
+								&quot; still running after timeout of &quot; + shutdownTimeout + &quot;ms: &quot; + countDownBeanNames);
+					}
+				}
+			}
+<span class="nc" id="L663">			catch (InterruptedException ex) {</span>
+<span class="nc" id="L664">				Thread.currentThread().interrupt();</span>
+<span class="fc" id="L665">			}</span>
+<span class="fc" id="L666">		}</span>
+	}
+
+
+	/**
+	 * A simple record of a LifecycleGroup member.
+	 */
+<span class="fc" id="L673">	private record LifecycleGroupMember(String name, Lifecycle bean) {}</span>
+
+
+	/**
+	 * Inner class to avoid a hard dependency on Project CRaC at runtime.
+	 * @since 6.1
+	 * @see org.crac.Core
+	 */
+<span class="fc" id="L681">	private class CracDelegate {</span>
+
+		public Object registerResource() {
+<span class="fc" id="L684">			logger.debug(&quot;Registering JVM checkpoint/restore callback for Spring-managed lifecycle beans&quot;);</span>
+<span class="fc" id="L685">			CracResourceAdapter resourceAdapter = new CracResourceAdapter();</span>
+<span class="fc" id="L686">			org.crac.Core.getGlobalContext().register(resourceAdapter);</span>
+<span class="fc" id="L687">			return resourceAdapter;</span>
+		}
+
+		public void checkpointRestore() {
+<span class="nc" id="L691">			logger.info(&quot;Triggering JVM checkpoint/restore&quot;);</span>
+			try {
+<span class="nc" id="L693">				Core.checkpointRestore();</span>
+			}
+<span class="nc" id="L695">			catch (UnsupportedOperationException ex) {</span>
+<span class="nc" id="L696">				throw new ApplicationContextException(&quot;CRaC checkpoint not supported on current JVM&quot;, ex);</span>
+			}
+<span class="nc" id="L698">			catch (CheckpointException ex) {</span>
+<span class="nc" id="L699">				throw new ApplicationContextException(&quot;Failed to take CRaC checkpoint on refresh&quot;, ex);</span>
+			}
+<span class="nc" id="L701">			catch (RestoreException ex) {</span>
+<span class="nc" id="L702">				throw new ApplicationContextException(&quot;Failed to restore CRaC checkpoint on refresh&quot;, ex);</span>
+<span class="nc" id="L703">			}</span>
+<span class="nc" id="L704">		}</span>
+	}
+
+
+	/**
+	 * Resource adapter for Project CRaC, triggering a stop-and-restart cycle
+	 * for Spring-managed lifecycle beans around a JVM checkpoint/restore.
+	 * @since 6.1
+	 * @see #stopForRestart()
+	 * @see #restartAfterStop()
+	 */
+<span class="fc" id="L715">	private class CracResourceAdapter implements org.crac.Resource {</span>
+
+<span class="fc" id="L717">		private final CyclicBarrier beforeCheckpointBarrier = new CyclicBarrier(2);</span>
+<span class="fc" id="L718">		private final CyclicBarrier afterRestoreBarrier = new CyclicBarrier(2);</span>
+
+		@Override
+		public void beforeCheckpoint(org.crac.Context&lt;? extends org.crac.Resource&gt; context) {
+<span class="nc" id="L722">			Thread thread = new Thread(this::preventShutdown, &quot;prevent-shutdown&quot;);</span>
+<span class="nc" id="L723">			thread.setDaemon(false);</span>
+<span class="nc" id="L724">			thread.start();</span>
+
+<span class="nc" id="L726">			logger.debug(&quot;Stopping Spring-managed lifecycle beans before JVM checkpoint&quot;);</span>
+<span class="nc" id="L727">			stopForRestart();</span>
+<span class="nc" id="L728">		}</span>
+
+		private void preventShutdown() {
+<span class="nc" id="L731">			awaitBarrier(this.beforeCheckpointBarrier);</span>
+			// Checkpoint happens here
+<span class="nc" id="L733">			awaitBarrier(this.afterRestoreBarrier);</span>
+<span class="nc" id="L734">		}</span>
+
+		@Override
+		public void afterRestore(org.crac.Context&lt;? extends org.crac.Resource&gt; context) {
+			// Unlock barrier for beforeCheckpoint
+<span class="nc" id="L739">			awaitBarrier(this.beforeCheckpointBarrier);</span>
+
+<span class="nc" id="L741">			logger.info(&quot;Restarting Spring-managed lifecycle beans after JVM restore&quot;);</span>
+<span class="nc" id="L742">			restartAfterStop();</span>
+
+			// Unlock barrier for afterRestore to shutdown &quot;prevent-shutdown&quot; thread
+<span class="nc" id="L745">			awaitBarrier(this.afterRestoreBarrier);</span>
+
+<span class="nc bnc" id="L747" title="All 2 branches missed.">			if (!checkpointOnRefresh) {</span>
+<span class="nc" id="L748">				logger.info(&quot;Spring-managed lifecycle restart completed (restored JVM running for &quot; +</span>
+<span class="nc" id="L749">						CRaCMXBean.getCRaCMXBean().getUptimeSinceRestore() + &quot; ms)&quot;);</span>
+			}
+<span class="nc" id="L751">		}</span>
+
+		private void awaitBarrier(CyclicBarrier barrier) {
+			try {
+<span class="nc" id="L755">				barrier.await();</span>
+			}
+<span class="nc" id="L757">			catch (Exception ex) {</span>
+<span class="nc" id="L758">				logger.trace(&quot;Exception from barrier&quot;, ex);</span>
+<span class="nc" id="L759">			}</span>
+<span class="nc" id="L760">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

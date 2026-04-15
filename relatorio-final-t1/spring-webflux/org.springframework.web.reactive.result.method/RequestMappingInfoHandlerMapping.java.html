@@ -1,0 +1,431 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>RequestMappingInfoHandlerMapping.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.result.method</a> &gt; <span class="el_source">RequestMappingInfoHandlerMapping.java</span></div><h1>RequestMappingInfoHandlerMapping.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.result.method;
+
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Mono;
+
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.InvalidMediaTypeException;
+import org.springframework.http.MediaType;
+import org.springframework.http.server.PathContainer;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.observation.ServerRequestObservationContext;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.bind.annotation.RequestMethod;
+import org.springframework.web.method.HandlerMethod;
+import org.springframework.web.reactive.HandlerMapping;
+import org.springframework.web.reactive.result.condition.NameValueExpression;
+import org.springframework.web.reactive.result.condition.ProducesRequestCondition;
+import org.springframework.web.server.MethodNotAllowedException;
+import org.springframework.web.server.NotAcceptableStatusException;
+import org.springframework.web.server.ServerWebExchange;
+import org.springframework.web.server.ServerWebInputException;
+import org.springframework.web.server.UnsatisfiedRequestParameterException;
+import org.springframework.web.server.UnsupportedMediaTypeStatusException;
+import org.springframework.web.util.pattern.PathPattern;
+
+/**
+ * Abstract base class for classes for which {@link RequestMappingInfo} defines
+ * the mapping between a request and a handler method.
+ *
+ * @author Rossen Stoyanchev
+ * @author Sam Brannen
+ * @since 5.0
+ */
+<span class="fc" id="L64">public abstract class RequestMappingInfoHandlerMapping extends AbstractHandlerMethodMapping&lt;RequestMappingInfo&gt; {</span>
+
+	private static final Method HTTP_OPTIONS_HANDLE_METHOD;
+
+	static {
+		try {
+<span class="fc" id="L70">			HTTP_OPTIONS_HANDLE_METHOD = HttpOptionsHandler.class.getMethod(&quot;handle&quot;);</span>
+		}
+<span class="nc" id="L72">		catch (NoSuchMethodException ex) {</span>
+			// Should never happen
+<span class="nc" id="L74">			throw new IllegalStateException(&quot;No handler for HTTP OPTIONS&quot;, ex);</span>
+<span class="fc" id="L75">		}</span>
+<span class="fc" id="L76">	}</span>
+
+
+	@Override
+	protected Set&lt;String&gt; getDirectPaths(RequestMappingInfo info) {
+<span class="fc" id="L81">		return info.getDirectPaths();</span>
+	}
+
+	/**
+	 * Check if the given RequestMappingInfo matches the current request and
+	 * return a (potentially new) instance with conditions that match the
+	 * current request -- for example with a subset of URL patterns.
+	 * @return an info in case of a match; or {@code null} otherwise.
+	 */
+	@Override
+	protected @Nullable RequestMappingInfo getMatchingMapping(RequestMappingInfo info, ServerWebExchange exchange) {
+<span class="fc" id="L92">		return info.getMatchingCondition(exchange);</span>
+	}
+
+	/**
+	 * Provide a Comparator to sort RequestMappingInfos matched to a request.
+	 */
+	@Override
+	protected Comparator&lt;RequestMappingInfo&gt; getMappingComparator(final ServerWebExchange exchange) {
+<span class="fc" id="L100">		return (info1, info2) -&gt; info1.compareTo(info2, exchange);</span>
+	}
+
+	@Override
+	public Mono&lt;HandlerMethod&gt; getHandlerInternal(ServerWebExchange exchange) {
+<span class="fc" id="L105">		exchange.getAttributes().remove(HandlerMapping.PRODUCIBLE_MEDIA_TYPES_ATTRIBUTE);</span>
+<span class="fc" id="L106">		return super.getHandlerInternal(exchange)</span>
+<span class="fc" id="L107">				.doOnTerminate(() -&gt; ProducesRequestCondition.clearMediaTypesAttribute(exchange));</span>
+	}
+
+	/**
+	 * Expose URI template variables, matrix variables, and producible media types in the request.
+	 * @see HandlerMapping#URI_TEMPLATE_VARIABLES_ATTRIBUTE
+	 * @see HandlerMapping#MATRIX_VARIABLES_ATTRIBUTE
+	 * @see HandlerMapping#PRODUCIBLE_MEDIA_TYPES_ATTRIBUTE
+	 */
+	@Override
+	@SuppressWarnings(&quot;removal&quot;)
+	protected void handleMatch(RequestMappingInfo info, HandlerMethod handlerMethod,
+			ServerWebExchange exchange) {
+
+<span class="fc" id="L121">		super.handleMatch(info, handlerMethod, exchange);</span>
+
+<span class="fc" id="L123">		info.getVersionCondition().handleMatch(exchange);</span>
+
+<span class="fc" id="L125">		PathContainer lookupPath = exchange.getRequest().getPath().pathWithinApplication();</span>
+
+		PathPattern bestPattern;
+		Map&lt;String, String&gt; uriVariables;
+		Map&lt;String, MultiValueMap&lt;String, String&gt;&gt; matrixVariables;
+
+<span class="fc" id="L131">		Set&lt;PathPattern&gt; patterns = info.getPatternsCondition().getPatterns();</span>
+<span class="pc bpc" id="L132" title="1 of 2 branches missed.">		if (patterns.isEmpty()) {</span>
+<span class="nc" id="L133">			bestPattern = getPathPatternParser().parse(lookupPath.value());</span>
+<span class="nc" id="L134">			uriVariables = Collections.emptyMap();</span>
+<span class="nc" id="L135">			matrixVariables = Collections.emptyMap();</span>
+		}
+		else {
+<span class="fc" id="L138">			bestPattern = patterns.iterator().next();</span>
+<span class="fc" id="L139">			PathPattern.PathMatchInfo result = bestPattern.matchAndExtract(lookupPath);</span>
+<span class="fc" id="L140">			Assert.notNull(result, () -&gt;</span>
+<span class="nc" id="L141">					&quot;Expected bestPattern: &quot; + bestPattern + &quot; to match lookupPath &quot; + lookupPath);</span>
+<span class="fc" id="L142">			uriVariables = result.getUriVariables();</span>
+<span class="fc" id="L143">			matrixVariables = result.getMatrixVariables();</span>
+		}
+
+<span class="fc" id="L146">		exchange.getAttributes().put(BEST_MATCHING_HANDLER_ATTRIBUTE, handlerMethod);</span>
+<span class="fc" id="L147">		exchange.getAttributes().put(BEST_MATCHING_PATTERN_ATTRIBUTE, bestPattern);</span>
+<span class="fc" id="L148">		ServerRequestObservationContext.findCurrent(exchange.getAttributes())</span>
+<span class="fc" id="L149">				.ifPresent(context -&gt; context.setPathPattern(bestPattern.toString()));</span>
+<span class="fc" id="L150">		exchange.getAttributes().put(URI_TEMPLATE_VARIABLES_ATTRIBUTE, uriVariables);</span>
+<span class="fc" id="L151">		exchange.getAttributes().put(MATRIX_VARIABLES_ATTRIBUTE, matrixVariables);</span>
+
+<span class="fc" id="L153">		ProducesRequestCondition producesCondition = info.getProducesCondition();</span>
+<span class="fc bfc" id="L154" title="All 2 branches covered.">		if (!producesCondition.isEmpty()) {</span>
+<span class="fc" id="L155">			Set&lt;MediaType&gt; mediaTypes = producesCondition.getProducibleMediaTypes();</span>
+<span class="pc bpc" id="L156" title="1 of 2 branches missed.">			if (!mediaTypes.isEmpty()) {</span>
+<span class="fc" id="L157">				exchange.getAttributes().put(PRODUCIBLE_MEDIA_TYPES_ATTRIBUTE, mediaTypes);</span>
+			}
+		}
+<span class="fc" id="L160">	}</span>
+
+	/**
+	 * Iterate all RequestMappingInfos once again, look if any match by URL at
+	 * least and raise exceptions accordingly.
+	 * @throws MethodNotAllowedException for matches by URL but not by HTTP method
+	 * @throws UnsupportedMediaTypeStatusException if there are matches by URL
+	 * and HTTP method but not by consumable media types
+	 * @throws NotAcceptableStatusException if there are matches by URL and HTTP
+	 * method but not by producible media types
+	 * @throws ServerWebInputException if there are matches by URL and HTTP
+	 * method but not by query parameter conditions
+	 */
+	@Override
+	protected @Nullable HandlerMethod handleNoMatch(Set&lt;RequestMappingInfo&gt; infos,
+			ServerWebExchange exchange) throws Exception {
+
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">		if (CollectionUtils.isEmpty(infos)) {</span>
+<span class="nc" id="L178">			return null;</span>
+		}
+
+<span class="fc" id="L181">		PartialMatchHelper helper = new PartialMatchHelper(infos, exchange);</span>
+<span class="fc bfc" id="L182" title="All 2 branches covered.">		if (helper.isEmpty()) {</span>
+<span class="fc" id="L183">			return null;</span>
+		}
+
+<span class="fc" id="L186">		ServerHttpRequest request = exchange.getRequest();</span>
+
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">		if (helper.hasMethodsMismatch()) {</span>
+<span class="nc" id="L189">			HttpMethod httpMethod = request.getMethod();</span>
+<span class="nc" id="L190">			Set&lt;HttpMethod&gt; methods = helper.getAllowedMethods();</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">			if (HttpMethod.OPTIONS.equals(httpMethod)) {</span>
+<span class="nc" id="L192">				Set&lt;MediaType&gt; mediaTypes = helper.getConsumablePatchMediaTypes();</span>
+<span class="nc" id="L193">				HttpOptionsHandler handler = new HttpOptionsHandler(methods, mediaTypes);</span>
+<span class="nc" id="L194">				return new HandlerMethod(handler, HTTP_OPTIONS_HANDLE_METHOD);</span>
+			}
+<span class="nc" id="L196">			throw new MethodNotAllowedException(httpMethod, methods);</span>
+		}
+
+<span class="pc bpc" id="L199" title="1 of 2 branches missed.">		if (helper.hasConsumesMismatch()) {</span>
+<span class="nc" id="L200">			Set&lt;MediaType&gt; mediaTypes = helper.getConsumableMediaTypes();</span>
+			MediaType contentType;
+			try {
+<span class="nc" id="L203">				contentType = request.getHeaders().getContentType();</span>
+			}
+<span class="nc" id="L205">			catch (InvalidMediaTypeException ex) {</span>
+<span class="nc" id="L206">				throw new UnsupportedMediaTypeStatusException(ex.getMessage(), new ArrayList&lt;&gt;(mediaTypes));</span>
+<span class="nc" id="L207">			}</span>
+<span class="nc" id="L208">			throw new UnsupportedMediaTypeStatusException(</span>
+<span class="nc" id="L209">					contentType, new ArrayList&lt;&gt;(mediaTypes), exchange.getRequest().getMethod());</span>
+		}
+
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">		if (helper.hasProducesMismatch()) {</span>
+<span class="nc" id="L213">			Set&lt;MediaType&gt; mediaTypes = helper.getProducibleMediaTypes();</span>
+<span class="nc" id="L214">			throw new NotAcceptableStatusException(new ArrayList&lt;&gt;(mediaTypes));</span>
+		}
+
+<span class="pc bpc" id="L217" title="1 of 2 branches missed.">		if (helper.hasParamsMismatch()) {</span>
+<span class="fc" id="L218">			throw new UnsatisfiedRequestParameterException(</span>
+<span class="fc" id="L219">					helper.getParamConditions().stream().map(Object::toString).toList(),</span>
+<span class="fc" id="L220">					request.getQueryParams());</span>
+		}
+
+<span class="nc" id="L223">		return null;</span>
+	}
+
+
+	/**
+	 * Aggregate all partial matches and expose methods checking across them.
+	 */
+	private static final class PartialMatchHelper {
+
+<span class="fc" id="L232">		private final List&lt;PartialMatch&gt; partialMatches = new ArrayList&lt;&gt;();</span>
+
+
+<span class="fc" id="L235">		PartialMatchHelper(Set&lt;RequestMappingInfo&gt; infos, ServerWebExchange exchange) {</span>
+<span class="fc bfc" id="L236" title="All 2 branches covered.">			for (RequestMappingInfo info : infos) {</span>
+<span class="fc bfc" id="L237" title="All 2 branches covered.">				if (info.getPatternsCondition().getMatchingCondition(exchange) != null) {</span>
+<span class="fc" id="L238">					this.partialMatches.add(new PartialMatch(info, exchange));</span>
+				}
+<span class="fc" id="L240">			}</span>
+<span class="fc" id="L241">		}</span>
+
+		/**
+		 * Whether there are any partial matches.
+		 */
+		public boolean isEmpty() {
+<span class="fc" id="L247">			return this.partialMatches.isEmpty();</span>
+		}
+
+		/**
+		 * Any partial matches for &quot;methods&quot;?
+		 */
+		public boolean hasMethodsMismatch() {
+<span class="fc" id="L254">			return this.partialMatches.stream().noneMatch(PartialMatch::hasMethodsMatch);</span>
+		}
+
+		/**
+		 * Any partial matches for &quot;methods&quot; and &quot;consumes&quot;?
+		 */
+		public boolean hasConsumesMismatch() {
+<span class="fc" id="L261">			return this.partialMatches.stream().noneMatch(PartialMatch::hasConsumesMatch);</span>
+		}
+
+		/**
+		 * Any partial matches for &quot;methods&quot;, &quot;consumes&quot;, and &quot;produces&quot;?
+		 */
+		public boolean hasProducesMismatch() {
+<span class="fc" id="L268">			return this.partialMatches.stream().noneMatch(PartialMatch::hasProducesMatch);</span>
+		}
+
+		/**
+		 * Any partial matches for &quot;methods&quot;, &quot;consumes&quot;, &quot;produces&quot;, and &quot;params&quot;?
+		 */
+		public boolean hasParamsMismatch() {
+<span class="fc" id="L275">			return this.partialMatches.stream().noneMatch(PartialMatch::hasParamsMatch);</span>
+		}
+
+		/**
+		 * Return declared HTTP methods.
+		 */
+		public Set&lt;HttpMethod&gt; getAllowedMethods() {
+<span class="nc" id="L282">			return this.partialMatches.stream()</span>
+<span class="nc" id="L283">					.flatMap(m -&gt; m.getInfo().getMethodsCondition().getMethods().stream())</span>
+<span class="nc" id="L284">					.map(requestMethod -&gt; HttpMethod.valueOf(requestMethod.name()))</span>
+<span class="nc" id="L285">					.collect(Collectors.toSet());</span>
+		}
+
+		/**
+		 * Return declared &quot;consumable&quot; types but only among those that also
+		 * match the &quot;methods&quot; condition.
+		 */
+		public Set&lt;MediaType&gt; getConsumableMediaTypes() {
+<span class="nc" id="L293">			return this.partialMatches.stream()</span>
+<span class="nc" id="L294">					.filter(PartialMatch::hasMethodsMatch)</span>
+<span class="nc" id="L295">					.flatMap(m -&gt; m.getInfo().getConsumesCondition().getConsumableMediaTypes().stream())</span>
+<span class="nc" id="L296">					.collect(Collectors.toCollection(LinkedHashSet::new));</span>
+		}
+
+		/**
+		 * Return declared &quot;producible&quot; types but only among those that also
+		 * match the &quot;methods&quot; and &quot;consumes&quot; conditions.
+		 */
+		public Set&lt;MediaType&gt; getProducibleMediaTypes() {
+<span class="nc" id="L304">			return this.partialMatches.stream()</span>
+<span class="nc" id="L305">					.filter(PartialMatch::hasConsumesMatch)</span>
+<span class="nc" id="L306">					.flatMap(m -&gt; m.getInfo().getProducesCondition().getProducibleMediaTypes().stream())</span>
+<span class="nc" id="L307">					.collect(Collectors.toCollection(LinkedHashSet::new));</span>
+		}
+
+		/**
+		 * Return declared &quot;params&quot; conditions but only among those that also
+		 * match the &quot;methods&quot;, &quot;consumes&quot;, and &quot;params&quot; conditions.
+		 */
+		public List&lt;Set&lt;NameValueExpression&lt;String&gt;&gt;&gt; getParamConditions() {
+<span class="fc" id="L315">			return this.partialMatches.stream()</span>
+<span class="fc" id="L316">					.filter(PartialMatch::hasProducesMatch)</span>
+<span class="fc" id="L317">					.map(match -&gt; match.getInfo().getParamsCondition().getExpressions())</span>
+<span class="fc" id="L318">					.toList();</span>
+		}
+
+		/**
+		 * Return declared &quot;consumable&quot; types but only among those that have
+		 * PATCH specified, or that have no methods at all.
+		 */
+		public Set&lt;MediaType&gt; getConsumablePatchMediaTypes() {
+<span class="nc" id="L326">			Set&lt;MediaType&gt; result = new LinkedHashSet&lt;&gt;();</span>
+<span class="nc bnc" id="L327" title="All 2 branches missed.">			for (PartialMatch match : this.partialMatches) {</span>
+<span class="nc" id="L328">				Set&lt;RequestMethod&gt; methods = match.getInfo().getMethodsCondition().getMethods();</span>
+<span class="nc bnc" id="L329" title="All 4 branches missed.">				if (methods.isEmpty() || methods.contains(RequestMethod.PATCH)) {</span>
+<span class="nc" id="L330">					result.addAll(match.getInfo().getConsumesCondition().getConsumableMediaTypes());</span>
+				}
+<span class="nc" id="L332">			}</span>
+<span class="nc" id="L333">			return result;</span>
+		}
+
+
+
+		/**
+		 * Container for a RequestMappingInfo that matches the URL path at least.
+		 */
+		private static class PartialMatch {
+
+			private final RequestMappingInfo info;
+
+			private final boolean methodsMatch;
+
+			private final boolean consumesMatch;
+
+			private final boolean producesMatch;
+
+			private final boolean paramsMatch;
+
+
+			/**
+			 * Create a new {@link PartialMatch} instance.
+			 * @param info the RequestMappingInfo that matches the URL path
+			 * @param exchange the current exchange
+			 */
+<span class="fc" id="L359">			public PartialMatch(RequestMappingInfo info, ServerWebExchange exchange) {</span>
+<span class="fc" id="L360">				this.info = info;</span>
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">				this.methodsMatch = info.getMethodsCondition().getMatchingCondition(exchange) != null;</span>
+<span class="pc bpc" id="L362" title="1 of 2 branches missed.">				this.consumesMatch = info.getConsumesCondition().getMatchingCondition(exchange) != null;</span>
+<span class="pc bpc" id="L363" title="1 of 2 branches missed.">				this.producesMatch = info.getProducesCondition().getMatchingCondition(exchange) != null;</span>
+<span class="pc bpc" id="L364" title="1 of 2 branches missed.">				this.paramsMatch = info.getParamsCondition().getMatchingCondition(exchange) != null;</span>
+<span class="fc" id="L365">			}</span>
+
+
+			public RequestMappingInfo getInfo() {
+<span class="fc" id="L369">				return this.info;</span>
+			}
+
+			public boolean hasMethodsMatch() {
+<span class="fc" id="L373">				return this.methodsMatch;</span>
+			}
+
+			public boolean hasConsumesMatch() {
+<span class="pc bpc" id="L377" title="2 of 4 branches missed.">				return hasMethodsMatch() &amp;&amp; this.consumesMatch;</span>
+			}
+
+			public boolean hasProducesMatch() {
+<span class="pc bpc" id="L381" title="2 of 4 branches missed.">				return hasConsumesMatch() &amp;&amp; this.producesMatch;</span>
+			}
+
+			public boolean hasParamsMatch() {
+<span class="pc bpc" id="L385" title="2 of 4 branches missed.">				return hasProducesMatch() &amp;&amp; this.paramsMatch;</span>
+			}
+
+			@Override
+			public String toString() {
+<span class="nc" id="L390">				return this.info.toString();</span>
+			}
+		}
+	}
+
+	/**
+	 * Default handler for HTTP OPTIONS.
+	 */
+	private static class HttpOptionsHandler {
+
+<span class="nc" id="L400">		private final HttpHeaders headers = new HttpHeaders();</span>
+
+
+<span class="nc" id="L403">		public HttpOptionsHandler(Set&lt;HttpMethod&gt; declaredMethods, Set&lt;MediaType&gt; acceptPatch) {</span>
+<span class="nc" id="L404">			this.headers.setAllow(initAllowedHttpMethods(declaredMethods));</span>
+<span class="nc" id="L405">			this.headers.setAcceptPatch(new ArrayList&lt;&gt;(acceptPatch));</span>
+<span class="nc" id="L406">		}</span>
+
+		private static Set&lt;HttpMethod&gt; initAllowedHttpMethods(Set&lt;HttpMethod&gt; declaredMethods) {
+<span class="nc bnc" id="L409" title="All 2 branches missed.">			if (declaredMethods.isEmpty()) {</span>
+<span class="nc" id="L410">				return Stream.of(HttpMethod.values())</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">						.filter(method -&gt; !HttpMethod.TRACE.equals(method))</span>
+<span class="nc" id="L412">						.collect(Collectors.toSet());</span>
+			}
+			else {
+<span class="nc" id="L415">				Set&lt;HttpMethod&gt; result = new LinkedHashSet&lt;&gt;(declaredMethods);</span>
+<span class="nc bnc" id="L416" title="All 2 branches missed.">				if (result.contains(HttpMethod.GET)) {</span>
+<span class="nc" id="L417">					result.add(HttpMethod.HEAD);</span>
+				}
+<span class="nc" id="L419">				result.add(HttpMethod.OPTIONS);</span>
+<span class="nc" id="L420">				return result;</span>
+			}
+		}
+
+		@SuppressWarnings(&quot;unused&quot;)
+		public HttpHeaders handle() {
+<span class="nc" id="L426">			return this.headers;</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

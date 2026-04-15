@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SQLStateSQLExceptionTranslator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.jdbc.support</a> &gt; <span class="el_source">SQLStateSQLExceptionTranslator.java</span></div><h1>SQLStateSQLExceptionTranslator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.jdbc.support;
+
+import java.sql.BatchUpdateException;
+import java.sql.SQLException;
+import java.util.Set;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.DataAccessException;
+import org.springframework.dao.DataAccessResourceFailureException;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.DuplicateKeyException;
+import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.dao.QueryTimeoutException;
+import org.springframework.dao.TransientDataAccessResourceException;
+import org.springframework.jdbc.BadSqlGrammarException;
+
+/**
+ * {@link SQLExceptionTranslator} implementation that analyzes the SQL state in
+ * the {@link SQLException} based on the first two digits (the SQL state &quot;class&quot;).
+ * Detects standard SQL state values and well-known vendor-specific SQL states.
+ *
+ * &lt;p&gt;Not able to diagnose all problems, but is portable between databases and
+ * does not require special initialization (no database vendor detection, etc.).
+ * For more precise translation, consider {@link SQLErrorCodeSQLExceptionTranslator}.
+ *
+ * &lt;p&gt;This translator is commonly used as a {@link #setFallbackTranslator fallback}
+ * behind a primary translator such as {@link SQLErrorCodeSQLExceptionTranslator} or
+ * {@link SQLExceptionSubclassTranslator}. As of 6.2.12, it specifically introspects
+ * {@link java.sql.BatchUpdateException} to look at the underlying exception
+ * (for alignment when used behind a {@link SQLExceptionSubclassTranslator}).
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Thomas Risberg
+ * @see java.sql.SQLException#getSQLState()
+ * @see SQLErrorCodeSQLExceptionTranslator
+ * @see SQLExceptionSubclassTranslator
+ */
+<span class="fc" id="L57">public class SQLStateSQLExceptionTranslator extends AbstractFallbackSQLExceptionTranslator {</span>
+
+<span class="fc" id="L59">	private static final Set&lt;String&gt; BAD_SQL_GRAMMAR_CODES = Set.of(</span>
+			&quot;07&quot;,  // Dynamic SQL error
+			&quot;21&quot;,  // Cardinality violation
+			&quot;2A&quot;,  // Syntax error direct SQL
+			&quot;37&quot;,  // Syntax error dynamic SQL
+			&quot;42&quot;,  // General SQL syntax error
+			&quot;65&quot;   // Oracle: unknown identifier
+		);
+
+<span class="fc" id="L68">	private static final Set&lt;String&gt; DATA_INTEGRITY_VIOLATION_CODES = Set.of(</span>
+			&quot;01&quot;,  // Data truncation
+			&quot;02&quot;,  // No data found
+			&quot;22&quot;,  // Value out of range
+			&quot;23&quot;,  // Integrity constraint violation
+			&quot;27&quot;,  // Triggered data change violation
+			&quot;44&quot;   // With check violation
+		);
+
+<span class="fc" id="L77">	private static final Set&lt;String&gt; PESSIMISTIC_LOCKING_FAILURE_CODES = Set.of(</span>
+			&quot;40&quot;,  // Transaction rollback
+			&quot;61&quot;   // Oracle: deadlock
+	);
+
+<span class="fc" id="L82">	private static final Set&lt;String&gt; DATA_ACCESS_RESOURCE_FAILURE_CODES = Set.of(</span>
+			&quot;08&quot;,  // Connection exception
+			&quot;53&quot;,  // PostgreSQL: insufficient resources (for example, disk full)
+			&quot;54&quot;,  // PostgreSQL: program limit exceeded (for example, statement too complex)
+			&quot;57&quot;,  // DB2: out-of-memory exception / database not started
+			&quot;58&quot;   // DB2: unexpected system error
+		);
+
+<span class="fc" id="L90">	private static final Set&lt;String&gt; TRANSIENT_DATA_ACCESS_RESOURCE_CODES = Set.of(</span>
+			&quot;JW&quot;,  // Sybase: internal I/O error
+			&quot;JZ&quot;,  // Sybase: unexpected I/O error
+			&quot;S1&quot;   // DB2: communication failure
+		);
+
+<span class="fc" id="L96">	private static final Set&lt;Integer&gt; DUPLICATE_KEY_ERROR_CODES = Set.of(</span>
+<span class="fc" id="L97">			1,     // Oracle</span>
+<span class="fc" id="L98">			301,   // SAP HANA</span>
+<span class="fc" id="L99">			1062,  // MySQL/MariaDB</span>
+<span class="fc" id="L100">			2601,  // MS SQL Server</span>
+<span class="fc" id="L101">			2627,  // MS SQL Server</span>
+<span class="fc" id="L102">			-239,  // Informix</span>
+<span class="fc" id="L103">			-268   // Informix</span>
+		);
+
+
+	@Override
+	protected @Nullable DataAccessException doTranslate(String task, @Nullable String sql, SQLException ex) {
+<span class="fc" id="L109">		SQLException sqlEx = ex;</span>
+		String sqlState;
+<span class="fc bfc" id="L111" title="All 2 branches covered.">		if (sqlEx instanceof BatchUpdateException) {</span>
+			// Unwrap BatchUpdateException to expose contained exception
+			// with potentially more specific SQL state.
+<span class="fc bfc" id="L114" title="All 2 branches covered.">			if (sqlEx.getNextException() != null) {</span>
+<span class="fc" id="L115">				SQLException nestedSqlEx = sqlEx.getNextException();</span>
+<span class="pc bpc" id="L116" title="1 of 2 branches missed.">				if (nestedSqlEx.getSQLState() != null) {</span>
+<span class="fc" id="L117">					sqlEx = nestedSqlEx;</span>
+				}
+			}
+<span class="fc" id="L120">			sqlState = sqlEx.getSQLState();</span>
+		}
+		else {
+			// Expose top-level exception but potentially use nested SQL state.
+<span class="fc" id="L124">			sqlState = getSqlState(sqlEx);</span>
+		}
+
+		// The actual SQL state check...
+<span class="fc bfc" id="L128" title="All 4 branches covered.">		if (sqlState != null &amp;&amp; sqlState.length() &gt;= 2) {</span>
+<span class="fc" id="L129">			String classCode = sqlState.substring(0, 2);</span>
+<span class="pc bpc" id="L130" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L131">				logger.debug(&quot;Extracted SQL state class '&quot; + classCode + &quot;' from value '&quot; + sqlState + &quot;'&quot;);</span>
+			}
+<span class="fc bfc" id="L133" title="All 2 branches covered.">			if (BAD_SQL_GRAMMAR_CODES.contains(classCode)) {</span>
+<span class="pc bpc" id="L134" title="1 of 2 branches missed.">				return new BadSqlGrammarException(task, (sql != null ? sql : &quot;&quot;), ex);</span>
+			}
+<span class="fc bfc" id="L136" title="All 2 branches covered.">			else if (DATA_INTEGRITY_VIOLATION_CODES.contains(classCode)) {</span>
+<span class="fc bfc" id="L137" title="All 2 branches covered.">				if (indicatesDuplicateKey(sqlState, sqlEx.getErrorCode())) {</span>
+<span class="fc" id="L138">					return new DuplicateKeyException(buildMessage(task, sql, sqlEx), ex);</span>
+				}
+<span class="fc" id="L140">				return new DataIntegrityViolationException(buildMessage(task, sql, sqlEx), ex);</span>
+			}
+<span class="fc bfc" id="L142" title="All 2 branches covered.">			else if (PESSIMISTIC_LOCKING_FAILURE_CODES.contains(classCode)) {</span>
+<span class="fc bfc" id="L143" title="All 2 branches covered.">				if (indicatesCannotAcquireLock(sqlState)) {</span>
+<span class="fc" id="L144">					return new CannotAcquireLockException(buildMessage(task, sql, sqlEx), ex);</span>
+				}
+<span class="fc" id="L146">				return new PessimisticLockingFailureException(buildMessage(task, sql, sqlEx), ex);</span>
+			}
+<span class="fc bfc" id="L148" title="All 2 branches covered.">			else if (DATA_ACCESS_RESOURCE_FAILURE_CODES.contains(classCode)) {</span>
+<span class="fc bfc" id="L149" title="All 2 branches covered.">				if (indicatesQueryTimeout(sqlState)) {</span>
+<span class="fc" id="L150">					return new QueryTimeoutException(buildMessage(task, sql, sqlEx), ex);</span>
+				}
+<span class="fc" id="L152">				return new DataAccessResourceFailureException(buildMessage(task, sql, sqlEx), ex);</span>
+			}
+<span class="fc bfc" id="L154" title="All 2 branches covered.">			else if (TRANSIENT_DATA_ACCESS_RESOURCE_CODES.contains(classCode)) {</span>
+<span class="fc" id="L155">				return new TransientDataAccessResourceException(buildMessage(task, sql, sqlEx), ex);</span>
+			}
+		}
+
+		// For MySQL: exception class name indicating a timeout?
+		// (since MySQL doesn't throw the JDBC 4 SQLTimeoutException)
+<span class="pc bpc" id="L161" title="1 of 2 branches missed.">		if (sqlEx.getClass().getName().contains(&quot;Timeout&quot;)) {</span>
+<span class="nc" id="L162">			return new QueryTimeoutException(buildMessage(task, sql, sqlEx), ex);</span>
+		}
+
+		// Couldn't resolve anything proper - resort to UncategorizedSQLException.
+<span class="fc" id="L166">		return null;</span>
+	}
+
+	/**
+	 * Gets the SQL state code from the supplied {@link SQLException exception}.
+	 * &lt;p&gt;Some JDBC drivers nest the actual exception from a batched update, so we
+	 * might need to dig down into the nested exception.
+	 * @param ex the exception from which the {@link SQLException#getSQLState() SQL state}
+	 * is to be extracted
+	 * @return the SQL state code
+	 */
+	private @Nullable String getSqlState(SQLException ex) {
+<span class="fc" id="L178">		String sqlState = ex.getSQLState();</span>
+<span class="fc bfc" id="L179" title="All 2 branches covered.">		if (sqlState == null) {</span>
+<span class="fc" id="L180">			SQLException nestedEx = ex.getNextException();</span>
+<span class="pc bpc" id="L181" title="1 of 2 branches missed.">			if (nestedEx != null) {</span>
+<span class="nc" id="L182">				sqlState = nestedEx.getSQLState();</span>
+			}
+		}
+<span class="fc" id="L185">		return sqlState;</span>
+	}
+
+
+	/**
+	 * Check whether the given SQL state and the associated error code (in case
+	 * of a generic SQL state value) indicate a {@link DuplicateKeyException}:
+	 * either SQL state 23505 as a specific indication, or the generic SQL state
+	 * 23000 with a well-known vendor code.
+	 * @param sqlState the SQL state value
+	 * @param errorCode the error code
+	 */
+	static boolean indicatesDuplicateKey(@Nullable String sqlState, int errorCode) {
+<span class="fc bfc" id="L198" title="All 2 branches covered.">		return (&quot;23505&quot;.equals(sqlState) ||</span>
+<span class="pc bpc" id="L199" title="1 of 4 branches missed.">				(&quot;23000&quot;.equals(sqlState) &amp;&amp; DUPLICATE_KEY_ERROR_CODES.contains(errorCode)));</span>
+	}
+
+	/**
+	 * Check whether the given SQL state indicates a {@link CannotAcquireLockException},
+	 * with SQL state 40001 as a specific indication.
+	 * @param sqlState the SQL state value
+	 */
+	static boolean indicatesCannotAcquireLock(@Nullable String sqlState) {
+<span class="fc" id="L208">		return &quot;40001&quot;.equals(sqlState);</span>
+	}
+
+	/**
+	 * Check whether the given SQL state indicates a {@link QueryTimeoutException},
+	 * with SQL state 57014 as a specific indication.
+	 * @param sqlState the SQL state value
+	 */
+	static boolean indicatesQueryTimeout(@Nullable String sqlState) {
+<span class="fc" id="L217">		return &quot;57014&quot;.equals(sqlState);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

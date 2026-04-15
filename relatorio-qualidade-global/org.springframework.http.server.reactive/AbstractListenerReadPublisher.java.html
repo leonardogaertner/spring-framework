@@ -1,0 +1,520 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractListenerReadPublisher.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.server.reactive</a> &gt; <span class="el_source">AbstractListenerReadPublisher.java</span></div><h1>AbstractListenerReadPublisher.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.server.reactive;
+
+import java.io.IOException;
+import java.util.concurrent.atomic.AtomicLongFieldUpdater;
+import java.util.concurrent.atomic.AtomicReference;
+
+import org.apache.commons.logging.Log;
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import org.reactivestreams.Subscriber;
+import org.reactivestreams.Subscription;
+import reactor.core.publisher.Operators;
+
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DefaultDataBufferFactory;
+import org.springframework.core.log.LogDelegateFactory;
+import org.springframework.util.Assert;
+
+/**
+ * Abstract base class for {@code Publisher} implementations that bridge between
+ * event-listener read APIs and Reactive Streams.
+ *
+ * &lt;p&gt;Specifically a base class for reading from the HTTP request body with
+ * Servlet non-blocking I/O as well as handling incoming
+ * WebSocket messages with standard Jakarta WebSocket (JSR-356), and Jetty.
+ *
+ * @author Arjen Poutsma
+ * @author Violeta Georgieva
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ * @param &lt;T&gt; the type of element signaled
+ */
+@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+public abstract class AbstractListenerReadPublisher&lt;T&gt; implements Publisher&lt;T&gt; {
+
+	/**
+	 * Special logger for debugging Reactive Streams signals.
+	 * @see LogDelegateFactory#getHiddenLog(Class)
+	 * @see AbstractListenerWriteProcessor#rsWriteLogger
+	 * @see AbstractListenerWriteFlushProcessor#rsWriteFlushLogger
+	 * @see WriteResultPublisher#rsWriteResultLogger
+	 */
+<span class="fc" id="L59">	protected static Log rsReadLogger = LogDelegateFactory.getHiddenLog(AbstractListenerReadPublisher.class);</span>
+
+<span class="fc" id="L61">	static final DataBuffer EMPTY_BUFFER = DefaultDataBufferFactory.sharedInstance.allocateBuffer(0);</span>
+
+
+<span class="fc" id="L64">	private final AtomicReference&lt;State&gt; state = new AtomicReference&lt;&gt;(State.UNSUBSCRIBED);</span>
+
+	private volatile long demand;
+
+	@SuppressWarnings(&quot;rawtypes&quot;)
+<span class="fc" id="L69">	private static final AtomicLongFieldUpdater&lt;AbstractListenerReadPublisher&gt; DEMAND_FIELD_UPDATER =</span>
+<span class="fc" id="L70">			AtomicLongFieldUpdater.newUpdater(AbstractListenerReadPublisher.class, &quot;demand&quot;);</span>
+
+	private volatile @Nullable Subscriber&lt;? super T&gt; subscriber;
+
+	/** Flag to defer transition to COMPLETED briefly while SUBSCRIBING or READING. */
+	private volatile boolean completionPending;
+
+	/** Flag to defer transition to COMPLETED briefly while SUBSCRIBING or READING. */
+	private volatile @Nullable Throwable errorPending;
+
+	private final String logPrefix;
+
+
+	public AbstractListenerReadPublisher() {
+<span class="nc" id="L84">		this(&quot;&quot;);</span>
+<span class="nc" id="L85">	}</span>
+
+	/**
+	 * Create an instance with the given log prefix.
+	 * @since 5.1
+	 */
+<span class="fc" id="L91">	public AbstractListenerReadPublisher(String logPrefix) {</span>
+<span class="fc" id="L92">		this.logPrefix = logPrefix;</span>
+<span class="fc" id="L93">	}</span>
+
+
+	/**
+	 * Return the configured log message prefix.
+	 * @since 5.1
+	 */
+	public String getLogPrefix() {
+<span class="fc" id="L101">		return this.logPrefix;</span>
+	}
+
+
+	// Publisher implementation...
+
+	@Override
+	public void subscribe(Subscriber&lt;? super T&gt; subscriber) {
+<span class="fc" id="L109">		this.state.get().subscribe(this, subscriber);</span>
+<span class="fc" id="L110">	}</span>
+
+
+	// Async I/O notification methods...
+
+	/**
+	 * Invoked when reading is possible, either in the same thread after a check
+	 * via {@link #checkOnDataAvailable()}, or as a callback from the underlying
+	 * container.
+	 */
+	public final void onDataAvailable() {
+<span class="fc" id="L121">		rsReadLogger.trace(getLogPrefix() + &quot;onDataAvailable&quot;);</span>
+<span class="fc" id="L122">		this.state.get().onDataAvailable(this);</span>
+<span class="fc" id="L123">	}</span>
+
+	/**
+	 * Subclasses can call this method to signal onComplete, delegating a
+	 * notification from the container when all data has been read.
+	 */
+	public void onAllDataRead() {
+<span class="fc" id="L130">		State state = this.state.get();</span>
+<span class="pc bpc" id="L131" title="1 of 2 branches missed.">		if (rsReadLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L132">			rsReadLogger.trace(getLogPrefix() + &quot;onAllDataRead [&quot; + state + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L134">		state.onAllDataRead(this);</span>
+<span class="fc" id="L135">	}</span>
+
+	/**
+	 * Subclasses can call this to signal onError, delegating a
+	 * notification from the container for an error.
+	 */
+	public final void onError(Throwable ex) {
+<span class="fc" id="L142">		State state = this.state.get();</span>
+<span class="pc bpc" id="L143" title="1 of 2 branches missed.">		if (rsReadLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L144">			rsReadLogger.trace(getLogPrefix() + &quot;onError: &quot; + ex + &quot; [&quot; + state + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L146">		state.onError(this, ex);</span>
+<span class="fc" id="L147">	}</span>
+
+
+	// Read API methods to be implemented or template methods to override...
+
+	/**
+	 * Check if data is available and either call {@link #onDataAvailable()}
+	 * immediately or schedule a notification.
+	 */
+	protected abstract void checkOnDataAvailable();
+
+	/**
+	 * Read once from the input, if possible.
+	 * @return the item that was read; or {@code null}
+	 */
+	protected abstract @Nullable T read() throws IOException;
+
+	/**
+	 * Invoked when reading is paused due to a lack of demand.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; This method is guaranteed not to compete with
+	 * {@link #checkOnDataAvailable()} so it can be used to safely suspend
+	 * reading, if the underlying API supports it, i.e. without competing with
+	 * an implicit call to resume via {@code checkOnDataAvailable()}.
+	 * @since 5.0.2
+	 */
+	protected abstract void readingPaused();
+
+	/**
+	 * Invoked after an I/O read error from the underlying server or after a
+	 * cancellation signal from the downstream consumer to allow subclasses
+	 * to discard any current cached data they might have.
+	 * @since 5.0.11
+	 */
+	protected abstract void discardData();
+
+
+	// Private methods for use in State...
+
+	/**
+	 * Read and publish data one by one until there are no more items
+	 * to read (i.e. input queue drained), or there is no more demand.
+	 * @return {@code true} if there is demand but no more to read, or
+	 * {@code false} if there is more to read but lack of demand.
+	 */
+	private boolean readAndPublish() throws IOException {
+		long r;
+<span class="pc bpc" id="L193" title="1 of 4 branches missed.">		while ((r = this.demand) &gt; 0 &amp;&amp; (this.state.get() != State.COMPLETED)) {</span>
+<span class="fc" id="L194">			T data = read();</span>
+<span class="pc bpc" id="L195" title="1 of 2 branches missed.">			if (data == EMPTY_BUFFER) {</span>
+<span class="nc bnc" id="L196" title="All 2 branches missed.">				if (rsReadLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L197">					rsReadLogger.trace(getLogPrefix() + &quot;0 bytes read, trying again&quot;);</span>
+				}
+			}
+<span class="fc bfc" id="L200" title="All 2 branches covered.">			else if (data != null) {</span>
+<span class="fc bfc" id="L201" title="All 2 branches covered.">				if (r != Long.MAX_VALUE) {</span>
+<span class="fc" id="L202">					DEMAND_FIELD_UPDATER.addAndGet(this, -1L);</span>
+				}
+<span class="fc" id="L204">				Subscriber&lt;? super T&gt; subscriber = this.subscriber;</span>
+<span class="pc bpc" id="L205" title="1 of 2 branches missed.">				Assert.state(subscriber != null, &quot;No subscriber&quot;);</span>
+<span class="pc bpc" id="L206" title="1 of 2 branches missed.">				if (rsReadLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L207">					rsReadLogger.trace(getLogPrefix() + &quot;Publishing &quot; + data.getClass().getSimpleName());</span>
+				}
+<span class="fc" id="L209">				subscriber.onNext(data);</span>
+<span class="fc" id="L210">			}</span>
+			else {
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">				if (rsReadLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L213">					rsReadLogger.trace(getLogPrefix() + &quot;No more to read&quot;);</span>
+				}
+<span class="fc" id="L215">				return true;</span>
+			}
+<span class="fc" id="L217">		}</span>
+<span class="fc" id="L218">		return false;</span>
+	}
+
+	private boolean changeState(State oldState, State newState) {
+<span class="fc" id="L222">		boolean result = this.state.compareAndSet(oldState, newState);</span>
+<span class="pc bpc" id="L223" title="1 of 4 branches missed.">		if (result &amp;&amp; rsReadLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L224">			rsReadLogger.trace(getLogPrefix() + oldState + &quot; -&gt; &quot; + newState);</span>
+		}
+<span class="fc" id="L226">		return result;</span>
+	}
+
+	private void changeToDemandState(State oldState) {
+<span class="fc bfc" id="L230" title="All 2 branches covered.">		if (changeState(oldState, State.DEMAND)) {</span>
+			// Protect from infinite recursion in Undertow, where we can't check if data
+			// is available, so all we can do is to try to read.
+			// Generally, no need to check if we just came out of readAndPublish()...
+<span class="fc bfc" id="L234" title="All 2 branches covered.">			if (oldState != State.READING) {</span>
+<span class="fc" id="L235">				checkOnDataAvailable();</span>
+			}
+		}
+<span class="fc" id="L238">	}</span>
+
+	private boolean handlePendingCompletionOrError() {
+<span class="fc" id="L241">		State state = this.state.get();</span>
+<span class="fc bfc" id="L242" title="All 4 branches covered.">		if (state == State.DEMAND || state == State.NO_DEMAND) {</span>
+<span class="fc bfc" id="L243" title="All 2 branches covered.">			if (this.completionPending) {</span>
+<span class="fc" id="L244">				rsReadLogger.trace(getLogPrefix() + &quot;Processing pending completion&quot;);</span>
+<span class="fc" id="L245">				this.state.get().onAllDataRead(this);</span>
+<span class="fc" id="L246">				return true;</span>
+			}
+<span class="fc" id="L248">			Throwable ex = this.errorPending;</span>
+<span class="pc bpc" id="L249" title="1 of 2 branches missed.">			if (ex != null) {</span>
+<span class="nc bnc" id="L250" title="All 2 branches missed.">				if (rsReadLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L251">					rsReadLogger.trace(getLogPrefix() + &quot;Processing pending completion with error: &quot; + ex);</span>
+				}
+<span class="nc" id="L253">				this.state.get().onError(this, ex);</span>
+<span class="nc" id="L254">				return true;</span>
+			}
+		}
+<span class="fc" id="L257">		return false;</span>
+	}
+
+	private Subscription createSubscription() {
+<span class="fc" id="L261">		return new ReadSubscription();</span>
+	}
+
+
+	/**
+	 * Subscription that delegates signals to State.
+	 */
+<span class="fc" id="L268">	private final class ReadSubscription implements Subscription {</span>
+
+
+		@Override
+		public void request(long n) {
+<span class="pc bpc" id="L273" title="1 of 2 branches missed.">			if (rsReadLogger.isTraceEnabled()) {</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">				rsReadLogger.trace(getLogPrefix() + &quot;request &quot; + (n != Long.MAX_VALUE ? n : &quot;Long.MAX_VALUE&quot;));</span>
+			}
+<span class="fc" id="L276">			state.get().request(AbstractListenerReadPublisher.this, n);</span>
+<span class="fc" id="L277">		}</span>
+
+		@Override
+		public void cancel() {
+<span class="fc" id="L281">			State state = AbstractListenerReadPublisher.this.state.get();</span>
+<span class="pc bpc" id="L282" title="1 of 2 branches missed.">			if (rsReadLogger.isTraceEnabled()) {</span>
+<span class="nc" id="L283">				rsReadLogger.trace(getLogPrefix() + &quot;cancel [&quot; + state + &quot;]&quot;);</span>
+			}
+<span class="fc" id="L285">			state.cancel(AbstractListenerReadPublisher.this);</span>
+<span class="fc" id="L286">		}</span>
+	}
+
+
+	/**
+	 * The states that a read {@link Publisher} transitions through.
+	 * &lt;p&gt;&lt;pre&gt;
+	 *        UNSUBSCRIBED
+	 *             |
+	 *             v
+	 *        SUBSCRIBING
+	 *             |
+	 *             v
+	 *    +---- NO_DEMAND ---------------&gt; DEMAND ---+
+	 *    |        ^                         ^       |
+	 *    |        |                         |       |
+	 *    |        +------- READING &lt;--------+       |
+	 *    |                    |                     |
+	 *    |                    v                     |
+	 *    +--------------&gt; COMPLETED &lt;---------------+
+	 * &lt;/pre&gt;
+	 */
+<span class="fc" id="L308">	private enum State {</span>
+
+<span class="fc" id="L310">		UNSUBSCRIBED {</span>
+			@Override
+			&lt;T&gt; void subscribe(AbstractListenerReadPublisher&lt;T&gt; publisher, Subscriber&lt;? super T&gt; subscriber) {
+<span class="fc" id="L313">				Assert.notNull(publisher, &quot;Publisher must not be null&quot;);</span>
+<span class="fc" id="L314">				Assert.notNull(subscriber, &quot;Subscriber must not be null&quot;);</span>
+<span class="pc bpc" id="L315" title="1 of 2 branches missed.">				if (publisher.changeState(this, SUBSCRIBING)) {</span>
+<span class="fc" id="L316">					Subscription subscription = publisher.createSubscription();</span>
+<span class="fc" id="L317">					publisher.subscriber = subscriber;</span>
+<span class="fc" id="L318">					subscriber.onSubscribe(subscription);</span>
+<span class="fc" id="L319">					publisher.changeState(SUBSCRIBING, NO_DEMAND);</span>
+<span class="fc" id="L320">					publisher.handlePendingCompletionOrError();</span>
+<span class="fc" id="L321">				}</span>
+				else {
+<span class="nc" id="L323">					throw new IllegalStateException(&quot;Failed to transition to SUBSCRIBING, &quot; +</span>
+							&quot;subscriber: &quot; + subscriber);
+				}
+<span class="fc" id="L326">			}</span>
+
+			@Override
+			&lt;T&gt; void onAllDataRead(AbstractListenerReadPublisher&lt;T&gt; publisher) {
+<span class="fc" id="L330">				publisher.completionPending = true;</span>
+<span class="fc" id="L331">				publisher.handlePendingCompletionOrError();</span>
+<span class="fc" id="L332">			}</span>
+
+			@Override
+			&lt;T&gt; void onError(AbstractListenerReadPublisher&lt;T&gt; publisher, Throwable ex) {
+<span class="fc" id="L336">				publisher.errorPending = ex;</span>
+<span class="fc" id="L337">				publisher.handlePendingCompletionOrError();</span>
+<span class="fc" id="L338">			}</span>
+		},
+
+		/**
+		 * Very brief state where we know we have a Subscriber but must not
+		 * send onComplete and onError until we after onSubscribe.
+		 */
+<span class="fc" id="L345">		SUBSCRIBING {</span>
+			@Override
+			&lt;T&gt; void request(AbstractListenerReadPublisher&lt;T&gt; publisher, long n) {
+<span class="pc bpc" id="L348" title="1 of 2 branches missed.">				if (Operators.validate(n)) {</span>
+<span class="fc" id="L349">					Operators.addCap(DEMAND_FIELD_UPDATER, publisher, n);</span>
+<span class="fc" id="L350">					publisher.changeToDemandState(this);</span>
+				}
+<span class="fc" id="L352">			}</span>
+
+			@Override
+			&lt;T&gt; void onAllDataRead(AbstractListenerReadPublisher&lt;T&gt; publisher) {
+<span class="nc" id="L356">				publisher.completionPending = true;</span>
+<span class="nc" id="L357">				publisher.handlePendingCompletionOrError();</span>
+<span class="nc" id="L358">			}</span>
+
+			@Override
+			&lt;T&gt; void onError(AbstractListenerReadPublisher&lt;T&gt; publisher, Throwable ex) {
+<span class="nc" id="L362">				publisher.errorPending = ex;</span>
+<span class="nc" id="L363">				publisher.handlePendingCompletionOrError();</span>
+<span class="nc" id="L364">			}</span>
+
+			@Override
+			&lt;T&gt; void cancel(AbstractListenerReadPublisher&lt;T&gt; publisher) {
+<span class="nc" id="L368">				publisher.completionPending = true;</span>
+<span class="nc" id="L369">				publisher.handlePendingCompletionOrError();</span>
+<span class="nc" id="L370">			}</span>
+		},
+
+<span class="fc" id="L373">		NO_DEMAND {</span>
+			@Override
+			&lt;T&gt; void request(AbstractListenerReadPublisher&lt;T&gt; publisher, long n) {
+<span class="pc bpc" id="L376" title="1 of 2 branches missed.">				if (Operators.validate(n)) {</span>
+<span class="fc" id="L377">					Operators.addCap(DEMAND_FIELD_UPDATER, publisher, n);</span>
+<span class="fc" id="L378">					publisher.changeToDemandState(this);</span>
+				}
+<span class="fc" id="L380">			}</span>
+		},
+
+<span class="fc" id="L383">		DEMAND {</span>
+			@Override
+			&lt;T&gt; void request(AbstractListenerReadPublisher&lt;T&gt; publisher, long n) {
+<span class="nc bnc" id="L386" title="All 2 branches missed.">				if (Operators.validate(n)) {</span>
+<span class="nc" id="L387">					Operators.addCap(DEMAND_FIELD_UPDATER, publisher, n);</span>
+					// Did a concurrent read transition to NO_DEMAND just before us?
+<span class="nc" id="L389">					publisher.changeToDemandState(NO_DEMAND);</span>
+				}
+<span class="nc" id="L391">			}</span>
+
+			@Override
+			&lt;T&gt; void onDataAvailable(AbstractListenerReadPublisher&lt;T&gt; publisher) {
+<span class="pc bpc" id="L395" title="1 of 2 branches missed.">				if (publisher.changeState(this, READING)) {</span>
+					try {
+<span class="fc" id="L397">						boolean demandAvailable = publisher.readAndPublish();</span>
+<span class="fc bfc" id="L398" title="All 2 branches covered.">						if (demandAvailable) {</span>
+<span class="fc" id="L399">							publisher.changeToDemandState(READING);</span>
+<span class="fc" id="L400">							publisher.handlePendingCompletionOrError();</span>
+						}
+						else {
+<span class="fc" id="L403">							publisher.readingPaused();</span>
+<span class="pc bpc" id="L404" title="1 of 2 branches missed.">							if (publisher.changeState(READING, NO_DEMAND)) {</span>
+<span class="fc bfc" id="L405" title="All 2 branches covered.">								if (!publisher.handlePendingCompletionOrError()) {</span>
+									// Demand may have arrived since readAndPublish returned
+<span class="fc" id="L407">									long r = publisher.demand;</span>
+<span class="pc bpc" id="L408" title="1 of 2 branches missed.">									if (r &gt; 0) {</span>
+<span class="nc" id="L409">										publisher.changeToDemandState(NO_DEMAND);</span>
+									}
+								}
+							}
+						}
+					}
+<span class="nc" id="L415">					catch (IOException ex) {</span>
+<span class="nc" id="L416">						publisher.onError(ex);</span>
+<span class="fc" id="L417">					}</span>
+				}
+				// Else, either competing onDataAvailable (request vs container), or concurrent completion
+<span class="fc" id="L420">			}</span>
+		},
+
+<span class="fc" id="L423">		READING {</span>
+			@Override
+			&lt;T&gt; void request(AbstractListenerReadPublisher&lt;T&gt; publisher, long n) {
+<span class="pc bpc" id="L426" title="1 of 2 branches missed.">				if (Operators.validate(n)) {</span>
+<span class="fc" id="L427">					Operators.addCap(DEMAND_FIELD_UPDATER, publisher, n);</span>
+					// Did a concurrent read transition to NO_DEMAND just before us?
+<span class="fc" id="L429">					publisher.changeToDemandState(NO_DEMAND);</span>
+				}
+<span class="fc" id="L431">			}</span>
+
+			@Override
+			&lt;T&gt; void onAllDataRead(AbstractListenerReadPublisher&lt;T&gt; publisher) {
+<span class="fc" id="L435">				publisher.completionPending = true;</span>
+<span class="fc" id="L436">				publisher.handlePendingCompletionOrError();</span>
+<span class="fc" id="L437">			}</span>
+
+			@Override
+			&lt;T&gt; void onError(AbstractListenerReadPublisher&lt;T&gt; publisher, Throwable ex) {
+<span class="nc" id="L441">				publisher.errorPending = ex;</span>
+<span class="nc" id="L442">				publisher.handlePendingCompletionOrError();</span>
+<span class="nc" id="L443">			}</span>
+
+			@Override
+			&lt;T&gt; void cancel(AbstractListenerReadPublisher&lt;T&gt; publisher) {
+<span class="fc" id="L447">				publisher.discardData();</span>
+<span class="fc" id="L448">				publisher.completionPending = true;</span>
+<span class="fc" id="L449">				publisher.handlePendingCompletionOrError();</span>
+<span class="fc" id="L450">			}</span>
+		},
+
+<span class="fc" id="L453">		COMPLETED {</span>
+			@Override
+			&lt;T&gt; void request(AbstractListenerReadPublisher&lt;T&gt; publisher, long n) {
+				// ignore
+<span class="nc" id="L457">			}</span>
+			@Override
+			&lt;T&gt; void cancel(AbstractListenerReadPublisher&lt;T&gt; publisher) {
+				// ignore
+<span class="fc" id="L461">			}</span>
+			@Override
+			&lt;T&gt; void onAllDataRead(AbstractListenerReadPublisher&lt;T&gt; publisher) {
+				// ignore
+<span class="fc" id="L465">			}</span>
+			@Override
+			&lt;T&gt; void onError(AbstractListenerReadPublisher&lt;T&gt; publisher, Throwable t) {
+				// ignore
+<span class="nc" id="L469">			}</span>
+		};
+
+		&lt;T&gt; void subscribe(AbstractListenerReadPublisher&lt;T&gt; publisher, Subscriber&lt;? super T&gt; subscriber) {
+<span class="nc" id="L473">			throw new IllegalStateException(toString());</span>
+		}
+
+		&lt;T&gt; void request(AbstractListenerReadPublisher&lt;T&gt; publisher, long n) {
+<span class="nc" id="L477">			throw new IllegalStateException(toString());</span>
+		}
+
+		&lt;T&gt; void cancel(AbstractListenerReadPublisher&lt;T&gt; publisher) {
+<span class="nc bnc" id="L481" title="All 2 branches missed.">			if (publisher.changeState(this, COMPLETED)) {</span>
+<span class="nc" id="L482">				publisher.discardData();</span>
+			}
+			else {
+<span class="nc" id="L485">				publisher.state.get().cancel(publisher);</span>
+			}
+<span class="nc" id="L487">		}</span>
+
+		&lt;T&gt; void onDataAvailable(AbstractListenerReadPublisher&lt;T&gt; publisher) {
+			// ignore
+<span class="fc" id="L491">		}</span>
+
+		&lt;T&gt; void onAllDataRead(AbstractListenerReadPublisher&lt;T&gt; publisher) {
+<span class="pc bpc" id="L494" title="1 of 2 branches missed.">			if (publisher.changeState(this, COMPLETED)) {</span>
+<span class="fc" id="L495">				Subscriber&lt;? super T&gt; s = publisher.subscriber;</span>
+<span class="pc bpc" id="L496" title="1 of 2 branches missed.">				if (s != null) {</span>
+<span class="fc" id="L497">					s.onComplete();</span>
+				}
+<span class="fc" id="L499">			}</span>
+			else {
+<span class="nc" id="L501">				publisher.state.get().onAllDataRead(publisher);</span>
+			}
+<span class="fc" id="L503">		}</span>
+
+		&lt;T&gt; void onError(AbstractListenerReadPublisher&lt;T&gt; publisher, Throwable t) {
+<span class="nc bnc" id="L506" title="All 2 branches missed.">			if (publisher.changeState(this, COMPLETED)) {</span>
+<span class="nc" id="L507">				publisher.discardData();</span>
+<span class="nc" id="L508">				Subscriber&lt;? super T&gt; s = publisher.subscriber;</span>
+<span class="nc bnc" id="L509" title="All 2 branches missed.">				if (s != null) {</span>
+<span class="nc" id="L510">					s.onError(t);</span>
+				}
+<span class="nc" id="L512">			}</span>
+			else {
+<span class="nc" id="L514">				publisher.state.get().onError(publisher, t);</span>
+			}
+<span class="nc" id="L516">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

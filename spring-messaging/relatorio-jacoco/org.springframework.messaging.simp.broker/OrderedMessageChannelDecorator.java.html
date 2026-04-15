@@ -1,0 +1,219 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>OrderedMessageChannelDecorator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.simp.broker</a> &gt; <span class="el_source">OrderedMessageChannelDecorator.java</span></div><h1>OrderedMessageChannelDecorator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.simp.broker;
+
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.apache.commons.logging.Log;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageHandler;
+import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
+import org.springframework.messaging.support.ExecutorChannelInterceptor;
+import org.springframework.messaging.support.ExecutorSubscribableChannel;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.util.Assert;
+
+/**
+ * Decorator for an {@link ExecutorSubscribableChannel} that ensures messages
+ * are processed in the order they were published to the channel. Messages are
+ * sent one at a time with the next one released when the previous has been
+ * processed. This decorator is intended to be applied per session.
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.1
+ */
+public class OrderedMessageChannelDecorator implements MessageChannel {
+
+	private static final String NEXT_MESSAGE_TASK_HEADER = &quot;simpNextMessageTask&quot;;
+
+
+	private final MessageChannel channel;
+
+	private final int subscriberCount;
+
+	private final Log logger;
+
+<span class="fc" id="L56">	private final Queue&lt;Message&lt;?&gt;&gt; messages = new ConcurrentLinkedQueue&lt;&gt;();</span>
+
+<span class="fc" id="L58">	private final AtomicBoolean sendInProgress = new AtomicBoolean();</span>
+
+
+<span class="fc" id="L61">	public OrderedMessageChannelDecorator(MessageChannel channel, Log logger) {</span>
+<span class="fc" id="L62">		this.channel = channel;</span>
+<span class="pc bpc" id="L63" title="1 of 2 branches missed.">		this.subscriberCount = (channel instanceof ExecutorSubscribableChannel ch ? ch.getSubscribers().size() : 0);</span>
+<span class="fc" id="L64">		this.logger = logger;</span>
+<span class="fc" id="L65">	}</span>
+
+
+	@Override
+	public boolean send(Message&lt;?&gt; message) {
+<span class="fc" id="L70">		return send(message, -1);</span>
+	}
+
+	@Override
+	public boolean send(Message&lt;?&gt; message, long timeout) {
+<span class="fc" id="L75">		this.messages.add(message);</span>
+<span class="fc" id="L76">		trySend();</span>
+<span class="fc" id="L77">		return true;</span>
+	}
+
+	private void trySend() {
+		// Take sendInProgress flag only if queue is not empty
+<span class="fc bfc" id="L82" title="All 2 branches covered.">		if (this.messages.isEmpty()) {</span>
+<span class="fc" id="L83">			return;</span>
+		}
+
+<span class="fc bfc" id="L86" title="All 2 branches covered.">		if (this.sendInProgress.compareAndSet(false, true)) {</span>
+<span class="fc" id="L87">			sendNextMessage();</span>
+		}
+<span class="fc" id="L89">	}</span>
+
+	private void sendNextMessage() {
+		for (;;) {
+<span class="fc" id="L93">			Message&lt;?&gt; message = this.messages.peek();</span>
+<span class="fc bfc" id="L94" title="All 2 branches covered.">			if (message != null) {</span>
+				try {
+<span class="fc" id="L96">					setTaskHeader(message, new PostHandleTask(message));</span>
+<span class="pc bpc" id="L97" title="1 of 2 branches missed.">					if (this.channel.send(message)) {</span>
+<span class="fc" id="L98">						return;</span>
+					}
+				}
+<span class="nc" id="L101">				catch (Throwable ex) {</span>
+<span class="nc bnc" id="L102" title="All 2 branches missed.">					if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L103">						logger.error(&quot;Failed to send &quot; + message, ex);</span>
+					}
+<span class="nc" id="L105">				}</span>
+<span class="nc" id="L106">				removeMessage(message);</span>
+			}
+			else {
+<span class="fc" id="L109">				this.sendInProgress.set(false);</span>
+<span class="fc" id="L110">				trySend();</span>
+<span class="fc" id="L111">				break;</span>
+			}
+<span class="nc" id="L113">		}</span>
+<span class="fc" id="L114">	}</span>
+
+	/**
+	 * Remove the message from the top of the queue, but only if it matches,
+	 * i.e. hasn't been removed already.
+	 */
+	private boolean removeMessage(Message&lt;?&gt; message) {
+		// Remove only if not removed already
+<span class="fc" id="L122">		Message&lt;?&gt; next = this.messages.peek();</span>
+<span class="pc bpc" id="L123" title="1 of 2 branches missed.">		if (next == message) {</span>
+<span class="fc" id="L124">			this.messages.remove();</span>
+<span class="fc" id="L125">			return true;</span>
+		}
+		else {
+<span class="nc" id="L128">			return false;</span>
+		}
+	}
+
+	private static void setTaskHeader(Message&lt;?&gt; message, Runnable task) {
+<span class="fc" id="L133">		SimpMessageHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, SimpMessageHeaderAccessor.class);</span>
+<span class="pc bpc" id="L134" title="2 of 4 branches missed.">		Assert.isTrue(accessor != null &amp;&amp; accessor.isMutable(), &quot;Expected mutable SimpMessageHeaderAccessor&quot;);</span>
+<span class="fc" id="L135">		accessor.setHeader(NEXT_MESSAGE_TASK_HEADER, task);</span>
+<span class="fc" id="L136">	}</span>
+
+
+	/**
+	 * Install or remove an {@link ExecutorChannelInterceptor} that invokes a
+	 * completion task, if found in the headers of the message.
+	 * @param channel the channel to configure
+	 * @param preserveOrder whether preserve the order or publication; when
+	 * &quot;true&quot; an interceptor is inserted, when &quot;false&quot; it removed.
+	 */
+	public static void configureInterceptor(MessageChannel channel, boolean preserveOrder) {
+<span class="fc bfc" id="L147" title="All 2 branches covered.">		if (preserveOrder) {</span>
+<span class="fc" id="L148">			Assert.isInstanceOf(ExecutorSubscribableChannel.class, channel,</span>
+					&quot;An ExecutorSubscribableChannel is required for 'preservePublishOrder'&quot;);
+<span class="fc" id="L150">			ExecutorSubscribableChannel execChannel = (ExecutorSubscribableChannel) channel;</span>
+<span class="pc bpc" id="L151" title="1 of 2 branches missed.">			if (execChannel.getInterceptors().stream().noneMatch(CallbackTaskInterceptor.class::isInstance)) {</span>
+<span class="fc" id="L152">				execChannel.addInterceptor(0, new CallbackTaskInterceptor());</span>
+			}
+<span class="fc" id="L154">		}</span>
+<span class="pc bpc" id="L155" title="1 of 2 branches missed.">		else if (channel instanceof ExecutorSubscribableChannel execChannel) {</span>
+<span class="fc" id="L156">			execChannel.getInterceptors().stream().filter(CallbackTaskInterceptor.class::isInstance)</span>
+<span class="fc" id="L157">					.findFirst().map(execChannel::removeInterceptor);</span>
+
+		}
+<span class="fc" id="L160">	}</span>
+
+	/**
+	 * Whether the channel has been {@link #configureInterceptor configured}
+	 * with an interceptor for sequential handling.
+	 * @since 6.1
+	 */
+	public static boolean supportsOrderedMessages(MessageChannel channel) {
+<span class="fc bfc" id="L168" title="All 2 branches covered.">		return (channel instanceof ExecutorSubscribableChannel ch &amp;&amp;</span>
+<span class="pc bpc" id="L169" title="1 of 2 branches missed.">				ch.getInterceptors().stream().anyMatch(CallbackTaskInterceptor.class::isInstance));</span>
+	}
+
+	/**
+	 * Obtain the task to release the next message, if found.
+	 */
+	public static @Nullable Runnable getNextMessageTask(Message&lt;?&gt; message) {
+<span class="fc" id="L176">		return (Runnable) message.getHeaders().get(OrderedMessageChannelDecorator.NEXT_MESSAGE_TASK_HEADER);</span>
+	}
+
+
+	/**
+	 * Remove handled message from queue, and send next message.
+	 */
+	private final class PostHandleTask implements Runnable {
+
+		private final Message&lt;?&gt; message;
+
+		private final @Nullable AtomicInteger handledCount;
+
+<span class="fc" id="L189">		private PostHandleTask(Message&lt;?&gt; message) {</span>
+<span class="fc" id="L190">			this.message = message;</span>
+<span class="fc bfc" id="L191" title="All 2 branches covered.">			this.handledCount = (subscriberCount &gt; 1 ? new AtomicInteger(0) : null);</span>
+<span class="fc" id="L192">		}</span>
+
+		@Override
+		public void run() {
+<span class="fc bfc" id="L196" title="All 4 branches covered.">			if (this.handledCount == null || this.handledCount.addAndGet(1) == subscriberCount) {</span>
+<span class="pc bpc" id="L197" title="1 of 2 branches missed.">				if (OrderedMessageChannelDecorator.this.removeMessage(this.message)) {</span>
+<span class="fc" id="L198">					sendNextMessage();</span>
+				}
+			}
+<span class="fc" id="L201">		}</span>
+	}
+
+
+	private static final class CallbackTaskInterceptor implements ExecutorChannelInterceptor {
+
+		@Override
+		public void afterMessageHandled(
+				Message&lt;?&gt; message, MessageChannel ch, MessageHandler handler, @Nullable Exception ex) {
+
+<span class="fc" id="L211">			Runnable task = getNextMessageTask(message);</span>
+<span class="pc bpc" id="L212" title="1 of 2 branches missed.">			if (task != null) {</span>
+<span class="fc" id="L213">				task.run();</span>
+			}
+<span class="fc" id="L215">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

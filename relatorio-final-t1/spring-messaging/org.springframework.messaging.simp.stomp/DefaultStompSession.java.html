@@ -1,0 +1,746 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>DefaultStompSession.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-messaging</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.simp.stomp</a> &gt; <span class="el_source">DefaultStompSession.java</span></div><h1>DefaultStompSession.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.simp.stomp;
+
+import java.lang.reflect.Type;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
+
+import org.apache.commons.logging.Log;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.ResolvableType;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageDeliveryException;
+import org.springframework.messaging.converter.MessageConversionException;
+import org.springframework.messaging.converter.MessageConverter;
+import org.springframework.messaging.converter.SimpleMessageConverter;
+import org.springframework.messaging.simp.SimpLogging;
+import org.springframework.messaging.support.MessageBuilder;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.messaging.tcp.TcpConnection;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.util.AlternativeJdkIdGenerator;
+import org.springframework.util.Assert;
+import org.springframework.util.IdGenerator;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Default implementation of {@link ConnectionHandlingStompSession}.
+ *
+ * @author Rossen Stoyanchev
+ * @since 4.2
+ */
+public class DefaultStompSession implements ConnectionHandlingStompSession {
+
+<span class="fc" id="L60">	private static final Log logger = SimpLogging.forLogName(DefaultStompSession.class);</span>
+
+<span class="fc" id="L62">	private static final IdGenerator idGenerator = new AlternativeJdkIdGenerator();</span>
+
+	/**
+	 * An empty payload.
+	 */
+<span class="fc" id="L67">	public static final byte[] EMPTY_PAYLOAD = new byte[0];</span>
+
+	/* STOMP spec: receiver SHOULD take into account an error margin */
+	private static final long HEARTBEAT_MULTIPLIER = 3;
+
+	private static final Message&lt;byte[]&gt; HEARTBEAT;
+
+	static {
+<span class="fc" id="L75">		StompHeaderAccessor accessor = StompHeaderAccessor.createForHeartbeat();</span>
+<span class="fc" id="L76">		HEARTBEAT = MessageBuilder.createMessage(StompDecoder.HEARTBEAT_PAYLOAD, accessor.getMessageHeaders());</span>
+<span class="fc" id="L77">	}</span>
+
+
+	private final String sessionId;
+
+	private final StompSessionHandler sessionHandler;
+
+	private final StompHeaders connectHeaders;
+
+<span class="fc" id="L86">	private final CompletableFuture&lt;StompSession&gt; sessionFuture = new CompletableFuture&lt;&gt;();</span>
+
+<span class="fc" id="L88">	private MessageConverter converter = new SimpleMessageConverter();</span>
+
+	private @Nullable TaskScheduler taskScheduler;
+
+<span class="fc" id="L92">	private long receiptTimeLimit = TimeUnit.SECONDS.toMillis(15);</span>
+
+	private volatile boolean autoReceiptEnabled;
+
+
+	private volatile @Nullable TcpConnection&lt;byte[]&gt; connection;
+
+	private volatile @Nullable String version;
+
+<span class="fc" id="L101">	private final AtomicInteger subscriptionIndex = new AtomicInteger();</span>
+
+<span class="fc" id="L103">	private final Map&lt;String, DefaultSubscription&gt; subscriptions = new ConcurrentHashMap&lt;&gt;(4);</span>
+
+<span class="fc" id="L105">	private final AtomicInteger receiptIndex = new AtomicInteger();</span>
+
+<span class="fc" id="L107">	private final Map&lt;String, ReceiptHandler&gt; receiptHandlers = new ConcurrentHashMap&lt;&gt;(4);</span>
+
+	private volatile boolean clientSideClose;
+
+
+	/**
+	 * Create a new session.
+	 * @param sessionHandler the application handler for the session
+	 * @param connectHeaders headers for the STOMP CONNECT frame
+	 */
+<span class="fc" id="L117">	public DefaultStompSession(StompSessionHandler sessionHandler, StompHeaders connectHeaders) {</span>
+<span class="fc" id="L118">		Assert.notNull(sessionHandler, &quot;StompSessionHandler must not be null&quot;);</span>
+<span class="fc" id="L119">		Assert.notNull(connectHeaders, &quot;StompHeaders must not be null&quot;);</span>
+<span class="fc" id="L120">		this.sessionId = idGenerator.generateId().toString();</span>
+<span class="fc" id="L121">		this.sessionHandler = sessionHandler;</span>
+<span class="fc" id="L122">		this.connectHeaders = connectHeaders;</span>
+<span class="fc" id="L123">	}</span>
+
+
+	@Override
+	public String getSessionId() {
+<span class="nc" id="L128">		return this.sessionId;</span>
+	}
+
+	@Override
+	public StompHeaderAccessor getConnectHeaders() {
+<span class="nc" id="L133">		StompHeaderAccessor accessor = createHeaderAccessor(StompCommand.CONNECT);</span>
+<span class="nc" id="L134">		accessor.addNativeHeaders(this.connectHeaders);</span>
+<span class="nc" id="L135">		return accessor;</span>
+	}
+
+	/**
+	 * Return the configured session handler.
+	 */
+	public StompSessionHandler getSessionHandler() {
+<span class="nc" id="L142">		return this.sessionHandler;</span>
+	}
+
+	@Override
+	public CompletableFuture&lt;StompSession&gt; getSession() {
+<span class="fc" id="L147">		return this.sessionFuture;</span>
+	}
+
+	/**
+	 * Set the {@link MessageConverter} to use to convert the payload of incoming
+	 * and outgoing messages to and from {@code byte[]} based on object type, or
+	 * expected object type, and the &quot;content-type&quot; header.
+	 * &lt;p&gt;By default, {@link SimpleMessageConverter} is configured.
+	 * @param messageConverter the message converter to use
+	 */
+	public void setMessageConverter(MessageConverter messageConverter) {
+<span class="fc" id="L158">		Assert.notNull(messageConverter, &quot;MessageConverter must not be null&quot;);</span>
+<span class="fc" id="L159">		this.converter = messageConverter;</span>
+<span class="fc" id="L160">	}</span>
+
+	/**
+	 * Return the configured {@link MessageConverter}.
+	 */
+	public MessageConverter getMessageConverter() {
+<span class="fc" id="L166">		return this.converter;</span>
+	}
+
+	/**
+	 * Configure the TaskScheduler to use for receipt tracking.
+	 */
+	public void setTaskScheduler(@Nullable TaskScheduler taskScheduler) {
+<span class="fc" id="L173">		this.taskScheduler = taskScheduler;</span>
+<span class="fc" id="L174">	}</span>
+
+	/**
+	 * Return the configured TaskScheduler to use for receipt tracking.
+	 */
+	public @Nullable TaskScheduler getTaskScheduler() {
+<span class="fc" id="L180">		return this.taskScheduler;</span>
+	}
+
+	/**
+	 * Configure the time in milliseconds before a receipt expires.
+	 * &lt;p&gt;By default set to 15,000 (15 seconds).
+	 */
+	public void setReceiptTimeLimit(long receiptTimeLimit) {
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">		Assert.isTrue(receiptTimeLimit &gt; 0, &quot;Receipt time limit must be larger than zero&quot;);</span>
+<span class="fc" id="L189">		this.receiptTimeLimit = receiptTimeLimit;</span>
+<span class="fc" id="L190">	}</span>
+
+	/**
+	 * Return the configured time limit before a receipt expires.
+	 */
+	public long getReceiptTimeLimit() {
+<span class="fc" id="L196">		return this.receiptTimeLimit;</span>
+	}
+
+	@Override
+	public void setAutoReceipt(boolean autoReceiptEnabled) {
+<span class="fc" id="L201">		this.autoReceiptEnabled = autoReceiptEnabled;</span>
+<span class="fc" id="L202">	}</span>
+
+	/**
+	 * Whether receipt headers should be automatically added.
+	 */
+	public boolean isAutoReceiptEnabled() {
+<span class="fc" id="L208">		return this.autoReceiptEnabled;</span>
+	}
+
+
+	@Override
+	public boolean isConnected() {
+<span class="fc bfc" id="L214" title="All 2 branches covered.">		return (this.connection != null);</span>
+	}
+
+	@Override
+	public Receiptable send(String destination, Object payload) {
+<span class="fc" id="L219">		StompHeaders headers = new StompHeaders();</span>
+<span class="fc" id="L220">		headers.setDestination(destination);</span>
+<span class="fc" id="L221">		return send(headers, payload);</span>
+	}
+
+	@Override
+	public Receiptable send(StompHeaders headers, Object payload) {
+<span class="fc" id="L226">		Assert.hasText(headers.getDestination(), &quot;Destination header is required&quot;);</span>
+
+<span class="fc" id="L228">		String receiptId = checkOrAddReceipt(headers);</span>
+<span class="fc" id="L229">		Receiptable receiptable = new ReceiptHandler(receiptId);</span>
+
+<span class="fc" id="L231">		StompHeaderAccessor accessor = createHeaderAccessor(StompCommand.SEND);</span>
+<span class="fc" id="L232">		accessor.addNativeHeaders(headers);</span>
+<span class="fc" id="L233">		Message&lt;byte[]&gt; message = createMessage(accessor, payload);</span>
+<span class="fc" id="L234">		execute(message);</span>
+
+<span class="fc" id="L236">		return receiptable;</span>
+	}
+
+	private @Nullable String checkOrAddReceipt(StompHeaders headers) {
+<span class="fc" id="L240">		String receiptId = headers.getReceipt();</span>
+<span class="fc bfc" id="L241" title="All 4 branches covered.">		if (isAutoReceiptEnabled() &amp;&amp; receiptId == null) {</span>
+<span class="fc" id="L242">			receiptId = String.valueOf(DefaultStompSession.this.receiptIndex.getAndIncrement());</span>
+<span class="fc" id="L243">			headers.setReceipt(receiptId);</span>
+		}
+<span class="fc" id="L245">		return receiptId;</span>
+	}
+
+	private StompHeaderAccessor createHeaderAccessor(StompCommand command) {
+<span class="fc" id="L249">		StompHeaderAccessor accessor = StompHeaderAccessor.create(command);</span>
+<span class="fc" id="L250">		accessor.setSessionId(this.sessionId);</span>
+<span class="fc" id="L251">		accessor.setLeaveMutable(true);</span>
+<span class="fc" id="L252">		return accessor;</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private Message&lt;byte[]&gt; createMessage(StompHeaderAccessor accessor, @Nullable Object payload) {
+<span class="fc" id="L257">		accessor.updateSimpMessageHeadersFromStompHeaders();</span>
+		Message&lt;byte[]&gt; message;
+<span class="fc bfc" id="L259" title="All 2 branches covered.">		if (ObjectUtils.isEmpty(payload)) {</span>
+<span class="fc" id="L260">			message = MessageBuilder.createMessage(EMPTY_PAYLOAD, accessor.getMessageHeaders());</span>
+		}
+		else {
+<span class="fc" id="L263">			message = (Message&lt;byte[]&gt;) getMessageConverter().toMessage(payload, accessor.getMessageHeaders());</span>
+<span class="fc" id="L264">			accessor.updateStompHeadersFromSimpMessageHeaders();</span>
+<span class="fc bfc" id="L265" title="All 2 branches covered.">			if (message == null) {</span>
+<span class="fc" id="L266">				throw new MessageConversionException(&quot;Unable to convert payload with type='&quot; +</span>
+<span class="fc" id="L267">						payload.getClass().getName() + &quot;', contentType='&quot; + accessor.getContentType() +</span>
+<span class="fc" id="L268">						&quot;', converter=[&quot; + getMessageConverter() + &quot;]&quot;);</span>
+			}
+		}
+<span class="fc" id="L271">		return message;</span>
+	}
+
+	private void execute(Message&lt;byte[]&gt; message) {
+<span class="fc bfc" id="L275" title="All 2 branches covered.">		if (logger.isTraceEnabled()) {</span>
+<span class="fc" id="L276">			StompHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);</span>
+<span class="pc bpc" id="L277" title="1 of 2 branches missed.">			if (accessor != null) {</span>
+<span class="fc" id="L278">				logger.trace(&quot;Sending &quot; + accessor.getDetailedLogMessage(message.getPayload()));</span>
+			}
+		}
+<span class="fc" id="L281">		TcpConnection&lt;byte[]&gt; conn = this.connection;</span>
+<span class="pc bpc" id="L282" title="1 of 2 branches missed.">		Assert.state(conn != null, &quot;Connection closed&quot;);</span>
+		try {
+<span class="fc" id="L284">			conn.sendAsync(message).get();</span>
+		}
+<span class="fc" id="L286">		catch (ExecutionException ex) {</span>
+<span class="fc" id="L287">			throw new MessageDeliveryException(message, ex.getCause());</span>
+		}
+<span class="nc" id="L289">		catch (Throwable ex) {</span>
+<span class="nc" id="L290">			throw new MessageDeliveryException(message, ex);</span>
+<span class="fc" id="L291">		}</span>
+<span class="fc" id="L292">	}</span>
+
+	@Override
+	public Subscription subscribe(String destination, StompFrameHandler handler) {
+<span class="fc" id="L296">		StompHeaders headers = new StompHeaders();</span>
+<span class="fc" id="L297">		headers.setDestination(destination);</span>
+<span class="fc" id="L298">		return subscribe(headers, handler);</span>
+	}
+
+	@Override
+	public Subscription subscribe(StompHeaders headers, StompFrameHandler handler) {
+<span class="fc" id="L303">		Assert.hasText(headers.getDestination(), &quot;Destination header is required&quot;);</span>
+<span class="fc" id="L304">		Assert.notNull(handler, &quot;StompFrameHandler must not be null&quot;);</span>
+
+<span class="fc" id="L306">		String subscriptionId = headers.getId();</span>
+<span class="fc bfc" id="L307" title="All 2 branches covered.">		if (!StringUtils.hasText(subscriptionId)) {</span>
+<span class="fc" id="L308">			subscriptionId = String.valueOf(DefaultStompSession.this.subscriptionIndex.getAndIncrement());</span>
+<span class="fc" id="L309">			headers.setId(subscriptionId);</span>
+		}
+<span class="fc" id="L311">		checkOrAddReceipt(headers);</span>
+<span class="fc" id="L312">		Subscription subscription = new DefaultSubscription(headers, handler);</span>
+
+<span class="fc" id="L314">		StompHeaderAccessor accessor = createHeaderAccessor(StompCommand.SUBSCRIBE);</span>
+<span class="fc" id="L315">		accessor.addNativeHeaders(headers);</span>
+<span class="fc" id="L316">		Message&lt;byte[]&gt; message = createMessage(accessor, EMPTY_PAYLOAD);</span>
+<span class="fc" id="L317">		execute(message);</span>
+
+<span class="fc" id="L319">		return subscription;</span>
+	}
+
+	@Override
+	public Receiptable acknowledge(String messageId, boolean consumed) {
+<span class="fc" id="L324">		StompHeaders headers = new StompHeaders();</span>
+<span class="pc bpc" id="L325" title="1 of 2 branches missed.">		if (&quot;1.1&quot;.equals(this.version)) {</span>
+<span class="nc" id="L326">			headers.setMessageId(messageId);</span>
+		}
+		else {
+<span class="fc" id="L329">			headers.setId(messageId);</span>
+		}
+<span class="fc" id="L331">		return acknowledge(headers, consumed);</span>
+	}
+
+	@Override
+	public Receiptable acknowledge(StompHeaders headers, boolean consumed) {
+<span class="fc" id="L336">		String receiptId = checkOrAddReceipt(headers);</span>
+<span class="fc" id="L337">		Receiptable receiptable = new ReceiptHandler(receiptId);</span>
+
+<span class="fc bfc" id="L339" title="All 2 branches covered.">		StompCommand command = (consumed ? StompCommand.ACK : StompCommand.NACK);</span>
+<span class="fc" id="L340">		StompHeaderAccessor accessor = createHeaderAccessor(command);</span>
+<span class="fc" id="L341">		accessor.addNativeHeaders(headers);</span>
+<span class="fc" id="L342">		Message&lt;byte[]&gt; message = createMessage(accessor, null);</span>
+<span class="fc" id="L343">		execute(message);</span>
+
+<span class="fc" id="L345">		return receiptable;</span>
+	}
+
+	private Receiptable unsubscribe(String id, @Nullable StompHeaders headers) {
+<span class="fc" id="L349">		Assert.hasText(id, &quot;Subscription id is required&quot;);</span>
+
+<span class="fc bfc" id="L351" title="All 2 branches covered.">		if (headers == null){</span>
+<span class="fc" id="L352">			headers = new StompHeaders();</span>
+		}
+<span class="fc" id="L354">		String receiptId = checkOrAddReceipt(headers);</span>
+<span class="fc" id="L355">		Receiptable receiptable = new ReceiptHandler(receiptId);</span>
+
+<span class="fc" id="L357">		StompHeaderAccessor accessor = createHeaderAccessor(StompCommand.UNSUBSCRIBE);</span>
+<span class="fc" id="L358">		accessor.addNativeHeaders(headers);</span>
+<span class="fc" id="L359">		accessor.setSubscriptionId(id);</span>
+
+<span class="fc" id="L361">		Message&lt;byte[]&gt; message = createMessage(accessor, EMPTY_PAYLOAD);</span>
+<span class="fc" id="L362">		execute(message);</span>
+
+<span class="fc" id="L364">		return receiptable;</span>
+	}
+
+	@Override
+	public void disconnect() {
+<span class="fc" id="L369">		disconnect(null);</span>
+<span class="fc" id="L370">	}</span>
+
+	@Override
+	public void disconnect(@Nullable StompHeaders headers) {
+<span class="fc" id="L374">		this.clientSideClose = true;</span>
+		try {
+<span class="fc" id="L376">			StompHeaderAccessor accessor = createHeaderAccessor(StompCommand.DISCONNECT);</span>
+<span class="fc bfc" id="L377" title="All 2 branches covered.">			if (headers != null) {</span>
+<span class="fc" id="L378">				accessor.addNativeHeaders(headers);</span>
+			}
+<span class="fc" id="L380">			Message&lt;byte[]&gt; message = createMessage(accessor, EMPTY_PAYLOAD);</span>
+<span class="fc" id="L381">			execute(message);</span>
+		}
+		finally {
+<span class="fc" id="L384">			resetConnection();</span>
+		}
+<span class="fc" id="L386">	}</span>
+
+
+	// TcpConnectionHandler
+
+	@Override
+	public void afterConnected(TcpConnection&lt;byte[]&gt; connection) {
+<span class="fc" id="L393">		this.connection = connection;</span>
+<span class="fc bfc" id="L394" title="All 2 branches covered.">		if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L395">			logger.debug(&quot;Connection established in session id=&quot; + this.sessionId);</span>
+		}
+<span class="fc" id="L397">		StompHeaderAccessor accessor = createHeaderAccessor(StompCommand.CONNECT);</span>
+<span class="fc" id="L398">		accessor.addNativeHeaders(this.connectHeaders);</span>
+<span class="fc bfc" id="L399" title="All 2 branches covered.">		if (this.connectHeaders.getAcceptVersion() == null) {</span>
+<span class="fc" id="L400">			accessor.setAcceptVersion(&quot;1.1,1.2&quot;);</span>
+		}
+<span class="fc" id="L402">		Message&lt;byte[]&gt; message = createMessage(accessor, EMPTY_PAYLOAD);</span>
+<span class="fc" id="L403">		execute(message);</span>
+<span class="fc" id="L404">	}</span>
+
+	@Override
+	public void afterConnectFailure(Throwable ex) {
+<span class="pc bpc" id="L408" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L409">			logger.debug(&quot;Failed to connect session id=&quot; + this.sessionId, ex);</span>
+		}
+<span class="fc" id="L411">		this.sessionFuture.completeExceptionally(ex);</span>
+<span class="fc" id="L412">		this.sessionHandler.handleTransportError(this, ex);</span>
+<span class="fc" id="L413">	}</span>
+
+	@Override
+	public void handleMessage(Message&lt;byte[]&gt; message) {
+<span class="fc" id="L417">		StompHeaderAccessor accessor = MessageHeaderAccessor.getAccessor(message, StompHeaderAccessor.class);</span>
+<span class="pc bpc" id="L418" title="1 of 2 branches missed.">		Assert.state(accessor != null, &quot;No StompHeaderAccessor&quot;);</span>
+
+<span class="fc" id="L420">		accessor.setSessionId(this.sessionId);</span>
+<span class="fc" id="L421">		StompCommand command = accessor.getCommand();</span>
+<span class="fc" id="L422">		Map&lt;String, List&lt;String&gt;&gt; nativeHeaders = accessor.getNativeHeaders();</span>
+<span class="fc" id="L423">		StompHeaders headers = StompHeaders.readOnlyStompHeaders(nativeHeaders);</span>
+<span class="fc" id="L424">		boolean isHeartbeat = accessor.isHeartbeat();</span>
+<span class="fc bfc" id="L425" title="All 2 branches covered.">		if (logger.isTraceEnabled()) {</span>
+<span class="fc" id="L426">			logger.trace(&quot;Received &quot; + accessor.getDetailedLogMessage(message.getPayload()));</span>
+		}
+
+		try {
+<span class="fc bfc" id="L430" title="All 2 branches covered.">			if (StompCommand.MESSAGE.equals(command)) {</span>
+<span class="fc" id="L431">				DefaultSubscription subscription = this.subscriptions.get(headers.getSubscription());</span>
+<span class="pc bpc" id="L432" title="1 of 2 branches missed.">				if (subscription != null) {</span>
+<span class="fc" id="L433">					invokeHandler(subscription.getHandler(), message, headers);</span>
+				}
+<span class="nc bnc" id="L435" title="All 2 branches missed.">				else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L436">					logger.debug(&quot;No handler for: &quot; + accessor.getDetailedLogMessage(message.getPayload()) +</span>
+							&quot;. Perhaps just unsubscribed?&quot;);
+				}
+<span class="fc" id="L439">			}</span>
+			else {
+<span class="fc bfc" id="L441" title="All 2 branches covered.">				if (StompCommand.RECEIPT.equals(command)) {</span>
+<span class="fc" id="L442">					String receiptId = headers.getReceiptId();</span>
+<span class="fc" id="L443">					ReceiptHandler handler = this.receiptHandlers.get(receiptId);</span>
+<span class="pc bpc" id="L444" title="1 of 2 branches missed.">					if (handler != null) {</span>
+<span class="fc" id="L445">						handler.handleReceiptReceived(headers);</span>
+					}
+<span class="nc bnc" id="L447" title="All 2 branches missed.">					else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L448">						logger.debug(&quot;No matching receipt: &quot; + accessor.getDetailedLogMessage(message.getPayload()));</span>
+					}
+<span class="fc" id="L450">				}</span>
+<span class="fc bfc" id="L451" title="All 2 branches covered.">				else if (StompCommand.CONNECTED.equals(command)) {</span>
+<span class="fc" id="L452">					initHeartbeatTasks(headers);</span>
+<span class="fc" id="L453">					this.version = headers.getFirst(&quot;version&quot;);</span>
+<span class="fc" id="L454">					this.sessionFuture.complete(this);</span>
+<span class="fc" id="L455">					this.sessionHandler.afterConnected(this, headers);</span>
+				}
+<span class="pc bpc" id="L457" title="1 of 2 branches missed.">				else if (StompCommand.ERROR.equals(command)) {</span>
+<span class="fc" id="L458">					invokeHandler(this.sessionHandler, message, headers);</span>
+				}
+<span class="nc bnc" id="L460" title="All 4 branches missed.">				else if (!isHeartbeat &amp;&amp; logger.isTraceEnabled()) {</span>
+<span class="nc" id="L461">					logger.trace(&quot;Message not handled.&quot;);</span>
+				}
+			}
+		}
+<span class="fc" id="L465">		catch (Throwable ex) {</span>
+<span class="fc" id="L466">			this.sessionHandler.handleException(this, command, headers, message.getPayload(), ex);</span>
+<span class="fc" id="L467">		}</span>
+<span class="fc" id="L468">	}</span>
+
+	private void invokeHandler(StompFrameHandler handler, Message&lt;byte[]&gt; message, StompHeaders headers) {
+<span class="fc bfc" id="L471" title="All 2 branches covered.">		if (message.getPayload().length == 0) {</span>
+<span class="fc" id="L472">			handler.handleFrame(headers, null);</span>
+<span class="fc" id="L473">			return;</span>
+		}
+<span class="fc" id="L475">		Type payloadType = handler.getPayloadType(headers);</span>
+<span class="fc" id="L476">		Class&lt;?&gt; resolvedType = ResolvableType.forType(payloadType).resolve();</span>
+<span class="pc bpc" id="L477" title="1 of 2 branches missed.">		if (resolvedType == null) {</span>
+<span class="nc" id="L478">			throw new MessageConversionException(&quot;Unresolvable payload type [&quot; + payloadType +</span>
+<span class="nc" id="L479">					&quot;] from handler type [&quot; + handler.getClass() + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L481">		Object object = getMessageConverter().fromMessage(message, resolvedType);</span>
+<span class="fc bfc" id="L482" title="All 2 branches covered.">		if (object == null) {</span>
+<span class="fc" id="L483">			throw new MessageConversionException(&quot;No suitable converter for payload type [&quot; + payloadType +</span>
+<span class="fc" id="L484">					&quot;] from handler type [&quot; + handler.getClass() + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L486">		handler.handleFrame(headers, object);</span>
+<span class="fc" id="L487">	}</span>
+
+	private void initHeartbeatTasks(StompHeaders connectedHeaders) {
+<span class="fc" id="L490">		long[] connect = this.connectHeaders.getHeartbeat();</span>
+<span class="fc" id="L491">		long[] connected = connectedHeaders.getHeartbeat();</span>
+<span class="pc bpc" id="L492" title="2 of 4 branches missed.">		if (connect == null || connected == null) {</span>
+<span class="nc" id="L493">			return;</span>
+		}
+<span class="fc" id="L495">		TcpConnection&lt;byte[]&gt; con = this.connection;</span>
+<span class="pc bpc" id="L496" title="1 of 2 branches missed.">		Assert.state(con != null, &quot;No TcpConnection available&quot;);</span>
+<span class="fc bfc" id="L497" title="All 4 branches covered.">		if (connect[0] &gt; 0 &amp;&amp; connected[1] &gt; 0) {</span>
+<span class="fc" id="L498">			long interval = Math.max(connect[0], connected[1]);</span>
+<span class="fc" id="L499">			con.onWriteInactivity(new WriteInactivityTask(), interval);</span>
+		}
+<span class="fc bfc" id="L501" title="All 4 branches covered.">		if (connect[1] &gt; 0 &amp;&amp; connected[0] &gt; 0) {</span>
+<span class="fc" id="L502">			long interval = Math.max(connect[1], connected[0]) * HEARTBEAT_MULTIPLIER;</span>
+<span class="fc" id="L503">			con.onReadInactivity(new ReadInactivityTask(), interval);</span>
+		}
+<span class="fc" id="L505">	}</span>
+
+	@Override
+	public void handleFailure(Throwable ex) {
+		try {
+<span class="fc" id="L510">			this.sessionFuture.completeExceptionally(ex);  // no-op if already set</span>
+<span class="fc" id="L511">			this.sessionHandler.handleTransportError(this, ex);</span>
+		}
+<span class="nc" id="L513">		catch (Throwable ex2) {</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L515">				logger.debug(&quot;Uncaught failure while handling transport failure&quot;, ex2);</span>
+			}
+<span class="fc" id="L517">		}</span>
+<span class="fc" id="L518">	}</span>
+
+	@Override
+	public void afterConnectionClosed() {
+<span class="fc bfc" id="L522" title="All 2 branches covered.">		if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L523">			logger.debug(&quot;Connection closed in session id=&quot; + this.sessionId);</span>
+		}
+<span class="fc bfc" id="L525" title="All 2 branches covered.">		if (!this.clientSideClose) {</span>
+<span class="fc" id="L526">			resetConnection();</span>
+<span class="fc" id="L527">			handleFailure(new ConnectionLostException(&quot;Connection closed&quot;));</span>
+		}
+<span class="fc" id="L529">	}</span>
+
+	private void resetConnection() {
+<span class="fc" id="L532">		TcpConnection&lt;?&gt; conn = this.connection;</span>
+<span class="fc" id="L533">		this.connection = null;</span>
+<span class="fc bfc" id="L534" title="All 2 branches covered.">		if (conn != null) {</span>
+			try {
+<span class="fc" id="L536">				conn.close();</span>
+			}
+<span class="nc" id="L538">			catch (Throwable ignored) {</span>
+<span class="fc" id="L539">			}</span>
+		}
+<span class="fc" id="L541">	}</span>
+
+
+	private class ReceiptHandler implements Receiptable {
+
+		private final @Nullable String receiptId;
+
+<span class="fc" id="L548">		private final List&lt;Consumer&lt;StompHeaders&gt;&gt; receiptCallbacks = new ArrayList&lt;&gt;(2);</span>
+
+<span class="fc" id="L550">		private final List&lt;Runnable&gt; receiptLostCallbacks = new ArrayList&lt;&gt;(2);</span>
+
+		private @Nullable ScheduledFuture&lt;?&gt; future;
+
+		private @Nullable Boolean result;
+
+		private @Nullable StompHeaders receiptHeaders;
+
+<span class="fc" id="L558">		public ReceiptHandler(@Nullable String receiptId) {</span>
+<span class="fc" id="L559">			this.receiptId = receiptId;</span>
+<span class="fc bfc" id="L560" title="All 2 branches covered.">			if (receiptId != null) {</span>
+<span class="fc" id="L561">				initReceiptHandling();</span>
+			}
+<span class="fc" id="L563">		}</span>
+
+		private void initReceiptHandling() {
+<span class="fc" id="L566">			Assert.notNull(getTaskScheduler(), &quot;To track receipts, a TaskScheduler must be configured&quot;);</span>
+<span class="fc" id="L567">			DefaultStompSession.this.receiptHandlers.put(this.receiptId, this);</span>
+<span class="fc" id="L568">			Instant startTime = Instant.now().plusMillis(getReceiptTimeLimit());</span>
+<span class="fc" id="L569">			this.future = getTaskScheduler().schedule(this::handleReceiptNotReceived, startTime);</span>
+<span class="fc" id="L570">		}</span>
+
+		@Override
+		public @Nullable String getReceiptId() {
+<span class="fc" id="L574">			return this.receiptId;</span>
+		}
+
+		@Override
+		public void addReceiptTask(Runnable task) {
+<span class="fc" id="L579">			addReceiptTask(headers -&gt; task.run());</span>
+<span class="fc" id="L580">		}</span>
+
+		@Override
+		public void addReceiptTask(Consumer&lt;StompHeaders&gt; task) {
+<span class="fc" id="L584">			Assert.notNull(this.receiptId, &quot;Set autoReceiptEnabled to track receipts or add a 'receiptId' header&quot;);</span>
+<span class="fc" id="L585">			synchronized (this) {</span>
+<span class="fc bfc" id="L586" title="All 2 branches covered.">				if (this.result != null) {</span>
+<span class="pc bpc" id="L587" title="1 of 2 branches missed.">					if (this.result) {</span>
+<span class="fc" id="L588">						task.accept(this.receiptHeaders);</span>
+					}
+				}
+				else {
+<span class="fc" id="L592">					this.receiptCallbacks.add(task);</span>
+				}
+<span class="fc" id="L594">			}</span>
+<span class="fc" id="L595">		}</span>
+
+		@Override
+		public void addReceiptLostTask(Runnable task) {
+<span class="fc" id="L599">			synchronized (this) {</span>
+<span class="pc bpc" id="L600" title="1 of 2 branches missed.">				if (this.result != null) {</span>
+<span class="nc bnc" id="L601" title="All 2 branches missed.">					if (!this.result) {</span>
+<span class="nc" id="L602">						task.run();</span>
+					}
+				}
+				else {
+<span class="fc" id="L606">					this.receiptLostCallbacks.add(task);</span>
+				}
+<span class="fc" id="L608">			}</span>
+<span class="fc" id="L609">		}</span>
+
+		public void handleReceiptReceived(StompHeaders receiptHeaders) {
+<span class="fc" id="L612">			handleInternal(true, receiptHeaders);</span>
+<span class="fc" id="L613">		}</span>
+
+		public void handleReceiptNotReceived() {
+<span class="fc" id="L616">			handleInternal(false, null);</span>
+<span class="fc" id="L617">		}</span>
+
+		private void handleInternal(boolean result, @Nullable StompHeaders receiptHeaders) {
+<span class="fc" id="L620">			synchronized (this) {</span>
+<span class="pc bpc" id="L621" title="1 of 2 branches missed.">				if (this.result != null) {</span>
+<span class="nc" id="L622">					return;</span>
+				}
+<span class="fc" id="L624">				this.result = result;</span>
+<span class="fc" id="L625">				this.receiptHeaders = receiptHeaders;</span>
+<span class="fc bfc" id="L626" title="All 2 branches covered.">				if (result) {</span>
+<span class="fc" id="L627">					this.receiptCallbacks.forEach(consumer -&gt; {</span>
+						try {
+<span class="fc" id="L629">							consumer.accept(this.receiptHeaders);</span>
+						}
+<span class="nc" id="L631">						catch (Throwable ex) {</span>
+							// ignore
+<span class="fc" id="L633">						}</span>
+<span class="fc" id="L634">					});</span>
+				}
+				else {
+<span class="fc" id="L637">					this.receiptLostCallbacks.forEach(task -&gt; {</span>
+						try {
+<span class="fc" id="L639">							task.run();</span>
+						}
+<span class="nc" id="L641">						catch (Throwable ex) {</span>
+							// ignore
+<span class="fc" id="L643">						}</span>
+<span class="fc" id="L644">					});</span>
+				}
+<span class="fc" id="L646">				DefaultStompSession.this.receiptHandlers.remove(this.receiptId);</span>
+<span class="fc bfc" id="L647" title="All 2 branches covered.">				if (this.future != null) {</span>
+<span class="fc" id="L648">					this.future.cancel(true);</span>
+				}
+<span class="fc" id="L650">			}</span>
+<span class="fc" id="L651">		}</span>
+
+	}
+
+
+	private class DefaultSubscription extends ReceiptHandler implements Subscription {
+
+		private final StompHeaders headers;
+
+		private final StompFrameHandler handler;
+
+<span class="fc" id="L662">		public DefaultSubscription(StompHeaders headers, StompFrameHandler handler) {</span>
+<span class="fc" id="L663">			super(headers.getReceipt());</span>
+<span class="fc" id="L664">			Assert.notNull(headers.getDestination(), &quot;Destination must not be null&quot;);</span>
+<span class="fc" id="L665">			Assert.notNull(handler, &quot;StompFrameHandler must not be null&quot;);</span>
+<span class="fc" id="L666">			this.headers = headers;</span>
+<span class="fc" id="L667">			this.handler = handler;</span>
+<span class="fc" id="L668">			DefaultStompSession.this.subscriptions.put(headers.getId(), this);</span>
+<span class="fc" id="L669">		}</span>
+
+		@Override
+		public @Nullable String getSubscriptionId() {
+<span class="fc" id="L673">			return this.headers.getId();</span>
+		}
+
+		@Override
+		public StompHeaders getSubscriptionHeaders() {
+<span class="fc" id="L678">			return this.headers;</span>
+		}
+
+		public StompFrameHandler getHandler() {
+<span class="fc" id="L682">			return this.handler;</span>
+		}
+
+		@Override
+		public Receiptable unsubscribe() {
+<span class="fc" id="L687">			return unsubscribe(null);</span>
+		}
+
+		@Override
+		public Receiptable unsubscribe(@Nullable StompHeaders headers) {
+<span class="fc" id="L692">			String id = this.headers.getId();</span>
+<span class="fc" id="L693">			Receiptable receiptable = new ReceiptHandler(null);</span>
+<span class="pc bpc" id="L694" title="1 of 2 branches missed.">			if (id != null) {</span>
+<span class="fc" id="L695">				DefaultStompSession.this.subscriptions.remove(id);</span>
+<span class="fc" id="L696">				receiptable = DefaultStompSession.this.unsubscribe(id, headers);</span>
+			}
+<span class="fc" id="L698">			return receiptable;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L703">			return &quot;Subscription [id=&quot; + getSubscriptionId() +</span>
+<span class="nc" id="L704">					&quot;, destination='&quot; + this.headers.getDestination() +</span>
+<span class="nc" id="L705">					&quot;', receiptId='&quot; + getReceiptId() + &quot;', handler=&quot; + getHandler() + &quot;]&quot;;</span>
+		}
+	}
+
+
+<span class="fc" id="L710">	private class WriteInactivityTask implements Runnable {</span>
+
+		@Override
+		public void run() {
+<span class="fc" id="L714">			TcpConnection&lt;byte[]&gt; conn = connection;</span>
+<span class="pc bpc" id="L715" title="1 of 2 branches missed.">			if (conn != null) {</span>
+<span class="fc" id="L716">				conn.sendAsync(HEARTBEAT).whenComplete((unused, ex) -&gt; {</span>
+<span class="pc bpc" id="L717" title="1 of 2 branches missed.">					if (ex != null) {</span>
+<span class="nc" id="L718">						String msg = &quot;Heartbeat write failure. Closing connection in session id=&quot; + sessionId + &quot;.&quot;;</span>
+<span class="nc bnc" id="L719" title="All 2 branches missed.">						if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L720">							logger.debug(msg);</span>
+						}
+<span class="nc" id="L722">						resetConnection();</span>
+<span class="nc" id="L723">						handleFailure(new ConnectionLostException(msg, ex));</span>
+					}
+<span class="fc" id="L725">				});</span>
+			}
+<span class="fc" id="L727">		}</span>
+	}
+
+
+<span class="fc" id="L731">	private class ReadInactivityTask implements Runnable {</span>
+
+		@Override
+		public void run() {
+<span class="fc" id="L735">			String msg = &quot;Read inactivity. Closing connection in session id=&quot; + sessionId + &quot;.&quot;;</span>
+<span class="pc bpc" id="L736" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L737">				logger.debug(msg);</span>
+			}
+<span class="fc" id="L739">			clientSideClose = true;</span>
+<span class="fc" id="L740">			resetConnection();</span>
+<span class="fc" id="L741">			handleFailure(new ConnectionLostException(msg));</span>
+<span class="fc" id="L742">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

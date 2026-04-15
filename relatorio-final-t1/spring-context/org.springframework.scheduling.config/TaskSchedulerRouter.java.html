@@ -1,0 +1,260 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>TaskSchedulerRouter.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-context</a> &gt; <a href="index.source.html" class="el_package">org.springframework.scheduling.config</a> &gt; <span class="el_source">TaskSchedulerRouter.java</span></div><h1>TaskSchedulerRouter.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.scheduling.config;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.function.Supplier;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.BeanNameAware;
+import org.springframework.beans.factory.BeanNotOfRequiredTypeException;
+import org.springframework.beans.factory.DisposableBean;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
+import org.springframework.beans.factory.annotation.BeanFactoryAnnotationUtils;
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.config.EmbeddedValueResolver;
+import org.springframework.beans.factory.config.NamedBeanHolder;
+import org.springframework.scheduling.SchedulingAwareRunnable;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.Trigger;
+import org.springframework.scheduling.concurrent.ConcurrentTaskScheduler;
+import org.springframework.util.Assert;
+import org.springframework.util.StringUtils;
+import org.springframework.util.StringValueResolver;
+import org.springframework.util.function.SingletonSupplier;
+
+/**
+ * A routing implementation of the {@link TaskScheduler} interface,
+ * delegating to a target scheduler based on an identified qualifier
+ * or using a default scheduler otherwise.
+ *
+ * @author Juergen Hoeller
+ * @since 6.1
+ * @see SchedulingAwareRunnable#getQualifier()
+ */
+<span class="fc" id="L60">public class TaskSchedulerRouter implements TaskScheduler, BeanNameAware, BeanFactoryAware, DisposableBean {</span>
+
+	/**
+	 * The default name of the {@link TaskScheduler} bean to pick up: {@value}.
+	 * &lt;p&gt;Note that the initial lookup happens by type; this is just the fallback
+	 * in case of multiple scheduler beans found in the context.
+	 */
+	public static final String DEFAULT_TASK_SCHEDULER_BEAN_NAME = &quot;taskScheduler&quot;;
+
+
+<span class="fc" id="L70">	protected static final Log logger = LogFactory.getLog(TaskSchedulerRouter.class);</span>
+
+	private @Nullable String beanName;
+
+	private @Nullable BeanFactory beanFactory;
+
+	private @Nullable StringValueResolver embeddedValueResolver;
+
+<span class="fc" id="L78">	private final Supplier&lt;TaskScheduler&gt; defaultScheduler = SingletonSupplier.of(this::determineDefaultScheduler);</span>
+
+	private volatile @Nullable ScheduledExecutorService localExecutor;
+
+
+	/**
+	 * The bean name for this router, or the bean name of the containing
+	 * bean if the router instance is internally held.
+	 */
+	@Override
+	public void setBeanName(@Nullable String name) {
+<span class="fc" id="L89">		this.beanName = name;</span>
+<span class="fc" id="L90">	}</span>
+
+	/**
+	 * The bean factory for scheduler lookups.
+	 */
+	@Override
+	public void setBeanFactory(@Nullable BeanFactory beanFactory) {
+<span class="fc" id="L97">		this.beanFactory = beanFactory;</span>
+<span class="pc bpc" id="L98" title="1 of 2 branches missed.">		if (beanFactory instanceof ConfigurableBeanFactory configurableBeanFactory) {</span>
+<span class="fc" id="L99">			this.embeddedValueResolver = new EmbeddedValueResolver(configurableBeanFactory);</span>
+		}
+<span class="fc" id="L101">	}</span>
+
+
+	@Override
+	public @Nullable ScheduledFuture&lt;?&gt; schedule(Runnable task, Trigger trigger) {
+<span class="fc" id="L106">		return determineTargetScheduler(task).schedule(task, trigger);</span>
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; schedule(Runnable task, Instant startTime) {
+<span class="fc" id="L111">		return determineTargetScheduler(task).schedule(task, startTime);</span>
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleAtFixedRate(Runnable task, Instant startTime, Duration period) {
+<span class="fc" id="L116">		return determineTargetScheduler(task).scheduleAtFixedRate(task, startTime, period);</span>
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleAtFixedRate(Runnable task, Duration period) {
+<span class="fc" id="L121">		return determineTargetScheduler(task).scheduleAtFixedRate(task, period);</span>
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleWithFixedDelay(Runnable task, Instant startTime, Duration delay) {
+<span class="fc" id="L126">		return determineTargetScheduler(task).scheduleWithFixedDelay(task, startTime, delay);</span>
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleWithFixedDelay(Runnable task, Duration delay) {
+<span class="nc" id="L131">		return determineTargetScheduler(task).scheduleWithFixedDelay(task, delay);</span>
+	}
+
+
+	protected TaskScheduler determineTargetScheduler(Runnable task) {
+<span class="fc" id="L136">		String qualifier = determineQualifier(task);</span>
+<span class="pc bpc" id="L137" title="2 of 4 branches missed.">		if (this.embeddedValueResolver != null &amp;&amp; StringUtils.hasLength(qualifier)) {</span>
+<span class="nc" id="L138">			qualifier = this.embeddedValueResolver.resolveStringValue(qualifier);</span>
+		}
+<span class="pc bpc" id="L140" title="1 of 2 branches missed.">		if (StringUtils.hasLength(qualifier)) {</span>
+<span class="nc" id="L141">			return determineQualifiedScheduler(qualifier);</span>
+		}
+		else {
+<span class="fc" id="L144">			return this.defaultScheduler.get();</span>
+		}
+	}
+
+	protected @Nullable String determineQualifier(Runnable task) {
+<span class="pc bpc" id="L149" title="1 of 2 branches missed.">		return (task instanceof SchedulingAwareRunnable sar ? sar.getQualifier() : null);</span>
+	}
+
+	protected TaskScheduler determineQualifiedScheduler(String qualifier) {
+<span class="nc bnc" id="L153" title="All 2 branches missed.">		Assert.state(this.beanFactory != null, &quot;BeanFactory must be set to find qualified scheduler&quot;);</span>
+		try {
+<span class="nc" id="L155">			return BeanFactoryAnnotationUtils.qualifiedBeanOfType(this.beanFactory, TaskScheduler.class, qualifier);</span>
+		}
+<span class="nc" id="L157">		catch (NoSuchBeanDefinitionException | BeanNotOfRequiredTypeException ex) {</span>
+<span class="nc" id="L158">			return new ConcurrentTaskScheduler(BeanFactoryAnnotationUtils.qualifiedBeanOfType(</span>
+					this.beanFactory, ScheduledExecutorService.class, qualifier));
+		}
+	}
+
+	protected TaskScheduler determineDefaultScheduler() {
+<span class="pc bpc" id="L164" title="1 of 2 branches missed.">		Assert.state(this.beanFactory != null, &quot;BeanFactory must be set to find default scheduler&quot;);</span>
+		try {
+			// Search for TaskScheduler bean...
+<span class="nc" id="L167">			return resolveSchedulerBean(this.beanFactory, TaskScheduler.class, false);</span>
+		}
+<span class="fc" id="L169">		catch (NoUniqueBeanDefinitionException ex) {</span>
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L171">				logger.trace(&quot;Could not find unique TaskScheduler bean - attempting to resolve by name: &quot; +</span>
+<span class="nc" id="L172">						ex.getMessage());</span>
+			}
+			try {
+<span class="nc" id="L175">				return resolveSchedulerBean(this.beanFactory, TaskScheduler.class, true);</span>
+			}
+<span class="fc" id="L177">			catch (NoSuchBeanDefinitionException ex2) {</span>
+<span class="pc bpc" id="L178" title="1 of 2 branches missed.">				if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L179">					logger.info(&quot;More than one TaskScheduler bean exists within the context, and &quot; +</span>
+							&quot;none is named 'taskScheduler'. Mark one of them as primary or name it 'taskScheduler' &quot; +
+							&quot;(possibly as an alias); or implement the SchedulingConfigurer interface and call &quot; +
+							&quot;ScheduledTaskRegistrar#setScheduler explicitly within the configureTasks() callback: &quot; +
+<span class="nc" id="L183">							ex.getBeanNamesFound());</span>
+				}
+			}
+		}
+<span class="fc" id="L187">		catch (NoSuchBeanDefinitionException ex) {</span>
+<span class="pc bpc" id="L188" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L189">				logger.trace(&quot;Could not find default TaskScheduler bean - attempting to find ScheduledExecutorService: &quot; +</span>
+<span class="nc" id="L190">						ex.getMessage());</span>
+			}
+			// Search for ScheduledExecutorService bean next...
+			try {
+<span class="nc" id="L194">				return new ConcurrentTaskScheduler(resolveSchedulerBean(this.beanFactory, ScheduledExecutorService.class, false));</span>
+			}
+<span class="nc" id="L196">			catch (NoUniqueBeanDefinitionException ex2) {</span>
+<span class="nc bnc" id="L197" title="All 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L198">					logger.trace(&quot;Could not find unique ScheduledExecutorService bean - attempting to resolve by name: &quot; +</span>
+<span class="nc" id="L199">							ex2.getMessage());</span>
+				}
+				try {
+<span class="nc" id="L202">					return new ConcurrentTaskScheduler(resolveSchedulerBean(this.beanFactory, ScheduledExecutorService.class, true));</span>
+				}
+<span class="nc" id="L204">				catch (NoSuchBeanDefinitionException ex3) {</span>
+<span class="nc bnc" id="L205" title="All 2 branches missed.">					if (logger.isInfoEnabled()) {</span>
+<span class="nc" id="L206">						logger.info(&quot;More than one ScheduledExecutorService bean exists within the context, and &quot; +</span>
+								&quot;none is named 'taskScheduler'. Mark one of them as primary or name it 'taskScheduler' &quot; +
+								&quot;(possibly as an alias); or implement the SchedulingConfigurer interface and call &quot; +
+								&quot;ScheduledTaskRegistrar#setScheduler explicitly within the configureTasks() callback: &quot; +
+<span class="nc" id="L210">								ex2.getBeanNamesFound());</span>
+					}
+				}
+			}
+<span class="fc" id="L214">			catch (NoSuchBeanDefinitionException ex2) {</span>
+<span class="pc bpc" id="L215" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L216">					logger.trace(&quot;Could not find default ScheduledExecutorService bean - falling back to default: &quot; +</span>
+<span class="nc" id="L217">							ex2.getMessage());</span>
+				}
+<span class="fc" id="L219">				logger.info(&quot;No TaskScheduler/ScheduledExecutorService bean found for scheduled processing&quot;);</span>
+<span class="nc" id="L220">			}</span>
+<span class="fc" id="L221">		}</span>
+<span class="fc" id="L222">		ScheduledExecutorService localExecutor = Executors.newSingleThreadScheduledExecutor();</span>
+<span class="fc" id="L223">		this.localExecutor = localExecutor;</span>
+<span class="fc" id="L224">		return new ConcurrentTaskScheduler(localExecutor);</span>
+	}
+
+	private &lt;T&gt; T resolveSchedulerBean(BeanFactory beanFactory, Class&lt;T&gt; schedulerType, boolean byName) {
+<span class="fc bfc" id="L228" title="All 2 branches covered.">		if (byName) {</span>
+<span class="nc" id="L229">			T scheduler = beanFactory.getBean(DEFAULT_TASK_SCHEDULER_BEAN_NAME, schedulerType);</span>
+<span class="nc bnc" id="L230" title="All 4 branches missed.">			if (this.beanName != null &amp;&amp; this.beanFactory instanceof ConfigurableBeanFactory cbf) {</span>
+<span class="nc" id="L231">				cbf.registerDependentBean(DEFAULT_TASK_SCHEDULER_BEAN_NAME, this.beanName);</span>
+			}
+<span class="nc" id="L233">			return scheduler;</span>
+		}
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">		else if (beanFactory instanceof AutowireCapableBeanFactory acbf) {</span>
+<span class="nc" id="L236">			NamedBeanHolder&lt;T&gt; holder = acbf.resolveNamedBean(schedulerType);</span>
+<span class="nc bnc" id="L237" title="All 4 branches missed.">			if (this.beanName != null &amp;&amp; beanFactory instanceof ConfigurableBeanFactory cbf) {</span>
+<span class="nc" id="L238">				cbf.registerDependentBean(holder.getBeanName(), this.beanName);</span>
+			}
+<span class="nc" id="L240">			return holder.getBeanInstance();</span>
+		}
+		else {
+<span class="nc" id="L243">			return beanFactory.getBean(schedulerType);</span>
+		}
+	}
+
+
+	/**
+	 * Destroy the local default executor, if any.
+	 */
+	@Override
+	public void destroy() {
+<span class="fc" id="L253">		ScheduledExecutorService localExecutor = this.localExecutor;</span>
+<span class="fc bfc" id="L254" title="All 2 branches covered.">		if (localExecutor != null) {</span>
+<span class="fc" id="L255">			localExecutor.shutdownNow();</span>
+		}
+<span class="fc" id="L257">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

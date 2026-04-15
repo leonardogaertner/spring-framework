@@ -1,0 +1,500 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>TransactionalTestExecutionListener.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-test</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context.transaction</a> &gt; <span class="el_source">TransactionalTestExecutionListener.java</span></div><h1>TransactionalTestExecutionListener.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context.transaction;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.annotation.BeanFactoryAnnotationUtils;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.test.annotation.Commit;
+import org.springframework.test.annotation.Rollback;
+import org.springframework.test.context.TestContext;
+import org.springframework.test.context.TestContextAnnotationUtils;
+import org.springframework.test.context.support.AbstractTestExecutionListener;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.interceptor.TransactionAttribute;
+import org.springframework.transaction.interceptor.TransactionAttributeSource;
+import org.springframework.util.Assert;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.ReflectionUtils.MethodFilter;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@code TestExecutionListener} that provides support for executing tests
+ * within &lt;em&gt;test-managed transactions&lt;/em&gt; by honoring Spring's
+ * {@link Transactional @Transactional} annotation.
+ *
+ * &lt;h3&gt;Test-managed Transactions&lt;/h3&gt;
+ * &lt;p&gt;&lt;em&gt;Test-managed transactions&lt;/em&gt; are transactions that are managed
+ * declaratively via this listener or programmatically via
+ * {@link TestTransaction}. Such transactions should not be confused with
+ * &lt;em&gt;Spring-managed transactions&lt;/em&gt; (i.e., those managed directly
+ * by Spring within the {@code ApplicationContext} loaded for tests) or
+ * &lt;em&gt;application-managed transactions&lt;/em&gt; (i.e., those managed
+ * programmatically within application code that is invoked via tests).
+ * Spring-managed and application-managed transactions will typically
+ * participate in test-managed transactions; however, caution should be
+ * taken if Spring-managed or application-managed transactions are
+ * configured with any propagation type other than
+ * {@link org.springframework.transaction.annotation.Propagation#REQUIRED REQUIRED}
+ * or {@link org.springframework.transaction.annotation.Propagation#SUPPORTS SUPPORTS}.
+ *
+ * &lt;h3&gt;Enabling and Disabling Transactions&lt;/h3&gt;
+ * &lt;p&gt;Annotating a test method with {@code @Transactional} causes the test
+ * to be run within a transaction that will, by default, be automatically
+ * &lt;em&gt;rolled back&lt;/em&gt; after completion of the test. If a test class is
+ * annotated with {@code @Transactional}, each test method within that class
+ * hierarchy or nested class hierarchy will be run within a transaction. Test
+ * methods that are &lt;em&gt;not&lt;/em&gt; annotated with {@code @Transactional} (at the
+ * class or method level) will not be run within a transaction. Furthermore,
+ * tests that &lt;em&gt;are&lt;/em&gt; annotated with {@code @Transactional} but have the
+ * {@link Transactional#propagation propagation} type set to
+ * {@link org.springframework.transaction.annotation.Propagation#NOT_SUPPORTED NOT_SUPPORTED}
+ * or {@link org.springframework.transaction.annotation.Propagation#NEVER NEVER}
+ * will not be run within a transaction.
+ *
+ * &lt;h3&gt;Declarative Rollback and Commit Behavior&lt;/h3&gt;
+ * &lt;p&gt;By default, test transactions will be automatically &lt;em&gt;rolled back&lt;/em&gt;
+ * after completion of the test; however, transactional commit and rollback
+ * behavior can be configured declaratively via the {@link Commit @Commit}
+ * and {@link Rollback @Rollback} annotations at the class level and at the
+ * method level.
+ *
+ * &lt;h3&gt;Programmatic Transaction Management&lt;/h3&gt;
+ * &lt;p&gt;As of Spring Framework 4.1, it is possible to interact with test-managed
+ * transactions programmatically via the static methods in {@link TestTransaction}.
+ * {@code TestTransaction} may be used within &lt;em&gt;test&lt;/em&gt; methods,
+ * &lt;em&gt;before&lt;/em&gt; methods, and &lt;em&gt;after&lt;/em&gt; methods.
+ *
+ * &lt;h3&gt;Executing Code outside of a Transaction&lt;/h3&gt;
+ * &lt;p&gt;When executing transactional tests, it is sometimes useful to be able to
+ * execute certain &lt;em&gt;set up&lt;/em&gt; or &lt;em&gt;tear down&lt;/em&gt; code outside a
+ * transaction. {@code TransactionalTestExecutionListener} provides such
+ * support for methods annotated with {@link BeforeTransaction @BeforeTransaction}
+ * or {@link AfterTransaction @AfterTransaction}. {@code @BeforeTransaction} and
+ * {@code @AfterTransaction} may also be declared on interface default methods.
+ *
+ * &lt;h3&gt;Configuring a Transaction Manager&lt;/h3&gt;
+ * &lt;p&gt;{@code TransactionalTestExecutionListener} expects a
+ * {@link PlatformTransactionManager} bean to be defined in the Spring
+ * {@code ApplicationContext} for the test. In case there are multiple
+ * instances of {@code PlatformTransactionManager} within the test's
+ * {@code ApplicationContext}, a &lt;em&gt;qualifier&lt;/em&gt; may be declared via
+ * {@link Transactional @Transactional} (for example, {@code @Transactional(&quot;myTxMgr&quot;)}
+ * or {@code @Transactional(transactionManager = &quot;myTxMgr&quot;)}, or
+ * {@link org.springframework.transaction.annotation.TransactionManagementConfigurer
+ * TransactionManagementConfigurer} can be implemented by an
+ * {@link org.springframework.context.annotation.Configuration @Configuration}
+ * class. See {@link TestContextTransactionUtils#retrieveTransactionManager}
+ * for details on the algorithm used to look up a transaction manager in
+ * the test's {@code ApplicationContext}.
+ *
+ * &lt;h3&gt;{@code @Transactional} Attribute Support&lt;/h3&gt;
+ * &lt;table border=&quot;1&quot;&gt;
+ * &lt;tr&gt;&lt;th&gt;Attribute&lt;/th&gt;&lt;th&gt;Supported for test-managed transactions&lt;/th&gt;&lt;/tr&gt;
+ * &lt;tr&gt;&lt;td&gt;{@link Transactional#value value} and {@link Transactional#transactionManager transactionManager}&lt;/td&gt;&lt;td&gt;yes&lt;/td&gt;&lt;/tr&gt;
+ * &lt;tr&gt;&lt;td&gt;{@link Transactional#propagation propagation}&lt;/td&gt;
+ * &lt;td&gt;only {@link org.springframework.transaction.annotation.Propagation#NOT_SUPPORTED NOT_SUPPORTED}
+ * and {@link org.springframework.transaction.annotation.Propagation#NEVER NEVER} are supported&lt;/td&gt;&lt;/tr&gt;
+ * &lt;tr&gt;&lt;td&gt;{@link Transactional#isolation isolation}&lt;/td&gt;&lt;td&gt;no&lt;/td&gt;&lt;/tr&gt;
+ * &lt;tr&gt;&lt;td&gt;{@link Transactional#timeout timeout}&lt;/td&gt;&lt;td&gt;no&lt;/td&gt;&lt;/tr&gt;
+ * &lt;tr&gt;&lt;td&gt;{@link Transactional#readOnly readOnly}&lt;/td&gt;&lt;td&gt;no&lt;/td&gt;&lt;/tr&gt;
+ * &lt;tr&gt;&lt;td&gt;{@link Transactional#rollbackFor rollbackFor} and {@link Transactional#rollbackForClassName rollbackForClassName}&lt;/td&gt;
+ * &lt;td&gt;no: use {@link TestTransaction#flagForRollback()} instead&lt;/td&gt;&lt;/tr&gt;
+ * &lt;tr&gt;&lt;td&gt;{@link Transactional#noRollbackFor noRollbackFor} and {@link Transactional#noRollbackForClassName noRollbackForClassName}&lt;/td&gt;
+ * &lt;td&gt;no: use {@link TestTransaction#flagForCommit()} instead&lt;/td&gt;&lt;/tr&gt;
+ * &lt;/table&gt;
+ *
+ * @author Sam Brannen
+ * @author Juergen Hoeller
+ * @since 2.5
+ * @see org.springframework.transaction.annotation.TransactionManagementConfigurer
+ * @see org.springframework.transaction.annotation.Transactional
+ * @see org.springframework.test.annotation.Commit
+ * @see org.springframework.test.annotation.Rollback
+ * @see BeforeTransaction
+ * @see AfterTransaction
+ * @see TestTransaction
+ */
+<span class="fc" id="L148">public class TransactionalTestExecutionListener extends AbstractTestExecutionListener {</span>
+
+	/**
+	 * The {@link #getOrder() order} value for this listener: {@value}.
+	 * @since 6.2.3
+	 */
+	public static final int ORDER = 4000;
+
+<span class="fc" id="L156">	private static final Log logger = LogFactory.getLog(TransactionalTestExecutionListener.class);</span>
+
+	// Do not require @Transactional test methods to be public.
+<span class="fc" id="L159">	@SuppressWarnings(&quot;serial&quot;)</span>
+<span class="fc" id="L160">	protected final TransactionAttributeSource attributeSource = new AnnotationTransactionAttributeSource(false) {</span>
+
+		@Override
+		protected @Nullable TransactionAttribute findTransactionAttribute(Class&lt;?&gt; clazz) {
+			// @Transactional present in inheritance hierarchy?
+<span class="fc" id="L165">			TransactionAttribute result = super.findTransactionAttribute(clazz);</span>
+<span class="fc bfc" id="L166" title="All 2 branches covered.">			if (result != null) {</span>
+<span class="fc" id="L167">				return result;</span>
+			}
+			// @Transactional present in enclosing class hierarchy?
+<span class="fc" id="L170">			return findTransactionAttributeInEnclosingClassHierarchy(clazz);</span>
+		}
+
+		private @Nullable TransactionAttribute findTransactionAttributeInEnclosingClassHierarchy(Class&lt;?&gt; clazz) {
+<span class="fc bfc" id="L174" title="All 2 branches covered.">			if (TestContextAnnotationUtils.searchEnclosingClass(clazz)) {</span>
+<span class="fc" id="L175">				return findTransactionAttribute(clazz.getEnclosingClass());</span>
+			}
+<span class="fc" id="L177">			return null;</span>
+		}
+	};
+
+
+	/**
+	 * Returns {@value #ORDER}, which ensures that the {@code TransactionalTestExecutionListener}
+	 * is ordered after the
+	 * {@link org.springframework.test.context.support.CommonCachesTestExecutionListener
+	 * CommonCachesTestExecutionListener} and before the
+	 * {@link org.springframework.test.context.jdbc.SqlScriptsTestExecutionListener
+	 * SqlScriptsTestExecutionListener}.
+	 */
+	@Override
+	public final int getOrder() {
+<span class="fc" id="L192">		return ORDER;</span>
+	}
+
+	/**
+	 * If the test method of the supplied {@linkplain TestContext test context}
+	 * is configured to run within a transaction, this method will run
+	 * {@link BeforeTransaction @BeforeTransaction} methods and start a new
+	 * transaction.
+	 * &lt;p&gt;Note that if a {@code @BeforeTransaction} method fails, any remaining
+	 * {@code @BeforeTransaction} methods will not be invoked, and a transaction
+	 * will not be started.
+	 * @see Transactional @Transactional
+	 * @see #getTransactionManager(TestContext, String)
+	 */
+	@Override
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	public void beforeTestMethod(final TestContext testContext) throws Exception {
+<span class="fc" id="L209">		Method testMethod = testContext.getTestMethod();</span>
+<span class="fc" id="L210">		Class&lt;?&gt; testClass = testContext.getTestClass();</span>
+<span class="fc" id="L211">		Assert.notNull(testMethod, &quot;Test method of supplied TestContext must not be null&quot;);</span>
+
+<span class="fc" id="L213">		TransactionContext txContext = TransactionContextHolder.removeCurrentTransactionContext();</span>
+<span class="pc bpc" id="L214" title="1 of 2 branches missed.">		Assert.state(txContext == null, &quot;Cannot start new transaction without ending existing transaction&quot;);</span>
+
+<span class="fc" id="L216">		PlatformTransactionManager tm = null;</span>
+<span class="fc" id="L217">		TransactionAttribute transactionAttribute = this.attributeSource.getTransactionAttribute(testMethod, testClass);</span>
+
+<span class="fc bfc" id="L219" title="All 2 branches covered.">		if (transactionAttribute != null) {</span>
+<span class="fc" id="L220">			transactionAttribute = TestContextTransactionUtils.createDelegatingTransactionAttribute(testContext,</span>
+				transactionAttribute);
+
+<span class="pc bpc" id="L223" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L224">				logger.trace(&quot;Explicit transaction definition [%s] found for test context %s&quot;</span>
+<span class="nc" id="L225">						.formatted(transactionAttribute, testContext));</span>
+			}
+<span class="pc bpc" id="L227" title="1 of 2 branches missed.">			else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L228">				logger.debug(&quot;Explicit transaction definition [%s] found for test class [%s] and test method [%s]&quot;</span>
+<span class="nc" id="L229">						.formatted(transactionAttribute, testClass.getName(), testMethod.getName()));</span>
+			}
+
+<span class="fc bfc" id="L232" title="All 2 branches covered.">			if (transactionAttribute.getPropagationBehavior() == TransactionDefinition.PROPAGATION_NOT_SUPPORTED ||</span>
+<span class="fc bfc" id="L233" title="All 2 branches covered.">					transactionAttribute.getPropagationBehavior() == TransactionDefinition.PROPAGATION_NEVER) {</span>
+<span class="fc" id="L234">				return;</span>
+			}
+
+<span class="fc" id="L237">			tm = getTransactionManager(testContext, transactionAttribute.getQualifier());</span>
+<span class="fc bfc" id="L238" title="All 2 branches covered.">			Assert.state(tm != null,</span>
+<span class="fc" id="L239">					() -&gt; &quot;Failed to retrieve PlatformTransactionManager for @Transactional test: &quot; + testContext);</span>
+		}
+
+<span class="fc bfc" id="L242" title="All 2 branches covered.">		if (tm != null) {</span>
+<span class="fc" id="L243">			txContext = new TransactionContext(testContext, tm, transactionAttribute, isRollback(testContext));</span>
+<span class="fc" id="L244">			runBeforeTransactionMethods(testContext);</span>
+<span class="fc" id="L245">			txContext.startTransaction();</span>
+<span class="fc" id="L246">			TransactionContextHolder.setCurrentTransactionContext(txContext);</span>
+		}
+<span class="fc" id="L248">	}</span>
+
+	/**
+	 * If a transaction is currently active for the supplied
+	 * {@linkplain TestContext test context}, this method will end the transaction
+	 * and run {@link AfterTransaction @AfterTransaction} methods.
+	 * &lt;p&gt;{@code @AfterTransaction} methods are guaranteed to be invoked even if
+	 * an error occurs while ending the transaction.
+	 */
+	@Override
+	public void afterTestMethod(TestContext testContext) throws Exception {
+<span class="fc" id="L259">		Method testMethod = testContext.getTestMethod();</span>
+<span class="fc" id="L260">		Assert.notNull(testMethod, &quot;The test method of the supplied TestContext must not be null&quot;);</span>
+
+<span class="fc" id="L262">		TransactionContext txContext = TransactionContextHolder.removeCurrentTransactionContext();</span>
+		// If there was (or perhaps still is) a transaction...
+<span class="fc bfc" id="L264" title="All 2 branches covered.">		if (txContext != null) {</span>
+<span class="fc" id="L265">			TransactionStatus transactionStatus = txContext.getTransactionStatus();</span>
+			try {
+				// If the transaction is still active...
+<span class="pc bpc" id="L268" title="1 of 4 branches missed.">				if (transactionStatus != null &amp;&amp; !transactionStatus.isCompleted()) {</span>
+<span class="fc" id="L269">					txContext.endTransaction();</span>
+				}
+			}
+			finally {
+<span class="fc" id="L273">				runAfterTransactionMethods(testContext);</span>
+			}
+		}
+<span class="fc" id="L276">	}</span>
+
+	/**
+	 * Run all {@link BeforeTransaction @BeforeTransaction} methods for the
+	 * specified {@linkplain TestContext test context}. If one of the methods
+	 * fails, however, the caught exception will be rethrown in a wrapped
+	 * {@link RuntimeException}, and the remaining methods will &lt;strong&gt;not&lt;/strong&gt;
+	 * be given a chance to execute.
+	 * @param testContext the current test context
+	 */
+	protected void runBeforeTransactionMethods(TestContext testContext) throws Exception {
+		try {
+<span class="fc" id="L288">			Class&lt;?&gt; testClass = testContext.getTestClass();</span>
+<span class="fc" id="L289">			List&lt;Method&gt; methods = getAnnotatedMethods(testClass, BeforeTransaction.class);</span>
+<span class="fc" id="L290">			Collections.reverse(methods);</span>
+<span class="fc bfc" id="L291" title="All 2 branches covered.">			for (Method method : methods) {</span>
+<span class="pc bpc" id="L292" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L293">					logger.trace(&quot;Executing @BeforeTransaction method [%s] for test context %s&quot;</span>
+<span class="nc" id="L294">							.formatted(method, testContext));</span>
+				}
+<span class="pc bpc" id="L296" title="1 of 2 branches missed.">				else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L297">					logger.debug(&quot;Executing @BeforeTransaction method [%s] for test class [%s]&quot;</span>
+<span class="nc" id="L298">							.formatted(method, testClass.getName()));</span>
+				}
+<span class="fc" id="L300">				testContext.getMethodInvoker().invoke(method, testContext.getTestInstance());</span>
+<span class="fc" id="L301">			}</span>
+		}
+<span class="nc" id="L303">		catch (InvocationTargetException ex) {</span>
+<span class="nc bnc" id="L304" title="All 2 branches missed.">			if (logger.isErrorEnabled()) {</span>
+<span class="nc" id="L305">				logger.error(&quot;Exception encountered while executing @BeforeTransaction methods for test context &quot; +</span>
+<span class="nc" id="L306">						testContext, ex.getTargetException());</span>
+			}
+<span class="nc" id="L308">			ReflectionUtils.rethrowException(ex.getTargetException());</span>
+<span class="fc" id="L309">		}</span>
+<span class="fc" id="L310">	}</span>
+
+	/**
+	 * Run all {@link AfterTransaction @AfterTransaction} methods for the
+	 * specified {@linkplain TestContext test context}. If one of the methods
+	 * fails, the caught exception will be logged as an error, and the remaining
+	 * methods will be given a chance to execute. After all methods have
+	 * executed, the first caught exception, if any, will be rethrown.
+	 * @param testContext the current test context
+	 */
+	protected void runAfterTransactionMethods(TestContext testContext) throws Exception {
+<span class="fc" id="L321">		Throwable afterTransactionException = null;</span>
+
+<span class="fc" id="L323">		Class&lt;?&gt; testClass = testContext.getTestClass();</span>
+<span class="fc" id="L324">		List&lt;Method&gt; methods = getAnnotatedMethods(testClass, AfterTransaction.class);</span>
+<span class="fc bfc" id="L325" title="All 2 branches covered.">		for (Method method : methods) {</span>
+			try {
+<span class="pc bpc" id="L327" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L328">					logger.trace(&quot;Executing @AfterTransaction method [%s] for test context %s&quot;</span>
+<span class="nc" id="L329">							.formatted(method, testContext));</span>
+				}
+<span class="pc bpc" id="L331" title="1 of 2 branches missed.">				else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L332">					logger.debug(&quot;Executing @AfterTransaction method [%s] for test class [%s]&quot;</span>
+<span class="nc" id="L333">							.formatted(method, testClass.getName()));</span>
+				}
+<span class="fc" id="L335">				testContext.getMethodInvoker().invoke(method, testContext.getTestInstance());</span>
+			}
+<span class="nc" id="L337">			catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L338">				Throwable targetException = ex.getTargetException();</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">				if (afterTransactionException == null) {</span>
+<span class="nc" id="L340">					afterTransactionException = targetException;</span>
+				}
+<span class="nc" id="L342">				logger.error(&quot;Exception encountered while executing @AfterTransaction method [&quot; + method +</span>
+						&quot;] for test context &quot; + testContext, targetException);
+			}
+<span class="nc" id="L345">			catch (Exception ex) {</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">				if (afterTransactionException == null) {</span>
+<span class="nc" id="L347">					afterTransactionException = ex;</span>
+				}
+<span class="nc" id="L349">				logger.error(&quot;Exception encountered while executing @AfterTransaction method [&quot; + method +</span>
+						&quot;] for test context &quot; + testContext, ex);
+<span class="pc" id="L351">			}</span>
+<span class="fc" id="L352">		}</span>
+
+<span class="pc bpc" id="L354" title="1 of 2 branches missed.">		if (afterTransactionException != null) {</span>
+<span class="nc" id="L355">			ReflectionUtils.rethrowException(afterTransactionException);</span>
+		}
+<span class="fc" id="L357">	}</span>
+
+	/**
+	 * Get the {@linkplain PlatformTransactionManager transaction manager} to use
+	 * for the supplied {@linkplain TestContext test context} and {@code qualifier}.
+	 * &lt;p&gt;Delegates to {@link #getTransactionManager(TestContext)} if the
+	 * supplied {@code qualifier} is {@code null} or empty.
+	 * @param testContext the test context for which the transaction manager
+	 * should be retrieved
+	 * @param qualifier the qualifier for selecting between multiple bean matches;
+	 * may be {@code null} or empty
+	 * @return the transaction manager to use, or {@code null} if not found
+	 * @throws BeansException if an error occurs while retrieving the transaction manager
+	 * @see #getTransactionManager(TestContext)
+	 */
+	protected @Nullable PlatformTransactionManager getTransactionManager(TestContext testContext, @Nullable String qualifier) {
+		// Look up by type and qualifier from @Transactional
+<span class="fc bfc" id="L374" title="All 2 branches covered.">		if (StringUtils.hasText(qualifier)) {</span>
+			try {
+				// Use autowire-capable factory in order to support extended qualifier matching
+				// (only exposed on the internal BeanFactory, not on the ApplicationContext).
+<span class="fc" id="L378">				BeanFactory bf = testContext.getApplicationContext().getAutowireCapableBeanFactory();</span>
+
+<span class="fc" id="L380">				return BeanFactoryAnnotationUtils.qualifiedBeanOfType(bf, PlatformTransactionManager.class, qualifier);</span>
+			}
+<span class="nc" id="L382">			catch (RuntimeException ex) {</span>
+<span class="nc bnc" id="L383" title="All 2 branches missed.">				if (logger.isWarnEnabled()) {</span>
+<span class="nc" id="L384">					logger.warn(String.format(</span>
+							&quot;Caught exception while retrieving transaction manager with qualifier '%s' for test context %s&quot;,
+							qualifier, testContext), ex);
+				}
+<span class="nc" id="L388">				throw ex;</span>
+			}
+		}
+
+		// else
+<span class="fc" id="L393">		return getTransactionManager(testContext);</span>
+	}
+
+	/**
+	 * Get the {@linkplain PlatformTransactionManager transaction manager}
+	 * to use for the supplied {@linkplain TestContext test context}.
+	 * &lt;p&gt;The default implementation simply delegates to
+	 * {@link TestContextTransactionUtils#retrieveTransactionManager}.
+	 * @param testContext the test context for which the transaction manager
+	 * should be retrieved
+	 * @return the transaction manager to use, or {@code null} if not found
+	 * @throws BeansException if an error occurs while retrieving an explicitly
+	 * named transaction manager
+	 * @throws IllegalStateException if more than one TransactionManagementConfigurer
+	 * exists in the ApplicationContext
+	 * @see #getTransactionManager(TestContext, String)
+	 */
+	protected @Nullable PlatformTransactionManager getTransactionManager(TestContext testContext) {
+<span class="fc" id="L411">		return TestContextTransactionUtils.retrieveTransactionManager(testContext, null);</span>
+	}
+
+	/**
+	 * Determine whether to rollback transactions by default for the
+	 * supplied {@linkplain TestContext test context}.
+	 * &lt;p&gt;Supports {@link Rollback @Rollback} or {@link Commit @Commit} at the
+	 * class-level.
+	 * @param testContext the test context for which the default rollback flag
+	 * should be retrieved
+	 * @return the &lt;em&gt;default rollback&lt;/em&gt; flag for the supplied test context
+	 * @throws Exception if an error occurs while determining the default rollback flag
+	 */
+	@SuppressWarnings(&quot;NullAway&quot;)
+	protected final boolean isDefaultRollback(TestContext testContext) throws Exception {
+<span class="fc" id="L426">		Class&lt;?&gt; testClass = testContext.getTestClass();</span>
+<span class="fc" id="L427">		Rollback rollback = TestContextAnnotationUtils.findMergedAnnotation(testClass, Rollback.class);</span>
+<span class="fc bfc" id="L428" title="All 2 branches covered.">		boolean rollbackPresent = (rollback != null);</span>
+
+<span class="fc bfc" id="L430" title="All 2 branches covered.">		if (rollbackPresent) {</span>
+<span class="fc" id="L431">			boolean defaultRollback = rollback.value();</span>
+<span class="pc bpc" id="L432" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L433">				logger.debug(String.format(&quot;Retrieved default @Rollback(%s) for test class [%s].&quot;,</span>
+<span class="nc" id="L434">						defaultRollback, testClass.getName()));</span>
+			}
+<span class="fc" id="L436">			return defaultRollback;</span>
+		}
+
+		// else
+<span class="fc" id="L440">		return true;</span>
+	}
+
+	/**
+	 * Determine whether to rollback transactions for the supplied
+	 * {@linkplain TestContext test context} by taking into consideration the
+	 * {@linkplain #isDefaultRollback(TestContext) default rollback} flag and a
+	 * possible method-level override via the {@link Rollback @Rollback}
+	 * annotation.
+	 * @param testContext the test context for which the rollback flag
+	 * should be retrieved
+	 * @return the &lt;em&gt;rollback&lt;/em&gt; flag for the supplied test context
+	 * @throws Exception if an error occurs while determining the rollback flag
+	 */
+	protected final boolean isRollback(TestContext testContext) throws Exception {
+<span class="fc" id="L455">		boolean rollback = isDefaultRollback(testContext);</span>
+<span class="fc" id="L456">		Method testMethod = testContext.getTestMethod();</span>
+<span class="fc" id="L457">		Rollback rollbackAnnotation = AnnotatedElementUtils.findMergedAnnotation(testMethod, Rollback.class);</span>
+<span class="fc bfc" id="L458" title="All 2 branches covered.">		if (rollbackAnnotation != null) {</span>
+<span class="fc" id="L459">			boolean rollbackOverride = rollbackAnnotation.value();</span>
+<span class="pc bpc" id="L460" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L461">				logger.trace(&quot;Method-level @Rollback(%s) overrides default rollback [%s] for test context %s&quot;</span>
+<span class="nc" id="L462">						.formatted(rollbackOverride, rollback, testContext));</span>
+			}
+<span class="pc bpc" id="L464" title="1 of 2 branches missed.">			else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L465">				logger.debug(&quot;Method-level @Rollback(%s) overrides default rollback [%s] for test method [%s]&quot;</span>
+<span class="nc" id="L466">						.formatted(rollbackOverride, rollback, testMethod));</span>
+			}
+<span class="fc" id="L468">			rollback = rollbackOverride;</span>
+<span class="fc" id="L469">		}</span>
+		else {
+<span class="pc bpc" id="L471" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L472">				logger.trace(&quot;No method-level @Rollback override: using default rollback [%s] for test context %s&quot;</span>
+<span class="nc" id="L473">						.formatted(rollback, testContext));</span>
+			}
+<span class="pc bpc" id="L475" title="1 of 2 branches missed.">			else if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L476">				logger.debug(&quot;No method-level @Rollback override: using default rollback [%s] for test method [%s]&quot;</span>
+<span class="nc" id="L477">						.formatted(rollback, testMethod));</span>
+			}
+		}
+<span class="fc" id="L480">		return rollback;</span>
+	}
+
+	/**
+	 * Get all methods in the supplied {@link Class class} and its superclasses
+	 * which are annotated with the supplied {@code annotationType} but
+	 * which are not &lt;em&gt;shadowed&lt;/em&gt; by methods overridden in subclasses.
+	 * &lt;p&gt;Default methods on interfaces are also detected.
+	 * @param clazz the class for which to retrieve the annotated methods
+	 * @param annotationType the annotation type for which to search
+	 * @return all annotated methods in the supplied class and its superclasses
+	 * as well as annotated interface default methods
+	 */
+	private List&lt;Method&gt; getAnnotatedMethods(Class&lt;?&gt; clazz, Class&lt;? extends Annotation&gt; annotationType) {
+<span class="fc" id="L494">		MethodFilter methodFilter = ReflectionUtils.USER_DECLARED_METHODS</span>
+<span class="fc" id="L495">				.and(method -&gt; AnnotatedElementUtils.hasAnnotation(method, annotationType));</span>
+<span class="fc" id="L496">		return Arrays.asList(ReflectionUtils.getUniqueDeclaredMethods(clazz, methodFilter));</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

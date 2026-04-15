@@ -1,0 +1,514 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BeanDefinitionValueResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.support</a> &gt; <span class="el_source">BeanDefinitionValueResolver.java</span></div><h1>BeanDefinitionValueResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.support;
+
+import java.lang.reflect.Array;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Properties;
+import java.util.Set;
+import java.util.function.BiFunction;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.BeanWrapper;
+import org.springframework.beans.BeanWrapperImpl;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.TypeConverter;
+import org.springframework.beans.factory.BeanCreationException;
+import org.springframework.beans.factory.BeanDefinitionStoreException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryUtils;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.BeanDefinitionHolder;
+import org.springframework.beans.factory.config.DependencyDescriptor;
+import org.springframework.beans.factory.config.NamedBeanHolder;
+import org.springframework.beans.factory.config.RuntimeBeanNameReference;
+import org.springframework.beans.factory.config.RuntimeBeanReference;
+import org.springframework.beans.factory.config.TypedStringValue;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Helper class for use in bean factory implementations,
+ * resolving values contained in bean definition objects
+ * into the actual values applied to the target bean instance.
+ *
+ * &lt;p&gt;Operates on an {@link AbstractBeanFactory} and a plain
+ * {@link org.springframework.beans.factory.config.BeanDefinition} object.
+ * Used by {@link AbstractAutowireCapableBeanFactory}.
+ *
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @author Stephane Nicoll
+ * @since 1.2
+ * @see AbstractAutowireCapableBeanFactory
+ */
+public class BeanDefinitionValueResolver {
+
+	private final AbstractAutowireCapableBeanFactory beanFactory;
+
+	private final String beanName;
+
+	private final BeanDefinition beanDefinition;
+
+	private final TypeConverter typeConverter;
+
+
+	/**
+	 * Create a BeanDefinitionValueResolver for the given BeanFactory and BeanDefinition,
+	 * using the given {@link TypeConverter}.
+	 * @param beanFactory the BeanFactory to resolve against
+	 * @param beanName the name of the bean that we work on
+	 * @param beanDefinition the BeanDefinition of the bean that we work on
+	 * @param typeConverter the TypeConverter to use for resolving TypedStringValues
+	 */
+	public BeanDefinitionValueResolver(AbstractAutowireCapableBeanFactory beanFactory, String beanName,
+<span class="fc" id="L86">			BeanDefinition beanDefinition, TypeConverter typeConverter) {</span>
+
+<span class="fc" id="L88">		this.beanFactory = beanFactory;</span>
+<span class="fc" id="L89">		this.beanName = beanName;</span>
+<span class="fc" id="L90">		this.beanDefinition = beanDefinition;</span>
+<span class="fc" id="L91">		this.typeConverter = typeConverter;</span>
+<span class="fc" id="L92">	}</span>
+
+	/**
+	 * Create a BeanDefinitionValueResolver for the given BeanFactory and BeanDefinition
+	 * using a default {@link TypeConverter}.
+	 * @param beanFactory the BeanFactory to resolve against
+	 * @param beanName the name of the bean that we work on
+	 * @param beanDefinition the BeanDefinition of the bean that we work on
+	 */
+	public BeanDefinitionValueResolver(AbstractAutowireCapableBeanFactory beanFactory, String beanName,
+<span class="fc" id="L102">			BeanDefinition beanDefinition) {</span>
+
+<span class="fc" id="L104">		this.beanFactory = beanFactory;</span>
+<span class="fc" id="L105">		this.beanName = beanName;</span>
+<span class="fc" id="L106">		this.beanDefinition = beanDefinition;</span>
+<span class="fc" id="L107">		BeanWrapper beanWrapper = new BeanWrapperImpl();</span>
+<span class="fc" id="L108">		beanFactory.initBeanWrapper(beanWrapper);</span>
+<span class="fc" id="L109">		this.typeConverter = beanWrapper;</span>
+<span class="fc" id="L110">	}</span>
+
+
+	/**
+	 * Given a PropertyValue, return a value, resolving any references to other
+	 * beans in the factory if necessary. The value could be:
+	 * &lt;li&gt;A BeanDefinition, which leads to the creation of a corresponding
+	 * new bean instance. Singleton flags and names of such &quot;inner beans&quot;
+	 * are always ignored: Inner beans are anonymous prototypes.
+	 * &lt;li&gt;A RuntimeBeanReference, which must be resolved.
+	 * &lt;li&gt;A ManagedList. This is a special collection that may contain
+	 * RuntimeBeanReferences or Collections that will need to be resolved.
+	 * &lt;li&gt;A ManagedSet. May also contain RuntimeBeanReferences or
+	 * Collections that will need to be resolved.
+	 * &lt;li&gt;A ManagedMap. In this case the value may be a RuntimeBeanReference
+	 * or Collection that will need to be resolved.
+	 * &lt;li&gt;An ordinary object or {@code null}, in which case it's left alone.
+	 * @param argName the name of the argument that the value is defined for
+	 * @param value the value object to resolve
+	 * @return the resolved object
+	 */
+	public @Nullable Object resolveValueIfNecessary(Object argName, @Nullable Object value) {
+		// We must check each value to see whether it requires a runtime reference
+		// to another bean to be resolved.
+<span class="fc bfc" id="L134" title="All 2 branches covered.">		if (value instanceof RuntimeBeanReference ref) {</span>
+<span class="fc" id="L135">			return resolveReference(argName, ref);</span>
+		}
+<span class="fc bfc" id="L137" title="All 2 branches covered.">		else if (value instanceof RuntimeBeanNameReference ref) {</span>
+<span class="fc" id="L138">			String refName = ref.getBeanName();</span>
+<span class="fc" id="L139">			refName = String.valueOf(doEvaluate(refName));</span>
+<span class="fc bfc" id="L140" title="All 2 branches covered.">			if (!this.beanFactory.containsBean(refName)) {</span>
+<span class="fc" id="L141">				throw new BeanDefinitionStoreException(</span>
+						&quot;Invalid bean name '&quot; + refName + &quot;' in bean reference for &quot; + argName);
+			}
+<span class="fc" id="L144">			return refName;</span>
+		}
+<span class="fc bfc" id="L146" title="All 2 branches covered.">		else if (value instanceof BeanDefinitionHolder bdHolder) {</span>
+			// Resolve BeanDefinitionHolder: contains BeanDefinition with name and aliases.
+<span class="fc" id="L148">			return resolveInnerBean(bdHolder.getBeanName(), bdHolder.getBeanDefinition(),</span>
+<span class="fc" id="L149">					(name, mbd) -&gt; resolveInnerBeanValue(argName, name, mbd));</span>
+		}
+<span class="fc bfc" id="L151" title="All 2 branches covered.">		else if (value instanceof BeanDefinition bd) {</span>
+<span class="fc" id="L152">			return resolveInnerBean(null, bd,</span>
+<span class="fc" id="L153">					(name, mbd) -&gt; resolveInnerBeanValue(argName, name, mbd));</span>
+		}
+<span class="fc bfc" id="L155" title="All 2 branches covered.">		else if (value instanceof DependencyDescriptor dependencyDescriptor) {</span>
+<span class="fc" id="L156">			Set&lt;String&gt; autowiredBeanNames = new LinkedHashSet&lt;&gt;(2);</span>
+<span class="fc" id="L157">			Object result = this.beanFactory.resolveDependency(</span>
+					dependencyDescriptor, this.beanName, autowiredBeanNames, this.typeConverter);
+<span class="fc bfc" id="L159" title="All 2 branches covered.">			for (String autowiredBeanName : autowiredBeanNames) {</span>
+<span class="pc bpc" id="L160" title="1 of 2 branches missed.">				if (this.beanFactory.containsBean(autowiredBeanName)) {</span>
+<span class="fc" id="L161">					this.beanFactory.registerDependentBean(autowiredBeanName, this.beanName);</span>
+				}
+<span class="fc" id="L163">			}</span>
+<span class="fc" id="L164">			return result;</span>
+		}
+<span class="fc bfc" id="L166" title="All 2 branches covered.">		else if (value instanceof ManagedArray managedArray) {</span>
+			// May need to resolve contained runtime references.
+<span class="fc" id="L168">			Class&lt;?&gt; elementType = managedArray.resolvedElementType;</span>
+<span class="pc bpc" id="L169" title="1 of 2 branches missed.">			if (elementType == null) {</span>
+<span class="fc" id="L170">				String elementTypeName = managedArray.getElementTypeName();</span>
+<span class="fc bfc" id="L171" title="All 2 branches covered.">				if (StringUtils.hasText(elementTypeName)) {</span>
+					try {
+<span class="fc" id="L173">						elementType = ClassUtils.forName(elementTypeName, this.beanFactory.getBeanClassLoader());</span>
+<span class="fc" id="L174">						managedArray.resolvedElementType = elementType;</span>
+					}
+<span class="nc" id="L176">					catch (Throwable ex) {</span>
+						// Improve the message by showing the context.
+<span class="nc" id="L178">						throw new BeanCreationException(</span>
+<span class="nc" id="L179">								this.beanDefinition.getResourceDescription(), this.beanName,</span>
+								&quot;Error resolving array type for &quot; + argName, ex);
+<span class="fc" id="L181">					}</span>
+				}
+				else {
+<span class="fc" id="L184">					elementType = Object.class;</span>
+				}
+			}
+<span class="fc" id="L187">			return resolveManagedArray(argName, (List&lt;?&gt;) value, elementType);</span>
+		}
+<span class="fc bfc" id="L189" title="All 2 branches covered.">		else if (value instanceof ManagedList&lt;?&gt; managedList) {</span>
+			// May need to resolve contained runtime references.
+<span class="fc" id="L191">			return resolveManagedList(argName, managedList);</span>
+		}
+<span class="fc bfc" id="L193" title="All 2 branches covered.">		else if (value instanceof ManagedSet&lt;?&gt; managedSet) {</span>
+			// May need to resolve contained runtime references.
+<span class="fc" id="L195">			return resolveManagedSet(argName, managedSet);</span>
+		}
+<span class="fc bfc" id="L197" title="All 2 branches covered.">		else if (value instanceof ManagedMap&lt;?, ?&gt; managedMap) {</span>
+			// May need to resolve contained runtime references.
+<span class="fc" id="L199">			return resolveManagedMap(argName, managedMap);</span>
+		}
+<span class="fc bfc" id="L201" title="All 2 branches covered.">		else if (value instanceof ManagedProperties original) {</span>
+			// Properties original = managedProperties;
+<span class="fc" id="L203">			Properties copy = new Properties();</span>
+<span class="fc" id="L204">			original.forEach((propKey, propValue) -&gt; {</span>
+<span class="pc bpc" id="L205" title="1 of 2 branches missed.">				if (propKey instanceof TypedStringValue typedStringValue) {</span>
+<span class="fc" id="L206">					propKey = evaluate(typedStringValue);</span>
+				}
+<span class="pc bpc" id="L208" title="1 of 2 branches missed.">				if (propValue instanceof TypedStringValue typedStringValue) {</span>
+<span class="fc" id="L209">					propValue = evaluate(typedStringValue);</span>
+				}
+<span class="pc bpc" id="L211" title="2 of 4 branches missed.">				if (propKey == null || propValue == null) {</span>
+<span class="nc" id="L212">					throw new BeanCreationException(</span>
+<span class="nc" id="L213">							this.beanDefinition.getResourceDescription(), this.beanName,</span>
+							&quot;Error converting Properties key/value pair for &quot; + argName + &quot;: resolved to null&quot;);
+				}
+<span class="fc" id="L216">				copy.put(propKey, propValue);</span>
+<span class="fc" id="L217">			});</span>
+<span class="fc" id="L218">			return copy;</span>
+		}
+<span class="fc bfc" id="L220" title="All 2 branches covered.">		else if (value instanceof TypedStringValue typedStringValue) {</span>
+			// Convert value to target type here.
+<span class="fc" id="L222">			Object valueObject = evaluate(typedStringValue);</span>
+			try {
+<span class="fc" id="L224">				Class&lt;?&gt; resolvedTargetType = resolveTargetType(typedStringValue);</span>
+<span class="fc bfc" id="L225" title="All 2 branches covered.">				if (resolvedTargetType != null) {</span>
+<span class="fc" id="L226">					return this.typeConverter.convertIfNecessary(valueObject, resolvedTargetType);</span>
+				}
+				else {
+<span class="fc" id="L229">					return valueObject;</span>
+				}
+			}
+<span class="nc" id="L232">			catch (Throwable ex) {</span>
+				// Improve the message by showing the context.
+<span class="nc" id="L234">				throw new BeanCreationException(</span>
+<span class="nc" id="L235">						this.beanDefinition.getResourceDescription(), this.beanName,</span>
+						&quot;Error converting typed String value for &quot; + argName, ex);
+			}
+		}
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">		else if (value instanceof NullBean) {</span>
+<span class="nc" id="L240">			return null;</span>
+		}
+		else {
+<span class="fc" id="L243">			return evaluate(value);</span>
+		}
+	}
+
+	/**
+	 * Resolve an inner bean definition and invoke the specified {@code resolver}
+	 * on its merged bean definition.
+	 * @param innerBeanName the inner bean name (or {@code null} to assign one)
+	 * @param innerBd the inner raw bean definition
+	 * @param resolver the function to invoke to resolve
+	 * @param &lt;T&gt; the type of the resolution
+	 * @return a resolved inner bean, as a result of applying the {@code resolver}
+	 * @since 6.0
+	 */
+	public &lt;T&gt; T resolveInnerBean(@Nullable String innerBeanName, BeanDefinition innerBd,
+			BiFunction&lt;String, RootBeanDefinition, T&gt; resolver) {
+
+<span class="fc bfc" id="L260" title="All 2 branches covered.">		String nameToUse = (innerBeanName != null ? innerBeanName : &quot;(inner bean)&quot; +</span>
+<span class="fc" id="L261">				BeanFactoryUtils.GENERATED_BEAN_NAME_SEPARATOR + ObjectUtils.getIdentityHexString(innerBd));</span>
+<span class="fc" id="L262">		return resolver.apply(nameToUse,</span>
+<span class="fc" id="L263">				this.beanFactory.getMergedBeanDefinition(nameToUse, innerBd, this.beanDefinition));</span>
+	}
+
+	/**
+	 * Evaluate the given value as an expression, if necessary.
+	 * @param value the candidate value (may be an expression)
+	 * @return the resolved value
+	 */
+	protected @Nullable Object evaluate(TypedStringValue value) {
+<span class="fc" id="L272">		Object result = doEvaluate(value.getValue());</span>
+<span class="pc bpc" id="L273" title="1 of 2 branches missed.">		if (!ObjectUtils.nullSafeEquals(result, value.getValue())) {</span>
+<span class="nc" id="L274">			value.setDynamic();</span>
+		}
+<span class="fc" id="L276">		return result;</span>
+	}
+
+	/**
+	 * Evaluate the given value as an expression, if necessary.
+	 * @param value the original value (may be an expression)
+	 * @return the resolved value if necessary, or the original value
+	 */
+	protected @Nullable Object evaluate(@Nullable Object value) {
+<span class="fc bfc" id="L285" title="All 2 branches covered.">		if (value instanceof String str) {</span>
+<span class="fc" id="L286">			return doEvaluate(str);</span>
+		}
+<span class="fc bfc" id="L288" title="All 2 branches covered.">		else if (value instanceof String[] values) {</span>
+<span class="fc" id="L289">			boolean actuallyResolved = false;</span>
+<span class="fc" id="L290">			@Nullable Object[] resolvedValues = new Object[values.length];</span>
+<span class="fc bfc" id="L291" title="All 2 branches covered.">			for (int i = 0; i &lt; values.length; i++) {</span>
+<span class="fc" id="L292">				String originalValue = values[i];</span>
+<span class="fc" id="L293">				Object resolvedValue = doEvaluate(originalValue);</span>
+<span class="fc bfc" id="L294" title="All 2 branches covered.">				if (resolvedValue != originalValue) {</span>
+<span class="fc" id="L295">					actuallyResolved = true;</span>
+				}
+<span class="fc" id="L297">				resolvedValues[i] = resolvedValue;</span>
+			}
+<span class="fc bfc" id="L299" title="All 2 branches covered.">			return (actuallyResolved ? resolvedValues : values);</span>
+		}
+		else {
+<span class="fc" id="L302">			return value;</span>
+		}
+	}
+
+	/**
+	 * Evaluate the given String value as an expression, if necessary.
+	 * @param value the original value (may be an expression)
+	 * @return the resolved value if necessary, or the original String value
+	 */
+	private @Nullable Object doEvaluate(@Nullable String value) {
+<span class="fc" id="L312">		return this.beanFactory.evaluateBeanDefinitionString(value, this.beanDefinition);</span>
+	}
+
+	/**
+	 * Resolve the target type in the given TypedStringValue.
+	 * @param value the TypedStringValue to resolve
+	 * @return the resolved target type (or {@code null} if none specified)
+	 * @throws ClassNotFoundException if the specified type cannot be resolved
+	 * @see TypedStringValue#resolveTargetType
+	 */
+	protected @Nullable Class&lt;?&gt; resolveTargetType(TypedStringValue value) throws ClassNotFoundException {
+<span class="fc bfc" id="L323" title="All 2 branches covered.">		if (value.hasTargetType()) {</span>
+<span class="fc" id="L324">			return value.getTargetType();</span>
+		}
+<span class="fc" id="L326">		return value.resolveTargetType(this.beanFactory.getBeanClassLoader());</span>
+	}
+
+	/**
+	 * Resolve a reference to another bean in the factory.
+	 */
+	private @Nullable Object resolveReference(Object argName, RuntimeBeanReference ref) {
+		try {
+			Object bean;
+<span class="fc" id="L335">			Class&lt;?&gt; beanType = ref.getBeanType();</span>
+<span class="fc" id="L336">			String resolvedName = String.valueOf(doEvaluate(ref.getBeanName()));</span>
+<span class="pc bpc" id="L337" title="1 of 2 branches missed.">			if (ref.isToParent()) {</span>
+<span class="nc" id="L338">				BeanFactory parent = this.beanFactory.getParentBeanFactory();</span>
+<span class="nc bnc" id="L339" title="All 2 branches missed.">				if (parent == null) {</span>
+<span class="nc" id="L340">					throw new BeanCreationException(</span>
+<span class="nc" id="L341">							this.beanDefinition.getResourceDescription(), this.beanName,</span>
+							&quot;Cannot resolve reference to bean &quot; + ref +
+									&quot; in parent factory: no parent factory available&quot;);
+				}
+<span class="nc bnc" id="L345" title="All 2 branches missed.">				if (beanType != null) {</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">					bean = (parent.containsBean(resolvedName) ?</span>
+<span class="nc" id="L347">							parent.getBean(resolvedName, beanType) : parent.getBean(beanType));</span>
+				}
+				else {
+<span class="nc" id="L350">					bean = parent.getBean(resolvedName);</span>
+				}
+<span class="nc" id="L352">			}</span>
+			else {
+<span class="fc bfc" id="L354" title="All 2 branches covered.">				if (beanType != null) {</span>
+<span class="fc bfc" id="L355" title="All 2 branches covered.">					if (this.beanFactory.containsBean(resolvedName)) {</span>
+<span class="fc" id="L356">						bean = this.beanFactory.getBean(resolvedName, beanType);</span>
+					}
+					else {
+<span class="fc" id="L359">						NamedBeanHolder&lt;?&gt; namedBean = this.beanFactory.resolveNamedBean(beanType);</span>
+<span class="fc" id="L360">						bean = namedBean.getBeanInstance();</span>
+<span class="fc" id="L361">						resolvedName = namedBean.getBeanName();</span>
+<span class="fc" id="L362">					}</span>
+				}
+				else {
+<span class="fc" id="L365">					bean = this.beanFactory.getBean(resolvedName);</span>
+				}
+<span class="fc" id="L367">				this.beanFactory.registerDependentBean(resolvedName, this.beanName);</span>
+			}
+<span class="fc bfc" id="L369" title="All 2 branches covered.">			if (bean instanceof NullBean) {</span>
+<span class="fc" id="L370">				bean = null;</span>
+			}
+<span class="fc" id="L372">			return bean;</span>
+		}
+<span class="fc" id="L374">		catch (BeansException ex) {</span>
+<span class="fc" id="L375">			throw new BeanCreationException(</span>
+<span class="fc" id="L376">					this.beanDefinition.getResourceDescription(), this.beanName,</span>
+<span class="fc" id="L377">					&quot;Cannot resolve reference to bean '&quot; + ref.getBeanName() + &quot;' while setting &quot; + argName, ex);</span>
+		}
+	}
+
+	/**
+	 * Resolve an inner bean definition.
+	 * @param argName the name of the argument that the inner bean is defined for
+	 * @param innerBeanName the name of the inner bean
+	 * @param mbd the merged bean definition for the inner bean
+	 * @return the resolved inner bean instance
+	 */
+	private @Nullable Object resolveInnerBeanValue(Object argName, String innerBeanName, RootBeanDefinition mbd) {
+		try {
+			// Check given bean name whether it is unique. If not already unique,
+			// add counter - increasing the counter until the name is unique.
+<span class="fc" id="L392">			String actualInnerBeanName = innerBeanName;</span>
+<span class="fc bfc" id="L393" title="All 2 branches covered.">			if (mbd.isSingleton()) {</span>
+<span class="fc" id="L394">				actualInnerBeanName = adaptInnerBeanName(innerBeanName);</span>
+			}
+<span class="fc" id="L396">			this.beanFactory.registerContainedBean(actualInnerBeanName, this.beanName);</span>
+			// Guarantee initialization of beans that the inner bean depends on.
+<span class="fc" id="L398">			String[] dependsOn = mbd.getDependsOn();</span>
+<span class="pc bpc" id="L399" title="1 of 2 branches missed.">			if (dependsOn != null) {</span>
+<span class="nc bnc" id="L400" title="All 2 branches missed.">				for (String dependsOnBean : dependsOn) {</span>
+<span class="nc" id="L401">					this.beanFactory.registerDependentBean(dependsOnBean, actualInnerBeanName);</span>
+<span class="nc" id="L402">					this.beanFactory.getBean(dependsOnBean);</span>
+				}
+			}
+			// Actually create the inner bean instance now...
+<span class="fc" id="L406">			Object innerBean = this.beanFactory.createBean(actualInnerBeanName, mbd, null);</span>
+<span class="fc bfc" id="L407" title="All 2 branches covered.">			if (innerBean instanceof FactoryBean&lt;?&gt; factoryBean) {</span>
+<span class="fc" id="L408">				boolean synthetic = mbd.isSynthetic();</span>
+<span class="pc bpc" id="L409" title="1 of 2 branches missed.">				innerBean = this.beanFactory.getObjectFromFactoryBean(</span>
+						factoryBean, null, actualInnerBeanName, !synthetic);
+			}
+<span class="fc bfc" id="L412" title="All 2 branches covered.">			if (innerBean instanceof NullBean) {</span>
+<span class="fc" id="L413">				innerBean = null;</span>
+			}
+<span class="fc" id="L415">			return innerBean;</span>
+		}
+<span class="nc" id="L417">		catch (BeansException ex) {</span>
+<span class="nc" id="L418">			throw new BeanCreationException(</span>
+<span class="nc" id="L419">					this.beanDefinition.getResourceDescription(), this.beanName,</span>
+					&quot;Cannot create inner bean '&quot; + innerBeanName + &quot;' &quot; +
+<span class="nc bnc" id="L421" title="All 2 branches missed.">					(mbd.getBeanClassName() != null ? &quot;of type [&quot; + mbd.getBeanClassName() + &quot;] &quot; : &quot;&quot;) +</span>
+					&quot;while setting &quot; + argName, ex);
+		}
+	}
+
+	/**
+	 * Checks the given bean name whether it is unique. If not already unique,
+	 * a counter is added, increasing the counter until the name is unique.
+	 * @param innerBeanName the original name for the inner bean
+	 * @return the adapted name for the inner bean
+	 */
+	private String adaptInnerBeanName(String innerBeanName) {
+<span class="fc" id="L433">		String actualInnerBeanName = innerBeanName;</span>
+<span class="fc" id="L434">		int counter = 0;</span>
+<span class="fc" id="L435">		String prefix = innerBeanName + BeanFactoryUtils.GENERATED_BEAN_NAME_SEPARATOR;</span>
+<span class="fc bfc" id="L436" title="All 2 branches covered.">		while (this.beanFactory.isBeanNameInUse(actualInnerBeanName)) {</span>
+<span class="fc" id="L437">			counter++;</span>
+<span class="fc" id="L438">			actualInnerBeanName = prefix + counter;</span>
+		}
+<span class="fc" id="L440">		return actualInnerBeanName;</span>
+	}
+
+	/**
+	 * For each element in the managed array, resolve reference if necessary.
+	 */
+	private Object resolveManagedArray(Object argName, List&lt;?&gt; ml, Class&lt;?&gt; elementType) {
+<span class="fc" id="L447">		Object resolved = Array.newInstance(elementType, ml.size());</span>
+<span class="fc bfc" id="L448" title="All 2 branches covered.">		for (int i = 0; i &lt; ml.size(); i++) {</span>
+<span class="fc" id="L449">			Array.set(resolved, i, resolveValueIfNecessary(new KeyedArgName(argName, i), ml.get(i)));</span>
+		}
+<span class="fc" id="L451">		return resolved;</span>
+	}
+
+	/**
+	 * For each element in the managed list, resolve reference if necessary.
+	 */
+	private List&lt;?&gt; resolveManagedList(Object argName, List&lt;?&gt; ml) {
+<span class="fc" id="L458">		List&lt;Object&gt; resolved = new ArrayList&lt;&gt;(ml.size());</span>
+<span class="fc bfc" id="L459" title="All 2 branches covered.">		for (int i = 0; i &lt; ml.size(); i++) {</span>
+<span class="fc" id="L460">			resolved.add(resolveValueIfNecessary(new KeyedArgName(argName, i), ml.get(i)));</span>
+		}
+<span class="fc" id="L462">		return resolved;</span>
+	}
+
+	/**
+	 * For each element in the managed set, resolve reference if necessary.
+	 */
+	private Set&lt;?&gt; resolveManagedSet(Object argName, Set&lt;?&gt; ms) {
+<span class="fc" id="L469">		Set&lt;Object&gt; resolved = CollectionUtils.newLinkedHashSet(ms.size());</span>
+<span class="fc" id="L470">		int i = 0;</span>
+<span class="fc bfc" id="L471" title="All 2 branches covered.">		for (Object m : ms) {</span>
+<span class="fc" id="L472">			resolved.add(resolveValueIfNecessary(new KeyedArgName(argName, i), m));</span>
+<span class="fc" id="L473">			i++;</span>
+<span class="fc" id="L474">		}</span>
+<span class="fc" id="L475">		return resolved;</span>
+	}
+
+	/**
+	 * For each element in the managed map, resolve reference if necessary.
+	 */
+	private Map&lt;?, ?&gt; resolveManagedMap(Object argName, Map&lt;?, ?&gt; mm) {
+<span class="fc" id="L482">		Map&lt;Object, Object&gt; resolved = CollectionUtils.newLinkedHashMap(mm.size());</span>
+<span class="fc" id="L483">		mm.forEach((key, value) -&gt; {</span>
+<span class="fc" id="L484">			Object resolvedKey = resolveValueIfNecessary(argName, key);</span>
+<span class="fc" id="L485">			Object resolvedValue = resolveValueIfNecessary(new KeyedArgName(argName, key), value);</span>
+<span class="fc" id="L486">			resolved.put(resolvedKey, resolvedValue);</span>
+<span class="fc" id="L487">		});</span>
+<span class="fc" id="L488">		return resolved;</span>
+	}
+
+
+	/**
+	 * Holder class used for delayed toString building.
+	 */
+	private static class KeyedArgName {
+
+		private final Object argName;
+
+		private final Object key;
+
+<span class="fc" id="L501">		public KeyedArgName(Object argName, Object key) {</span>
+<span class="fc" id="L502">			this.argName = argName;</span>
+<span class="fc" id="L503">			this.key = key;</span>
+<span class="fc" id="L504">		}</span>
+
+		@Override
+		public String toString() {
+<span class="fc" id="L508">			return this.argName + &quot; with key &quot; + BeanWrapper.PROPERTY_KEY_PREFIX +</span>
+					this.key + BeanWrapper.PROPERTY_KEY_SUFFIX;
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

@@ -1,0 +1,1460 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConstructorResolver.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.support</a> &gt; <span class="el_source">ConstructorResolver.java</span></div><h1>ConstructorResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.support;
+
+import java.beans.ConstructorProperties;
+import java.lang.reflect.Array;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.Deque;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+
+import org.apache.commons.logging.Log;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.BeanMetadataElement;
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.BeanWrapper;
+import org.springframework.beans.BeanWrapperImpl;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.TypeConverter;
+import org.springframework.beans.TypeMismatchException;
+import org.springframework.beans.factory.BeanCreationException;
+import org.springframework.beans.factory.BeanDefinitionStoreException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.InjectionPoint;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
+import org.springframework.beans.factory.UnsatisfiedDependencyException;
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.BeanReference;
+import org.springframework.beans.factory.config.ConstructorArgumentValues;
+import org.springframework.beans.factory.config.ConstructorArgumentValues.ValueHolder;
+import org.springframework.beans.factory.config.DependencyDescriptor;
+import org.springframework.beans.factory.config.RuntimeBeanReference;
+import org.springframework.beans.factory.config.TypedStringValue;
+import org.springframework.core.CollectionFactory;
+import org.springframework.core.KotlinDetector;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.NamedThreadLocal;
+import org.springframework.core.ParameterNameDiscoverer;
+import org.springframework.core.ResolvableType;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.MethodInvoker;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Delegate for resolving constructors and factory methods.
+ *
+ * &lt;p&gt;Performs constructor resolution through argument matching.
+ *
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @author Mark Fisher
+ * @author Costin Leau
+ * @author Sebastien Deleuze
+ * @author Sam Brannen
+ * @author Stephane Nicoll
+ * @author Phillip Webb
+ * @since 2.0
+ * @see #autowireConstructor
+ * @see #instantiateUsingFactoryMethod
+ * @see #resolveConstructorOrFactoryMethod
+ * @see AbstractAutowireCapableBeanFactory
+ */
+class ConstructorResolver {
+
+<span class="fc" id="L101">	private static final Object[] EMPTY_ARGS = new Object[0];</span>
+
+<span class="fc" id="L103">	private static final NamedThreadLocal&lt;InjectionPoint&gt; currentInjectionPoint =</span>
+			new NamedThreadLocal&lt;&gt;(&quot;Current injection point&quot;);
+
+
+	private final AbstractAutowireCapableBeanFactory beanFactory;
+
+	private final Log logger;
+
+
+	/**
+	 * Create a new ConstructorResolver for the given factory and instantiation strategy.
+	 * @param beanFactory the BeanFactory to work with
+	 */
+<span class="fc" id="L116">	public ConstructorResolver(AbstractAutowireCapableBeanFactory beanFactory) {</span>
+<span class="fc" id="L117">		this.beanFactory = beanFactory;</span>
+<span class="fc" id="L118">		this.logger = beanFactory.getLogger();</span>
+<span class="fc" id="L119">	}</span>
+
+
+	// BeanWrapper-based construction
+
+	/**
+	 * &quot;autowire constructor&quot; (with constructor arguments by type) behavior.
+	 * Also applied if explicit constructor argument values are specified.
+	 * @param beanName the name of the bean
+	 * @param mbd the merged bean definition for the bean
+	 * @param chosenCtors chosen candidate constructors (or {@code null} if none)
+	 * @param explicitArgs argument values passed in programmatically via the getBean method,
+	 * or {@code null} if none (-&gt; use constructor argument values from bean definition)
+	 * @return a BeanWrapper for the new instance
+	 */
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	public BeanWrapper autowireConstructor(String beanName, RootBeanDefinition mbd,
+			Constructor&lt;?&gt; @Nullable [] chosenCtors, @Nullable Object @Nullable [] explicitArgs) {
+
+<span class="fc" id="L138">		BeanWrapperImpl bw = new BeanWrapperImpl();</span>
+<span class="fc" id="L139">		this.beanFactory.initBeanWrapper(bw);</span>
+
+<span class="fc" id="L141">		Constructor&lt;?&gt; constructorToUse = null;</span>
+<span class="fc" id="L142">		ArgumentsHolder argsHolderToUse = null;</span>
+<span class="fc" id="L143">		@Nullable Object[] argsToUse = null;</span>
+
+<span class="fc bfc" id="L145" title="All 2 branches covered.">		if (explicitArgs != null) {</span>
+<span class="fc" id="L146">			argsToUse = explicitArgs;</span>
+		}
+		else {
+<span class="fc" id="L149">			Object[] argsToResolve = null;</span>
+<span class="fc" id="L150">			synchronized (mbd.constructorArgumentLock) {</span>
+<span class="fc" id="L151">				constructorToUse = (Constructor&lt;?&gt;) mbd.resolvedConstructorOrFactoryMethod;</span>
+<span class="pc bpc" id="L152" title="1 of 4 branches missed.">				if (constructorToUse != null &amp;&amp; mbd.constructorArgumentsResolved) {</span>
+					// Found a cached constructor...
+<span class="fc" id="L154">					argsToUse = mbd.resolvedConstructorArguments;</span>
+<span class="fc bfc" id="L155" title="All 2 branches covered.">					if (argsToUse == null) {</span>
+<span class="fc" id="L156">						argsToResolve = mbd.preparedConstructorArguments;</span>
+					}
+				}
+<span class="fc" id="L159">			}</span>
+<span class="fc bfc" id="L160" title="All 2 branches covered.">			if (argsToResolve != null) {</span>
+<span class="fc" id="L161">				argsToUse = resolvePreparedArguments(beanName, mbd, bw, constructorToUse, argsToResolve);</span>
+			}
+		}
+
+<span class="pc bpc" id="L165" title="1 of 4 branches missed.">		if (constructorToUse == null || argsToUse == null) {</span>
+			// Take specified constructors, if any.
+<span class="fc" id="L167">			Constructor&lt;?&gt;[] candidates = chosenCtors;</span>
+<span class="fc bfc" id="L168" title="All 2 branches covered.">			if (candidates == null) {</span>
+<span class="fc" id="L169">				Class&lt;?&gt; beanClass = mbd.getBeanClass();</span>
+				try {
+<span class="pc bpc" id="L171" title="1 of 2 branches missed.">					candidates = (mbd.isNonPublicAccessAllowed() ?</span>
+<span class="pc" id="L172">							beanClass.getDeclaredConstructors() : beanClass.getConstructors());</span>
+				}
+<span class="nc" id="L174">				catch (Throwable ex) {</span>
+<span class="nc" id="L175">					throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+<span class="nc" id="L176">							&quot;Resolution of declared constructors on bean Class [&quot; + beanClass.getName() +</span>
+<span class="nc" id="L177">							&quot;] from ClassLoader [&quot; + beanClass.getClassLoader() + &quot;] failed&quot;, ex);</span>
+<span class="fc" id="L178">				}</span>
+			}
+
+<span class="pc bpc" id="L181" title="1 of 6 branches missed.">			if (candidates.length == 1 &amp;&amp; explicitArgs == null &amp;&amp; !mbd.hasConstructorArgumentValues()) {</span>
+<span class="fc" id="L182">				Constructor&lt;?&gt; uniqueCandidate = candidates[0];</span>
+<span class="fc bfc" id="L183" title="All 2 branches covered.">				if (uniqueCandidate.getParameterCount() == 0) {</span>
+<span class="fc" id="L184">					synchronized (mbd.constructorArgumentLock) {</span>
+<span class="fc" id="L185">						mbd.resolvedConstructorOrFactoryMethod = uniqueCandidate;</span>
+<span class="fc" id="L186">						mbd.constructorArgumentsResolved = true;</span>
+<span class="fc" id="L187">						mbd.resolvedConstructorArguments = EMPTY_ARGS;</span>
+<span class="fc" id="L188">					}</span>
+<span class="fc" id="L189">					bw.setBeanInstance(instantiate(beanName, mbd, uniqueCandidate, EMPTY_ARGS));</span>
+<span class="fc" id="L190">					return bw;</span>
+				}
+			}
+
+			// Need to resolve the constructor.
+<span class="fc bfc" id="L195" title="All 2 branches covered.">			boolean autowiring = (chosenCtors != null ||</span>
+<span class="fc bfc" id="L196" title="All 2 branches covered.">					mbd.getResolvedAutowireMode() == AutowireCapableBeanFactory.AUTOWIRE_CONSTRUCTOR);</span>
+<span class="fc" id="L197">			ConstructorArgumentValues resolvedValues = null;</span>
+
+			int minNrOfArgs;
+<span class="fc bfc" id="L200" title="All 2 branches covered.">			if (explicitArgs != null) {</span>
+<span class="fc" id="L201">				minNrOfArgs = explicitArgs.length;</span>
+			}
+			else {
+<span class="fc" id="L204">				ConstructorArgumentValues cargs = mbd.getConstructorArgumentValues();</span>
+<span class="fc" id="L205">				resolvedValues = new ConstructorArgumentValues();</span>
+<span class="fc" id="L206">				minNrOfArgs = resolveConstructorArguments(beanName, mbd, bw, cargs, resolvedValues);</span>
+			}
+
+<span class="fc" id="L209">			AutowireUtils.sortConstructors(candidates);</span>
+<span class="fc" id="L210">			int minTypeDiffWeight = Integer.MAX_VALUE;</span>
+<span class="fc" id="L211">			Set&lt;Constructor&lt;?&gt;&gt; ambiguousConstructors = null;</span>
+<span class="fc" id="L212">			Deque&lt;UnsatisfiedDependencyException&gt; causes = null;</span>
+
+<span class="fc bfc" id="L214" title="All 2 branches covered.">			for (Constructor&lt;?&gt; candidate : candidates) {</span>
+<span class="fc" id="L215">				int parameterCount = candidate.getParameterCount();</span>
+
+<span class="pc bpc" id="L217" title="1 of 6 branches missed.">				if (constructorToUse != null &amp;&amp; argsToUse != null &amp;&amp; argsToUse.length &gt; parameterCount) {</span>
+					// Already found greedy constructor that can be satisfied -&gt;
+					// do not look any further, there are only less greedy constructors left.
+<span class="fc" id="L220">					break;</span>
+				}
+<span class="fc bfc" id="L222" title="All 2 branches covered.">				if (parameterCount &lt; minNrOfArgs) {</span>
+<span class="fc" id="L223">					continue;</span>
+				}
+
+				ArgumentsHolder argsHolder;
+<span class="fc" id="L227">				Class&lt;?&gt;[] paramTypes = candidate.getParameterTypes();</span>
+<span class="fc bfc" id="L228" title="All 2 branches covered.">				if (resolvedValues != null) {</span>
+					try {
+<span class="fc" id="L230">						@Nullable String[] paramNames = null;</span>
+<span class="fc bfc" id="L231" title="All 2 branches covered.">						if (resolvedValues.containsNamedArgument()) {</span>
+<span class="fc" id="L232">							paramNames = ConstructorPropertiesChecker.evaluate(candidate, parameterCount);</span>
+<span class="fc bfc" id="L233" title="All 2 branches covered.">							if (paramNames == null) {</span>
+<span class="fc" id="L234">								ParameterNameDiscoverer pnd = this.beanFactory.getParameterNameDiscoverer();</span>
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">								if (pnd != null) {</span>
+<span class="fc" id="L236">									paramNames = pnd.getParameterNames(candidate);</span>
+								}
+							}
+						}
+<span class="fc" id="L240">						argsHolder = createArgumentArray(beanName, mbd, resolvedValues, bw, paramTypes, paramNames,</span>
+<span class="fc bfc" id="L241" title="All 2 branches covered.">								getUserDeclaredConstructor(candidate), autowiring, candidates.length == 1);</span>
+					}
+<span class="fc" id="L243">					catch (UnsatisfiedDependencyException ex) {</span>
+<span class="pc bpc" id="L244" title="1 of 2 branches missed.">						if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L245">							logger.trace(&quot;Ignoring constructor [&quot; + candidate + &quot;] of bean '&quot; + beanName + &quot;': &quot; + ex);</span>
+						}
+						// Swallow and try next constructor.
+<span class="fc bfc" id="L248" title="All 2 branches covered.">						if (causes == null) {</span>
+<span class="fc" id="L249">							causes = new ArrayDeque&lt;&gt;(1);</span>
+						}
+<span class="fc" id="L251">						causes.add(ex);</span>
+<span class="fc" id="L252">						continue;</span>
+<span class="fc" id="L253">					}</span>
+				}
+				else {
+					// Explicit arguments given -&gt; arguments length must match exactly.
+<span class="fc bfc" id="L257" title="All 2 branches covered.">					if (parameterCount != explicitArgs.length) {</span>
+<span class="fc" id="L258">						continue;</span>
+					}
+<span class="fc" id="L260">					argsHolder = new ArgumentsHolder(explicitArgs);</span>
+				}
+
+<span class="fc bfc" id="L263" title="All 2 branches covered.">				int typeDiffWeight = (mbd.isLenientConstructorResolution() ?</span>
+<span class="fc" id="L264">						argsHolder.getTypeDifferenceWeight(paramTypes) : argsHolder.getAssignabilityWeight(paramTypes));</span>
+				// Choose this constructor if it represents the closest match.
+<span class="fc bfc" id="L266" title="All 2 branches covered.">				if (typeDiffWeight &lt; minTypeDiffWeight) {</span>
+<span class="fc" id="L267">					constructorToUse = candidate;</span>
+<span class="fc" id="L268">					argsHolderToUse = argsHolder;</span>
+<span class="fc" id="L269">					argsToUse = argsHolder.arguments;</span>
+<span class="fc" id="L270">					minTypeDiffWeight = typeDiffWeight;</span>
+<span class="fc" id="L271">					ambiguousConstructors = null;</span>
+				}
+<span class="pc bpc" id="L273" title="1 of 4 branches missed.">				else if (constructorToUse != null &amp;&amp; typeDiffWeight == minTypeDiffWeight) {</span>
+<span class="fc bfc" id="L274" title="All 2 branches covered.">					if (ambiguousConstructors == null) {</span>
+<span class="fc" id="L275">						ambiguousConstructors = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc" id="L276">						ambiguousConstructors.add(constructorToUse);</span>
+					}
+<span class="fc" id="L278">					ambiguousConstructors.add(candidate);</span>
+				}
+			}
+
+<span class="fc bfc" id="L282" title="All 2 branches covered.">			if (constructorToUse == null) {</span>
+<span class="fc bfc" id="L283" title="All 2 branches covered.">				if (causes != null) {</span>
+<span class="fc" id="L284">					UnsatisfiedDependencyException ex = causes.removeLast();</span>
+<span class="fc bfc" id="L285" title="All 2 branches covered.">					for (Exception cause : causes) {</span>
+<span class="fc" id="L286">						this.beanFactory.onSuppressedException(cause);</span>
+<span class="fc" id="L287">					}</span>
+<span class="fc" id="L288">					throw ex;</span>
+				}
+<span class="fc" id="L290">				throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+<span class="fc" id="L291">						&quot;Could not resolve matching constructor on bean class [&quot; + mbd.getBeanClassName() + &quot;] &quot; +</span>
+						&quot;(hint: specify index/type/name arguments for simple parameters to avoid type ambiguities. &quot; +
+						&quot;You should also check the consistency of arguments when mixing indexed and named arguments, &quot; +
+						&quot;especially in case of bean definition inheritance)&quot;);
+			}
+<span class="fc bfc" id="L296" title="All 4 branches covered.">			else if (ambiguousConstructors != null &amp;&amp; !mbd.isLenientConstructorResolution()) {</span>
+<span class="fc" id="L297">				throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+<span class="fc" id="L298">						&quot;Ambiguous constructor matches found on bean class [&quot; + mbd.getBeanClassName() + &quot;] &quot; +</span>
+						&quot;(hint: specify index/type/name arguments for simple parameters to avoid type ambiguities): &quot; +
+						ambiguousConstructors);
+			}
+
+<span class="pc bpc" id="L303" title="1 of 4 branches missed.">			if (explicitArgs == null &amp;&amp; argsHolderToUse != null) {</span>
+<span class="fc" id="L304">				argsHolderToUse.storeCache(mbd, constructorToUse);</span>
+			}
+		}
+
+<span class="pc bpc" id="L308" title="1 of 2 branches missed.">		Assert.state(argsToUse != null, &quot;Unresolved constructor arguments&quot;);</span>
+<span class="fc" id="L309">		bw.setBeanInstance(instantiate(beanName, mbd, constructorToUse, argsToUse));</span>
+<span class="fc" id="L310">		return bw;</span>
+	}
+
+	private Object instantiate(
+			String beanName, RootBeanDefinition mbd, Constructor&lt;?&gt; constructorToUse, Object[] argsToUse) {
+
+		try {
+<span class="fc" id="L317">			InstantiationStrategy strategy = this.beanFactory.getInstantiationStrategy();</span>
+<span class="fc" id="L318">			return strategy.instantiate(mbd, beanName, this.beanFactory, constructorToUse, argsToUse);</span>
+		}
+<span class="fc" id="L320">		catch (Throwable ex) {</span>
+<span class="fc" id="L321">			throw new BeanCreationException(mbd.getResourceDescription(), beanName, ex.getMessage(), ex);</span>
+		}
+	}
+
+	/**
+	 * Resolve the factory method in the specified bean definition, if possible.
+	 * {@link RootBeanDefinition#getResolvedFactoryMethod()} can be checked for the result.
+	 * @param mbd the bean definition to check
+	 */
+	public void resolveFactoryMethodIfPossible(RootBeanDefinition mbd) {
+		Class&lt;?&gt; factoryClass;
+		boolean isStatic;
+<span class="nc bnc" id="L333" title="All 2 branches missed.">		if (mbd.getFactoryBeanName() != null) {</span>
+<span class="nc" id="L334">			factoryClass = this.beanFactory.getType(mbd.getFactoryBeanName());</span>
+<span class="nc" id="L335">			isStatic = false;</span>
+		}
+		else {
+<span class="nc" id="L338">			factoryClass = mbd.getBeanClass();</span>
+<span class="nc" id="L339">			isStatic = true;</span>
+		}
+<span class="nc bnc" id="L341" title="All 2 branches missed.">		Assert.state(factoryClass != null, &quot;Unresolvable factory class&quot;);</span>
+<span class="nc" id="L342">		factoryClass = ClassUtils.getUserClass(factoryClass);</span>
+
+<span class="nc" id="L344">		Method[] candidates = getCandidateMethods(factoryClass, mbd);</span>
+<span class="nc" id="L345">		Method uniqueCandidate = null;</span>
+<span class="nc bnc" id="L346" title="All 2 branches missed.">		for (Method candidate : candidates) {</span>
+<span class="nc bnc" id="L347" title="All 6 branches missed.">			if ((!isStatic || isStaticCandidate(candidate, factoryClass)) &amp;&amp; mbd.isFactoryMethod(candidate)) {</span>
+<span class="nc bnc" id="L348" title="All 2 branches missed.">				if (uniqueCandidate == null) {</span>
+<span class="nc" id="L349">					uniqueCandidate = candidate;</span>
+				}
+<span class="nc bnc" id="L351" title="All 2 branches missed.">				else if (isParamMismatch(uniqueCandidate, candidate)) {</span>
+<span class="nc" id="L352">					uniqueCandidate = null;</span>
+<span class="nc" id="L353">					break;</span>
+				}
+			}
+		}
+<span class="nc" id="L357">		mbd.factoryMethodToIntrospect = uniqueCandidate;</span>
+<span class="nc" id="L358">	}</span>
+
+	private boolean isParamMismatch(Method uniqueCandidate, Method candidate) {
+<span class="nc" id="L361">		int uniqueCandidateParameterCount = uniqueCandidate.getParameterCount();</span>
+<span class="nc" id="L362">		int candidateParameterCount = candidate.getParameterCount();</span>
+<span class="nc bnc" id="L363" title="All 2 branches missed.">		return (uniqueCandidateParameterCount != candidateParameterCount ||</span>
+<span class="nc bnc" id="L364" title="All 2 branches missed.">				!Arrays.equals(uniqueCandidate.getParameterTypes(), candidate.getParameterTypes()));</span>
+	}
+
+	/**
+	 * Retrieve all candidate methods for the given class, considering
+	 * the {@link RootBeanDefinition#isNonPublicAccessAllowed()} flag.
+	 * Called as the starting point for factory method determination.
+	 */
+	private Method[] getCandidateMethods(Class&lt;?&gt; factoryClass, RootBeanDefinition mbd) {
+<span class="pc bpc" id="L373" title="1 of 2 branches missed.">		return (mbd.isNonPublicAccessAllowed() ?</span>
+<span class="pc" id="L374">				ReflectionUtils.getUniqueDeclaredMethods(factoryClass) : factoryClass.getMethods());</span>
+	}
+
+	private boolean isStaticCandidate(Method method, Class&lt;?&gt; factoryClass) {
+<span class="fc bfc" id="L378" title="All 4 branches covered.">		return (Modifier.isStatic(method.getModifiers()) &amp;&amp; method.getDeclaringClass() == factoryClass);</span>
+	}
+
+	/**
+	 * Instantiate the bean using a named factory method. The method may be static, if the
+	 * bean definition parameter specifies a class, rather than a &quot;factory-bean&quot;, or
+	 * an instance variable on a factory object itself configured using Dependency Injection.
+	 * &lt;p&gt;Implementation requires iterating over the static or instance methods with the
+	 * name specified in the RootBeanDefinition (the method may be overloaded) and trying
+	 * to match with the parameters. We don't have the types attached to constructor args,
+	 * so trial and error is the only way to go here. The explicitArgs array may contain
+	 * argument values passed in programmatically via the corresponding getBean method.
+	 * @param beanName the name of the bean
+	 * @param mbd the merged bean definition for the bean
+	 * @param explicitArgs argument values passed in programmatically via the getBean
+	 * method, or {@code null} if none (-&gt; use constructor argument values from bean definition)
+	 * @return a BeanWrapper for the new instance
+	 */
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	public BeanWrapper instantiateUsingFactoryMethod(
+			String beanName, RootBeanDefinition mbd, @Nullable Object @Nullable [] explicitArgs) {
+
+<span class="fc" id="L400">		BeanWrapperImpl bw = new BeanWrapperImpl();</span>
+<span class="fc" id="L401">		this.beanFactory.initBeanWrapper(bw);</span>
+
+		Object factoryBean;
+		Class&lt;?&gt; factoryClass;
+		boolean isStatic;
+
+<span class="fc" id="L407">		String factoryBeanName = mbd.getFactoryBeanName();</span>
+<span class="fc bfc" id="L408" title="All 2 branches covered.">		if (factoryBeanName != null) {</span>
+<span class="pc bpc" id="L409" title="1 of 2 branches missed.">			if (factoryBeanName.equals(beanName)) {</span>
+<span class="nc" id="L410">				throw new BeanDefinitionStoreException(mbd.getResourceDescription(), beanName,</span>
+						&quot;factory-bean reference points back to the same bean definition&quot;);
+			}
+<span class="fc" id="L413">			factoryBean = this.beanFactory.getBean(factoryBeanName);</span>
+<span class="fc bfc" id="L414" title="All 4 branches covered.">			if (mbd.isSingleton() &amp;&amp; this.beanFactory.containsSingleton(beanName)) {</span>
+<span class="fc" id="L415">				throw new ImplicitlyAppearedSingletonException();</span>
+			}
+<span class="fc" id="L417">			this.beanFactory.registerDependentBean(factoryBeanName, beanName);</span>
+<span class="fc" id="L418">			factoryClass = factoryBean.getClass();</span>
+<span class="fc" id="L419">			isStatic = false;</span>
+		}
+		else {
+			// It's a static factory method on the bean class.
+<span class="pc bpc" id="L423" title="1 of 2 branches missed.">			if (!mbd.hasBeanClass()) {</span>
+<span class="nc" id="L424">				throw new BeanDefinitionStoreException(mbd.getResourceDescription(), beanName,</span>
+						&quot;bean definition declares neither a bean class nor a factory-bean reference&quot;);
+			}
+<span class="fc" id="L427">			factoryBean = null;</span>
+<span class="fc" id="L428">			factoryClass = mbd.getBeanClass();</span>
+<span class="fc" id="L429">			isStatic = true;</span>
+		}
+
+<span class="fc" id="L432">		Method factoryMethodToUse = null;</span>
+<span class="fc" id="L433">		ArgumentsHolder argsHolderToUse = null;</span>
+<span class="fc" id="L434">		@Nullable Object[] argsToUse = null;</span>
+
+<span class="fc bfc" id="L436" title="All 2 branches covered.">		if (explicitArgs != null) {</span>
+<span class="fc" id="L437">			argsToUse = explicitArgs;</span>
+		}
+		else {
+<span class="fc" id="L440">			@Nullable Object[] argsToResolve = null;</span>
+<span class="fc" id="L441">			synchronized (mbd.constructorArgumentLock) {</span>
+<span class="fc" id="L442">				factoryMethodToUse = (Method) mbd.resolvedConstructorOrFactoryMethod;</span>
+<span class="pc bpc" id="L443" title="1 of 4 branches missed.">				if (factoryMethodToUse != null &amp;&amp; mbd.constructorArgumentsResolved) {</span>
+					// Found a cached factory method...
+<span class="fc" id="L445">					argsToUse = mbd.resolvedConstructorArguments;</span>
+<span class="fc bfc" id="L446" title="All 2 branches covered.">					if (argsToUse == null) {</span>
+<span class="fc" id="L447">						argsToResolve = mbd.preparedConstructorArguments;</span>
+					}
+				}
+<span class="fc" id="L450">			}</span>
+<span class="fc bfc" id="L451" title="All 2 branches covered.">			if (argsToResolve != null) {</span>
+<span class="fc" id="L452">				argsToUse = resolvePreparedArguments(beanName, mbd, bw, factoryMethodToUse, argsToResolve);</span>
+			}
+		}
+
+<span class="pc bpc" id="L456" title="1 of 4 branches missed.">		if (factoryMethodToUse == null || argsToUse == null) {</span>
+			// Need to determine the factory method...
+			// Try all methods with this name to see if they match the given arguments.
+<span class="fc" id="L459">			factoryClass = ClassUtils.getUserClass(factoryClass);</span>
+
+<span class="fc" id="L461">			List&lt;Method&gt; candidates = null;</span>
+<span class="fc bfc" id="L462" title="All 2 branches covered.">			if (mbd.isFactoryMethodUnique) {</span>
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">				if (factoryMethodToUse == null) {</span>
+<span class="fc" id="L464">					factoryMethodToUse = mbd.getResolvedFactoryMethod();</span>
+				}
+<span class="pc bpc" id="L466" title="1 of 2 branches missed.">				if (factoryMethodToUse != null) {</span>
+<span class="fc" id="L467">					candidates = Collections.singletonList(factoryMethodToUse);</span>
+				}
+			}
+<span class="fc bfc" id="L470" title="All 2 branches covered.">			if (candidates == null) {</span>
+<span class="fc" id="L471">				candidates = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L472">				Method[] rawCandidates = getCandidateMethods(factoryClass, mbd);</span>
+<span class="fc bfc" id="L473" title="All 2 branches covered.">				for (Method candidate : rawCandidates) {</span>
+<span class="fc bfc" id="L474" title="All 6 branches covered.">					if ((!isStatic || isStaticCandidate(candidate, factoryClass)) &amp;&amp; mbd.isFactoryMethod(candidate)) {</span>
+<span class="fc" id="L475">						candidates.add(candidate);</span>
+					}
+				}
+			}
+
+<span class="fc bfc" id="L480" title="All 6 branches covered.">			if (candidates.size() == 1 &amp;&amp; explicitArgs == null &amp;&amp; !mbd.hasConstructorArgumentValues()) {</span>
+<span class="fc" id="L481">				Method uniqueCandidate = candidates.get(0);</span>
+<span class="fc bfc" id="L482" title="All 2 branches covered.">				if (uniqueCandidate.getParameterCount() == 0) {</span>
+<span class="fc" id="L483">					mbd.factoryMethodToIntrospect = uniqueCandidate;</span>
+<span class="fc" id="L484">					synchronized (mbd.constructorArgumentLock) {</span>
+<span class="fc" id="L485">						mbd.resolvedConstructorOrFactoryMethod = uniqueCandidate;</span>
+<span class="fc" id="L486">						mbd.constructorArgumentsResolved = true;</span>
+<span class="fc" id="L487">						mbd.resolvedConstructorArguments = EMPTY_ARGS;</span>
+<span class="fc" id="L488">					}</span>
+<span class="fc" id="L489">					bw.setBeanInstance(instantiate(beanName, mbd, factoryBean, uniqueCandidate, EMPTY_ARGS));</span>
+<span class="fc" id="L490">					return bw;</span>
+				}
+			}
+
+<span class="fc bfc" id="L494" title="All 2 branches covered.">			if (candidates.size() &gt; 1) {  // explicitly skip immutable singletonList</span>
+<span class="fc" id="L495">				candidates.sort(AutowireUtils.EXECUTABLE_COMPARATOR);</span>
+			}
+
+<span class="fc" id="L498">			ConstructorArgumentValues resolvedValues = null;</span>
+<span class="fc bfc" id="L499" title="All 2 branches covered.">			boolean autowiring = (mbd.getResolvedAutowireMode() == AutowireCapableBeanFactory.AUTOWIRE_CONSTRUCTOR);</span>
+<span class="fc" id="L500">			int minTypeDiffWeight = Integer.MAX_VALUE;</span>
+<span class="fc" id="L501">			Set&lt;Method&gt; ambiguousFactoryMethods = null;</span>
+
+			int minNrOfArgs;
+<span class="fc bfc" id="L504" title="All 2 branches covered.">			if (explicitArgs != null) {</span>
+<span class="fc" id="L505">				minNrOfArgs = explicitArgs.length;</span>
+			}
+			else {
+				// We don't have arguments passed in programmatically, so we need to resolve the
+				// arguments specified in the constructor arguments held in the bean definition.
+<span class="fc bfc" id="L510" title="All 2 branches covered.">				if (mbd.hasConstructorArgumentValues()) {</span>
+<span class="fc" id="L511">					ConstructorArgumentValues cargs = mbd.getConstructorArgumentValues();</span>
+<span class="fc" id="L512">					resolvedValues = new ConstructorArgumentValues();</span>
+<span class="fc" id="L513">					minNrOfArgs = resolveConstructorArguments(beanName, mbd, bw, cargs, resolvedValues);</span>
+<span class="fc" id="L514">				}</span>
+				else {
+<span class="fc" id="L516">					minNrOfArgs = 0;</span>
+				}
+			}
+
+<span class="fc" id="L520">			Deque&lt;UnsatisfiedDependencyException&gt; causes = null;</span>
+
+<span class="fc bfc" id="L522" title="All 2 branches covered.">			for (Method candidate : candidates) {</span>
+<span class="fc" id="L523">				int parameterCount = candidate.getParameterCount();</span>
+
+<span class="fc bfc" id="L525" title="All 2 branches covered.">				if (parameterCount &gt;= minNrOfArgs) {</span>
+					ArgumentsHolder argsHolder;
+
+<span class="fc" id="L528">					Class&lt;?&gt;[] paramTypes = candidate.getParameterTypes();</span>
+<span class="fc bfc" id="L529" title="All 2 branches covered.">					if (explicitArgs != null) {</span>
+						// Explicit arguments given -&gt; arguments length must match exactly.
+<span class="fc bfc" id="L531" title="All 2 branches covered.">						if (paramTypes.length != explicitArgs.length) {</span>
+<span class="fc" id="L532">							continue;</span>
+						}
+<span class="fc" id="L534">						argsHolder = new ArgumentsHolder(explicitArgs);</span>
+					}
+					else {
+						// Resolved constructor arguments: type conversion and/or autowiring necessary.
+						try {
+<span class="fc" id="L539">							@Nullable String[] paramNames = null;</span>
+<span class="fc bfc" id="L540" title="All 4 branches covered.">							if (resolvedValues != null &amp;&amp; resolvedValues.containsNamedArgument()) {</span>
+<span class="fc" id="L541">								ParameterNameDiscoverer pnd = this.beanFactory.getParameterNameDiscoverer();</span>
+<span class="pc bpc" id="L542" title="1 of 2 branches missed.">								if (pnd != null) {</span>
+<span class="fc" id="L543">									paramNames = pnd.getParameterNames(candidate);</span>
+								}
+							}
+<span class="fc" id="L546">							argsHolder = createArgumentArray(beanName, mbd, resolvedValues, bw,</span>
+<span class="fc bfc" id="L547" title="All 2 branches covered.">									paramTypes, paramNames, candidate, autowiring, candidates.size() == 1);</span>
+						}
+<span class="fc" id="L549">						catch (UnsatisfiedDependencyException ex) {</span>
+<span class="pc bpc" id="L550" title="1 of 2 branches missed.">							if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L551">								logger.trace(&quot;Ignoring factory method [&quot; + candidate + &quot;] of bean '&quot; + beanName + &quot;': &quot; + ex);</span>
+							}
+							// Swallow and try next overloaded factory method.
+<span class="fc bfc" id="L554" title="All 2 branches covered.">							if (causes == null) {</span>
+<span class="fc" id="L555">								causes = new ArrayDeque&lt;&gt;(1);</span>
+							}
+<span class="fc" id="L557">							causes.add(ex);</span>
+<span class="fc" id="L558">							continue;</span>
+<span class="fc" id="L559">						}</span>
+					}
+
+<span class="fc bfc" id="L562" title="All 2 branches covered.">					int typeDiffWeight = (mbd.isLenientConstructorResolution() ?</span>
+<span class="fc" id="L563">							argsHolder.getTypeDifferenceWeight(paramTypes) : argsHolder.getAssignabilityWeight(paramTypes));</span>
+					// Choose this factory method if it represents the closest match.
+<span class="fc bfc" id="L565" title="All 2 branches covered.">					if (typeDiffWeight &lt; minTypeDiffWeight) {</span>
+<span class="fc" id="L566">						factoryMethodToUse = candidate;</span>
+<span class="fc" id="L567">						argsHolderToUse = argsHolder;</span>
+<span class="fc" id="L568">						argsToUse = argsHolder.arguments;</span>
+<span class="fc" id="L569">						minTypeDiffWeight = typeDiffWeight;</span>
+<span class="fc" id="L570">						ambiguousFactoryMethods = null;</span>
+					}
+					// Find out about ambiguity: In case of the same type difference weight
+					// for methods with the same number of parameters, collect such candidates
+					// and eventually raise an ambiguity exception.
+					// However, only perform that check in non-lenient constructor resolution mode,
+					// and explicitly ignore overridden methods (with the same parameter signature).
+<span class="pc bpc" id="L577" title="1 of 4 branches missed.">					else if (factoryMethodToUse != null &amp;&amp; typeDiffWeight == minTypeDiffWeight &amp;&amp;</span>
+<span class="pc bpc" id="L578" title="1 of 2 branches missed.">							!mbd.isLenientConstructorResolution() &amp;&amp;</span>
+<span class="fc bfc" id="L579" title="All 2 branches covered.">							paramTypes.length == factoryMethodToUse.getParameterCount() &amp;&amp;</span>
+<span class="pc bpc" id="L580" title="1 of 2 branches missed.">							!Arrays.equals(paramTypes, factoryMethodToUse.getParameterTypes())) {</span>
+<span class="fc bfc" id="L581" title="All 2 branches covered.">						if (ambiguousFactoryMethods == null) {</span>
+<span class="fc" id="L582">							ambiguousFactoryMethods = new LinkedHashSet&lt;&gt;();</span>
+<span class="fc" id="L583">							ambiguousFactoryMethods.add(factoryMethodToUse);</span>
+						}
+<span class="fc" id="L585">						ambiguousFactoryMethods.add(candidate);</span>
+					}
+				}
+<span class="fc" id="L588">			}</span>
+
+<span class="fc bfc" id="L590" title="All 4 branches covered.">			if (factoryMethodToUse == null || argsToUse == null) {</span>
+<span class="fc bfc" id="L591" title="All 2 branches covered.">				if (causes != null) {</span>
+<span class="fc" id="L592">					UnsatisfiedDependencyException ex = causes.removeLast();</span>
+<span class="pc bpc" id="L593" title="1 of 2 branches missed.">					for (Exception cause : causes) {</span>
+<span class="nc" id="L594">						this.beanFactory.onSuppressedException(cause);</span>
+<span class="nc" id="L595">					}</span>
+<span class="fc" id="L596">					throw ex;</span>
+				}
+<span class="fc" id="L598">				List&lt;String&gt; argTypes = new ArrayList&lt;&gt;(minNrOfArgs);</span>
+<span class="fc bfc" id="L599" title="All 2 branches covered.">				if (explicitArgs != null) {</span>
+<span class="fc bfc" id="L600" title="All 2 branches covered.">					for (Object arg : explicitArgs) {</span>
+<span class="pc bpc" id="L601" title="1 of 2 branches missed.">						argTypes.add(arg != null ? arg.getClass().getSimpleName() : &quot;null&quot;);</span>
+					}
+				}
+<span class="fc bfc" id="L604" title="All 2 branches covered.">				else if (resolvedValues != null) {</span>
+<span class="fc" id="L605">					Set&lt;ValueHolder&gt; valueHolders = CollectionUtils.newLinkedHashSet(resolvedValues.getArgumentCount());</span>
+<span class="fc" id="L606">					valueHolders.addAll(resolvedValues.getIndexedArgumentValues().values());</span>
+<span class="fc" id="L607">					valueHolders.addAll(resolvedValues.getGenericArgumentValues());</span>
+<span class="fc bfc" id="L608" title="All 2 branches covered.">					for (ValueHolder value : valueHolders) {</span>
+<span class="fc bfc" id="L609" title="All 2 branches covered.">						String argType = (value.getType() != null ? ClassUtils.getShortName(value.getType()) :</span>
+<span class="pc bpc" id="L610" title="1 of 2 branches missed.">								(value.getValue() != null ? value.getValue().getClass().getSimpleName() : &quot;null&quot;));</span>
+<span class="fc" id="L611">						argTypes.add(argType);</span>
+<span class="fc" id="L612">					}</span>
+				}
+<span class="fc" id="L614">				String argDesc = StringUtils.collectionToCommaDelimitedString(argTypes);</span>
+<span class="fc" id="L615">				throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+<span class="fc" id="L616">						&quot;No matching factory method found on class [&quot; + factoryClass.getName() + &quot;]: &quot; +</span>
+<span class="fc bfc" id="L617" title="All 2 branches covered.">						(mbd.getFactoryBeanName() != null ? &quot;factory bean '&quot; + mbd.getFactoryBeanName() + &quot;'; &quot; : &quot;&quot;) +</span>
+<span class="fc" id="L618">						&quot;factory method '&quot; + mbd.getFactoryMethodName() + &quot;(&quot; + argDesc + &quot;)'. &quot; +</span>
+<span class="fc bfc" id="L619" title="All 2 branches covered.">						&quot;Check that a method with the specified name &quot; + (minNrOfArgs &gt; 0 ? &quot;and arguments &quot; : &quot;&quot;) +</span>
+<span class="fc bfc" id="L620" title="All 2 branches covered.">						&quot;exists and that it is &quot; + (isStatic ? &quot;static&quot; : &quot;non-static&quot;) + &quot;.&quot;);</span>
+			}
+<span class="pc bpc" id="L622" title="1 of 2 branches missed.">			else if (void.class == factoryMethodToUse.getReturnType()) {</span>
+<span class="nc" id="L623">				throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+<span class="nc" id="L624">						&quot;Invalid factory method '&quot; + mbd.getFactoryMethodName() + &quot;' on class [&quot; +</span>
+<span class="nc" id="L625">						factoryClass.getName() + &quot;]: needs to have a non-void return type!&quot;);</span>
+			}
+<span class="fc bfc" id="L627" title="All 2 branches covered.">			else if (KotlinDetector.isSuspendingFunction(factoryMethodToUse)) {</span>
+<span class="fc" id="L628">				throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+<span class="fc" id="L629">						&quot;Invalid factory method '&quot; + mbd.getFactoryMethodName() + &quot;' on class [&quot; +</span>
+<span class="fc" id="L630">								factoryClass.getName() + &quot;]: suspending functions are not supported!&quot;);</span>
+			}
+<span class="fc bfc" id="L632" title="All 2 branches covered.">			else if (ambiguousFactoryMethods != null) {</span>
+<span class="fc" id="L633">				throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+<span class="fc" id="L634">						&quot;Ambiguous factory method matches found on class [&quot; + factoryClass.getName() + &quot;] &quot; +</span>
+						&quot;(hint: specify index/type/name arguments for simple parameters to avoid type ambiguities): &quot; +
+						ambiguousFactoryMethods);
+			}
+
+<span class="pc bpc" id="L639" title="1 of 4 branches missed.">			if (explicitArgs == null &amp;&amp; argsHolderToUse != null) {</span>
+<span class="fc" id="L640">				mbd.factoryMethodToIntrospect = factoryMethodToUse;</span>
+<span class="fc" id="L641">				argsHolderToUse.storeCache(mbd, factoryMethodToUse);</span>
+			}
+		}
+
+<span class="fc" id="L645">		bw.setBeanInstance(instantiate(beanName, mbd, factoryBean, factoryMethodToUse, argsToUse));</span>
+<span class="fc" id="L646">		return bw;</span>
+	}
+
+	private Object instantiate(String beanName, RootBeanDefinition mbd,
+			@Nullable Object factoryBean, Method factoryMethod, @Nullable Object[] args) {
+
+		try {
+<span class="fc" id="L653">			return this.beanFactory.getInstantiationStrategy().instantiate(</span>
+					mbd, beanName, this.beanFactory, factoryBean, factoryMethod, args);
+		}
+<span class="fc" id="L656">		catch (Throwable ex) {</span>
+<span class="fc" id="L657">			throw new BeanCreationException(mbd.getResourceDescription(), beanName, ex.getMessage(), ex);</span>
+		}
+	}
+
+	/**
+	 * Resolve the constructor arguments for this bean into the resolvedValues object.
+	 * This may involve looking up other beans.
+	 * &lt;p&gt;This method is also used for handling invocations of static factory methods.
+	 */
+	private int resolveConstructorArguments(String beanName, RootBeanDefinition mbd, BeanWrapper bw,
+			ConstructorArgumentValues cargs, ConstructorArgumentValues resolvedValues) {
+
+<span class="fc" id="L669">		TypeConverter customConverter = this.beanFactory.getCustomTypeConverter();</span>
+<span class="fc bfc" id="L670" title="All 2 branches covered.">		TypeConverter converter = (customConverter != null ? customConverter : bw);</span>
+<span class="fc" id="L671">		BeanDefinitionValueResolver valueResolver =</span>
+				new BeanDefinitionValueResolver(this.beanFactory, beanName, mbd, converter);
+
+<span class="fc" id="L674">		int minNrOfArgs = cargs.getArgumentCount();</span>
+
+<span class="fc bfc" id="L676" title="All 2 branches covered.">		for (Map.Entry&lt;Integer, ConstructorArgumentValues.ValueHolder&gt; entry : cargs.getIndexedArgumentValues().entrySet()) {</span>
+<span class="fc" id="L677">			int index = entry.getKey();</span>
+<span class="pc bpc" id="L678" title="1 of 2 branches missed.">			if (index &lt; 0) {</span>
+<span class="nc" id="L679">				throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+						&quot;Invalid constructor argument index: &quot; + index);
+			}
+<span class="fc bfc" id="L682" title="All 2 branches covered.">			if (index + 1 &gt; minNrOfArgs) {</span>
+<span class="fc" id="L683">				minNrOfArgs = index + 1;</span>
+			}
+<span class="fc" id="L685">			ConstructorArgumentValues.ValueHolder valueHolder = entry.getValue();</span>
+<span class="pc bpc" id="L686" title="1 of 2 branches missed.">			if (valueHolder.isConverted()) {</span>
+<span class="nc" id="L687">				resolvedValues.addIndexedArgumentValue(index, valueHolder);</span>
+			}
+			else {
+<span class="fc" id="L690">				Object resolvedValue =</span>
+<span class="fc" id="L691">						valueResolver.resolveValueIfNecessary(&quot;constructor argument&quot;, valueHolder.getValue());</span>
+<span class="fc" id="L692">				ConstructorArgumentValues.ValueHolder resolvedValueHolder =</span>
+<span class="fc" id="L693">						new ConstructorArgumentValues.ValueHolder(resolvedValue, valueHolder.getType(), valueHolder.getName());</span>
+<span class="fc" id="L694">				resolvedValueHolder.setSource(valueHolder);</span>
+<span class="fc" id="L695">				resolvedValues.addIndexedArgumentValue(index, resolvedValueHolder);</span>
+			}
+<span class="fc" id="L697">		}</span>
+
+<span class="fc bfc" id="L699" title="All 2 branches covered.">		for (ConstructorArgumentValues.ValueHolder valueHolder : cargs.getGenericArgumentValues()) {</span>
+<span class="pc bpc" id="L700" title="1 of 2 branches missed.">			if (valueHolder.isConverted()) {</span>
+<span class="nc" id="L701">				resolvedValues.addGenericArgumentValue(valueHolder);</span>
+			}
+			else {
+<span class="fc" id="L704">				Object resolvedValue =</span>
+<span class="fc" id="L705">						valueResolver.resolveValueIfNecessary(&quot;constructor argument&quot;, valueHolder.getValue());</span>
+<span class="fc" id="L706">				ConstructorArgumentValues.ValueHolder resolvedValueHolder = new ConstructorArgumentValues.ValueHolder(</span>
+<span class="fc" id="L707">						resolvedValue, valueHolder.getType(), valueHolder.getName());</span>
+<span class="fc" id="L708">				resolvedValueHolder.setSource(valueHolder);</span>
+<span class="fc" id="L709">				resolvedValues.addGenericArgumentValue(resolvedValueHolder);</span>
+			}
+<span class="fc" id="L711">		}</span>
+
+<span class="fc" id="L713">		return minNrOfArgs;</span>
+	}
+
+	/**
+	 * Create an array of arguments to invoke a constructor or factory method,
+	 * given the resolved constructor argument values.
+	 */
+	private ArgumentsHolder createArgumentArray(
+			String beanName, RootBeanDefinition mbd, @Nullable ConstructorArgumentValues resolvedValues,
+			BeanWrapper bw, Class&lt;?&gt;[] paramTypes, @Nullable String @Nullable [] paramNames, Executable executable,
+			boolean autowiring, boolean fallback) throws UnsatisfiedDependencyException {
+
+<span class="fc" id="L725">		TypeConverter customConverter = this.beanFactory.getCustomTypeConverter();</span>
+<span class="fc bfc" id="L726" title="All 2 branches covered.">		TypeConverter converter = (customConverter != null ? customConverter : bw);</span>
+
+<span class="fc" id="L728">		ArgumentsHolder args = new ArgumentsHolder(paramTypes.length);</span>
+<span class="fc" id="L729">		Set&lt;ConstructorArgumentValues.ValueHolder&gt; usedValueHolders = new HashSet&lt;&gt;(paramTypes.length);</span>
+<span class="fc" id="L730">		Set&lt;String&gt; allAutowiredBeanNames = new LinkedHashSet&lt;&gt;(paramTypes.length * 2);</span>
+
+<span class="fc bfc" id="L732" title="All 2 branches covered.">		for (int paramIndex = 0; paramIndex &lt; paramTypes.length; paramIndex++) {</span>
+<span class="fc" id="L733">			Class&lt;?&gt; paramType = paramTypes[paramIndex];</span>
+<span class="fc bfc" id="L734" title="All 2 branches covered.">			String paramName = (paramNames != null ? paramNames[paramIndex] : &quot;&quot;);</span>
+			// Try to find matching constructor argument value, either indexed or generic.
+<span class="fc" id="L736">			ConstructorArgumentValues.ValueHolder valueHolder = null;</span>
+<span class="fc bfc" id="L737" title="All 2 branches covered.">			if (resolvedValues != null) {</span>
+<span class="fc" id="L738">				valueHolder = resolvedValues.getArgumentValue(paramIndex, paramType, paramName, usedValueHolders);</span>
+				// If we couldn't find a direct match and are not supposed to autowire,
+				// let's try the next generic, untyped argument value as fallback:
+				// it could match after type conversion (for example, String -&gt; int).
+<span class="fc bfc" id="L742" title="All 6 branches covered.">				if (valueHolder == null &amp;&amp; (!autowiring || paramTypes.length == resolvedValues.getArgumentCount())) {</span>
+<span class="fc" id="L743">					valueHolder = resolvedValues.getGenericArgumentValue(null, null, usedValueHolders);</span>
+				}
+			}
+<span class="fc bfc" id="L746" title="All 2 branches covered.">			if (valueHolder != null) {</span>
+				// We found a potential match - let's give it a try.
+				// Do not consider the same value definition multiple times!
+<span class="fc" id="L749">				usedValueHolders.add(valueHolder);</span>
+<span class="fc" id="L750">				Object originalValue = valueHolder.getValue();</span>
+				Object convertedValue;
+<span class="pc bpc" id="L752" title="1 of 2 branches missed.">				if (valueHolder.isConverted()) {</span>
+<span class="nc" id="L753">					convertedValue = valueHolder.getConvertedValue();</span>
+<span class="nc" id="L754">					args.preparedArguments[paramIndex] = convertedValue;</span>
+				}
+				else {
+<span class="fc" id="L757">					MethodParameter methodParam = MethodParameter.forExecutable(executable, paramIndex);</span>
+					try {
+<span class="fc" id="L759">						convertedValue = converter.convertIfNecessary(originalValue, paramType, methodParam);</span>
+					}
+<span class="fc" id="L761">					catch (TypeMismatchException ex) {</span>
+<span class="fc" id="L762">						throw new UnsatisfiedDependencyException(</span>
+<span class="fc" id="L763">								mbd.getResourceDescription(), beanName, new InjectionPoint(methodParam),</span>
+								&quot;Could not convert argument value of type [&quot; +
+<span class="fc" id="L765">								ObjectUtils.nullSafeClassName(valueHolder.getValue()) +</span>
+<span class="fc" id="L766">								&quot;] to required type [&quot; + paramType.getName() + &quot;]: &quot; + ex.getMessage());</span>
+<span class="fc" id="L767">					}</span>
+<span class="fc" id="L768">					Object sourceHolder = valueHolder.getSource();</span>
+<span class="pc bpc" id="L769" title="1 of 2 branches missed.">					if (sourceHolder instanceof ConstructorArgumentValues.ValueHolder constructorValueHolder) {</span>
+<span class="fc" id="L770">						Object sourceValue = constructorValueHolder.getValue();</span>
+<span class="fc" id="L771">						args.resolveNecessary = true;</span>
+<span class="fc" id="L772">						args.preparedArguments[paramIndex] = sourceValue;</span>
+					}
+				}
+<span class="fc" id="L775">				args.arguments[paramIndex] = convertedValue;</span>
+<span class="fc" id="L776">				args.rawArguments[paramIndex] = originalValue;</span>
+<span class="fc" id="L777">			}</span>
+			else {
+<span class="fc" id="L779">				MethodParameter methodParam = MethodParameter.forExecutable(executable, paramIndex);</span>
+				// No explicit match found: we're either supposed to autowire or
+				// have to fail creating an argument array for the given constructor.
+<span class="fc bfc" id="L782" title="All 2 branches covered.">				if (!autowiring) {</span>
+<span class="fc" id="L783">					throw new UnsatisfiedDependencyException(</span>
+<span class="fc" id="L784">							mbd.getResourceDescription(), beanName, new InjectionPoint(methodParam),</span>
+<span class="fc" id="L785">							&quot;Ambiguous argument values for parameter of type [&quot; + paramType.getName() +</span>
+							&quot;] - did you specify the correct bean references as arguments?&quot;);
+				}
+				try {
+<span class="fc" id="L789">					ConstructorDependencyDescriptor desc = new ConstructorDependencyDescriptor(methodParam, true);</span>
+<span class="fc" id="L790">					Set&lt;String&gt; autowiredBeanNames = new LinkedHashSet&lt;&gt;(2);</span>
+<span class="fc" id="L791">					Object arg = resolveAutowiredArgument(</span>
+							desc, paramType, beanName, autowiredBeanNames, converter, fallback);
+<span class="fc bfc" id="L793" title="All 2 branches covered.">					if (arg != null) {</span>
+<span class="fc" id="L794">						setShortcutIfPossible(desc, paramType, autowiredBeanNames);</span>
+					}
+<span class="fc" id="L796">					allAutowiredBeanNames.addAll(autowiredBeanNames);</span>
+<span class="fc" id="L797">					args.rawArguments[paramIndex] = arg;</span>
+<span class="fc" id="L798">					args.arguments[paramIndex] = arg;</span>
+<span class="fc" id="L799">					args.preparedArguments[paramIndex] = desc;</span>
+<span class="fc" id="L800">					args.resolveNecessary = true;</span>
+				}
+<span class="fc" id="L802">				catch (BeansException ex) {</span>
+<span class="fc" id="L803">					throw new UnsatisfiedDependencyException(</span>
+<span class="fc" id="L804">							mbd.getResourceDescription(), beanName, new InjectionPoint(methodParam), ex);</span>
+<span class="fc" id="L805">				}</span>
+			}
+		}
+
+<span class="fc" id="L809">		registerDependentBeans(executable, beanName, allAutowiredBeanNames);</span>
+
+<span class="fc" id="L811">		return args;</span>
+	}
+
+	/**
+	 * Resolve the prepared arguments stored in the given bean definition.
+	 */
+	private @Nullable Object[] resolvePreparedArguments(String beanName, RootBeanDefinition mbd, BeanWrapper bw,
+			Executable executable, Object[] argsToResolve) {
+
+<span class="fc" id="L820">		TypeConverter customConverter = this.beanFactory.getCustomTypeConverter();</span>
+<span class="pc bpc" id="L821" title="1 of 2 branches missed.">		TypeConverter converter = (customConverter != null ? customConverter : bw);</span>
+<span class="fc" id="L822">		BeanDefinitionValueResolver valueResolver =</span>
+				new BeanDefinitionValueResolver(this.beanFactory, beanName, mbd, converter);
+<span class="fc" id="L824">		Class&lt;?&gt;[] paramTypes = executable.getParameterTypes();</span>
+
+<span class="fc" id="L826">		@Nullable Object[] resolvedArgs = new Object[argsToResolve.length];</span>
+<span class="fc bfc" id="L827" title="All 2 branches covered.">		for (int argIndex = 0; argIndex &lt; argsToResolve.length; argIndex++) {</span>
+<span class="fc" id="L828">			Object argValue = argsToResolve[argIndex];</span>
+<span class="fc" id="L829">			Class&lt;?&gt; paramType = paramTypes[argIndex];</span>
+<span class="fc" id="L830">			boolean convertNecessary = false;</span>
+<span class="fc bfc" id="L831" title="All 2 branches covered.">			if (argValue instanceof ConstructorDependencyDescriptor descriptor) {</span>
+				try {
+<span class="fc" id="L833">					argValue = resolveAutowiredArgument(descriptor, paramType, beanName,</span>
+							null, converter, true);
+				}
+<span class="fc" id="L836">				catch (BeansException ex) {</span>
+					// Unexpected target bean mismatch for cached argument -&gt; re-resolve
+<span class="fc" id="L838">					Set&lt;String&gt; autowiredBeanNames = null;</span>
+<span class="pc bpc" id="L839" title="1 of 2 branches missed.">					if (descriptor.hasShortcut()) {</span>
+						// Reset shortcut and try to re-resolve it in this thread...
+<span class="fc" id="L841">						descriptor.setShortcut(null);</span>
+<span class="fc" id="L842">						autowiredBeanNames = new LinkedHashSet&lt;&gt;(2);</span>
+					}
+<span class="fc" id="L844">					logger.debug(&quot;Failed to resolve cached argument&quot;, ex);</span>
+<span class="fc" id="L845">					argValue = resolveAutowiredArgument(descriptor, paramType, beanName,</span>
+							autowiredBeanNames, converter, true);
+<span class="pc bpc" id="L847" title="2 of 4 branches missed.">					if (autowiredBeanNames != null &amp;&amp; !descriptor.hasShortcut()) {</span>
+						// We encountered as stale shortcut before, and the shortcut has
+						// not been re-resolved by another thread in the meantime...
+<span class="fc bfc" id="L850" title="All 2 branches covered.">						if (argValue != null) {</span>
+<span class="fc" id="L851">							setShortcutIfPossible(descriptor, paramType, autowiredBeanNames);</span>
+						}
+<span class="fc" id="L853">						registerDependentBeans(executable, beanName, autowiredBeanNames);</span>
+					}
+<span class="fc" id="L855">				}</span>
+			}
+<span class="fc bfc" id="L857" title="All 2 branches covered.">			else if (argValue instanceof BeanMetadataElement) {</span>
+<span class="fc" id="L858">				argValue = valueResolver.resolveValueIfNecessary(&quot;constructor argument&quot;, argValue);</span>
+<span class="fc" id="L859">				convertNecessary = true;</span>
+			}
+<span class="fc bfc" id="L861" title="All 2 branches covered.">			else if (argValue instanceof String text) {</span>
+<span class="fc" id="L862">				argValue = this.beanFactory.evaluateBeanDefinitionString(text, mbd);</span>
+<span class="fc" id="L863">				convertNecessary = true;</span>
+			}
+<span class="fc bfc" id="L865" title="All 2 branches covered.">			if (convertNecessary) {</span>
+<span class="fc" id="L866">				MethodParameter methodParam = MethodParameter.forExecutable(executable, argIndex);</span>
+				try {
+<span class="fc" id="L868">					argValue = converter.convertIfNecessary(argValue, paramType, methodParam);</span>
+				}
+<span class="nc" id="L870">				catch (TypeMismatchException ex) {</span>
+<span class="nc" id="L871">					throw new UnsatisfiedDependencyException(</span>
+<span class="nc" id="L872">							mbd.getResourceDescription(), beanName, new InjectionPoint(methodParam),</span>
+<span class="nc" id="L873">							&quot;Could not convert argument value of type [&quot; + ObjectUtils.nullSafeClassName(argValue) +</span>
+<span class="nc" id="L874">							&quot;] to required type [&quot; + paramType.getName() + &quot;]: &quot; + ex.getMessage());</span>
+<span class="fc" id="L875">				}</span>
+			}
+<span class="fc" id="L877">			resolvedArgs[argIndex] = argValue;</span>
+		}
+<span class="fc" id="L879">		return resolvedArgs;</span>
+	}
+
+	private Constructor&lt;?&gt; getUserDeclaredConstructor(Constructor&lt;?&gt; constructor) {
+<span class="fc" id="L883">		Class&lt;?&gt; declaringClass = constructor.getDeclaringClass();</span>
+<span class="fc" id="L884">		Class&lt;?&gt; userClass = ClassUtils.getUserClass(declaringClass);</span>
+<span class="fc bfc" id="L885" title="All 2 branches covered.">		if (userClass != declaringClass) {</span>
+			try {
+<span class="fc" id="L887">				return userClass.getDeclaredConstructor(constructor.getParameterTypes());</span>
+			}
+<span class="nc" id="L889">			catch (NoSuchMethodException ex) {</span>
+				// No equivalent constructor on user class (superclass)...
+				// Let's proceed with the given constructor as we usually would.
+			}
+		}
+<span class="fc" id="L894">		return constructor;</span>
+	}
+
+	/**
+	 * Resolve the specified argument which is supposed to be autowired.
+	 */
+	@Nullable Object resolveAutowiredArgument(DependencyDescriptor descriptor, Class&lt;?&gt; paramType, String beanName,
+			@Nullable Set&lt;String&gt; autowiredBeanNames, TypeConverter typeConverter, boolean fallback) {
+
+<span class="fc bfc" id="L903" title="All 2 branches covered.">		if (InjectionPoint.class.isAssignableFrom(paramType)) {</span>
+<span class="fc" id="L904">			InjectionPoint injectionPoint = currentInjectionPoint.get();</span>
+<span class="pc bpc" id="L905" title="1 of 2 branches missed.">			if (injectionPoint == null) {</span>
+<span class="nc" id="L906">				throw new IllegalStateException(&quot;No current InjectionPoint available for &quot; + descriptor);</span>
+			}
+<span class="fc" id="L908">			return injectionPoint;</span>
+		}
+
+		try {
+<span class="fc" id="L912">			return this.beanFactory.resolveDependency(descriptor, beanName, autowiredBeanNames, typeConverter);</span>
+		}
+<span class="fc" id="L914">		catch (NoUniqueBeanDefinitionException ex) {</span>
+<span class="fc" id="L915">			throw ex;</span>
+		}
+<span class="fc" id="L917">		catch (NoSuchBeanDefinitionException ex) {</span>
+<span class="fc bfc" id="L918" title="All 2 branches covered.">			if (fallback) {</span>
+				// Single constructor or factory method -&gt; let's return an empty array/collection
+				// for example, a vararg or a non-null List/Set/Map parameter.
+<span class="fc bfc" id="L921" title="All 2 branches covered.">				if (paramType.isArray()) {</span>
+<span class="fc" id="L922">					return Array.newInstance(paramType.componentType(), 0);</span>
+				}
+<span class="fc bfc" id="L924" title="All 2 branches covered.">				else if (CollectionFactory.isApproximableCollectionType(paramType)) {</span>
+<span class="fc" id="L925">					return CollectionFactory.createCollection(paramType, 0);</span>
+				}
+<span class="fc bfc" id="L927" title="All 2 branches covered.">				else if (CollectionFactory.isApproximableMapType(paramType)) {</span>
+<span class="fc" id="L928">					return CollectionFactory.createMap(paramType, 0);</span>
+				}
+			}
+<span class="fc" id="L931">			throw ex;</span>
+		}
+	}
+
+	private void setShortcutIfPossible(
+			ConstructorDependencyDescriptor descriptor, Class&lt;?&gt; paramType, Set&lt;String&gt; autowiredBeanNames) {
+
+<span class="fc bfc" id="L938" title="All 2 branches covered.">		if (autowiredBeanNames.size() == 1) {</span>
+<span class="fc" id="L939">			String autowiredBeanName = autowiredBeanNames.iterator().next();</span>
+<span class="fc bfc" id="L940" title="All 2 branches covered.">			if (this.beanFactory.containsBean(autowiredBeanName) &amp;&amp;</span>
+<span class="fc bfc" id="L941" title="All 2 branches covered.">					this.beanFactory.isTypeMatch(autowiredBeanName, paramType)) {</span>
+<span class="fc" id="L942">				descriptor.setShortcut(autowiredBeanName);</span>
+			}
+		}
+<span class="fc" id="L945">	}</span>
+
+	private void registerDependentBeans(
+			Executable executable, String beanName, Set&lt;String&gt; autowiredBeanNames) {
+
+<span class="fc bfc" id="L950" title="All 2 branches covered.">		for (String autowiredBeanName : autowiredBeanNames) {</span>
+<span class="fc" id="L951">			this.beanFactory.registerDependentBean(autowiredBeanName, beanName);</span>
+<span class="fc bfc" id="L952" title="All 2 branches covered.">			if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L953">				logger.debug(&quot;Autowiring by type from bean name '&quot; + beanName + &quot;' via &quot; +</span>
+<span class="pc bpc" id="L954" title="1 of 2 branches missed.">						(executable instanceof Constructor ? &quot;constructor&quot; : &quot;factory method&quot;) +</span>
+						&quot; to bean named '&quot; + autowiredBeanName + &quot;'&quot;);
+			}
+<span class="fc" id="L957">		}</span>
+<span class="fc" id="L958">	}</span>
+
+
+	// AOT-oriented pre-resolution
+
+	public Executable resolveConstructorOrFactoryMethod(String beanName, RootBeanDefinition mbd) {
+<span class="fc" id="L964">		Supplier&lt;ResolvableType&gt; beanType = () -&gt; getBeanType(beanName, mbd);</span>
+<span class="fc bfc" id="L965" title="All 2 branches covered.">		List&lt;ResolvableType&gt; valueTypes = (mbd.hasConstructorArgumentValues() ?</span>
+<span class="fc" id="L966">				determineParameterValueTypes(mbd) : Collections.emptyList());</span>
+<span class="fc" id="L967">		Method resolvedFactoryMethod = resolveFactoryMethod(beanName, mbd, valueTypes);</span>
+<span class="fc bfc" id="L968" title="All 2 branches covered.">		if (resolvedFactoryMethod != null) {</span>
+<span class="fc" id="L969">			return resolvedFactoryMethod;</span>
+		}
+
+<span class="fc" id="L972">		Class&lt;?&gt; factoryBeanClass = getFactoryBeanClass(beanName, mbd);</span>
+<span class="fc bfc" id="L973" title="All 4 branches covered.">		if (factoryBeanClass != null &amp;&amp; !factoryBeanClass.equals(mbd.getResolvableType().toClass())) {</span>
+<span class="fc" id="L974">			ResolvableType resolvableType = mbd.getResolvableType();</span>
+<span class="fc" id="L975">			boolean isCompatible = ResolvableType.forClass(factoryBeanClass)</span>
+<span class="fc" id="L976">					.as(FactoryBean.class).getGeneric(0).isAssignableFrom(resolvableType);</span>
+<span class="fc" id="L977">			Assert.state(isCompatible, () -&gt; String.format(</span>
+					&quot;Incompatible target type '%s' for factory bean '%s'&quot;,
+<span class="fc" id="L979">					resolvableType.toClass().getName(), factoryBeanClass.getName()));</span>
+<span class="fc" id="L980">			Constructor&lt;?&gt; constructor = resolveConstructor(beanName, mbd,</span>
+<span class="fc" id="L981">					() -&gt; ResolvableType.forClass(factoryBeanClass), valueTypes);</span>
+<span class="pc bpc" id="L982" title="1 of 2 branches missed.">			if (constructor != null) {</span>
+<span class="fc" id="L983">				return constructor;</span>
+			}
+<span class="nc" id="L985">			throw new IllegalStateException(&quot;No suitable FactoryBean constructor found for &quot; +</span>
+					mbd + &quot; and argument types &quot; + valueTypes);
+
+		}
+
+<span class="fc" id="L990">		Constructor&lt;?&gt; constructor = resolveConstructor(beanName, mbd, beanType, valueTypes);</span>
+<span class="fc bfc" id="L991" title="All 2 branches covered.">		if (constructor != null) {</span>
+<span class="fc" id="L992">			return constructor;</span>
+		}
+
+<span class="fc" id="L995">		throw new IllegalStateException(&quot;No constructor or factory method candidate found for &quot; +</span>
+				mbd + &quot; and argument types &quot; + valueTypes);
+	}
+
+	private List&lt;ResolvableType&gt; determineParameterValueTypes(RootBeanDefinition mbd) {
+<span class="fc" id="L1000">		List&lt;ResolvableType&gt; parameterTypes = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L1001" title="All 2 branches covered.">		for (ValueHolder valueHolder : mbd.getConstructorArgumentValues().getIndexedArgumentValues().values()) {</span>
+<span class="fc" id="L1002">			parameterTypes.add(determineParameterValueType(mbd, valueHolder));</span>
+<span class="fc" id="L1003">		}</span>
+<span class="fc bfc" id="L1004" title="All 2 branches covered.">		for (ValueHolder valueHolder : mbd.getConstructorArgumentValues().getGenericArgumentValues()) {</span>
+<span class="fc" id="L1005">			parameterTypes.add(determineParameterValueType(mbd, valueHolder));</span>
+<span class="fc" id="L1006">		}</span>
+<span class="fc" id="L1007">		return parameterTypes;</span>
+	}
+
+	private ResolvableType determineParameterValueType(RootBeanDefinition mbd, ValueHolder valueHolder) {
+<span class="pc bpc" id="L1011" title="1 of 2 branches missed.">		if (valueHolder.getType() != null) {</span>
+<span class="nc" id="L1012">			return ResolvableType.forClass(</span>
+<span class="nc" id="L1013">					ClassUtils.resolveClassName(valueHolder.getType(), this.beanFactory.getBeanClassLoader()));</span>
+		}
+<span class="fc" id="L1015">		Object value = valueHolder.getValue();</span>
+<span class="fc bfc" id="L1016" title="All 2 branches covered.">		if (value instanceof BeanReference br) {</span>
+<span class="pc bpc" id="L1017" title="1 of 2 branches missed.">			if (value instanceof RuntimeBeanReference rbr) {</span>
+<span class="pc bpc" id="L1018" title="1 of 2 branches missed.">				if (rbr.getBeanType() != null) {</span>
+<span class="nc" id="L1019">					return ResolvableType.forClass(rbr.getBeanType());</span>
+				}
+			}
+<span class="fc" id="L1022">			return ResolvableType.forClass(this.beanFactory.getType(br.getBeanName(), false));</span>
+		}
+<span class="fc bfc" id="L1024" title="All 2 branches covered.">		if (value instanceof BeanDefinition innerBd) {</span>
+<span class="fc" id="L1025">			String nameToUse = &quot;(inner bean)&quot;;</span>
+<span class="fc" id="L1026">			ResolvableType type = getBeanType(nameToUse,</span>
+<span class="fc" id="L1027">					this.beanFactory.getMergedBeanDefinition(nameToUse, innerBd, mbd));</span>
+<span class="fc bfc" id="L1028" title="All 2 branches covered.">			return (FactoryBean.class.isAssignableFrom(type.toClass()) ?</span>
+<span class="fc" id="L1029">					type.as(FactoryBean.class).getGeneric(0) : type);</span>
+		}
+<span class="fc bfc" id="L1031" title="All 2 branches covered.">		if (value instanceof TypedStringValue typedValue) {</span>
+<span class="fc bfc" id="L1032" title="All 2 branches covered.">			if (typedValue.hasTargetType()) {</span>
+<span class="fc" id="L1033">				return ResolvableType.forClass(typedValue.getTargetType());</span>
+			}
+<span class="fc" id="L1035">			return ResolvableType.forClass(String.class);</span>
+		}
+<span class="fc bfc" id="L1037" title="All 2 branches covered.">		if (value instanceof Class&lt;?&gt; clazz) {</span>
+<span class="fc" id="L1038">			return ResolvableType.forClassWithGenerics(Class.class, clazz);</span>
+		}
+<span class="fc" id="L1040">		return ResolvableType.forInstance(value);</span>
+	}
+
+	private @Nullable Constructor&lt;?&gt; resolveConstructor(String beanName, RootBeanDefinition mbd,
+			Supplier&lt;ResolvableType&gt; beanType, List&lt;ResolvableType&gt; valueTypes) {
+
+<span class="fc" id="L1046">		Class&lt;?&gt; type = ClassUtils.getUserClass(beanType.get().toClass());</span>
+<span class="fc" id="L1047">		Constructor&lt;?&gt;[] ctors = this.beanFactory.determineConstructorsFromBeanPostProcessors(type, beanName);</span>
+<span class="fc bfc" id="L1048" title="All 2 branches covered.">		if (ctors == null) {</span>
+<span class="fc bfc" id="L1049" title="All 2 branches covered.">			if (!mbd.hasConstructorArgumentValues()) {</span>
+<span class="fc" id="L1050">				ctors = mbd.getPreferredConstructors();</span>
+			}
+<span class="fc bfc" id="L1052" title="All 2 branches covered.">			if (ctors == null) {</span>
+<span class="pc bpc" id="L1053" title="1 of 2 branches missed.">				ctors = (mbd.isNonPublicAccessAllowed() ? type.getDeclaredConstructors() : type.getConstructors());</span>
+			}
+		}
+<span class="fc bfc" id="L1056" title="All 2 branches covered.">		if (ctors.length == 1) {</span>
+<span class="fc" id="L1057">			return ctors[0];</span>
+		}
+
+<span class="fc" id="L1060">		Function&lt;Constructor&lt;?&gt;, List&lt;ResolvableType&gt;&gt; parameterTypesFactory = executable -&gt; {</span>
+<span class="fc" id="L1061">			List&lt;ResolvableType&gt; types = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L1062" title="All 2 branches covered.">			for (int i = 0; i &lt; executable.getParameterCount(); i++) {</span>
+<span class="fc" id="L1063">				types.add(ResolvableType.forConstructorParameter(executable, i));</span>
+			}
+<span class="fc" id="L1065">			return types;</span>
+		};
+<span class="fc" id="L1067">		List&lt;Constructor&lt;?&gt;&gt; matches = Arrays.stream(ctors)</span>
+<span class="fc" id="L1068">				.filter(executable -&gt; match(parameterTypesFactory.apply(executable),</span>
+						valueTypes, FallbackMode.NONE))
+<span class="fc" id="L1070">				.toList();</span>
+<span class="fc bfc" id="L1071" title="All 2 branches covered.">		if (matches.size() == 1) {</span>
+<span class="fc" id="L1072">			return matches.get(0);</span>
+		}
+<span class="fc" id="L1074">		List&lt;Constructor&lt;?&gt;&gt; assignableElementFallbackMatches = Arrays</span>
+<span class="fc" id="L1075">				.stream(ctors)</span>
+<span class="fc" id="L1076">				.filter(executable -&gt; match(parameterTypesFactory.apply(executable),</span>
+						valueTypes, FallbackMode.ASSIGNABLE_ELEMENT))
+<span class="fc" id="L1078">				.toList();</span>
+<span class="fc bfc" id="L1079" title="All 2 branches covered.">		if (assignableElementFallbackMatches.size() == 1) {</span>
+<span class="fc" id="L1080">			return assignableElementFallbackMatches.get(0);</span>
+		}
+<span class="fc" id="L1082">		List&lt;Constructor&lt;?&gt;&gt; typeConversionFallbackMatches = Arrays</span>
+<span class="fc" id="L1083">				.stream(ctors)</span>
+<span class="fc" id="L1084">				.filter(executable -&gt; match(parameterTypesFactory.apply(executable),</span>
+						valueTypes, FallbackMode.TYPE_CONVERSION))
+<span class="fc" id="L1086">				.toList();</span>
+<span class="fc bfc" id="L1087" title="All 2 branches covered.">		return (typeConversionFallbackMatches.size() == 1 ? typeConversionFallbackMatches.get(0) : null);</span>
+	}
+
+	private @Nullable Method resolveFactoryMethod(String beanName, RootBeanDefinition mbd, List&lt;ResolvableType&gt; valueTypes) {
+<span class="fc bfc" id="L1091" title="All 2 branches covered.">		if (mbd.isFactoryMethodUnique) {</span>
+<span class="fc" id="L1092">			Method resolvedFactoryMethod = mbd.getResolvedFactoryMethod();</span>
+<span class="pc bpc" id="L1093" title="1 of 2 branches missed.">			if (resolvedFactoryMethod != null) {</span>
+<span class="fc" id="L1094">				return resolvedFactoryMethod;</span>
+			}
+		}
+
+<span class="fc" id="L1098">		String factoryMethodName = mbd.getFactoryMethodName();</span>
+<span class="fc bfc" id="L1099" title="All 2 branches covered.">		if (factoryMethodName != null) {</span>
+<span class="fc" id="L1100">			String factoryBeanName = mbd.getFactoryBeanName();</span>
+			Class&lt;?&gt; factoryClass;
+			boolean isStatic;
+<span class="fc bfc" id="L1103" title="All 2 branches covered.">			if (factoryBeanName != null) {</span>
+<span class="fc" id="L1104">				factoryClass = this.beanFactory.getType(factoryBeanName);</span>
+<span class="fc" id="L1105">				isStatic = false;</span>
+			}
+			else {
+<span class="fc" id="L1108">				factoryClass = this.beanFactory.resolveBeanClass(mbd, beanName);</span>
+<span class="fc" id="L1109">				isStatic = true;</span>
+			}
+
+<span class="pc bpc" id="L1112" title="1 of 2 branches missed.">			Assert.state(factoryClass != null, () -&gt; &quot;Failed to determine bean class of &quot; + mbd);</span>
+<span class="fc" id="L1113">			Method[] rawCandidates = getCandidateMethods(factoryClass, mbd);</span>
+<span class="fc" id="L1114">			List&lt;Method&gt; candidates = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L1115" title="All 2 branches covered.">			for (Method candidate : rawCandidates) {</span>
+<span class="fc bfc" id="L1116" title="All 6 branches covered.">				if ((!isStatic || isStaticCandidate(candidate, factoryClass)) &amp;&amp; mbd.isFactoryMethod(candidate)) {</span>
+<span class="fc" id="L1117">					candidates.add(candidate);</span>
+				}
+			}
+
+<span class="fc" id="L1121">			Method result = null;</span>
+<span class="fc bfc" id="L1122" title="All 2 branches covered.">			if (candidates.size() == 1) {</span>
+<span class="fc" id="L1123">				result = candidates.get(0);</span>
+			}
+<span class="pc bpc" id="L1125" title="1 of 2 branches missed.">			else if (candidates.size() &gt; 1) {</span>
+<span class="fc" id="L1126">				Function&lt;Method, List&lt;ResolvableType&gt;&gt; parameterTypesFactory = method -&gt; {</span>
+<span class="fc" id="L1127">					List&lt;ResolvableType&gt; types = new ArrayList&lt;&gt;();</span>
+<span class="fc bfc" id="L1128" title="All 2 branches covered.">					for (int i = 0; i &lt; method.getParameterCount(); i++) {</span>
+<span class="fc" id="L1129">						types.add(ResolvableType.forMethodParameter(method, i));</span>
+					}
+<span class="fc" id="L1131">					return types;</span>
+				};
+<span class="fc" id="L1133">				result = resolveFactoryMethod(candidates, parameterTypesFactory, valueTypes);</span>
+			}
+
+<span class="pc bpc" id="L1136" title="1 of 2 branches missed.">			if (result == null) {</span>
+<span class="nc" id="L1137">				throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+<span class="nc" id="L1138">						&quot;No matching factory method found on class [&quot; + factoryClass.getName() + &quot;]: &quot; +</span>
+<span class="nc bnc" id="L1139" title="All 2 branches missed.">						(mbd.getFactoryBeanName() != null ?</span>
+<span class="nc" id="L1140">								&quot;factory bean '&quot; + mbd.getFactoryBeanName() + &quot;'; &quot; : &quot;&quot;) +</span>
+<span class="nc" id="L1141">						&quot;factory method '&quot; + mbd.getFactoryMethodName() + &quot;'. &quot;);</span>
+			}
+<span class="fc" id="L1143">			return result;</span>
+		}
+
+<span class="fc" id="L1146">		return null;</span>
+	}
+
+	private @Nullable Method resolveFactoryMethod(List&lt;Method&gt; executables,
+			Function&lt;Method, List&lt;ResolvableType&gt;&gt; parameterTypesFactory,
+			List&lt;ResolvableType&gt; valueTypes) {
+
+<span class="fc" id="L1153">		List&lt;Method&gt; matches = executables.stream()</span>
+<span class="fc" id="L1154">				.filter(executable -&gt; match(parameterTypesFactory.apply(executable), valueTypes, FallbackMode.NONE))</span>
+<span class="fc" id="L1155">				.toList();</span>
+<span class="fc bfc" id="L1156" title="All 2 branches covered.">		if (matches.size() == 1) {</span>
+<span class="fc" id="L1157">			return matches.get(0);</span>
+		}
+<span class="fc" id="L1159">		List&lt;Method&gt; assignableElementFallbackMatches = executables.stream()</span>
+<span class="fc" id="L1160">				.filter(executable -&gt; match(parameterTypesFactory.apply(executable),</span>
+						valueTypes, FallbackMode.ASSIGNABLE_ELEMENT))
+<span class="fc" id="L1162">				.toList();</span>
+<span class="fc bfc" id="L1163" title="All 2 branches covered.">		if (assignableElementFallbackMatches.size() == 1) {</span>
+<span class="fc" id="L1164">			return assignableElementFallbackMatches.get(0);</span>
+		}
+<span class="fc" id="L1166">		List&lt;Method&gt; typeConversionFallbackMatches = executables.stream()</span>
+<span class="fc" id="L1167">				.filter(executable -&gt; match(parameterTypesFactory.apply(executable),</span>
+						valueTypes, FallbackMode.TYPE_CONVERSION))
+<span class="fc" id="L1169">				.toList();</span>
+<span class="pc bpc" id="L1170" title="1 of 2 branches missed.">		Assert.state(typeConversionFallbackMatches.size() &lt;= 1,</span>
+<span class="nc" id="L1171">				() -&gt; &quot;Multiple matches with parameters '&quot; + valueTypes + &quot;': &quot; + typeConversionFallbackMatches);</span>
+<span class="pc bpc" id="L1172" title="1 of 2 branches missed.">		return (typeConversionFallbackMatches.size() == 1 ? typeConversionFallbackMatches.get(0) : null);</span>
+	}
+
+	private boolean match(
+			List&lt;ResolvableType&gt; parameterTypes, List&lt;ResolvableType&gt; valueTypes, FallbackMode fallbackMode) {
+
+<span class="fc bfc" id="L1178" title="All 2 branches covered.">		if (parameterTypes.size() != valueTypes.size()) {</span>
+<span class="fc" id="L1179">			return false;</span>
+		}
+<span class="fc bfc" id="L1181" title="All 2 branches covered.">		for (int i = 0; i &lt; parameterTypes.size(); i++) {</span>
+<span class="fc bfc" id="L1182" title="All 2 branches covered.">			if (!isMatch(parameterTypes.get(i), valueTypes.get(i), fallbackMode)) {</span>
+<span class="fc" id="L1183">				return false;</span>
+			}
+		}
+<span class="fc" id="L1186">		return true;</span>
+	}
+
+	private boolean isMatch(ResolvableType parameterType, ResolvableType valueType, FallbackMode fallbackMode) {
+<span class="fc bfc" id="L1190" title="All 2 branches covered.">		if (isAssignable(valueType).test(parameterType)) {</span>
+<span class="fc" id="L1191">			return true;</span>
+		}
+<span class="fc bfc" id="L1193" title="All 3 branches covered.">		return switch (fallbackMode) {</span>
+<span class="fc" id="L1194">			case ASSIGNABLE_ELEMENT -&gt; isAssignable(valueType).test(extractElementType(parameterType));</span>
+<span class="fc" id="L1195">			case TYPE_CONVERSION -&gt; typeConversionFallback(valueType).test(parameterType);</span>
+<span class="fc" id="L1196">			default -&gt; false;</span>
+		};
+	}
+
+	private Predicate&lt;ResolvableType&gt; isAssignable(ResolvableType valueType) {
+<span class="fc bfc" id="L1201" title="All 4 branches covered.">		return parameterType -&gt; (valueType == ResolvableType.NONE || parameterType.isAssignableFrom(valueType));</span>
+	}
+
+	private ResolvableType extractElementType(ResolvableType parameterType) {
+<span class="fc bfc" id="L1205" title="All 2 branches covered.">		if (parameterType.isArray()) {</span>
+<span class="fc" id="L1206">			return parameterType.getComponentType();</span>
+		}
+<span class="fc bfc" id="L1208" title="All 2 branches covered.">		if (Collection.class.isAssignableFrom(parameterType.toClass())) {</span>
+<span class="fc" id="L1209">			return parameterType.as(Collection.class).getGeneric(0);</span>
+		}
+<span class="fc" id="L1211">		return ResolvableType.NONE;</span>
+	}
+
+	private Predicate&lt;ResolvableType&gt; typeConversionFallback(ResolvableType valueType) {
+<span class="fc" id="L1215">		return parameterType -&gt; {</span>
+<span class="fc bfc" id="L1216" title="All 2 branches covered.">			if (valueOrCollection(valueType, this::isStringForClassFallback).test(parameterType)) {</span>
+<span class="fc" id="L1217">				return true;</span>
+			}
+<span class="fc" id="L1219">			return valueOrCollection(valueType, this::isSimpleValueType).test(parameterType);</span>
+		};
+	}
+
+	private Predicate&lt;ResolvableType&gt; valueOrCollection(ResolvableType valueType,
+			Function&lt;ResolvableType, Predicate&lt;ResolvableType&gt;&gt; predicateProvider) {
+
+<span class="fc" id="L1226">		return parameterType -&gt; {</span>
+<span class="fc bfc" id="L1227" title="All 2 branches covered.">			if (predicateProvider.apply(valueType).test(parameterType)) {</span>
+<span class="fc" id="L1228">				return true;</span>
+			}
+<span class="fc bfc" id="L1230" title="All 2 branches covered.">			if (predicateProvider.apply(extractElementType(valueType)).test(extractElementType(parameterType))) {</span>
+<span class="fc" id="L1231">				return true;</span>
+			}
+<span class="fc" id="L1233">			return (predicateProvider.apply(valueType).test(extractElementType(parameterType)));</span>
+		};
+	}
+
+	/**
+	 * Return a {@link Predicate} for a parameter type that checks if its target
+	 * value is a {@link Class} and the value type is a {@link String}. This is
+	 * a regular use case where a {@link Class} is defined in the bean definition
+	 * as a fully-qualified class name.
+	 * @param valueType the type of the value
+	 * @return a predicate to indicate a fallback match for a String to Class
+	 * parameter
+	 */
+	private Predicate&lt;ResolvableType&gt; isStringForClassFallback(ResolvableType valueType) {
+<span class="fc bfc" id="L1247" title="All 2 branches covered.">		return parameterType -&gt; (valueType.isAssignableFrom(String.class) &amp;&amp;</span>
+<span class="fc bfc" id="L1248" title="All 2 branches covered.">				parameterType.isAssignableFrom(Class.class));</span>
+	}
+
+	private Predicate&lt;ResolvableType&gt; isSimpleValueType(ResolvableType valueType) {
+<span class="fc bfc" id="L1252" title="All 2 branches covered.">		return parameterType -&gt; (BeanUtils.isSimpleValueType(parameterType.toClass()) &amp;&amp;</span>
+<span class="pc bpc" id="L1253" title="1 of 2 branches missed.">				BeanUtils.isSimpleValueType(valueType.toClass()));</span>
+	}
+
+	private @Nullable Class&lt;?&gt; getFactoryBeanClass(String beanName, RootBeanDefinition mbd) {
+<span class="fc" id="L1257">		Class&lt;?&gt; beanClass = this.beanFactory.resolveBeanClass(mbd, beanName);</span>
+<span class="fc bfc" id="L1258" title="All 4 branches covered.">		return (beanClass != null &amp;&amp; FactoryBean.class.isAssignableFrom(beanClass) ? beanClass : null);</span>
+	}
+
+	private ResolvableType getBeanType(String beanName, RootBeanDefinition mbd) {
+<span class="fc" id="L1262">		ResolvableType resolvableType = mbd.getResolvableType();</span>
+<span class="pc bpc" id="L1263" title="1 of 2 branches missed.">		if (resolvableType != ResolvableType.NONE) {</span>
+<span class="fc" id="L1264">			return resolvableType;</span>
+		}
+<span class="nc" id="L1266">		return ResolvableType.forClass(this.beanFactory.resolveBeanClass(mbd, beanName));</span>
+	}
+
+
+	static InjectionPoint setCurrentInjectionPoint(@Nullable InjectionPoint injectionPoint) {
+<span class="fc" id="L1271">		InjectionPoint old = currentInjectionPoint.get();</span>
+<span class="fc bfc" id="L1272" title="All 2 branches covered.">		if (injectionPoint != null) {</span>
+<span class="fc" id="L1273">			currentInjectionPoint.set(injectionPoint);</span>
+		}
+		else {
+<span class="fc" id="L1276">			currentInjectionPoint.remove();</span>
+		}
+<span class="fc" id="L1278">		return old;</span>
+	}
+
+	/**
+	 * See {@link BeanUtils#getResolvableConstructor(Class)} for alignment.
+	 * This variant adds a lenient fallback to the default constructor if available, similar to
+	 * {@link org.springframework.beans.factory.annotation.AutowiredAnnotationBeanPostProcessor#determineCandidateConstructors}.
+	 */
+	static Constructor&lt;?&gt; @Nullable [] determinePreferredConstructors(Class&lt;?&gt; clazz) {
+<span class="fc" id="L1287">		Constructor&lt;?&gt; primaryCtor = BeanUtils.findPrimaryConstructor(clazz);</span>
+
+		Constructor&lt;?&gt; defaultCtor;
+		try {
+<span class="fc" id="L1291">			defaultCtor = clazz.getDeclaredConstructor();</span>
+		}
+<span class="fc" id="L1293">		catch (NoSuchMethodException ex) {</span>
+<span class="fc" id="L1294">			defaultCtor = null;</span>
+<span class="fc" id="L1295">		}</span>
+
+<span class="pc bpc" id="L1297" title="1 of 2 branches missed.">		if (primaryCtor != null) {</span>
+<span class="nc bnc" id="L1298" title="All 4 branches missed.">			if (defaultCtor != null &amp;&amp; !primaryCtor.equals(defaultCtor)) {</span>
+<span class="nc" id="L1299">				return new Constructor&lt;?&gt;[] {primaryCtor, defaultCtor};</span>
+			}
+			else {
+<span class="nc" id="L1302">				return new Constructor&lt;?&gt;[] {primaryCtor};</span>
+			}
+		}
+
+<span class="fc" id="L1306">		Constructor&lt;?&gt;[] ctors = clazz.getConstructors();</span>
+<span class="fc bfc" id="L1307" title="All 2 branches covered.">		if (ctors.length == 1) {</span>
+			// A single public constructor, potentially in combination with a non-public default constructor
+<span class="fc bfc" id="L1309" title="All 4 branches covered.">			if (defaultCtor != null &amp;&amp; !ctors[0].equals(defaultCtor)) {</span>
+<span class="fc" id="L1310">				return new Constructor&lt;?&gt;[] {ctors[0], defaultCtor};</span>
+			}
+			else {
+<span class="fc" id="L1313">				return ctors;</span>
+			}
+		}
+<span class="fc bfc" id="L1316" title="All 2 branches covered.">		else if (ctors.length == 0) {</span>
+			// No public constructors -&gt; check non-public
+<span class="fc" id="L1318">			ctors = clazz.getDeclaredConstructors();</span>
+<span class="fc bfc" id="L1319" title="All 2 branches covered.">			if (ctors.length == 1) {</span>
+				// A single non-public constructor, for example, from a non-public record type
+<span class="fc" id="L1321">				return ctors;</span>
+			}
+		}
+
+<span class="fc" id="L1325">		return null;</span>
+	}
+
+
+	/**
+	 * Private inner class for holding argument combinations.
+	 */
+	private static class ArgumentsHolder {
+
+		public final @Nullable Object[] rawArguments;
+
+		public final @Nullable Object[] arguments;
+
+		public final @Nullable Object[] preparedArguments;
+
+<span class="fc" id="L1340">		public boolean resolveNecessary = false;</span>
+
+<span class="fc" id="L1342">		public ArgumentsHolder(int size) {</span>
+<span class="fc" id="L1343">			this.rawArguments = new Object[size];</span>
+<span class="fc" id="L1344">			this.arguments = new Object[size];</span>
+<span class="fc" id="L1345">			this.preparedArguments = new Object[size];</span>
+<span class="fc" id="L1346">		}</span>
+
+<span class="fc" id="L1348">		public ArgumentsHolder(@Nullable Object[] args) {</span>
+<span class="fc" id="L1349">			this.rawArguments = args;</span>
+<span class="fc" id="L1350">			this.arguments = args;</span>
+<span class="fc" id="L1351">			this.preparedArguments = args;</span>
+<span class="fc" id="L1352">		}</span>
+
+		public int getTypeDifferenceWeight(Class&lt;?&gt;[] paramTypes) {
+			// If valid arguments found, determine type difference weight.
+			// Try type difference weight on both the converted arguments and
+			// the raw arguments. If the raw weight is better, use it.
+			// Decrease raw weight by 1024 to prefer it over equal converted weight.
+<span class="fc" id="L1359">			int typeDiffWeight = MethodInvoker.getTypeDifferenceWeight(paramTypes, this.arguments);</span>
+<span class="fc" id="L1360">			int rawTypeDiffWeight = MethodInvoker.getTypeDifferenceWeight(paramTypes, this.rawArguments) - 1024;</span>
+<span class="fc" id="L1361">			return Math.min(rawTypeDiffWeight, typeDiffWeight);</span>
+		}
+
+		public int getAssignabilityWeight(Class&lt;?&gt;[] paramTypes) {
+<span class="fc bfc" id="L1365" title="All 2 branches covered.">			for (int i = 0; i &lt; paramTypes.length; i++) {</span>
+<span class="pc bpc" id="L1366" title="1 of 2 branches missed.">				if (!ClassUtils.isAssignableValue(paramTypes[i], this.arguments[i])) {</span>
+<span class="nc" id="L1367">					return Integer.MAX_VALUE;</span>
+				}
+			}
+<span class="fc bfc" id="L1370" title="All 2 branches covered.">			for (int i = 0; i &lt; paramTypes.length; i++) {</span>
+<span class="fc bfc" id="L1371" title="All 2 branches covered.">				if (!ClassUtils.isAssignableValue(paramTypes[i], this.rawArguments[i])) {</span>
+<span class="fc" id="L1372">					return Integer.MAX_VALUE - 512;</span>
+				}
+			}
+<span class="fc" id="L1375">			return Integer.MAX_VALUE - 1024;</span>
+		}
+
+		public void storeCache(RootBeanDefinition mbd, Executable constructorOrFactoryMethod) {
+<span class="fc" id="L1379">			synchronized (mbd.constructorArgumentLock) {</span>
+<span class="fc" id="L1380">				mbd.resolvedConstructorOrFactoryMethod = constructorOrFactoryMethod;</span>
+<span class="fc" id="L1381">				mbd.constructorArgumentsResolved = true;</span>
+<span class="fc bfc" id="L1382" title="All 2 branches covered.">				if (this.resolveNecessary) {</span>
+<span class="fc" id="L1383">					mbd.preparedConstructorArguments = this.preparedArguments;</span>
+				}
+				else {
+<span class="fc" id="L1386">					mbd.resolvedConstructorArguments = this.arguments;</span>
+				}
+<span class="fc" id="L1388">			}</span>
+<span class="fc" id="L1389">		}</span>
+	}
+
+
+	/**
+	 * Delegate for checking Java's {@link ConstructorProperties} annotation.
+	 */
+	private static class ConstructorPropertiesChecker {
+
+		public static String @Nullable [] evaluate(Constructor&lt;?&gt; candidate, int paramCount) {
+<span class="fc" id="L1399">			ConstructorProperties cp = candidate.getAnnotation(ConstructorProperties.class);</span>
+<span class="fc bfc" id="L1400" title="All 2 branches covered.">			if (cp != null) {</span>
+<span class="fc" id="L1401">				String[] names = cp.value();</span>
+<span class="pc bpc" id="L1402" title="1 of 2 branches missed.">				if (names.length != paramCount) {</span>
+<span class="nc" id="L1403">					throw new IllegalStateException(&quot;Constructor annotated with @ConstructorProperties but not &quot; +</span>
+							&quot;corresponding to actual number of parameters (&quot; + paramCount + &quot;): &quot; + candidate);
+				}
+<span class="fc" id="L1406">				return names;</span>
+			}
+			else {
+<span class="fc" id="L1409">				return null;</span>
+			}
+		}
+	}
+
+
+	/**
+	 * DependencyDescriptor marker for constructor arguments,
+	 * for differentiating between a provided DependencyDescriptor instance
+	 * and an internally built DependencyDescriptor for autowiring purposes.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	private static class ConstructorDependencyDescriptor extends DependencyDescriptor {
+
+		private volatile @Nullable String shortcut;
+
+		public ConstructorDependencyDescriptor(MethodParameter methodParameter, boolean required) {
+<span class="fc" id="L1426">			super(methodParameter, required);</span>
+<span class="fc" id="L1427">		}</span>
+
+		public void setShortcut(@Nullable String shortcut) {
+<span class="fc" id="L1430">			this.shortcut = shortcut;</span>
+<span class="fc" id="L1431">		}</span>
+
+		public boolean hasShortcut() {
+<span class="fc bfc" id="L1434" title="All 2 branches covered.">			return (this.shortcut != null);</span>
+		}
+
+		@Override
+		public @Nullable Object resolveShortcut(BeanFactory beanFactory) {
+<span class="fc" id="L1439">			String shortcut = this.shortcut;</span>
+<span class="fc bfc" id="L1440" title="All 2 branches covered.">			return (shortcut != null ? beanFactory.getBean(shortcut, getDependencyType()) : null);</span>
+		}
+
+		@Override
+		public boolean usesStandardBeanLookup() {
+<span class="fc" id="L1445">			return true;</span>
+		}
+	}
+
+
+<span class="fc" id="L1450">	private enum FallbackMode {</span>
+
+<span class="fc" id="L1452">		NONE,</span>
+
+<span class="fc" id="L1454">		ASSIGNABLE_ELEMENT,</span>
+
+<span class="fc" id="L1456">		TYPE_CONVERSION</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

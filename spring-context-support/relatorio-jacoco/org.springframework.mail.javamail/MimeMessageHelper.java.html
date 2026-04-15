@@ -1,0 +1,1231 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>MimeMessageHelper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.mail.javamail</a> &gt; <span class="el_source">MimeMessageHelper.java</span></div><h1>MimeMessageHelper.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.mail.javamail;
+
+import java.io.File;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.io.UnsupportedEncodingException;
+import java.util.Date;
+
+import jakarta.activation.DataHandler;
+import jakarta.activation.DataSource;
+import jakarta.activation.FileDataSource;
+import jakarta.activation.FileTypeMap;
+import jakarta.mail.BodyPart;
+import jakarta.mail.Message;
+import jakarta.mail.MessagingException;
+import jakarta.mail.Part;
+import jakarta.mail.internet.AddressException;
+import jakarta.mail.internet.InternetAddress;
+import jakarta.mail.internet.MimeBodyPart;
+import jakarta.mail.internet.MimeMessage;
+import jakarta.mail.internet.MimeMultipart;
+import jakarta.mail.internet.MimePart;
+import jakarta.mail.internet.MimeUtility;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.io.InputStreamSource;
+import org.springframework.core.io.Resource;
+import org.springframework.util.Assert;
+import org.springframework.util.MimeTypeUtils;
+
+/**
+ * Helper class for populating a {@link jakarta.mail.internet.MimeMessage}.
+ *
+ * &lt;p&gt;Mirrors the simple setters of {@link org.springframework.mail.SimpleMailMessage},
+ * directly applying the values to the underlying MimeMessage. Allows for defining
+ * a character encoding for the entire message, automatically applied by all methods
+ * of this helper class.
+ *
+ * &lt;p&gt;Offers support for HTML text content, inline elements such as images, and typical
+ * mail attachments. Also supports personal names that accompany mail addresses. Note that
+ * advanced settings can still be applied directly to the underlying MimeMessage object!
+ *
+ * &lt;p&gt;Typically used in {@link MimeMessagePreparator} implementations or
+ * {@link JavaMailSender} client code: simply instantiating it as a MimeMessage wrapper,
+ * invoking setters on the wrapper, using the underlying MimeMessage for mail sending.
+ * Also used internally by {@link JavaMailSenderImpl}.
+ *
+ * &lt;p&gt;Sample code for an HTML mail with an inline image and a PDF attachment:
+ *
+ * &lt;pre class=&quot;code&quot;&gt;
+ * mailSender.send(new MimeMessagePreparator() {
+ *   public void prepare(MimeMessage mimeMessage) throws MessagingException {
+ *     MimeMessageHelper message = new MimeMessageHelper(mimeMessage, true, &quot;UTF-8&quot;);
+ *     message.setFrom(&quot;me@mail.com&quot;);
+ *     message.setTo(&quot;you@mail.com&quot;);
+ *     message.setSubject(&quot;my subject&quot;);
+ *     message.setText(&quot;my text &amp;lt;img src='cid:myLogo'&amp;gt;&quot;, true);
+ *     message.addInline(&quot;myLogo&quot;, new ClassPathResource(&quot;img/mylogo.gif&quot;));
+ *     message.addAttachment(&quot;myDocument.pdf&quot;, new ClassPathResource(&quot;doc/myDocument.pdf&quot;));
+ *   }
+ * });&lt;/pre&gt;
+ *
+ * Consider using {@link MimeMailMessage} (which implements the common
+ * {@link org.springframework.mail.MailMessage} interface, just like
+ * {@link org.springframework.mail.SimpleMailMessage}) on top of this helper,
+ * in order to let message population code interact with a simple message
+ * or a MIME message through a common interface.
+ *
+ * &lt;p&gt;&lt;b&gt;Warning regarding multipart mails:&lt;/b&gt; Simple MIME messages that
+ * just contain HTML text but no inline elements or attachments will work on
+ * more or less any email client that is capable of HTML rendering. However,
+ * inline elements and attachments are still a major compatibility issue
+ * between email clients: It's virtually impossible to get inline elements
+ * and attachments working across Microsoft Outlook, Lotus Notes and Mac Mail.
+ * Consider choosing a specific multipart mode for your needs: The javadoc
+ * on the MULTIPART_MODE constants contains more detailed information.
+ *
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 19.01.2004
+ * @see #setText(String, boolean)
+ * @see #setText(String, String)
+ * @see #addInline(String, org.springframework.core.io.Resource)
+ * @see #addAttachment(String, org.springframework.core.io.InputStreamSource)
+ * @see #MULTIPART_MODE_MIXED_RELATED
+ * @see #MULTIPART_MODE_RELATED
+ * @see #getMimeMessage()
+ * @see JavaMailSender
+ */
+public class MimeMessageHelper {
+
+	/**
+	 * Constant indicating a non-multipart message.
+	 */
+	public static final int MULTIPART_MODE_NO = 0;
+
+	/**
+	 * Constant indicating a multipart message with a single root multipart
+	 * element of type &quot;mixed&quot;. Texts, inline elements and attachments
+	 * will all get added to that root element.
+	 * &lt;p&gt;This was Spring 1.0's default behavior. It is known to work properly
+	 * on Outlook. However, other mail clients tend to misinterpret inline
+	 * elements as attachments and/or show attachments inline as well.
+	 */
+	public static final int MULTIPART_MODE_MIXED = 1;
+
+	/**
+	 * Constant indicating a multipart message with a single root multipart
+	 * element of type &quot;related&quot;. Texts, inline elements and attachments
+	 * will all get added to that root element.
+	 * &lt;p&gt;This was the default behavior from Spring 1.1 up to 1.2 final.
+	 * This is the &quot;Microsoft multipart mode&quot;, as natively sent by Outlook.
+	 * It is known to work properly on Outlook, Outlook Express, Yahoo Mail, and
+	 * to a large degree also on Mac Mail (with an additional attachment listed
+	 * for an inline element, despite the inline element also shown inline).
+	 * Does not work properly on Lotus Notes (attachments won't be shown there).
+	 */
+	public static final int MULTIPART_MODE_RELATED = 2;
+
+	/**
+	 * Constant indicating a multipart message with a root multipart element
+	 * &quot;mixed&quot; plus a nested multipart element of type &quot;related&quot;. Texts and
+	 * inline elements will get added to the nested &quot;related&quot; element,
+	 * while attachments will get added to the &quot;mixed&quot; root element.
+	 * &lt;p&gt;This is the default since Spring 1.2.1. This is arguably the most correct
+	 * MIME structure, according to the MIME spec: It is known to work properly
+	 * on Outlook, Outlook Express, Yahoo Mail, and Lotus Notes. Does not work
+	 * properly on Mac Mail. If you target Mac Mail or experience issues with
+	 * specific mails on Outlook, consider using MULTIPART_MODE_RELATED instead.
+	 */
+	public static final int MULTIPART_MODE_MIXED_RELATED = 3;
+
+
+	private static final String MULTIPART_SUBTYPE_MIXED = &quot;mixed&quot;;
+
+	private static final String MULTIPART_SUBTYPE_RELATED = &quot;related&quot;;
+
+	private static final String MULTIPART_SUBTYPE_ALTERNATIVE = &quot;alternative&quot;;
+
+	private static final String CONTENT_TYPE_ALTERNATIVE = &quot;text/alternative&quot;;
+
+	private static final String CONTENT_TYPE_HTML = &quot;text/html&quot;;
+
+	private static final String CONTENT_TYPE_CHARSET_SUFFIX = &quot;;charset=&quot;;
+
+	private static final String HEADER_PRIORITY = &quot;X-Priority&quot;;
+
+
+	private final MimeMessage mimeMessage;
+
+	private @Nullable MimeMultipart rootMimeMultipart;
+
+	private @Nullable MimeMultipart mimeMultipart;
+
+	private final @Nullable String encoding;
+
+	private FileTypeMap fileTypeMap;
+
+<span class="fc" id="L176">	private boolean encodeFilenames = false;</span>
+
+<span class="fc" id="L178">	private boolean validateAddresses = false;</span>
+
+
+	/**
+	 * Create a new MimeMessageHelper for the given MimeMessage,
+	 * assuming a simple text message (no multipart content,
+	 * i.e. no alternative texts and no inline elements or attachments).
+	 * &lt;p&gt;The character encoding for the message will be taken from
+	 * the passed-in MimeMessage object, if carried there. Else,
+	 * JavaMail's default encoding will be used.
+	 * @param mimeMessage the mime message to work on
+	 * @see #MimeMessageHelper(jakarta.mail.internet.MimeMessage, boolean)
+	 * @see #getDefaultEncoding(jakarta.mail.internet.MimeMessage)
+	 * @see JavaMailSenderImpl#setDefaultEncoding
+	 */
+	public MimeMessageHelper(MimeMessage mimeMessage) {
+<span class="fc" id="L194">		this(mimeMessage, null);</span>
+<span class="fc" id="L195">	}</span>
+
+	/**
+	 * Create a new MimeMessageHelper for the given MimeMessage,
+	 * assuming a simple text message (no multipart content,
+	 * i.e. no alternative texts and no inline elements or attachments).
+	 * @param mimeMessage the mime message to work on
+	 * @param encoding the character encoding to use for the message
+	 * @see #MimeMessageHelper(jakarta.mail.internet.MimeMessage, boolean)
+	 */
+<span class="fc" id="L205">	public MimeMessageHelper(MimeMessage mimeMessage, @Nullable String encoding) {</span>
+<span class="fc" id="L206">		this.mimeMessage = mimeMessage;</span>
+<span class="fc bfc" id="L207" title="All 2 branches covered.">		this.encoding = (encoding != null ? encoding : getDefaultEncoding(mimeMessage));</span>
+<span class="fc" id="L208">		this.fileTypeMap = getDefaultFileTypeMap(mimeMessage);</span>
+<span class="fc" id="L209">	}</span>
+
+	/**
+	 * Create a new MimeMessageHelper for the given MimeMessage,
+	 * in multipart mode (supporting alternative texts, inline
+	 * elements and attachments) if requested.
+	 * &lt;p&gt;Consider using the MimeMessageHelper constructor that
+	 * takes a multipartMode argument to choose a specific multipart
+	 * mode other than MULTIPART_MODE_MIXED_RELATED.
+	 * &lt;p&gt;The character encoding for the message will be taken from
+	 * the passed-in MimeMessage object, if carried there. Else,
+	 * JavaMail's default encoding will be used.
+	 * @param mimeMessage the mime message to work on
+	 * @param multipart whether to create a multipart message that
+	 * supports alternative texts, inline elements and attachments
+	 * (corresponds to MULTIPART_MODE_MIXED_RELATED)
+	 * @throws MessagingException if multipart creation failed
+	 * @see #MimeMessageHelper(jakarta.mail.internet.MimeMessage, int)
+	 * @see #getDefaultEncoding(jakarta.mail.internet.MimeMessage)
+	 * @see JavaMailSenderImpl#setDefaultEncoding
+	 */
+	public MimeMessageHelper(MimeMessage mimeMessage, boolean multipart) throws MessagingException {
+<span class="fc" id="L231">		this(mimeMessage, multipart, null);</span>
+<span class="fc" id="L232">	}</span>
+
+	/**
+	 * Create a new MimeMessageHelper for the given MimeMessage,
+	 * in multipart mode (supporting alternative texts, inline
+	 * elements and attachments) if requested.
+	 * &lt;p&gt;Consider using the MimeMessageHelper constructor that
+	 * takes a multipartMode argument to choose a specific multipart
+	 * mode other than MULTIPART_MODE_MIXED_RELATED.
+	 * @param mimeMessage the mime message to work on
+	 * @param multipart whether to create a multipart message that
+	 * supports alternative texts, inline elements and attachments
+	 * (corresponds to MULTIPART_MODE_MIXED_RELATED)
+	 * @param encoding the character encoding to use for the message
+	 * @throws MessagingException if multipart creation failed
+	 * @see #MimeMessageHelper(jakarta.mail.internet.MimeMessage, int, String)
+	 */
+	public MimeMessageHelper(MimeMessage mimeMessage, boolean multipart, @Nullable String encoding)
+			throws MessagingException {
+
+<span class="pc bpc" id="L252" title="1 of 2 branches missed.">		this(mimeMessage, (multipart ? MULTIPART_MODE_MIXED_RELATED : MULTIPART_MODE_NO), encoding);</span>
+<span class="fc" id="L253">	}</span>
+
+	/**
+	 * Create a new MimeMessageHelper for the given MimeMessage,
+	 * in multipart mode (supporting alternative texts, inline
+	 * elements and attachments) if requested.
+	 * &lt;p&gt;The character encoding for the message will be taken from
+	 * the passed-in MimeMessage object, if carried there. Else,
+	 * JavaMail's default encoding will be used.
+	 * @param mimeMessage the mime message to work on
+	 * @param multipartMode which kind of multipart message to create
+	 * (MIXED, RELATED, MIXED_RELATED, or NO)
+	 * @throws MessagingException if multipart creation failed
+	 * @see #MULTIPART_MODE_NO
+	 * @see #MULTIPART_MODE_MIXED
+	 * @see #MULTIPART_MODE_RELATED
+	 * @see #MULTIPART_MODE_MIXED_RELATED
+	 * @see #getDefaultEncoding(jakarta.mail.internet.MimeMessage)
+	 * @see JavaMailSenderImpl#setDefaultEncoding
+	 */
+	public MimeMessageHelper(MimeMessage mimeMessage, int multipartMode) throws MessagingException {
+<span class="nc" id="L274">		this(mimeMessage, multipartMode, null);</span>
+<span class="nc" id="L275">	}</span>
+
+	/**
+	 * Create a new MimeMessageHelper for the given MimeMessage,
+	 * in multipart mode (supporting alternative texts, inline
+	 * elements and attachments) if requested.
+	 * @param mimeMessage the mime message to work on
+	 * @param multipartMode which kind of multipart message to create
+	 * (MIXED, RELATED, MIXED_RELATED, or NO)
+	 * @param encoding the character encoding to use for the message
+	 * @throws MessagingException if multipart creation failed
+	 * @see #MULTIPART_MODE_NO
+	 * @see #MULTIPART_MODE_MIXED
+	 * @see #MULTIPART_MODE_RELATED
+	 * @see #MULTIPART_MODE_MIXED_RELATED
+	 */
+	public MimeMessageHelper(MimeMessage mimeMessage, int multipartMode, @Nullable String encoding)
+<span class="fc" id="L292">			throws MessagingException {</span>
+
+<span class="fc" id="L294">		this.mimeMessage = mimeMessage;</span>
+<span class="fc" id="L295">		createMimeMultiparts(mimeMessage, multipartMode);</span>
+<span class="pc bpc" id="L296" title="1 of 2 branches missed.">		this.encoding = (encoding != null ? encoding : getDefaultEncoding(mimeMessage));</span>
+<span class="fc" id="L297">		this.fileTypeMap = getDefaultFileTypeMap(mimeMessage);</span>
+<span class="fc" id="L298">	}</span>
+
+
+	/**
+	 * Return the underlying MimeMessage object.
+	 */
+	public final MimeMessage getMimeMessage() {
+<span class="fc" id="L305">		return this.mimeMessage;</span>
+	}
+
+
+	/**
+	 * Determine the MimeMultipart objects to use, which will be used
+	 * to store attachments on the one hand and text(s) and inline elements
+	 * on the other hand.
+	 * &lt;p&gt;Texts and inline elements can either be stored in the root element
+	 * itself (MULTIPART_MODE_MIXED, MULTIPART_MODE_RELATED) or in a nested element
+	 * rather than the root element directly (MULTIPART_MODE_MIXED_RELATED).
+	 * &lt;p&gt;By default, the root MimeMultipart element will be of type &quot;mixed&quot;
+	 * (MULTIPART_MODE_MIXED) or &quot;related&quot; (MULTIPART_MODE_RELATED).
+	 * The main multipart element will either be added as nested element of
+	 * type &quot;related&quot; (MULTIPART_MODE_MIXED_RELATED) or be identical to the root
+	 * element itself (MULTIPART_MODE_MIXED, MULTIPART_MODE_RELATED).
+	 * @param mimeMessage the MimeMessage object to add the root MimeMultipart
+	 * object to
+	 * @param multipartMode the multipart mode, as passed into the constructor
+	 * (MIXED, RELATED, MIXED_RELATED, or NO)
+	 * @throws MessagingException if multipart creation failed
+	 * @see #setMimeMultiparts
+	 * @see #MULTIPART_MODE_NO
+	 * @see #MULTIPART_MODE_MIXED
+	 * @see #MULTIPART_MODE_RELATED
+	 * @see #MULTIPART_MODE_MIXED_RELATED
+	 */
+	protected void createMimeMultiparts(MimeMessage mimeMessage, int multipartMode) throws MessagingException {
+<span class="pc bpc" id="L333" title="4 of 5 branches missed.">		switch (multipartMode) {</span>
+<span class="nc" id="L334">			case MULTIPART_MODE_NO -&gt; setMimeMultiparts(null, null);</span>
+			case MULTIPART_MODE_MIXED -&gt; {
+<span class="nc" id="L336">				MimeMultipart mixedMultipart = new MimeMultipart(MULTIPART_SUBTYPE_MIXED);</span>
+<span class="nc" id="L337">				mimeMessage.setContent(mixedMultipart);</span>
+<span class="nc" id="L338">				setMimeMultiparts(mixedMultipart, mixedMultipart);</span>
+<span class="nc" id="L339">			}</span>
+			case MULTIPART_MODE_RELATED -&gt; {
+<span class="nc" id="L341">				MimeMultipart relatedMultipart = new MimeMultipart(MULTIPART_SUBTYPE_RELATED);</span>
+<span class="nc" id="L342">				mimeMessage.setContent(relatedMultipart);</span>
+<span class="nc" id="L343">				setMimeMultiparts(relatedMultipart, relatedMultipart);</span>
+<span class="nc" id="L344">			}</span>
+			case MULTIPART_MODE_MIXED_RELATED -&gt; {
+<span class="fc" id="L346">				MimeMultipart rootMixedMultipart = new MimeMultipart(MULTIPART_SUBTYPE_MIXED);</span>
+<span class="fc" id="L347">				mimeMessage.setContent(rootMixedMultipart);</span>
+<span class="fc" id="L348">				MimeMultipart nestedRelatedMultipart = new MimeMultipart(MULTIPART_SUBTYPE_RELATED);</span>
+<span class="fc" id="L349">				MimeBodyPart relatedBodyPart = new MimeBodyPart();</span>
+<span class="fc" id="L350">				relatedBodyPart.setContent(nestedRelatedMultipart);</span>
+<span class="fc" id="L351">				rootMixedMultipart.addBodyPart(relatedBodyPart);</span>
+<span class="fc" id="L352">				setMimeMultiparts(rootMixedMultipart, nestedRelatedMultipart);</span>
+<span class="fc" id="L353">			}</span>
+			default -&gt;
+<span class="nc" id="L355">				throw new IllegalArgumentException(&quot;Only multipart modes MIXED_RELATED, RELATED and NO supported&quot;);</span>
+		}
+<span class="fc" id="L357">	}</span>
+
+	/**
+	 * Set the given MimeMultipart objects for use by this MimeMessageHelper.
+	 * @param root the root MimeMultipart object, which attachments will be added to;
+	 * or {@code null} to indicate no multipart at all
+	 * @param main the main MimeMultipart object, which text(s) and inline elements
+	 * will be added to (can be the same as the root multipart object, or an element
+	 * nested underneath the root multipart element)
+	 */
+	protected final void setMimeMultiparts(@Nullable MimeMultipart root, @Nullable MimeMultipart main) {
+<span class="fc" id="L368">		this.rootMimeMultipart = root;</span>
+<span class="fc" id="L369">		this.mimeMultipart = main;</span>
+<span class="fc" id="L370">	}</span>
+
+	/**
+	 * Return whether this helper is in multipart mode,
+	 * i.e. whether it holds a multipart message.
+	 * @see #MimeMessageHelper(MimeMessage, boolean)
+	 */
+	public final boolean isMultipart() {
+<span class="pc bpc" id="L378" title="1 of 2 branches missed.">		return (this.rootMimeMultipart != null);</span>
+	}
+
+	/**
+	 * Return the root MIME &quot;multipart/mixed&quot; object, if any.
+	 * Can be used to manually add attachments.
+	 * &lt;p&gt;This will be the direct content of the MimeMessage,
+	 * in case of a multipart mail.
+	 * @throws IllegalStateException if this helper is not in multipart mode
+	 * @see #isMultipart
+	 * @see #getMimeMessage
+	 * @see jakarta.mail.internet.MimeMultipart#addBodyPart
+	 */
+	public final MimeMultipart getRootMimeMultipart() throws IllegalStateException {
+<span class="nc bnc" id="L392" title="All 2 branches missed.">		if (this.rootMimeMultipart == null) {</span>
+<span class="nc" id="L393">			throw new IllegalStateException(&quot;Not in multipart mode - &quot; +</span>
+					&quot;create an appropriate MimeMessageHelper via a constructor that takes a 'multipart' flag &quot; +
+					&quot;if you need to set alternative texts or add inline elements or attachments.&quot;);
+		}
+<span class="nc" id="L397">		return this.rootMimeMultipart;</span>
+	}
+
+	/**
+	 * Return the underlying MIME &quot;multipart/related&quot; object, if any.
+	 * Can be used to manually add body parts, inline elements, etc.
+	 * &lt;p&gt;This will be nested within the root MimeMultipart,
+	 * in case of a multipart mail.
+	 * @throws IllegalStateException if this helper is not in multipart mode
+	 * @see #isMultipart
+	 * @see #getRootMimeMultipart
+	 * @see jakarta.mail.internet.MimeMultipart#addBodyPart
+	 */
+	public final MimeMultipart getMimeMultipart() throws IllegalStateException {
+<span class="pc bpc" id="L411" title="1 of 2 branches missed.">		if (this.mimeMultipart == null) {</span>
+<span class="nc" id="L412">			throw new IllegalStateException(&quot;Not in multipart mode - &quot; +</span>
+					&quot;create an appropriate MimeMessageHelper via a constructor that takes a 'multipart' flag &quot; +
+					&quot;if you need to set alternative texts or add inline elements or attachments.&quot;);
+		}
+<span class="fc" id="L416">		return this.mimeMultipart;</span>
+	}
+
+
+	/**
+	 * Determine the default encoding for the given MimeMessage.
+	 * @param mimeMessage the passed-in MimeMessage
+	 * @return the default encoding associated with the MimeMessage,
+	 * or {@code null} if none found
+	 */
+	protected @Nullable String getDefaultEncoding(MimeMessage mimeMessage) {
+<span class="pc bpc" id="L427" title="1 of 2 branches missed.">		if (mimeMessage instanceof SmartMimeMessage smartMimeMessage) {</span>
+<span class="fc" id="L428">			return smartMimeMessage.getDefaultEncoding();</span>
+		}
+<span class="nc" id="L430">		return null;</span>
+	}
+
+	/**
+	 * Return the specific character encoding used for this message, if any.
+	 */
+	public @Nullable String getEncoding() {
+<span class="fc" id="L437">		return this.encoding;</span>
+	}
+
+	/**
+	 * Determine the default Java Activation FileTypeMap for the given MimeMessage.
+	 * @param mimeMessage the passed-in MimeMessage
+	 * @return the default FileTypeMap associated with the MimeMessage,
+	 * or a default ConfigurableMimeFileTypeMap if none found for the message
+	 * @see ConfigurableMimeFileTypeMap
+	 */
+	protected FileTypeMap getDefaultFileTypeMap(MimeMessage mimeMessage) {
+<span class="pc bpc" id="L448" title="1 of 2 branches missed.">		if (mimeMessage instanceof SmartMimeMessage smartMimeMessage) {</span>
+<span class="fc" id="L449">			FileTypeMap fileTypeMap = smartMimeMessage.getDefaultFileTypeMap();</span>
+<span class="pc bpc" id="L450" title="1 of 2 branches missed.">			if (fileTypeMap != null) {</span>
+<span class="fc" id="L451">				return fileTypeMap;</span>
+			}
+		}
+<span class="nc" id="L454">		ConfigurableMimeFileTypeMap fileTypeMap = new ConfigurableMimeFileTypeMap();</span>
+<span class="nc" id="L455">		fileTypeMap.afterPropertiesSet();</span>
+<span class="nc" id="L456">		return fileTypeMap;</span>
+	}
+
+	/**
+	 * Set the Java Activation Framework {@code FileTypeMap} to use
+	 * for determining the content type of inline content and attachments
+	 * that get added to the message.
+	 * &lt;p&gt;The default is the {@code FileTypeMap} that the underlying
+	 * MimeMessage carries, if any, or the Activation Framework's default
+	 * {@code FileTypeMap} instance else.
+	 * @see #addInline
+	 * @see #addAttachment
+	 * @see #getDefaultFileTypeMap(jakarta.mail.internet.MimeMessage)
+	 * @see JavaMailSenderImpl#setDefaultFileTypeMap
+	 * @see jakarta.activation.FileTypeMap#getDefaultFileTypeMap
+	 * @see ConfigurableMimeFileTypeMap
+	 */
+	public void setFileTypeMap(@Nullable FileTypeMap fileTypeMap) {
+<span class="pc bpc" id="L474" title="1 of 2 branches missed.">		this.fileTypeMap = (fileTypeMap != null ? fileTypeMap : getDefaultFileTypeMap(getMimeMessage()));</span>
+<span class="fc" id="L475">	}</span>
+
+	/**
+	 * Return the {@code FileTypeMap} used by this MimeMessageHelper.
+	 * @see #setFileTypeMap
+	 */
+	public FileTypeMap getFileTypeMap() {
+<span class="fc" id="L482">		return this.fileTypeMap;</span>
+	}
+
+
+	/**
+	 * Set whether to encode attachment filenames passed to this helper's
+	 * {@code #addAttachment} methods.
+	 * &lt;p&gt;The default is {@code false} for standard MIME behavior; turn this to
+	 * {@code true} for compatibility with older email clients. On a related note,
+	 * check out JavaMail's {@code mail.mime.encodefilename} system property.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; The default changed to {@code false} in 5.3, in favor of
+	 * JavaMail's standard {@code mail.mime.encodefilename} system property.
+	 * @since 5.2.9
+	 * @see #addAttachment(String, DataSource)
+	 * @see MimeBodyPart#setFileName(String)
+	 */
+	public void setEncodeFilenames(boolean encodeFilenames) {
+<span class="nc" id="L499">		this.encodeFilenames = encodeFilenames;</span>
+<span class="nc" id="L500">	}</span>
+
+	/**
+	 * Return whether to encode attachment filenames passed to this helper's
+	 * {@code #addAttachment} methods.
+	 * @since 5.2.9
+	 * @see #setEncodeFilenames
+	 */
+	public boolean isEncodeFilenames() {
+<span class="fc" id="L509">		return this.encodeFilenames;</span>
+	}
+
+	/**
+	 * Set whether to validate all addresses which get passed to this helper.
+	 * &lt;p&gt;The default is {@code false}.
+	 * @see #validateAddress
+	 */
+	public void setValidateAddresses(boolean validateAddresses) {
+<span class="nc" id="L518">		this.validateAddresses = validateAddresses;</span>
+<span class="nc" id="L519">	}</span>
+
+	/**
+	 * Return whether this helper will validate all addresses passed to it.
+	 * @see #setValidateAddresses
+	 */
+	public boolean isValidateAddresses() {
+<span class="fc" id="L526">		return this.validateAddresses;</span>
+	}
+
+	/**
+	 * Validate the given mail address.
+	 * Called by all of MimeMessageHelper's address setters and adders.
+	 * &lt;p&gt;The default implementation invokes {@link InternetAddress#validate()},
+	 * provided that address validation is activated for the helper instance.
+	 * @param address the address to validate
+	 * @throws AddressException if validation failed
+	 * @see #isValidateAddresses()
+	 * @see jakarta.mail.internet.InternetAddress#validate()
+	 */
+	protected void validateAddress(InternetAddress address) throws AddressException {
+<span class="pc bpc" id="L540" title="1 of 2 branches missed.">		if (isValidateAddresses()) {</span>
+<span class="nc" id="L541">			address.validate();</span>
+		}
+<span class="fc" id="L543">	}</span>
+
+	/**
+	 * Validate all given mail addresses.
+	 * &lt;p&gt;The default implementation simply delegates to {@link #validateAddress}
+	 * for each address.
+	 * @param addresses the addresses to validate
+	 * @throws AddressException if validation failed
+	 * @see #validateAddress(InternetAddress)
+	 */
+	protected void validateAddresses(InternetAddress[] addresses) throws AddressException {
+<span class="fc bfc" id="L554" title="All 2 branches covered.">		for (InternetAddress address : addresses) {</span>
+<span class="fc" id="L555">			validateAddress(address);</span>
+		}
+<span class="fc" id="L557">	}</span>
+
+
+	public void setFrom(InternetAddress from) throws MessagingException {
+<span class="fc" id="L561">		Assert.notNull(from, &quot;From address must not be null&quot;);</span>
+<span class="fc" id="L562">		validateAddress(from);</span>
+<span class="fc" id="L563">		this.mimeMessage.setFrom(from);</span>
+<span class="fc" id="L564">	}</span>
+
+	public void setFrom(String from) throws MessagingException {
+<span class="fc" id="L567">		Assert.notNull(from, &quot;From address must not be null&quot;);</span>
+<span class="fc" id="L568">		setFrom(parseAddress(from));</span>
+<span class="fc" id="L569">	}</span>
+
+	public void setFrom(String from, String personal) throws MessagingException, UnsupportedEncodingException {
+<span class="nc" id="L572">		Assert.notNull(from, &quot;From address must not be null&quot;);</span>
+<span class="nc bnc" id="L573" title="All 2 branches missed.">		setFrom(getEncoding() != null ?</span>
+<span class="nc" id="L574">			new InternetAddress(from, personal, getEncoding()) : new InternetAddress(from, personal));</span>
+<span class="nc" id="L575">	}</span>
+
+	public void setReplyTo(InternetAddress replyTo) throws MessagingException {
+<span class="fc" id="L578">		Assert.notNull(replyTo, &quot;Reply-to address must not be null&quot;);</span>
+<span class="fc" id="L579">		validateAddress(replyTo);</span>
+<span class="fc" id="L580">		this.mimeMessage.setReplyTo(new InternetAddress[] {replyTo});</span>
+<span class="fc" id="L581">	}</span>
+
+	public void setReplyTo(String replyTo) throws MessagingException {
+<span class="fc" id="L584">		Assert.notNull(replyTo, &quot;Reply-to address must not be null&quot;);</span>
+<span class="fc" id="L585">		setReplyTo(parseAddress(replyTo));</span>
+<span class="fc" id="L586">	}</span>
+
+	public void setReplyTo(String replyTo, String personal) throws MessagingException, UnsupportedEncodingException {
+<span class="nc" id="L589">		Assert.notNull(replyTo, &quot;Reply-to address must not be null&quot;);</span>
+<span class="nc bnc" id="L590" title="All 2 branches missed.">		InternetAddress replyToAddress = (getEncoding() != null) ?</span>
+<span class="nc" id="L591">				new InternetAddress(replyTo, personal, getEncoding()) : new InternetAddress(replyTo, personal);</span>
+<span class="nc" id="L592">		setReplyTo(replyToAddress);</span>
+<span class="nc" id="L593">	}</span>
+
+
+	public void setTo(InternetAddress to) throws MessagingException {
+<span class="fc" id="L597">		Assert.notNull(to, &quot;To address must not be null&quot;);</span>
+<span class="fc" id="L598">		validateAddress(to);</span>
+<span class="fc" id="L599">		this.mimeMessage.setRecipient(Message.RecipientType.TO, to);</span>
+<span class="fc" id="L600">	}</span>
+
+	public void setTo(InternetAddress[] to) throws MessagingException {
+<span class="fc" id="L603">		Assert.notNull(to, &quot;To address array must not be null&quot;);</span>
+<span class="fc" id="L604">		validateAddresses(to);</span>
+<span class="fc" id="L605">		this.mimeMessage.setRecipients(Message.RecipientType.TO, to);</span>
+<span class="fc" id="L606">	}</span>
+
+	public void setTo(String to) throws MessagingException {
+<span class="fc" id="L609">		Assert.notNull(to, &quot;To address must not be null&quot;);</span>
+<span class="fc" id="L610">		setTo(parseAddress(to));</span>
+<span class="fc" id="L611">	}</span>
+
+	public void setTo(String[] to) throws MessagingException {
+<span class="fc" id="L614">		Assert.notNull(to, &quot;To address array must not be null&quot;);</span>
+<span class="fc" id="L615">		InternetAddress[] addresses = new InternetAddress[to.length];</span>
+<span class="fc bfc" id="L616" title="All 2 branches covered.">		for (int i = 0; i &lt; to.length; i++) {</span>
+<span class="fc" id="L617">			addresses[i] = parseAddress(to[i]);</span>
+		}
+<span class="fc" id="L619">		setTo(addresses);</span>
+<span class="fc" id="L620">	}</span>
+
+	public void addTo(InternetAddress to) throws MessagingException {
+<span class="nc" id="L623">		Assert.notNull(to, &quot;To address must not be null&quot;);</span>
+<span class="nc" id="L624">		validateAddress(to);</span>
+<span class="nc" id="L625">		this.mimeMessage.addRecipient(Message.RecipientType.TO, to);</span>
+<span class="nc" id="L626">	}</span>
+
+	public void addTo(String to) throws MessagingException {
+<span class="nc" id="L629">		Assert.notNull(to, &quot;To address must not be null&quot;);</span>
+<span class="nc" id="L630">		addTo(parseAddress(to));</span>
+<span class="nc" id="L631">	}</span>
+
+	public void addTo(String to, String personal) throws MessagingException, UnsupportedEncodingException {
+<span class="nc" id="L634">		Assert.notNull(to, &quot;To address must not be null&quot;);</span>
+<span class="nc bnc" id="L635" title="All 2 branches missed.">		addTo(getEncoding() != null ?</span>
+<span class="nc" id="L636">			new InternetAddress(to, personal, getEncoding()) :</span>
+<span class="nc" id="L637">			new InternetAddress(to, personal));</span>
+<span class="nc" id="L638">	}</span>
+
+
+	public void setCc(InternetAddress cc) throws MessagingException {
+<span class="nc" id="L642">		Assert.notNull(cc, &quot;Cc address must not be null&quot;);</span>
+<span class="nc" id="L643">		validateAddress(cc);</span>
+<span class="nc" id="L644">		this.mimeMessage.setRecipient(Message.RecipientType.CC, cc);</span>
+<span class="nc" id="L645">	}</span>
+
+	public void setCc(InternetAddress[] cc) throws MessagingException {
+<span class="fc" id="L648">		Assert.notNull(cc, &quot;Cc address array must not be null&quot;);</span>
+<span class="fc" id="L649">		validateAddresses(cc);</span>
+<span class="fc" id="L650">		this.mimeMessage.setRecipients(Message.RecipientType.CC, cc);</span>
+<span class="fc" id="L651">	}</span>
+
+	public void setCc(String cc) throws MessagingException {
+<span class="nc" id="L654">		Assert.notNull(cc, &quot;Cc address must not be null&quot;);</span>
+<span class="nc" id="L655">		setCc(parseAddress(cc));</span>
+<span class="nc" id="L656">	}</span>
+
+	public void setCc(String[] cc) throws MessagingException {
+<span class="fc" id="L659">		Assert.notNull(cc, &quot;Cc address array must not be null&quot;);</span>
+<span class="fc" id="L660">		InternetAddress[] addresses = new InternetAddress[cc.length];</span>
+<span class="fc bfc" id="L661" title="All 2 branches covered.">		for (int i = 0; i &lt; cc.length; i++) {</span>
+<span class="fc" id="L662">			addresses[i] = parseAddress(cc[i]);</span>
+		}
+<span class="fc" id="L664">		setCc(addresses);</span>
+<span class="fc" id="L665">	}</span>
+
+	public void addCc(InternetAddress cc) throws MessagingException {
+<span class="nc" id="L668">		Assert.notNull(cc, &quot;Cc address must not be null&quot;);</span>
+<span class="nc" id="L669">		validateAddress(cc);</span>
+<span class="nc" id="L670">		this.mimeMessage.addRecipient(Message.RecipientType.CC, cc);</span>
+<span class="nc" id="L671">	}</span>
+
+	public void addCc(String cc) throws MessagingException {
+<span class="nc" id="L674">		Assert.notNull(cc, &quot;Cc address must not be null&quot;);</span>
+<span class="nc" id="L675">		addCc(parseAddress(cc));</span>
+<span class="nc" id="L676">	}</span>
+
+	public void addCc(String cc, String personal) throws MessagingException, UnsupportedEncodingException {
+<span class="nc" id="L679">		Assert.notNull(cc, &quot;Cc address must not be null&quot;);</span>
+<span class="nc bnc" id="L680" title="All 2 branches missed.">		addCc(getEncoding() != null ?</span>
+<span class="nc" id="L681">			new InternetAddress(cc, personal, getEncoding()) :</span>
+<span class="nc" id="L682">			new InternetAddress(cc, personal));</span>
+<span class="nc" id="L683">	}</span>
+
+
+	public void setBcc(InternetAddress bcc) throws MessagingException {
+<span class="nc" id="L687">		Assert.notNull(bcc, &quot;Bcc address must not be null&quot;);</span>
+<span class="nc" id="L688">		validateAddress(bcc);</span>
+<span class="nc" id="L689">		this.mimeMessage.setRecipient(Message.RecipientType.BCC, bcc);</span>
+<span class="nc" id="L690">	}</span>
+
+	public void setBcc(InternetAddress[] bcc) throws MessagingException {
+<span class="fc" id="L693">		Assert.notNull(bcc, &quot;Bcc address array must not be null&quot;);</span>
+<span class="fc" id="L694">		validateAddresses(bcc);</span>
+<span class="fc" id="L695">		this.mimeMessage.setRecipients(Message.RecipientType.BCC, bcc);</span>
+<span class="fc" id="L696">	}</span>
+
+	public void setBcc(String bcc) throws MessagingException {
+<span class="nc" id="L699">		Assert.notNull(bcc, &quot;Bcc address must not be null&quot;);</span>
+<span class="nc" id="L700">		setBcc(parseAddress(bcc));</span>
+<span class="nc" id="L701">	}</span>
+
+	public void setBcc(String[] bcc) throws MessagingException {
+<span class="fc" id="L704">		Assert.notNull(bcc, &quot;Bcc address array must not be null&quot;);</span>
+<span class="fc" id="L705">		InternetAddress[] addresses = new InternetAddress[bcc.length];</span>
+<span class="fc bfc" id="L706" title="All 2 branches covered.">		for (int i = 0; i &lt; bcc.length; i++) {</span>
+<span class="fc" id="L707">			addresses[i] = parseAddress(bcc[i]);</span>
+		}
+<span class="fc" id="L709">		setBcc(addresses);</span>
+<span class="fc" id="L710">	}</span>
+
+	public void addBcc(InternetAddress bcc) throws MessagingException {
+<span class="nc" id="L713">		Assert.notNull(bcc, &quot;Bcc address must not be null&quot;);</span>
+<span class="nc" id="L714">		validateAddress(bcc);</span>
+<span class="nc" id="L715">		this.mimeMessage.addRecipient(Message.RecipientType.BCC, bcc);</span>
+<span class="nc" id="L716">	}</span>
+
+	public void addBcc(String bcc) throws MessagingException {
+<span class="nc" id="L719">		Assert.notNull(bcc, &quot;Bcc address must not be null&quot;);</span>
+<span class="nc" id="L720">		addBcc(parseAddress(bcc));</span>
+<span class="nc" id="L721">	}</span>
+
+	public void addBcc(String bcc, String personal) throws MessagingException, UnsupportedEncodingException {
+<span class="nc" id="L724">		Assert.notNull(bcc, &quot;Bcc address must not be null&quot;);</span>
+<span class="nc bnc" id="L725" title="All 2 branches missed.">		addBcc(getEncoding() != null ?</span>
+<span class="nc" id="L726">			new InternetAddress(bcc, personal, getEncoding()) :</span>
+<span class="nc" id="L727">			new InternetAddress(bcc, personal));</span>
+<span class="nc" id="L728">	}</span>
+
+	private InternetAddress parseAddress(String address) throws MessagingException {
+<span class="fc" id="L731">		InternetAddress[] parsed = InternetAddress.parse(address);</span>
+<span class="fc bfc" id="L732" title="All 2 branches covered.">		if (parsed.length != 1) {</span>
+<span class="fc" id="L733">			throw new AddressException(&quot;Illegal address&quot;, address);</span>
+		}
+<span class="fc" id="L735">		InternetAddress raw = parsed[0];</span>
+		try {
+<span class="fc bfc" id="L737" title="All 2 branches covered.">			return (getEncoding() != null ?</span>
+<span class="fc" id="L738">					new InternetAddress(raw.getAddress(), raw.getPersonal(), getEncoding()) : raw);</span>
+		}
+<span class="nc" id="L740">		catch (UnsupportedEncodingException ex) {</span>
+<span class="nc" id="L741">			throw new MessagingException(&quot;Failed to parse embedded personal name to correct encoding&quot;, ex);</span>
+		}
+	}
+
+
+	/**
+	 * Set the priority (&quot;X-Priority&quot; header) of the message.
+	 * @param priority the priority value;
+	 * typically between 1 (highest) and 5 (lowest)
+	 * @throws MessagingException in case of errors
+	 */
+	public void setPriority(int priority) throws MessagingException {
+<span class="nc" id="L753">		this.mimeMessage.setHeader(HEADER_PRIORITY, Integer.toString(priority));</span>
+<span class="nc" id="L754">	}</span>
+
+	/**
+	 * Set the sent-date of the message.
+	 * @param sentDate the date to set (never {@code null})
+	 * @throws MessagingException in case of errors
+	 */
+	public void setSentDate(Date sentDate) throws MessagingException {
+<span class="fc" id="L762">		Assert.notNull(sentDate, &quot;Sent date must not be null&quot;);</span>
+<span class="fc" id="L763">		this.mimeMessage.setSentDate(sentDate);</span>
+<span class="fc" id="L764">	}</span>
+
+	/**
+	 * Set the subject of the message, using the correct encoding.
+	 * @param subject the subject text
+	 * @throws MessagingException in case of errors
+	 */
+	public void setSubject(String subject) throws MessagingException {
+<span class="fc" id="L772">		Assert.notNull(subject, &quot;Subject must not be null&quot;);</span>
+<span class="pc bpc" id="L773" title="1 of 2 branches missed.">		if (getEncoding() != null) {</span>
+<span class="nc" id="L774">			this.mimeMessage.setSubject(subject, getEncoding());</span>
+		}
+		else {
+<span class="fc" id="L777">			this.mimeMessage.setSubject(subject);</span>
+		}
+<span class="fc" id="L779">	}</span>
+
+
+	/**
+	 * Set the given text directly as content in non-multipart mode
+	 * or as default body part in multipart mode.
+	 * Always applies the default content type &quot;text/plain&quot;.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Invoke {@link #addInline} &lt;i&gt;after&lt;/i&gt; {@code setText};
+	 * else, mail readers might not be able to resolve inline references correctly.
+	 * @param text the text for the message
+	 * @throws MessagingException in case of errors
+	 */
+	public void setText(String text) throws MessagingException {
+<span class="fc" id="L792">		setText(text, false);</span>
+<span class="fc" id="L793">	}</span>
+
+	/**
+	 * Set the given text directly as content in non-multipart mode
+	 * or as default body part in multipart mode.
+	 * The &quot;html&quot; flag determines the content type to apply.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Invoke {@link #addInline} &lt;i&gt;after&lt;/i&gt; {@code setText};
+	 * else, mail readers might not be able to resolve inline references correctly.
+	 * @param text the text for the message
+	 * @param html whether to apply content type &quot;text/html&quot; for an
+	 * HTML mail, using default content type (&quot;text/plain&quot;) else
+	 * @throws MessagingException in case of errors
+	 */
+	public void setText(String text, boolean html) throws MessagingException {
+<span class="fc" id="L807">		Assert.notNull(text, &quot;Text must not be null&quot;);</span>
+		MimePart partToUse;
+<span class="pc bpc" id="L809" title="1 of 2 branches missed.">		if (isMultipart()) {</span>
+<span class="nc" id="L810">			partToUse = getMainPart();</span>
+		}
+		else {
+<span class="fc" id="L813">			partToUse = this.mimeMessage;</span>
+		}
+<span class="pc bpc" id="L815" title="1 of 2 branches missed.">		if (html) {</span>
+<span class="nc" id="L816">			setHtmlTextToMimePart(partToUse, text);</span>
+		}
+		else {
+<span class="fc" id="L819">			setPlainTextToMimePart(partToUse, text);</span>
+		}
+<span class="fc" id="L821">	}</span>
+
+	/**
+	 * Set the given plain text and HTML text as alternatives, offering
+	 * both options to the email client. Requires multipart mode.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Invoke {@link #addInline} &lt;i&gt;after&lt;/i&gt; {@code setText};
+	 * else, mail readers might not be able to resolve inline references correctly.
+	 * @param plainText the plain text for the message
+	 * @param htmlText the HTML text for the message
+	 * @throws MessagingException in case of errors
+	 */
+	public void setText(String plainText, String htmlText) throws MessagingException {
+<span class="nc" id="L833">		Assert.notNull(plainText, &quot;Plain text must not be null&quot;);</span>
+<span class="nc" id="L834">		Assert.notNull(htmlText, &quot;HTML text must not be null&quot;);</span>
+
+<span class="nc" id="L836">		MimeMultipart messageBody = new MimeMultipart(MULTIPART_SUBTYPE_ALTERNATIVE);</span>
+<span class="nc" id="L837">		getMainPart().setContent(messageBody, CONTENT_TYPE_ALTERNATIVE);</span>
+
+		// Create the plain text part of the message.
+<span class="nc" id="L840">		MimeBodyPart plainTextPart = new MimeBodyPart();</span>
+<span class="nc" id="L841">		setPlainTextToMimePart(plainTextPart, plainText);</span>
+<span class="nc" id="L842">		messageBody.addBodyPart(plainTextPart);</span>
+
+		// Create the HTML text part of the message.
+<span class="nc" id="L845">		MimeBodyPart htmlTextPart = new MimeBodyPart();</span>
+<span class="nc" id="L846">		setHtmlTextToMimePart(htmlTextPart, htmlText);</span>
+<span class="nc" id="L847">		messageBody.addBodyPart(htmlTextPart);</span>
+<span class="nc" id="L848">	}</span>
+
+	private MimeBodyPart getMainPart() throws MessagingException {
+<span class="nc" id="L851">		MimeMultipart mimeMultipart = getMimeMultipart();</span>
+<span class="nc" id="L852">		MimeBodyPart bodyPart = null;</span>
+<span class="nc bnc" id="L853" title="All 2 branches missed.">		for (int i = 0; i &lt; mimeMultipart.getCount(); i++) {</span>
+<span class="nc" id="L854">			BodyPart bp = mimeMultipart.getBodyPart(i);</span>
+<span class="nc bnc" id="L855" title="All 2 branches missed.">			if (bp.getFileName() == null) {</span>
+<span class="nc" id="L856">				bodyPart = (MimeBodyPart) bp;</span>
+			}
+		}
+<span class="nc bnc" id="L859" title="All 2 branches missed.">		if (bodyPart == null) {</span>
+<span class="nc" id="L860">			MimeBodyPart mimeBodyPart = new MimeBodyPart();</span>
+<span class="nc" id="L861">			mimeMultipart.addBodyPart(mimeBodyPart);</span>
+<span class="nc" id="L862">			bodyPart = mimeBodyPart;</span>
+		}
+<span class="nc" id="L864">		return bodyPart;</span>
+	}
+
+	private void setPlainTextToMimePart(MimePart mimePart, String text) throws MessagingException {
+<span class="pc bpc" id="L868" title="1 of 2 branches missed.">		if (getEncoding() != null) {</span>
+<span class="nc" id="L869">			mimePart.setText(text, getEncoding());</span>
+		}
+		else {
+<span class="fc" id="L872">			mimePart.setText(text);</span>
+		}
+<span class="fc" id="L874">	}</span>
+
+	private void setHtmlTextToMimePart(MimePart mimePart, String text) throws MessagingException {
+<span class="nc bnc" id="L877" title="All 2 branches missed.">		if (getEncoding() != null) {</span>
+<span class="nc" id="L878">			mimePart.setContent(text, CONTENT_TYPE_HTML + CONTENT_TYPE_CHARSET_SUFFIX + getEncoding());</span>
+		}
+		else {
+<span class="nc" id="L881">			mimePart.setContent(text, CONTENT_TYPE_HTML);</span>
+		}
+<span class="nc" id="L883">	}</span>
+
+
+	/**
+	 * Add an inline element to the MimeMessage, taking the content from a
+	 * {@code jakarta.activation.DataSource}.
+	 * &lt;p&gt;Note that the InputStream returned by the DataSource implementation
+	 * needs to be a &lt;i&gt;fresh one on each call&lt;/i&gt;, as JavaMail will invoke
+	 * {@code getInputStream()} multiple times.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Invoke {@code addInline} &lt;i&gt;after&lt;/i&gt; {@link #setText};
+	 * else, mail readers might not be able to resolve inline references correctly.
+	 * @param contentId the content ID to use. Will end up as &quot;Content-ID&quot; header
+	 * in the body part, surrounded by angle brackets: for example, &quot;myId&quot; &amp;rarr; &quot;&amp;lt;myId&amp;gt;&quot;.
+	 * Can be referenced in HTML source via src=&quot;cid:myId&quot; expressions.
+	 * @param dataSource the {@code jakarta.activation.DataSource} to take
+	 * the content from, determining the InputStream and the content type
+	 * @throws MessagingException in case of errors
+	 * @see #addInline(String, java.io.File)
+	 * @see #addInline(String, org.springframework.core.io.Resource)
+	 */
+	public void addInline(String contentId, DataSource dataSource) throws MessagingException {
+<span class="nc" id="L904">		addInline(contentId, null, dataSource);</span>
+<span class="nc" id="L905">	}</span>
+
+	/**
+	 * Add an inline element to the MimeMessage, taking the content from a
+	 * {@code jakarta.activation.DataSource} and assigning the provided
+	 * {@code inlineFileName} to the element.
+	 * &lt;p&gt;Note that the InputStream returned by the DataSource implementation
+	 * needs to be a &lt;i&gt;fresh one on each call&lt;/i&gt;, as JavaMail will invoke
+	 * {@code getInputStream()} multiple times.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Invoke {@code addInline} &lt;i&gt;after&lt;/i&gt; {@link #setText};
+	 * else, mail readers might not be able to resolve inline references correctly.
+	 * @param contentId the content ID to use. Will end up as &quot;Content-ID&quot; header
+	 * in the body part, surrounded by angle brackets: for example, &quot;myId&quot; &amp;rarr; &quot;&amp;lt;myId&amp;gt;&quot;.
+	 * Can be referenced in HTML source via src=&quot;cid:myId&quot; expressions.
+	 * @param inlineFilename the fileName to use for the inline element's part
+	 * @param dataSource the {@code jakarta.activation.DataSource} to take
+	 * the content from, determining the InputStream and the content type
+	 * @throws MessagingException in case of errors
+	 * @since 6.2
+	 * @see #addInline(String, java.io.File)
+	 * @see #addInline(String, org.springframework.core.io.Resource)
+	 */
+	public void addInline(String contentId, @Nullable String inlineFilename, DataSource dataSource)
+			throws MessagingException {
+
+<span class="fc" id="L930">		Assert.notNull(contentId, &quot;Content ID must not be null&quot;);</span>
+<span class="fc" id="L931">		Assert.notNull(dataSource, &quot;DataSource must not be null&quot;);</span>
+<span class="fc" id="L932">		MimeBodyPart mimeBodyPart = new MimeBodyPart();</span>
+<span class="fc" id="L933">		mimeBodyPart.setDisposition(Part.INLINE);</span>
+<span class="fc" id="L934">		mimeBodyPart.setContentID(&quot;&lt;&quot; + contentId + &quot;&gt;&quot;);</span>
+<span class="fc" id="L935">		mimeBodyPart.setDataHandler(new DataHandler(dataSource));</span>
+<span class="pc bpc" id="L936" title="1 of 2 branches missed.">		if (inlineFilename != null) {</span>
+			try {
+<span class="pc bpc" id="L938" title="1 of 2 branches missed.">			mimeBodyPart.setFileName(isEncodeFilenames() ?</span>
+<span class="pc" id="L939">					MimeUtility.encodeText(inlineFilename) : inlineFilename);</span>
+			}
+<span class="nc" id="L941">			catch (UnsupportedEncodingException ex) {</span>
+<span class="nc" id="L942">				throw new MessagingException(&quot;Failed to encode inline filename&quot;, ex);</span>
+<span class="fc" id="L943">			}</span>
+		}
+<span class="fc" id="L945">		getMimeMultipart().addBodyPart(mimeBodyPart);</span>
+<span class="fc" id="L946">	}</span>
+
+	/**
+	 * Add an inline element to the MimeMessage, taking the content from a
+	 * {@code java.io.File}.
+	 * &lt;p&gt;The content type will be determined by the name of the given
+	 * content file. Do not use this for temporary files with arbitrary
+	 * filenames (possibly ending in &quot;.tmp&quot; or the like)!
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Invoke {@code addInline} &lt;i&gt;after&lt;/i&gt; {@link #setText};
+	 * else, mail readers might not be able to resolve inline references correctly.
+	 * @param contentId the content ID to use. Will end up as &quot;Content-ID&quot; header
+	 * in the body part, surrounded by angle brackets: for example, &quot;myId&quot; &amp;rarr; &quot;&amp;lt;myId&amp;gt;&quot;.
+	 * Can be referenced in HTML source via src=&quot;cid:myId&quot; expressions.
+	 * @param file the File resource to take the content from
+	 * @throws MessagingException in case of errors
+	 * @see #setText
+	 * @see #addInline(String, org.springframework.core.io.Resource)
+	 * @see #addInline(String, jakarta.activation.DataSource)
+	 */
+	public void addInline(String contentId, File file) throws MessagingException {
+<span class="nc" id="L966">		Assert.notNull(file, &quot;File must not be null&quot;);</span>
+<span class="nc" id="L967">		FileDataSource dataSource = new FileDataSource(file);</span>
+<span class="nc" id="L968">		dataSource.setFileTypeMap(getFileTypeMap());</span>
+<span class="nc" id="L969">		addInline(contentId, dataSource);</span>
+<span class="nc" id="L970">	}</span>
+
+	/**
+	 * Add an inline element to the MimeMessage, taking the content from a
+	 * {@code org.springframework.core.io.Resource}.
+	 * &lt;p&gt;The content type will be determined by the name of the given
+	 * content file. Do not use this for temporary files with arbitrary
+	 * filenames (possibly ending in &quot;.tmp&quot; or the like)!
+	 * &lt;p&gt;Note that the InputStream returned by the Resource implementation
+	 * needs to be a &lt;i&gt;fresh one on each call&lt;/i&gt;, as JavaMail will invoke
+	 * {@code getInputStream()} multiple times.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Invoke {@code addInline} &lt;i&gt;after&lt;/i&gt; {@link #setText};
+	 * else, mail readers might not be able to resolve inline references correctly.
+	 * @param contentId the content ID to use. Will end up as &quot;Content-ID&quot; header
+	 * in the body part, surrounded by angle brackets: for example, &quot;myId&quot; &amp;rarr; &quot;&amp;lt;myId&amp;gt;&quot;.
+	 * Can be referenced in HTML source via src=&quot;cid:myId&quot; expressions.
+	 * @param resource the resource to take the content from
+	 * @throws MessagingException in case of errors
+	 * @see #setText
+	 * @see #addInline(String, java.io.File)
+	 * @see #addInline(String, jakarta.activation.DataSource)
+	 */
+	public void addInline(String contentId, Resource resource) throws MessagingException {
+<span class="fc" id="L993">		Assert.notNull(resource, &quot;Resource must not be null&quot;);</span>
+<span class="pc bpc" id="L994" title="1 of 2 branches missed.">		String contentType = (resource.getFilename() != null ?</span>
+<span class="pc" id="L995">				getFileTypeMap().getContentType(resource.getFilename()) : MimeTypeUtils.APPLICATION_OCTET_STREAM_VALUE);</span>
+<span class="fc" id="L996">		addInline(contentId, resource, contentType);</span>
+<span class="fc" id="L997">	}</span>
+
+	/**
+	 * Add an inline element to the MimeMessage, taking the content from an
+	 * {@code org.springframework.core.InputStreamResource}, and
+	 * specifying the content type explicitly.
+	 * &lt;p&gt;You can determine the content type for any given filename via a Java
+	 * Activation Framework's FileTypeMap, for example the one held by this helper.
+	 * &lt;p&gt;Note that the InputStream returned by the InputStreamSource implementation
+	 * needs to be a &lt;i&gt;fresh one on each call&lt;/i&gt;, as JavaMail will invoke
+	 * {@code getInputStream()} multiple times.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Invoke {@code addInline} &lt;i&gt;after&lt;/i&gt; {@code setText};
+	 * else, mail readers might not be able to resolve inline references correctly.
+	 * @param contentId the content ID to use. Will end up as &quot;Content-ID&quot; header
+	 * in the body part, surrounded by angle brackets: for example, &quot;myId&quot; &amp;rarr; &quot;&amp;lt;myId&amp;gt;&quot;.
+	 * Can be referenced in HTML source via src=&quot;cid:myId&quot; expressions.
+	 * @param inputStreamSource the resource to take the content from
+	 * @param contentType the content type to use for the element
+	 * @throws MessagingException in case of errors
+	 * @see #setText
+	 * @see #getFileTypeMap
+	 * @see #addInline(String, org.springframework.core.io.Resource)
+	 * @see #addInline(String, jakarta.activation.DataSource)
+	 */
+	public void addInline(String contentId, InputStreamSource inputStreamSource, String contentType)
+			throws MessagingException {
+
+<span class="fc" id="L1024">		addInline(contentId, &quot;inline&quot;, inputStreamSource, contentType);</span>
+<span class="fc" id="L1025">	}</span>
+
+	/**
+	 * Add an inline element to the MimeMessage, taking the content from an
+	 * {@code org.springframework.core.InputStreamResource}, and
+	 * specifying the inline fileName explicitly.
+	 * &lt;p&gt;The content type will be determined by the name of the given
+	 * content file. Do not use this for temporary files with arbitrary
+	 * filenames (possibly ending in &quot;.tmp&quot; or the like)!
+	 * &lt;p&gt;Note that the InputStream returned by the InputStreamSource implementation
+	 * needs to be a &lt;i&gt;fresh one on each call&lt;/i&gt;, as JavaMail will invoke
+	 * {@code getInputStream()} multiple times.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Invoke {@code addInline} &lt;i&gt;after&lt;/i&gt; {@code setText};
+	 * else, mail readers might not be able to resolve inline references correctly.
+	 * @param contentId the content ID to use. Will end up as &quot;Content-ID&quot; header
+	 * in the body part, surrounded by angle brackets: for example, &quot;myId&quot; &amp;rarr; &quot;&amp;lt;myId&amp;gt;&quot;.
+	 * Can be referenced in HTML source via src=&quot;cid:myId&quot; expressions.
+	 * @param inlineFilename the file name to use for the inline element
+	 * @param inputStreamSource the resource to take the content from
+	 * @throws MessagingException in case of errors
+	 * @since 6.2
+	 * @see #setText(String)
+	 * @see #getFileTypeMap
+	 * @see #addInline(String, org.springframework.core.io.Resource)
+	 * @see #addInline(String, String, jakarta.activation.DataSource)
+	 */
+	public void addInline(String contentId, String inlineFilename, InputStreamSource inputStreamSource)
+			throws MessagingException {
+
+<span class="nc" id="L1054">		String contentType = getFileTypeMap().getContentType(inlineFilename);</span>
+<span class="nc" id="L1055">		addInline(contentId, inlineFilename, inputStreamSource, contentType);</span>
+<span class="nc" id="L1056">	}</span>
+
+	/**
+	 * Add an inline element to the MimeMessage, taking the content from an
+	 * {@code org.springframework.core.InputStreamResource}, and
+	 * specifying the inline fileName and content type explicitly.
+	 * &lt;p&gt;You can determine the content type for any given filename via a Java
+	 * Activation Framework's FileTypeMap, for example the one held by this helper.
+	 * &lt;p&gt;Note that the InputStream returned by the InputStreamSource implementation
+	 * needs to be a &lt;i&gt;fresh one on each call&lt;/i&gt;, as JavaMail will invoke
+	 * {@code getInputStream()} multiple times.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; Invoke {@code addInline} &lt;i&gt;after&lt;/i&gt; {@code setText};
+	 * else, mail readers might not be able to resolve inline references correctly.
+	 * @param contentId the content ID to use. Will end up as &quot;Content-ID&quot; header
+	 * in the body part, surrounded by angle brackets: for example, &quot;myId&quot; &amp;rarr; &quot;&amp;lt;myId&amp;gt;&quot;.
+	 * Can be referenced in HTML source via src=&quot;cid:myId&quot; expressions.
+	 * @param inlineFilename the fileName to use for the inline element's part
+	 * @param inputStreamSource the resource to take the content from
+	 * @param contentType the content type to use for the element
+	 * @throws MessagingException in case of errors
+	 * @since 6.2
+	 * @see #setText
+	 * @see #getFileTypeMap
+	 * @see #addInline(String, org.springframework.core.io.Resource)
+	 * @see #addInline(String, String, jakarta.activation.DataSource)
+	 */
+	public void addInline(String contentId, String inlineFilename, InputStreamSource inputStreamSource, String contentType)
+			throws MessagingException {
+
+<span class="fc" id="L1085">		Assert.notNull(inputStreamSource, &quot;InputStreamSource must not be null&quot;);</span>
+<span class="pc bpc" id="L1086" title="2 of 4 branches missed.">		if (inputStreamSource instanceof Resource resource &amp;&amp; resource.isOpen()) {</span>
+<span class="nc" id="L1087">			throw new IllegalArgumentException(</span>
+					&quot;Passed-in Resource contains an open stream: invalid argument. &quot; +
+					&quot;JavaMail requires an InputStreamSource that creates a fresh stream for every call.&quot;);
+		}
+<span class="fc" id="L1091">		DataSource dataSource = createDataSource(inputStreamSource, contentType, inlineFilename);</span>
+<span class="fc" id="L1092">		addInline(contentId, inlineFilename, dataSource);</span>
+<span class="fc" id="L1093">	}</span>
+
+	/**
+	 * Add an attachment to the MimeMessage, taking the content from a
+	 * {@code jakarta.activation.DataSource}.
+	 * &lt;p&gt;Note that the InputStream returned by the DataSource implementation
+	 * needs to be a &lt;i&gt;fresh one on each call&lt;/i&gt;, as JavaMail will invoke
+	 * {@code getInputStream()} multiple times.
+	 * @param attachmentFilename the name of the attachment as it will
+	 * appear in the mail (the content type will be determined by this)
+	 * @param dataSource the {@code jakarta.activation.DataSource} to take
+	 * the content from, determining the InputStream and the content type
+	 * @throws MessagingException in case of errors
+	 * @see #addAttachment(String, org.springframework.core.io.InputStreamSource)
+	 * @see #addAttachment(String, java.io.File)
+	 */
+	public void addAttachment(String attachmentFilename, DataSource dataSource) throws MessagingException {
+<span class="nc" id="L1110">		Assert.notNull(attachmentFilename, &quot;Attachment filename must not be null&quot;);</span>
+<span class="nc" id="L1111">		Assert.notNull(dataSource, &quot;DataSource must not be null&quot;);</span>
+		try {
+<span class="nc" id="L1113">			MimeBodyPart mimeBodyPart = new MimeBodyPart();</span>
+<span class="nc" id="L1114">			mimeBodyPart.setDisposition(Part.ATTACHMENT);</span>
+<span class="nc bnc" id="L1115" title="All 2 branches missed.">			mimeBodyPart.setFileName(isEncodeFilenames() ?</span>
+<span class="nc" id="L1116">					MimeUtility.encodeText(attachmentFilename) : attachmentFilename);</span>
+<span class="nc" id="L1117">			mimeBodyPart.setDataHandler(new DataHandler(dataSource));</span>
+<span class="nc" id="L1118">			getRootMimeMultipart().addBodyPart(mimeBodyPart);</span>
+		}
+<span class="nc" id="L1120">		catch (UnsupportedEncodingException ex) {</span>
+<span class="nc" id="L1121">			throw new MessagingException(&quot;Failed to encode attachment filename&quot;, ex);</span>
+<span class="nc" id="L1122">		}</span>
+<span class="nc" id="L1123">	}</span>
+
+	/**
+	 * Add an attachment to the MimeMessage, taking the content from a
+	 * {@code java.io.File}.
+	 * &lt;p&gt;The content type will be determined by the name of the given
+	 * content file. Do not use this for temporary files with arbitrary
+	 * filenames (possibly ending in &quot;.tmp&quot; or the like)!
+	 * @param attachmentFilename the name of the attachment as it will
+	 * appear in the mail
+	 * @param file the File resource to take the content from
+	 * @throws MessagingException in case of errors
+	 * @see #addAttachment(String, org.springframework.core.io.InputStreamSource)
+	 * @see #addAttachment(String, jakarta.activation.DataSource)
+	 */
+	public void addAttachment(String attachmentFilename, File file) throws MessagingException {
+<span class="nc" id="L1139">		Assert.notNull(file, &quot;File must not be null&quot;);</span>
+<span class="nc" id="L1140">		FileDataSource dataSource = new FileDataSource(file);</span>
+<span class="nc" id="L1141">		dataSource.setFileTypeMap(getFileTypeMap());</span>
+<span class="nc" id="L1142">		addAttachment(attachmentFilename, dataSource);</span>
+<span class="nc" id="L1143">	}</span>
+
+	/**
+	 * Add an attachment to the MimeMessage, taking the content from an
+	 * {@code org.springframework.core.io.InputStreamResource}.
+	 * &lt;p&gt;The content type will be determined by the given filename for
+	 * the attachment. Thus, any content source will be fine, including
+	 * temporary files with arbitrary filenames.
+	 * &lt;p&gt;Note that the InputStream returned by the InputStreamSource
+	 * implementation needs to be a &lt;i&gt;fresh one on each call&lt;/i&gt;, as
+	 * JavaMail will invoke {@code getInputStream()} multiple times.
+	 * @param attachmentFilename the name of the attachment as it will
+	 * appear in the mail
+	 * @param inputStreamSource the resource to take the content from
+	 * (all of Spring's Resource implementations can be passed in here)
+	 * @throws MessagingException in case of errors
+	 * @see #addAttachment(String, java.io.File)
+	 * @see #addAttachment(String, jakarta.activation.DataSource)
+	 * @see org.springframework.core.io.Resource
+	 */
+	public void addAttachment(String attachmentFilename, InputStreamSource inputStreamSource)
+			throws MessagingException {
+
+<span class="nc" id="L1166">		String contentType = getFileTypeMap().getContentType(attachmentFilename);</span>
+<span class="nc" id="L1167">		addAttachment(attachmentFilename, inputStreamSource, contentType);</span>
+<span class="nc" id="L1168">	}</span>
+
+	/**
+	 * Add an attachment to the MimeMessage, taking the content from an
+	 * {@code org.springframework.core.io.InputStreamResource}.
+	 * &lt;p&gt;Note that the InputStream returned by the InputStreamSource
+	 * implementation needs to be a &lt;i&gt;fresh one on each call&lt;/i&gt;, as
+	 * JavaMail will invoke {@code getInputStream()} multiple times.
+	 * @param attachmentFilename the name of the attachment as it will
+	 * appear in the mail
+	 * @param inputStreamSource the resource to take the content from
+	 * (all of Spring's Resource implementations can be passed in here)
+	 * @param contentType the content type to use for the element
+	 * @throws MessagingException in case of errors
+	 * @see #addAttachment(String, java.io.File)
+	 * @see #addAttachment(String, jakarta.activation.DataSource)
+	 * @see org.springframework.core.io.Resource
+	 */
+	public void addAttachment(
+			String attachmentFilename, InputStreamSource inputStreamSource, String contentType)
+			throws MessagingException {
+
+<span class="nc" id="L1190">		Assert.notNull(inputStreamSource, &quot;InputStreamSource must not be null&quot;);</span>
+<span class="nc bnc" id="L1191" title="All 4 branches missed.">		if (inputStreamSource instanceof Resource resource &amp;&amp; resource.isOpen()) {</span>
+<span class="nc" id="L1192">			throw new IllegalArgumentException(</span>
+					&quot;Passed-in Resource contains an open stream: invalid argument. &quot; +
+					&quot;JavaMail requires an InputStreamSource that creates a fresh stream for every call.&quot;);
+		}
+<span class="nc" id="L1196">		DataSource dataSource = createDataSource(inputStreamSource, contentType, attachmentFilename);</span>
+<span class="nc" id="L1197">		addAttachment(attachmentFilename, dataSource);</span>
+<span class="nc" id="L1198">	}</span>
+
+	/**
+	 * Create an Activation Framework DataSource for the given InputStreamSource.
+	 * @param inputStreamSource the InputStreamSource (typically a Spring Resource)
+	 * @param contentType the content type
+	 * @param name the name of the DataSource
+	 * @return the Activation Framework DataSource
+	 */
+	protected DataSource createDataSource(
+		final InputStreamSource inputStreamSource, final String contentType, final String name) {
+
+<span class="fc" id="L1210">		return new DataSource() {</span>
+			@Override
+			public InputStream getInputStream() throws IOException {
+<span class="fc" id="L1213">				return inputStreamSource.getInputStream();</span>
+			}
+			@Override
+			public OutputStream getOutputStream() {
+<span class="nc" id="L1217">				throw new UnsupportedOperationException(&quot;Read-only jakarta.activation.DataSource&quot;);</span>
+			}
+			@Override
+			public String getContentType() {
+<span class="fc" id="L1221">				return contentType;</span>
+			}
+			@Override
+			public String getName() {
+<span class="fc" id="L1225">				return name;</span>
+			}
+		};
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

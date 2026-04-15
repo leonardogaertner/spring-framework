@@ -1,0 +1,283 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ControllerAdviceBean.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.method</a> &gt; <span class="el_source">ControllerAdviceBean.java</span></div><h1>ControllerAdviceBean.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.method;
+
+import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aop.scope.ScopedProxyUtils;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryUtils;
+import org.springframework.beans.factory.ListableBeanFactory;
+import org.springframework.beans.factory.NoSuchBeanDefinitionException;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.support.RootBeanDefinition;
+import org.springframework.context.ApplicationContext;
+import org.springframework.context.ConfigurableApplicationContext;
+import org.springframework.core.OrderComparator;
+import org.springframework.core.Ordered;
+import org.springframework.core.annotation.OrderUtils;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.web.bind.annotation.ControllerAdvice;
+
+/**
+ * Encapsulates information about an {@link ControllerAdvice @ControllerAdvice}
+ * Spring-managed bean without necessarily requiring it to be instantiated.
+ * The {@link #findAnnotatedBeans(ApplicationContext)} method can be used to
+ * discover such beans.
+ *
+ * &lt;p&gt;This class is internal to Spring Framework and is not meant to be used
+ * by applications to manually create {@code @ControllerAdvice} beans.
+ *
+ * @author Rossen Stoyanchev
+ * @author Brian Clozel
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 3.2
+ */
+public class ControllerAdviceBean implements Ordered {
+
+	private final String beanName;
+
+	private final boolean isSingleton;
+
+	/**
+	 * Reference to the resolved bean instance, potentially lazily retrieved
+	 * via the {@code BeanFactory}.
+	 */
+	private @Nullable Object resolvedBean;
+
+	private final @Nullable Class&lt;?&gt; beanType;
+
+	private final HandlerTypePredicate beanTypePredicate;
+
+	private final BeanFactory beanFactory;
+
+	private @Nullable Integer order;
+
+
+	/**
+	 * Create a {@code ControllerAdviceBean} using the given bean name,
+	 * {@code BeanFactory}, and {@link ControllerAdvice @ControllerAdvice}
+	 * annotation.
+	 * @param beanName the name of the bean
+	 * @param beanFactory a {@code BeanFactory} to retrieve the bean type initially
+	 * and later to resolve the actual bean
+	 * @param controllerAdvice the {@code @ControllerAdvice} annotation for the bean
+	 * @since 5.2
+	 */
+<span class="nc" id="L89">	public ControllerAdviceBean(String beanName, BeanFactory beanFactory, ControllerAdvice controllerAdvice) {</span>
+<span class="nc" id="L90">		Assert.hasText(beanName, &quot;Bean name must contain text&quot;);</span>
+<span class="nc" id="L91">		Assert.notNull(beanFactory, &quot;BeanFactory must not be null&quot;);</span>
+<span class="nc" id="L92">		Assert.isTrue(beanFactory.containsBean(beanName), () -&gt; &quot;BeanFactory [&quot; + beanFactory +</span>
+				&quot;] does not contain specified controller advice bean '&quot; + beanName + &quot;'&quot;);
+<span class="nc" id="L94">		Assert.notNull(controllerAdvice, &quot;ControllerAdvice must not be null&quot;);</span>
+
+<span class="nc" id="L96">		this.beanName = beanName;</span>
+<span class="nc" id="L97">		this.isSingleton = beanFactory.isSingleton(beanName);</span>
+<span class="nc" id="L98">		this.beanType = getBeanType(beanName, beanFactory);</span>
+<span class="nc" id="L99">		this.beanTypePredicate = createBeanTypePredicate(controllerAdvice);</span>
+<span class="nc" id="L100">		this.beanFactory = beanFactory;</span>
+<span class="nc" id="L101">	}</span>
+
+
+	/**
+	 * Get the order value for the contained bean.
+	 * &lt;p&gt;The order value is lazily retrieved using the following algorithm and cached.
+	 * Note, however, that a {@link ControllerAdvice @ControllerAdvice} bean that is
+	 * configured as a scoped bean &amp;mdash; for example, as a request-scoped or
+	 * session-scoped bean &amp;mdash; will not be eagerly resolved. Consequently,
+	 * {@link Ordered} is not honored for scoped {@code @ControllerAdvice} beans.
+	 * &lt;ul&gt;
+	 * &lt;li&gt;If the {@linkplain #resolveBean resolved bean} implements {@link Ordered},
+	 * use the value returned by {@link Ordered#getOrder()}.&lt;/li&gt;
+	 * &lt;li&gt;If the {@linkplain org.springframework.context.annotation.Bean factory method}
+	 * is known, use the value returned by {@link OrderUtils#getOrder(AnnotatedElement)}.
+	 * &lt;li&gt;If the {@linkplain #getBeanType() bean type} is known, use the value returned
+	 * by {@link OrderUtils#getOrder(Class, int)} with {@link Ordered#LOWEST_PRECEDENCE}
+	 * used as the default order value.&lt;/li&gt;
+	 * &lt;li&gt;Otherwise use {@link Ordered#LOWEST_PRECEDENCE} as the default, fallback
+	 * order value.&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 * @see #resolveBean()
+	 */
+	@Override
+	public int getOrder() {
+<span class="nc bnc" id="L126" title="All 2 branches missed.">		if (this.order == null) {</span>
+<span class="nc" id="L127">			Object resolvedBean = null;</span>
+<span class="nc" id="L128">			String targetBeanName = ScopedProxyUtils.getTargetBeanName(this.beanName);</span>
+<span class="nc" id="L129">			boolean isScopedProxy = this.beanFactory.containsBean(targetBeanName);</span>
+			// Avoid eager @ControllerAdvice bean resolution for scoped proxies,
+			// since attempting to do so during context initialization would result
+			// in an exception due to the current absence of the scope. For example,
+			// an HTTP request or session scope is not active during initialization.
+<span class="nc bnc" id="L134" title="All 4 branches missed.">			if (!isScopedProxy &amp;&amp; !ScopedProxyUtils.isScopedTarget(this.beanName)) {</span>
+<span class="nc" id="L135">				resolvedBean = resolveBean();</span>
+			}
+
+<span class="nc bnc" id="L138" title="All 2 branches missed.">			if (resolvedBean instanceof Ordered ordered) {</span>
+<span class="nc" id="L139">				this.order = ordered.getOrder();</span>
+			}
+			else {
+<span class="nc bnc" id="L142" title="All 2 branches missed.">				if (this.beanFactory instanceof ConfigurableBeanFactory cbf) {</span>
+					try {
+<span class="nc" id="L144">						BeanDefinition bd = cbf.getMergedBeanDefinition(this.beanName);</span>
+<span class="nc bnc" id="L145" title="All 2 branches missed.">						if (bd instanceof RootBeanDefinition rbd) {</span>
+<span class="nc" id="L146">							Method factoryMethod = rbd.getResolvedFactoryMethod();</span>
+<span class="nc bnc" id="L147" title="All 2 branches missed.">							if (factoryMethod != null) {</span>
+<span class="nc" id="L148">								this.order = OrderUtils.getOrder(factoryMethod);</span>
+							}
+						}
+					}
+<span class="nc" id="L152">					catch (NoSuchBeanDefinitionException ex) {</span>
+						// ignore -&gt; probably a manually registered singleton
+<span class="nc" id="L154">					}</span>
+				}
+<span class="nc bnc" id="L156" title="All 2 branches missed.">				if (this.order == null) {</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">					if (this.beanType != null) {</span>
+<span class="nc" id="L158">						this.order = OrderUtils.getOrder(this.beanType, Ordered.LOWEST_PRECEDENCE);</span>
+					}
+					else {
+<span class="nc" id="L161">						this.order = Ordered.LOWEST_PRECEDENCE;</span>
+					}
+				}
+			}
+		}
+<span class="nc" id="L166">		return this.order;</span>
+	}
+
+	/**
+	 * Return the type of the contained bean.
+	 * &lt;p&gt;If the bean type is a CGLIB-generated class, the original user-defined
+	 * class is returned.
+	 */
+	public @Nullable Class&lt;?&gt; getBeanType() {
+<span class="nc" id="L175">		return this.beanType;</span>
+	}
+
+	/**
+	 * Get the bean instance for this {@code ControllerAdviceBean}, if necessary
+	 * resolving the bean name through the {@link BeanFactory}.
+	 * &lt;p&gt;Once the bean instance has been resolved it will be cached if it is a
+	 * singleton, thereby avoiding repeated lookups in the {@code BeanFactory}.
+	 */
+	public Object resolveBean() {
+<span class="nc bnc" id="L185" title="All 2 branches missed.">		if (this.resolvedBean == null) {</span>
+<span class="nc" id="L186">			Object resolvedBean = this.beanFactory.getBean(this.beanName);</span>
+			// Don't cache non-singletons (for example, prototypes).
+<span class="nc bnc" id="L188" title="All 2 branches missed.">			if (!this.isSingleton) {</span>
+<span class="nc" id="L189">				return resolvedBean;</span>
+			}
+<span class="nc" id="L191">			this.resolvedBean = resolvedBean;</span>
+		}
+<span class="nc" id="L193">		return this.resolvedBean;</span>
+	}
+
+	/**
+	 * Check whether the given bean type should be advised by this
+	 * {@code ControllerAdviceBean}.
+	 * @param beanType the type of the bean to check
+	 * @since 4.0
+	 * @see ControllerAdvice
+	 */
+	public boolean isApplicableToBeanType(@Nullable Class&lt;?&gt; beanType) {
+<span class="nc" id="L204">		return this.beanTypePredicate.test(beanType);</span>
+	}
+
+
+	@Override
+	public boolean equals(@Nullable Object other) {
+<span class="nc bnc" id="L210" title="All 4 branches missed.">		return (this == other || (other instanceof ControllerAdviceBean that &amp;&amp;</span>
+<span class="nc bnc" id="L211" title="All 4 branches missed.">				this.beanName.equals(that.beanName) &amp;&amp; this.beanFactory == that.beanFactory));</span>
+	}
+
+	@Override
+	public int hashCode() {
+<span class="nc" id="L216">		return this.beanName.hashCode();</span>
+	}
+
+	@Override
+	public String toString() {
+<span class="nc" id="L221">		return this.beanName;</span>
+	}
+
+
+	/**
+	 * Find beans annotated with {@link ControllerAdvice @ControllerAdvice} in the
+	 * given {@link ApplicationContext} and wrap them as {@code ControllerAdviceBean}
+	 * instances.
+	 * &lt;p&gt;Note that the {@code ControllerAdviceBean} instances in the returned list
+	 * are sorted using {@link OrderComparator#sort(List)}.
+	 * @see #findAnnotatedBeans(ListableBeanFactory)
+	 */
+	public static List&lt;ControllerAdviceBean&gt; findAnnotatedBeans(ApplicationContext context) {
+<span class="nc" id="L234">		return findAnnotatedBeans((ListableBeanFactory) context);</span>
+	}
+
+	/**
+	 * Find beans annotated with {@link ControllerAdvice @ControllerAdvice} in the
+	 * given {@link ListableBeanFactory} and wrap them as {@code ControllerAdviceBean}
+	 * instances.
+	 * &lt;p&gt;Note that the {@code ControllerAdviceBean} instances in the returned list
+	 * are sorted using {@link OrderComparator#sort(List)}.
+	 * @since 7.0
+	 * @see #getOrder()
+	 * @see OrderComparator
+	 * @see Ordered
+	 */
+	public static List&lt;ControllerAdviceBean&gt; findAnnotatedBeans(ListableBeanFactory beanFactory) {
+<span class="nc bnc" id="L249" title="All 2 branches missed.">		if (beanFactory instanceof ConfigurableApplicationContext cac) {</span>
+			// Use internal BeanFactory for potential downcast to ConfigurableBeanFactory in getOrder().
+<span class="nc" id="L251">			beanFactory = cac.getBeanFactory();</span>
+		}
+<span class="nc" id="L253">		List&lt;ControllerAdviceBean&gt; adviceBeans = new ArrayList&lt;&gt;();</span>
+<span class="nc bnc" id="L254" title="All 2 branches missed.">		for (String name : BeanFactoryUtils.beanNamesForTypeIncludingAncestors(beanFactory, Object.class)) {</span>
+<span class="nc bnc" id="L255" title="All 2 branches missed.">			if (!ScopedProxyUtils.isScopedTarget(name)) {</span>
+<span class="nc" id="L256">				ControllerAdvice controllerAdvice = beanFactory.findAnnotationOnBean(name, ControllerAdvice.class);</span>
+<span class="nc bnc" id="L257" title="All 2 branches missed.">				if (controllerAdvice != null) {</span>
+					// Use the @ControllerAdvice annotation found by findAnnotationOnBean()
+					// in order to avoid a subsequent lookup of the same annotation.
+<span class="nc" id="L260">					adviceBeans.add(new ControllerAdviceBean(name, beanFactory, controllerAdvice));</span>
+				}
+			}
+		}
+<span class="nc" id="L264">		OrderComparator.sort(adviceBeans);</span>
+<span class="nc" id="L265">		return adviceBeans;</span>
+	}
+
+	private static @Nullable Class&lt;?&gt; getBeanType(String beanName, BeanFactory beanFactory) {
+<span class="nc" id="L269">		Class&lt;?&gt; beanType = beanFactory.getType(beanName);</span>
+<span class="nc bnc" id="L270" title="All 2 branches missed.">		return (beanType != null ? ClassUtils.getUserClass(beanType) : null);</span>
+	}
+
+	private static HandlerTypePredicate createBeanTypePredicate(ControllerAdvice controllerAdvice) {
+<span class="nc" id="L274">		return HandlerTypePredicate.builder()</span>
+<span class="nc" id="L275">				.basePackage(controllerAdvice.basePackages())</span>
+<span class="nc" id="L276">				.basePackageClass(controllerAdvice.basePackageClasses())</span>
+<span class="nc" id="L277">				.assignableType(controllerAdvice.assignableTypes())</span>
+<span class="nc" id="L278">				.annotation(controllerAdvice.annotations())</span>
+<span class="nc" id="L279">				.build();</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

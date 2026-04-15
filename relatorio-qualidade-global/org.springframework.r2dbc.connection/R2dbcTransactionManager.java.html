@@ -1,0 +1,570 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>R2dbcTransactionManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.r2dbc.connection</a> &gt; <span class="el_source">R2dbcTransactionManager.java</span></div><h1>R2dbcTransactionManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.r2dbc.connection;
+
+import java.time.Duration;
+
+import io.r2dbc.spi.Connection;
+import io.r2dbc.spi.ConnectionFactory;
+import io.r2dbc.spi.IsolationLevel;
+import io.r2dbc.spi.Option;
+import io.r2dbc.spi.R2dbcException;
+import io.r2dbc.spi.Result;
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Mono;
+
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.transaction.CannotCreateTransactionException;
+import org.springframework.transaction.TransactionDefinition;
+import org.springframework.transaction.reactive.AbstractReactiveTransactionManager;
+import org.springframework.transaction.reactive.GenericReactiveTransaction;
+import org.springframework.transaction.reactive.TransactionSynchronizationManager;
+import org.springframework.util.Assert;
+
+/**
+ * {@link org.springframework.transaction.ReactiveTransactionManager} implementation
+ * for a single R2DBC {@link ConnectionFactory}. This class is capable of working
+ * in any environment with any R2DBC driver, as long as the setup uses a
+ * {@code ConnectionFactory} as its {@link Connection} factory mechanism.
+ * Binds a R2DBC {@code Connection} from the specified {@code ConnectionFactory}
+ * to the current subscriber context, potentially allowing for one context-bound
+ * {@code Connection} per {@code ConnectionFactory}.
+ *
+ * &lt;p&gt;&lt;b&gt;Note: The {@code ConnectionFactory} that this transaction manager operates
+ * on needs to return independent {@code Connection}s.&lt;/b&gt; The {@code Connection}s
+ * typically come from a connection pool but the {@code ConnectionFactory} must not
+ * return specifically scoped or constrained {@code Connection}s. This transaction
+ * manager will associate {@code Connection} with context-bound transactions,
+ * according to the specified propagation behavior. It assumes that a separate,
+ * independent {@code Connection} can be obtained even during an ongoing transaction.
+ *
+ * &lt;p&gt;Application code is required to retrieve the R2DBC Connection via
+ * {@link ConnectionFactoryUtils#getConnection(ConnectionFactory)}
+ * instead of a standard R2DBC-style {@link ConnectionFactory#create()} call.
+ * Spring classes such as {@code DatabaseClient} use this strategy implicitly.
+ * If not used in combination with this transaction manager, the
+ * {@link ConnectionFactoryUtils} lookup strategy behaves exactly like the native
+ * {@code ConnectionFactory} lookup; it can thus be used in a portable fashion.
+ *
+ * &lt;p&gt;Alternatively, you can allow application code to work with the lookup pattern
+ * {@link ConnectionFactory#create()}, for example for code not aware of Spring.
+ * In that case, define a {@link TransactionAwareConnectionFactoryProxy} for your
+ * target {@code ConnectionFactory}, and pass that proxy {@code ConnectionFactory}
+ * to your DAOs which will automatically participate in Spring-managed transactions
+ * when accessing it.
+ *
+ * &lt;p&gt;Spring's {@code TransactionDefinition} attributes are carried forward to
+ * R2DBC drivers using extensible R2DBC {@link io.r2dbc.spi.TransactionDefinition}.
+ * Subclasses may override {@link #createTransactionDefinition(TransactionDefinition)}
+ * to customize transaction definitions for vendor-specific attributes. As of 6.0.10,
+ * this transaction manager supports nested transactions via R2DBC savepoints as well.
+ *
+ * @author Mark Paluch
+ * @author Juergen Hoeller
+ * @since 5.3
+ * @see ConnectionFactoryUtils#getConnection(ConnectionFactory)
+ * @see ConnectionFactoryUtils#releaseConnection
+ * @see TransactionAwareConnectionFactoryProxy
+ */
+@SuppressWarnings(&quot;serial&quot;)
+public class R2dbcTransactionManager extends AbstractReactiveTransactionManager implements InitializingBean {
+
+	private @Nullable ConnectionFactory connectionFactory;
+
+<span class="fc" id="L88">	private boolean enforceReadOnly = false;</span>
+
+
+	/**
+	 * Create a new {@code R2dbcTransactionManager} instance.
+	 * A {@code ConnectionFactory} has to be set to be able to use it.
+	 * @see #setConnectionFactory
+	 */
+<span class="fc" id="L96">	public R2dbcTransactionManager() {}</span>
+
+	/**
+	 * Create a new {@code R2dbcTransactionManager} instance.
+	 * @param connectionFactory the R2DBC ConnectionFactory to manage transactions for
+	 */
+	public R2dbcTransactionManager(ConnectionFactory connectionFactory) {
+<span class="fc" id="L103">		this();</span>
+<span class="fc" id="L104">		setConnectionFactory(connectionFactory);</span>
+<span class="fc" id="L105">		afterPropertiesSet();</span>
+<span class="fc" id="L106">	}</span>
+
+
+	/**
+	 * Set the R2DBC {@link ConnectionFactory} that this instance should manage transactions
+	 * for. This will typically be a locally defined {@code ConnectionFactory}, for example
+	 * an R2DBC connection pool.
+	 * &lt;p&gt;&lt;b&gt;The {@code ConnectionFactory} passed in here needs to return independent
+	 * {@link Connection}s.&lt;/b&gt; The {@code Connection}s typically come from a connection
+	 * pool but the {@code ConnectionFactory} must not return specifically scoped or
+	 * constrained {@code Connection}s.
+	 */
+	public void setConnectionFactory(@Nullable ConnectionFactory connectionFactory) {
+<span class="fc" id="L119">		this.connectionFactory = connectionFactory;</span>
+<span class="fc" id="L120">	}</span>
+
+	/**
+	 * Return the R2DBC {@link ConnectionFactory} that this instance manages transactions for.
+	 */
+	public @Nullable ConnectionFactory getConnectionFactory() {
+<span class="fc" id="L126">		return this.connectionFactory;</span>
+	}
+
+	/**
+	 * Obtain the {@link ConnectionFactory} for actual use.
+	 * @return the {@code ConnectionFactory} (never {@code null})
+	 * @throws IllegalStateException in case of no ConnectionFactory set
+	 */
+	protected ConnectionFactory obtainConnectionFactory() {
+<span class="fc" id="L135">		ConnectionFactory connectionFactory = getConnectionFactory();</span>
+<span class="pc bpc" id="L136" title="1 of 2 branches missed.">		Assert.state(connectionFactory != null, &quot;No ConnectionFactory set&quot;);</span>
+<span class="fc" id="L137">		return connectionFactory;</span>
+	}
+
+	/**
+	 * Specify whether to enforce the read-only nature of a transaction (as indicated by
+	 * {@link TransactionDefinition#isReadOnly()}) through an explicit statement on the
+	 * transactional connection: &quot;SET TRANSACTION READ ONLY&quot; as understood by Oracle,
+	 * MySQL and Postgres.
+	 * &lt;p&gt;The exact treatment, including any SQL statement executed on the connection,
+	 * can be customized through {@link #prepareTransactionalConnection}.
+	 * @see #prepareTransactionalConnection
+	 */
+	public void setEnforceReadOnly(boolean enforceReadOnly) {
+<span class="fc" id="L150">		this.enforceReadOnly = enforceReadOnly;</span>
+<span class="fc" id="L151">	}</span>
+
+	/**
+	 * Return whether to enforce the read-only nature of a transaction through an
+	 * explicit statement on the transactional connection.
+	 * @see #setEnforceReadOnly
+	 */
+	public boolean isEnforceReadOnly() {
+<span class="fc" id="L159">		return this.enforceReadOnly;</span>
+	}
+
+	@Override
+	public void afterPropertiesSet() {
+<span class="pc bpc" id="L164" title="1 of 2 branches missed.">		if (getConnectionFactory() == null) {</span>
+<span class="nc" id="L165">			throw new IllegalArgumentException(&quot;Property 'connectionFactory' is required&quot;);</span>
+		}
+<span class="fc" id="L167">	}</span>
+
+	@Override
+	protected Object doGetTransaction(TransactionSynchronizationManager synchronizationManager) {
+<span class="fc" id="L171">		ConnectionFactoryTransactionObject txObject = new ConnectionFactoryTransactionObject();</span>
+<span class="fc" id="L172">		ConnectionHolder conHolder = (ConnectionHolder) synchronizationManager.getResource(obtainConnectionFactory());</span>
+<span class="fc" id="L173">		txObject.setConnectionHolder(conHolder, false);</span>
+<span class="fc" id="L174">		return txObject;</span>
+	}
+
+	@Override
+	protected boolean isExistingTransaction(Object transaction) {
+<span class="fc" id="L179">		return ((ConnectionFactoryTransactionObject) transaction).isTransactionActive();</span>
+	}
+
+	@Override
+	protected Mono&lt;Void&gt; doBegin(TransactionSynchronizationManager synchronizationManager, Object transaction,
+			TransactionDefinition definition) {
+
+<span class="fc" id="L186">		ConnectionFactoryTransactionObject txObject = (ConnectionFactoryTransactionObject) transaction;</span>
+
+<span class="fc bfc" id="L188" title="All 2 branches covered.">		if (definition.getPropagationBehavior() == TransactionDefinition.PROPAGATION_NESTED &amp;&amp;</span>
+<span class="fc bfc" id="L189" title="All 2 branches covered.">				txObject.isTransactionActive()) {</span>
+<span class="fc" id="L190">			return txObject.createSavepoint();</span>
+		}
+
+<span class="fc" id="L193">		return Mono.defer(() -&gt; {</span>
+			Mono&lt;Connection&gt; connectionMono;
+
+<span class="pc bpc" id="L196" title="3 of 4 branches missed.">			if (!txObject.hasConnectionHolder() || txObject.getConnectionHolder().isSynchronizedWithTransaction()) {</span>
+<span class="fc" id="L197">				Mono&lt;Connection&gt; newCon = Mono.from(obtainConnectionFactory().create());</span>
+<span class="fc" id="L198">				connectionMono = newCon.doOnNext(connection -&gt; {</span>
+<span class="pc bpc" id="L199" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L200">						logger.debug(&quot;Acquired Connection [&quot; + connection + &quot;] for R2DBC transaction&quot;);</span>
+					}
+<span class="fc" id="L202">					txObject.setConnectionHolder(new ConnectionHolder(connection), true);</span>
+<span class="fc" id="L203">				});</span>
+<span class="fc" id="L204">			}</span>
+			else {
+<span class="nc" id="L206">				txObject.getConnectionHolder().setSynchronizedWithTransaction(true);</span>
+<span class="nc" id="L207">				connectionMono = Mono.just(txObject.getConnectionHolder().getConnection());</span>
+			}
+
+<span class="fc" id="L210">			return connectionMono.flatMap(con -&gt; doBegin(con, txObject, definition)</span>
+<span class="fc" id="L211">					.then(prepareTransactionalConnection(con, definition))</span>
+<span class="fc" id="L212">					.doOnSuccess(v -&gt; {</span>
+<span class="fc" id="L213">						txObject.getConnectionHolder().setTransactionActive(true);</span>
+<span class="fc" id="L214">						Duration timeout = determineTimeout(definition);</span>
+<span class="pc bpc" id="L215" title="1 of 4 branches missed.">						if (!timeout.isNegative() &amp;&amp; !timeout.isZero()) {</span>
+<span class="fc" id="L216">							txObject.getConnectionHolder().setTimeoutInMillis(timeout.toMillis());</span>
+						}
+						// Bind the connection holder to the thread.
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">						if (txObject.isNewConnectionHolder()) {</span>
+<span class="fc" id="L220">							synchronizationManager.bindResource(obtainConnectionFactory(), txObject.getConnectionHolder());</span>
+						}
+<span class="fc" id="L222">					}).onErrorResume(ex -&gt; {</span>
+<span class="nc bnc" id="L223" title="All 2 branches missed.">						if (txObject.isNewConnectionHolder()) {</span>
+<span class="nc" id="L224">							return ConnectionFactoryUtils.releaseConnection(con, obtainConnectionFactory())</span>
+<span class="nc" id="L225">									.doOnTerminate(() -&gt; txObject.setConnectionHolder(null, false))</span>
+<span class="nc" id="L226">									.then(Mono.error(ex));</span>
+						}
+<span class="nc" id="L228">						return Mono.error(ex);</span>
+<span class="fc" id="L229">					})).onErrorMap(ex -&gt; new CannotCreateTransactionException(</span>
+							&quot;Could not open R2DBC Connection for transaction&quot;, ex));
+<span class="fc" id="L231">		}).then();</span>
+	}
+
+	private Mono&lt;Void&gt; doBegin(
+			Connection con, ConnectionFactoryTransactionObject transaction, TransactionDefinition definition) {
+
+<span class="fc" id="L237">		transaction.setMustRestoreAutoCommit(con.isAutoCommit());</span>
+<span class="fc" id="L238">		io.r2dbc.spi.TransactionDefinition transactionDefinition = createTransactionDefinition(definition);</span>
+<span class="pc bpc" id="L239" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L240">			logger.debug(&quot;Starting R2DBC transaction on Connection [&quot; + con + &quot;] using [&quot; + transactionDefinition + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L242">		return Mono.from(con.beginTransaction(transactionDefinition));</span>
+	}
+
+	/**
+	 * Determine the transaction definition from our {@code TransactionDefinition}.
+	 * Can be overridden to wrap the R2DBC {@code TransactionDefinition} to adjust or
+	 * enhance transaction attributes.
+	 * @param definition the transaction definition
+	 * @return the actual transaction definition to use
+	 * @since 6.0
+	 * @see io.r2dbc.spi.TransactionDefinition
+	 */
+	protected io.r2dbc.spi.TransactionDefinition createTransactionDefinition(TransactionDefinition definition) {
+		// Apply specific isolation level, if any.
+<span class="fc" id="L256">		IsolationLevel isolationLevelToUse = resolveIsolationLevel(definition.getIsolationLevel());</span>
+<span class="fc" id="L257">		return new ExtendedTransactionDefinition(definition.getName(), definition.isReadOnly(),</span>
+<span class="fc bfc" id="L258" title="All 2 branches covered.">				definition.getIsolationLevel() != TransactionDefinition.ISOLATION_DEFAULT ? isolationLevelToUse : null,</span>
+<span class="fc" id="L259">				determineTimeout(definition));</span>
+	}
+
+	/**
+	 * Determine the actual timeout to use for the given definition.
+	 * Will fall back to this manager's default timeout if the
+	 * transaction definition doesn't specify a non-default value.
+	 * @param definition the transaction definition
+	 * @return the actual timeout to use
+	 * @see org.springframework.transaction.TransactionDefinition#getTimeout()
+	 */
+	protected Duration determineTimeout(TransactionDefinition definition) {
+<span class="fc bfc" id="L271" title="All 2 branches covered.">		if (definition.getTimeout() != TransactionDefinition.TIMEOUT_DEFAULT) {</span>
+<span class="fc" id="L272">			return Duration.ofSeconds(definition.getTimeout());</span>
+		}
+<span class="fc" id="L274">		return Duration.ZERO;</span>
+	}
+
+	@Override
+	protected Mono&lt;Object&gt; doSuspend(TransactionSynchronizationManager synchronizationManager, Object transaction) {
+<span class="nc" id="L279">		return Mono.defer(() -&gt; {</span>
+<span class="nc" id="L280">			ConnectionFactoryTransactionObject txObject = (ConnectionFactoryTransactionObject) transaction;</span>
+<span class="nc" id="L281">			txObject.setConnectionHolder(null);</span>
+<span class="nc" id="L282">			return Mono.justOrEmpty(synchronizationManager.unbindResource(obtainConnectionFactory()));</span>
+		});
+	}
+
+	@Override
+	protected Mono&lt;Void&gt; doResume(TransactionSynchronizationManager synchronizationManager,
+			@Nullable Object transaction, Object suspendedResources) {
+
+<span class="nc" id="L290">		return Mono.defer(() -&gt; {</span>
+<span class="nc" id="L291">			synchronizationManager.bindResource(obtainConnectionFactory(), suspendedResources);</span>
+<span class="nc" id="L292">			return Mono.empty();</span>
+		});
+	}
+
+	@Override
+	protected Mono&lt;Void&gt; doCommit(TransactionSynchronizationManager synchronizationManager,
+			GenericReactiveTransaction status) {
+
+<span class="fc" id="L300">		ConnectionFactoryTransactionObject txObject = (ConnectionFactoryTransactionObject) status.getTransaction();</span>
+<span class="pc bpc" id="L301" title="1 of 2 branches missed.">		if (status.isDebug()) {</span>
+<span class="nc" id="L302">			logger.debug(&quot;Committing R2DBC transaction on Connection [&quot; +</span>
+<span class="nc" id="L303">					txObject.getConnectionHolder().getConnection() + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L305">		return txObject.commit().onErrorMap(R2dbcException.class, ex -&gt; translateException(&quot;R2DBC commit&quot;, ex));</span>
+	}
+
+	@Override
+	protected Mono&lt;Void&gt; doRollback(TransactionSynchronizationManager synchronizationManager,
+			GenericReactiveTransaction status) {
+
+<span class="fc" id="L312">		ConnectionFactoryTransactionObject txObject = (ConnectionFactoryTransactionObject) status.getTransaction();</span>
+<span class="pc bpc" id="L313" title="1 of 2 branches missed.">		if (status.isDebug()) {</span>
+<span class="nc" id="L314">			logger.debug(&quot;Rolling back R2DBC transaction on Connection [&quot; +</span>
+<span class="nc" id="L315">					txObject.getConnectionHolder().getConnection() + &quot;]&quot;);</span>
+		}
+<span class="fc" id="L317">		return txObject.rollback().onErrorMap(R2dbcException.class, ex -&gt; translateException(&quot;R2DBC rollback&quot;, ex));</span>
+	}
+
+	@Override
+	protected Mono&lt;Void&gt; doSetRollbackOnly(TransactionSynchronizationManager synchronizationManager,
+			GenericReactiveTransaction status) {
+
+<span class="nc" id="L324">		return Mono.fromRunnable(() -&gt; {</span>
+<span class="nc" id="L325">			ConnectionFactoryTransactionObject txObject = (ConnectionFactoryTransactionObject) status.getTransaction();</span>
+<span class="nc bnc" id="L326" title="All 2 branches missed.">			if (status.isDebug()) {</span>
+<span class="nc" id="L327">				logger.debug(&quot;Setting R2DBC transaction [&quot; + txObject.getConnectionHolder().getConnection() +</span>
+						&quot;] rollback-only&quot;);
+			}
+<span class="nc" id="L330">			txObject.setRollbackOnly();</span>
+<span class="nc" id="L331">		});</span>
+	}
+
+	@Override
+	protected Mono&lt;Void&gt; doCleanupAfterCompletion(TransactionSynchronizationManager synchronizationManager,
+			Object transaction) {
+
+<span class="fc" id="L338">		return Mono.defer(() -&gt; {</span>
+<span class="fc" id="L339">			ConnectionFactoryTransactionObject txObject = (ConnectionFactoryTransactionObject) transaction;</span>
+
+<span class="fc bfc" id="L341" title="All 2 branches covered.">			if (txObject.hasSavepoint()) {</span>
+				// Just release the savepoint, keeping the transactional connection.
+<span class="fc" id="L343">				return txObject.releaseSavepoint();</span>
+			}
+
+			// Remove the connection holder from the context, if exposed.
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">			if (txObject.isNewConnectionHolder()) {</span>
+<span class="fc" id="L348">				synchronizationManager.unbindResource(obtainConnectionFactory());</span>
+			}
+
+			// Reset connection.
+			try {
+<span class="pc bpc" id="L353" title="1 of 2 branches missed.">				if (txObject.isNewConnectionHolder()) {</span>
+<span class="fc" id="L354">					Connection con = txObject.getConnectionHolder().getConnection();</span>
+<span class="pc bpc" id="L355" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L356">						logger.debug(&quot;Releasing R2DBC Connection [&quot; + con + &quot;] after transaction&quot;);</span>
+					}
+<span class="fc" id="L358">					Mono&lt;Void&gt; restoreMono = Mono.empty();</span>
+<span class="fc bfc" id="L359" title="All 4 branches covered.">					if (txObject.isMustRestoreAutoCommit() &amp;&amp; !con.isAutoCommit()) {</span>
+<span class="fc" id="L360">						restoreMono = Mono.from(con.setAutoCommit(true));</span>
+<span class="pc bpc" id="L361" title="1 of 2 branches missed.">						if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L362">							restoreMono = restoreMono.doOnError(ex -&gt;</span>
+<span class="nc" id="L363">									logger.debug(String.format(&quot;Error ignored during auto-commit restore: %s&quot;, ex)));</span>
+						}
+<span class="fc" id="L365">						restoreMono = restoreMono.onErrorComplete();</span>
+					}
+<span class="fc" id="L367">					Mono&lt;Void&gt; releaseMono = ConnectionFactoryUtils.releaseConnection(con, obtainConnectionFactory());</span>
+<span class="pc bpc" id="L368" title="1 of 2 branches missed.">					if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L369">						releaseMono = releaseMono.doOnError(ex -&gt;</span>
+<span class="nc" id="L370">								logger.debug(String.format(&quot;Error ignored during connection release: %s&quot;, ex)));</span>
+					}
+<span class="fc" id="L372">					releaseMono = releaseMono.onErrorComplete();</span>
+<span class="fc" id="L373">					return restoreMono.then(releaseMono);</span>
+				}
+			}
+			finally {
+<span class="fc" id="L377">				txObject.getConnectionHolder().clear();</span>
+			}
+
+<span class="nc" id="L380">			return Mono.empty();</span>
+		});
+	}
+
+	/**
+	 * Prepare the transactional {@link Connection} right after transaction begin.
+	 * &lt;p&gt;The default implementation executes a &quot;SET TRANSACTION READ ONLY&quot; statement if the
+	 * {@link #setEnforceReadOnly &quot;enforceReadOnly&quot;} flag is set to {@code true} and the
+	 * transaction definition indicates a read-only transaction.
+	 * &lt;p&gt;The &quot;SET TRANSACTION READ ONLY&quot; is understood by Oracle, MySQL and Postgres
+	 * and may work with other databases as well. If you'd like to adapt this treatment,
+	 * override this method accordingly.
+	 * @param con the transactional R2DBC Connection
+	 * @param definition the current transaction definition
+	 * @since 5.3.22
+	 * @see #setEnforceReadOnly
+	 */
+	protected Mono&lt;Void&gt; prepareTransactionalConnection(Connection con, TransactionDefinition definition) {
+<span class="fc" id="L398">		Mono&lt;Void&gt; prepare = Mono.empty();</span>
+<span class="pc bpc" id="L399" title="1 of 4 branches missed.">		if (isEnforceReadOnly() &amp;&amp; definition.isReadOnly()) {</span>
+<span class="fc" id="L400">			prepare = Mono.from(con.createStatement(&quot;SET TRANSACTION READ ONLY&quot;).execute())</span>
+<span class="fc" id="L401">					.flatMapMany(Result::getRowsUpdated)</span>
+<span class="fc" id="L402">					.then();</span>
+		}
+<span class="fc" id="L404">		return prepare;</span>
+	}
+
+	/**
+	 * Resolve the {@linkplain TransactionDefinition#getIsolationLevel() isolation level constant} to a R2DBC
+	 * {@link IsolationLevel}. If you'd like to extend isolation level translation for vendor-specific
+	 * {@code IsolationLevel}s, override this method accordingly.
+	 * @param isolationLevel the isolation level to translate.
+	 * @return the resolved isolation level. Can be {@code null} if not resolvable or the isolation level
+	 * should remain {@link TransactionDefinition#ISOLATION_DEFAULT default}.
+	 * @see TransactionDefinition#getIsolationLevel()
+	 */
+	protected @Nullable IsolationLevel resolveIsolationLevel(int isolationLevel) {
+<span class="pc bpc" id="L417" title="3 of 5 branches missed.">		return switch (isolationLevel) {</span>
+<span class="nc" id="L418">			case TransactionDefinition.ISOLATION_READ_COMMITTED -&gt; IsolationLevel.READ_COMMITTED;</span>
+<span class="nc" id="L419">			case TransactionDefinition.ISOLATION_READ_UNCOMMITTED -&gt; IsolationLevel.READ_UNCOMMITTED;</span>
+<span class="nc" id="L420">			case TransactionDefinition.ISOLATION_REPEATABLE_READ -&gt; IsolationLevel.REPEATABLE_READ;</span>
+<span class="fc" id="L421">			case TransactionDefinition.ISOLATION_SERIALIZABLE -&gt; IsolationLevel.SERIALIZABLE;</span>
+<span class="fc" id="L422">			default -&gt; null;</span>
+		};
+	}
+
+	/**
+	 * Translate the given R2DBC commit/rollback exception to a common Spring exception to propagate
+	 * from the {@link #commit}/{@link #rollback} call.
+	 * @param task the task description (commit or rollback).
+	 * @param ex the SQLException thrown from commit/rollback.
+	 * @return the translated exception to emit
+	 */
+	protected RuntimeException translateException(String task, R2dbcException ex) {
+<span class="fc" id="L434">		return ConnectionFactoryUtils.convertR2dbcException(task, null, ex);</span>
+	}
+
+
+	/**
+	 * Extended R2DBC transaction definition object providing transaction attributes
+	 * to R2DBC drivers when starting a transaction.
+	 */
+<span class="fc" id="L442">	private record ExtendedTransactionDefinition(@Nullable String transactionName,</span>
+			boolean readOnly, @Nullable IsolationLevel isolationLevel, Duration lockWaitTimeout)
+			implements io.r2dbc.spi.TransactionDefinition {
+
+		@SuppressWarnings(&quot;unchecked&quot;)
+		@Override
+		public &lt;T&gt; @Nullable T getAttribute(Option&lt;T&gt; option) {
+<span class="fc" id="L449">			return (T) doGetValue(option);</span>
+		}
+
+		private @Nullable Object doGetValue(Option&lt;?&gt; option) {
+<span class="fc bfc" id="L453" title="All 2 branches covered.">			if (io.r2dbc.spi.TransactionDefinition.ISOLATION_LEVEL.equals(option)) {</span>
+<span class="fc" id="L454">				return this.isolationLevel;</span>
+			}
+<span class="fc bfc" id="L456" title="All 2 branches covered.">			if (io.r2dbc.spi.TransactionDefinition.NAME.equals(option)) {</span>
+<span class="fc" id="L457">				return this.transactionName;</span>
+			}
+<span class="fc bfc" id="L459" title="All 2 branches covered.">			if (io.r2dbc.spi.TransactionDefinition.READ_ONLY.equals(option)) {</span>
+<span class="fc" id="L460">				return this.readOnly;</span>
+			}
+<span class="pc bpc" id="L462" title="1 of 2 branches missed.">			if (io.r2dbc.spi.TransactionDefinition.LOCK_WAIT_TIMEOUT.equals(option) &amp;&amp;</span>
+<span class="pc bpc" id="L463" title="1 of 2 branches missed.">					!this.lockWaitTimeout.isZero()) {</span>
+<span class="fc" id="L464">				return this.lockWaitTimeout;</span>
+			}
+<span class="nc" id="L466">			return null;</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L471">			StringBuilder sb = new StringBuilder(128);</span>
+<span class="nc" id="L472">			sb.append(getClass().getSimpleName());</span>
+<span class="nc" id="L473">			sb.append(&quot; [transactionName='&quot;).append(this.transactionName).append('\'');</span>
+<span class="nc" id="L474">			sb.append(&quot;, readOnly=&quot;).append(this.readOnly);</span>
+<span class="nc" id="L475">			sb.append(&quot;, isolationLevel=&quot;).append(this.isolationLevel);</span>
+<span class="nc" id="L476">			sb.append(&quot;, lockWaitTimeout=&quot;).append(this.lockWaitTimeout);</span>
+<span class="nc" id="L477">			sb.append(']');</span>
+<span class="nc" id="L478">			return sb.toString();</span>
+		}
+	}
+
+
+	/**
+	 * ConnectionFactory transaction object, representing a ConnectionHolder.
+	 * Used as transaction object by R2dbcTransactionManager.
+	 */
+	private static class ConnectionFactoryTransactionObject {
+
+		private @Nullable ConnectionHolder connectionHolder;
+
+		private boolean newConnectionHolder;
+
+		private boolean mustRestoreAutoCommit;
+
+		private @Nullable String savepointName;
+
+		void setConnectionHolder(@Nullable ConnectionHolder connectionHolder, boolean newConnectionHolder) {
+<span class="fc" id="L498">			setConnectionHolder(connectionHolder);</span>
+<span class="fc" id="L499">			this.newConnectionHolder = newConnectionHolder;</span>
+<span class="fc" id="L500">		}</span>
+
+		boolean isNewConnectionHolder() {
+<span class="fc" id="L503">			return this.newConnectionHolder;</span>
+		}
+
+		public void setConnectionHolder(@Nullable ConnectionHolder connectionHolder) {
+<span class="fc" id="L507">			this.connectionHolder = connectionHolder;</span>
+<span class="fc" id="L508">		}</span>
+
+		public ConnectionHolder getConnectionHolder() {
+<span class="pc bpc" id="L511" title="1 of 2 branches missed.">			Assert.state(this.connectionHolder != null, &quot;No ConnectionHolder available&quot;);</span>
+<span class="fc" id="L512">			return this.connectionHolder;</span>
+		}
+
+		public boolean hasConnectionHolder() {
+<span class="pc bpc" id="L516" title="1 of 2 branches missed.">			return (this.connectionHolder != null);</span>
+		}
+
+		public void setMustRestoreAutoCommit(boolean mustRestoreAutoCommit) {
+<span class="fc" id="L520">			this.mustRestoreAutoCommit = mustRestoreAutoCommit;</span>
+<span class="fc" id="L521">		}</span>
+
+		public boolean isMustRestoreAutoCommit() {
+<span class="fc" id="L524">			return this.mustRestoreAutoCommit;</span>
+		}
+
+		public boolean isTransactionActive() {
+<span class="pc bpc" id="L528" title="1 of 4 branches missed.">			return (this.connectionHolder != null &amp;&amp; this.connectionHolder.isTransactionActive());</span>
+		}
+
+		public boolean hasSavepoint() {
+<span class="fc bfc" id="L532" title="All 2 branches covered.">			return (this.savepointName != null);</span>
+		}
+
+		public Mono&lt;Void&gt; createSavepoint() {
+<span class="fc" id="L536">			ConnectionHolder holder = getConnectionHolder();</span>
+<span class="fc" id="L537">			String currentSavepoint = holder.nextSavepoint();</span>
+<span class="fc" id="L538">			this.savepointName = currentSavepoint;</span>
+<span class="fc" id="L539">			return Mono.from(holder.getConnection().createSavepoint(currentSavepoint));</span>
+		}
+
+		public Mono&lt;Void&gt; releaseSavepoint() {
+<span class="fc" id="L543">			String currentSavepoint = this.savepointName;</span>
+<span class="pc bpc" id="L544" title="1 of 2 branches missed.">			if (currentSavepoint == null) {</span>
+<span class="nc" id="L545">				return Mono.empty();</span>
+			}
+<span class="fc" id="L547">			this.savepointName = null;</span>
+<span class="fc" id="L548">			return Mono.from(getConnectionHolder().getConnection().releaseSavepoint(currentSavepoint));</span>
+		}
+
+		public Mono&lt;Void&gt; commit() {
+<span class="fc bfc" id="L552" title="All 2 branches covered.">			return (hasSavepoint() ? Mono.empty() :</span>
+<span class="fc" id="L553">					Mono.from(getConnectionHolder().getConnection().commitTransaction()));</span>
+		}
+
+		public Mono&lt;Void&gt; rollback() {
+<span class="fc" id="L557">			Connection connection = getConnectionHolder().getConnection();</span>
+<span class="fc" id="L558">			String currentSavepoint = this.savepointName;</span>
+<span class="fc bfc" id="L559" title="All 2 branches covered.">			return (currentSavepoint != null ?</span>
+<span class="fc" id="L560">					Mono.from(connection.rollbackTransactionToSavepoint(currentSavepoint)) :</span>
+<span class="fc" id="L561">					Mono.from(connection.rollbackTransaction()));</span>
+		}
+
+		public void setRollbackOnly() {
+<span class="nc" id="L565">			getConnectionHolder().setRollbackOnly();</span>
+<span class="nc" id="L566">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

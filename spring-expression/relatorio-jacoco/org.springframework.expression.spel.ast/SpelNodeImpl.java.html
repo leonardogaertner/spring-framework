@@ -1,0 +1,328 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SpelNodeImpl.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.expression.spel.ast</a> &gt; <span class="el_source">SpelNodeImpl.java</span></div><h1>SpelNodeImpl.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.expression.spel.ast;
+
+import java.lang.reflect.Executable;
+import java.lang.reflect.Member;
+import java.util.function.Supplier;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.asm.MethodVisitor;
+import org.springframework.asm.Opcodes;
+import org.springframework.asm.Type;
+import org.springframework.expression.EvaluationException;
+import org.springframework.expression.TypedValue;
+import org.springframework.expression.common.ExpressionUtils;
+import org.springframework.expression.spel.CodeFlow;
+import org.springframework.expression.spel.ExpressionState;
+import org.springframework.expression.spel.SpelEvaluationException;
+import org.springframework.expression.spel.SpelMessage;
+import org.springframework.expression.spel.SpelNode;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * The common supertype of all AST nodes in a parsed Spring Expression Language
+ * format expression.
+ *
+ * @author Andy Clement
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 3.0
+ */
+public abstract class SpelNodeImpl implements SpelNode, Opcodes {
+
+<span class="fc" id="L52">	private static final SpelNodeImpl[] NO_CHILDREN = new SpelNodeImpl[0];</span>
+
+
+	private final int startPos;
+
+	private final int endPos;
+
+<span class="fc" id="L59">	protected SpelNodeImpl[] children = SpelNodeImpl.NO_CHILDREN;</span>
+
+	private @Nullable SpelNodeImpl parent;
+
+	/**
+	 * Indicates the type descriptor for the result of this expression node.
+	 * This is set as soon as it is known. For a literal node it is known immediately.
+	 * For a property access or method invocation it is known after one evaluation of
+	 * that node.
+	 * &lt;p&gt;The descriptor is like the bytecode form but is slightly easier to work with.
+	 * It does not include the trailing semicolon (for non array reference types).
+	 * Some examples: Ljava/lang/String, I, [I
+	 */
+	protected volatile @Nullable String exitTypeDescriptor;
+
+
+<span class="fc" id="L75">	public SpelNodeImpl(int startPos, int endPos, SpelNodeImpl @Nullable ... operands) {</span>
+<span class="fc" id="L76">		this.startPos = startPos;</span>
+<span class="fc" id="L77">		this.endPos = endPos;</span>
+<span class="fc bfc" id="L78" title="All 2 branches covered.">		if (!ObjectUtils.isEmpty(operands)) {</span>
+<span class="fc" id="L79">			this.children = operands;</span>
+<span class="fc bfc" id="L80" title="All 2 branches covered.">			for (SpelNodeImpl operand : operands) {</span>
+<span class="fc" id="L81">				Assert.notNull(operand, &quot;Operand must not be null&quot;);</span>
+<span class="fc" id="L82">				operand.parent = this;</span>
+			}
+		}
+<span class="fc" id="L85">	}</span>
+
+
+	/**
+	 * Return {@code true} if the next child is one of the specified classes.
+	 */
+	protected boolean nextChildIs(Class&lt;?&gt;... classes) {
+<span class="fc bfc" id="L92" title="All 2 branches covered.">		if (this.parent != null) {</span>
+<span class="fc" id="L93">			SpelNodeImpl[] peers = this.parent.children;</span>
+<span class="pc bpc" id="L94" title="1 of 2 branches missed.">			for (int i = 0, max = peers.length; i &lt; max; i++) {</span>
+<span class="fc bfc" id="L95" title="All 2 branches covered.">				if (this == peers[i]) {</span>
+<span class="pc bpc" id="L96" title="1 of 2 branches missed.">					if (i + 1 &gt;= max) {</span>
+<span class="nc" id="L97">						return false;</span>
+					}
+<span class="fc" id="L99">					Class&lt;?&gt; peerClass = peers[i + 1].getClass();</span>
+<span class="pc bpc" id="L100" title="1 of 2 branches missed.">					for (Class&lt;?&gt; desiredClass : classes) {</span>
+<span class="fc bfc" id="L101" title="All 2 branches covered.">						if (peerClass == desiredClass) {</span>
+<span class="fc" id="L102">							return true;</span>
+						}
+					}
+<span class="nc" id="L105">					return false;</span>
+				}
+			}
+		}
+<span class="fc" id="L109">		return false;</span>
+	}
+
+	@Override
+	public final @Nullable Object getValue(ExpressionState expressionState) throws EvaluationException {
+<span class="fc" id="L114">		return getValueInternal(expressionState).getValue();</span>
+	}
+
+	@Override
+	public final TypedValue getTypedValue(ExpressionState expressionState) throws EvaluationException {
+<span class="fc" id="L119">		return getValueInternal(expressionState);</span>
+	}
+
+	// by default Ast nodes are not writable
+	@Override
+	public boolean isWritable(ExpressionState expressionState) throws EvaluationException {
+<span class="fc" id="L125">		return false;</span>
+	}
+
+	@Override
+	public void setValue(ExpressionState expressionState, @Nullable Object newValue) throws EvaluationException {
+<span class="fc" id="L130">		setValueInternal(expressionState, () -&gt; new TypedValue(newValue));</span>
+<span class="fc" id="L131">	}</span>
+
+	/**
+	 * Evaluate the expression to a node and then set the new value created by the
+	 * specified {@link Supplier} on that node.
+	 * &lt;p&gt;For example, if the expression evaluates to a property reference, then the
+	 * property will be set to the new value.
+	 * &lt;p&gt;Favor this method over {@link #setValue(ExpressionState, Object)} when
+	 * the value should be lazily computed.
+	 * &lt;p&gt;By default, this method throws a {@link SpelEvaluationException},
+	 * effectively disabling this feature. Subclasses may override this method to
+	 * provide an actual implementation.
+	 * @param expressionState the current expression state (includes the context)
+	 * @param valueSupplier a supplier of the new value
+	 * @throws EvaluationException if any problem occurs evaluating the expression or
+	 * setting the new value
+	 * @since 5.2.24
+	 */
+	public TypedValue setValueInternal(ExpressionState expressionState, Supplier&lt;TypedValue&gt; valueSupplier)
+			throws EvaluationException {
+
+<span class="fc" id="L152">		throw new SpelEvaluationException(getStartPosition(), SpelMessage.SETVALUE_NOT_SUPPORTED, getClass().getName());</span>
+	}
+
+	@Override
+	public SpelNode getChild(int index) {
+<span class="fc" id="L157">		return this.children[index];</span>
+	}
+
+	@Override
+	public int getChildCount() {
+<span class="fc" id="L162">		return this.children.length;</span>
+	}
+
+	@Override
+	public @Nullable Class&lt;?&gt; getObjectClass(@Nullable Object obj) {
+<span class="pc bpc" id="L167" title="1 of 2 branches missed.">		if (obj == null) {</span>
+<span class="nc" id="L168">			return null;</span>
+		}
+<span class="pc bpc" id="L170" title="1 of 2 branches missed.">		return (obj instanceof Class&lt;?&gt; clazz ? clazz : obj.getClass());</span>
+	}
+
+	@Override
+	public int getStartPosition() {
+<span class="fc" id="L175">		return this.startPos;</span>
+	}
+
+	@Override
+	public int getEndPosition() {
+<span class="fc" id="L180">		return this.endPos;</span>
+	}
+
+	/**
+	 * Determine if this node is the target of a null-safe navigation operation.
+	 * &lt;p&gt;The default implementation returns {@code false}.
+	 * @return {@code true} if this node is the target of a null-safe operation
+	 * @since 6.1.6
+	 */
+	public boolean isNullSafe() {
+<span class="fc" id="L190">		return false;</span>
+	}
+
+	public @Nullable String getExitDescriptor() {
+<span class="fc" id="L194">		return this.exitTypeDescriptor;</span>
+	}
+
+	protected final &lt;T&gt; @Nullable T getValue(ExpressionState state, Class&lt;T&gt; desiredReturnType) throws EvaluationException {
+<span class="fc" id="L198">		return ExpressionUtils.convertTypedValue(state.getEvaluationContext(), getValueInternal(state), desiredReturnType);</span>
+	}
+
+	protected ValueRef getValueRef(ExpressionState state) throws EvaluationException {
+<span class="fc" id="L202">		throw new SpelEvaluationException(getStartPosition(), SpelMessage.NOT_ASSIGNABLE, toStringAST());</span>
+	}
+
+	public abstract TypedValue getValueInternal(ExpressionState expressionState) throws EvaluationException;
+
+
+	/**
+	 * Generate code that handles building the argument values for the specified
+	 * {@link Member} (method or constructor).
+	 * &lt;p&gt;This method takes into account whether the method or constructor was
+	 * declared to accept varargs, and if it was then the argument values will be
+	 * appropriately packaged into an array.
+	 * @param mv the method visitor where code should be generated
+	 * @param cf the current {@link CodeFlow}
+	 * @param member the method or constructor for which arguments are being set up
+	 * @param arguments the expression nodes for the expression supplied argument values
+	 * @deprecated as of 6.2, in favor of
+	 * {@link #generateCodeForArguments(MethodVisitor, CodeFlow, Executable, SpelNodeImpl[])}
+	 */
+	@Deprecated(since = &quot;6.2&quot;)
+	protected static void generateCodeForArguments(
+			MethodVisitor mv, CodeFlow cf, Member member, SpelNodeImpl[] arguments) {
+
+<span class="nc bnc" id="L225" title="All 2 branches missed.">		if (member instanceof Executable executable) {</span>
+<span class="nc" id="L226">			generateCodeForArguments(mv, cf, executable, arguments);</span>
+		}
+<span class="nc" id="L228">		throw new IllegalArgumentException(</span>
+				&quot;The supplied member must be an instance of java.lang.reflect.Executable: &quot; + member);
+	}
+
+	/**
+	 * Generate code that handles building the argument values for the specified
+	 * {@link Executable} (method or constructor).
+	 * &lt;p&gt;This method takes into account whether the method or constructor was
+	 * declared to accept varargs, and if it was then the argument values will be
+	 * appropriately packaged into an array.
+	 * @param mv the method visitor where code should be generated
+	 * @param cf the current {@link CodeFlow}
+	 * @param executable the {@link Executable} (method or constructor) for which
+	 * arguments are being set up
+	 * @param arguments the expression nodes for the expression supplied argument
+	 * values
+	 * @since 6.2
+	 */
+	protected static void generateCodeForArguments(
+			MethodVisitor mv, CodeFlow cf, Executable executable, SpelNodeImpl[] arguments) {
+
+<span class="fc" id="L249">		Class&lt;?&gt;[] parameterTypes = executable.getParameterTypes();</span>
+<span class="fc" id="L250">		String[] parameterDescriptors = CodeFlow.toDescriptors(parameterTypes);</span>
+<span class="fc" id="L251">		int parameterCount = parameterTypes.length;</span>
+
+<span class="fc bfc" id="L253" title="All 2 branches covered.">		if (executable.isVarArgs()) {</span>
+			// The final parameter may or may not need packaging into an array, or nothing may
+			// have been passed to satisfy the varargs which means something needs to be built.
+
+<span class="fc" id="L257">			int varargsIndex = parameterCount - 1;</span>
+<span class="fc" id="L258">			int argumentCount = arguments.length;</span>
+<span class="fc" id="L259">			int p = 0;  // Current supplied argument being processed</span>
+
+			// Fulfill all the parameter requirements except the last one (the varargs array).
+<span class="fc bfc" id="L262" title="All 2 branches covered.">			for (p = 0; p &lt; varargsIndex; p++) {</span>
+<span class="fc" id="L263">				cf.generateCodeForArgument(mv, arguments[p], parameterDescriptors[p]);</span>
+			}
+
+<span class="fc bfc" id="L266" title="All 2 branches covered.">			SpelNodeImpl lastArgument = (argumentCount != 0 ? arguments[argumentCount - 1] : null);</span>
+<span class="fc" id="L267">			ClassLoader classLoader = executable.getDeclaringClass().getClassLoader();</span>
+<span class="fc bfc" id="L268" title="All 2 branches covered.">			Class&lt;?&gt; lastArgumentType = (lastArgument != null ?</span>
+<span class="fc" id="L269">					loadClassForExitDescriptor(lastArgument.getExitDescriptor(), classLoader) : null);</span>
+<span class="fc" id="L270">			Class&lt;?&gt; lastParameterType = parameterTypes[varargsIndex];</span>
+
+			// Determine if the final passed argument is already suitably packaged in array
+			// form to be passed to the method.
+<span class="pc bpc" id="L274" title="1 of 6 branches missed.">			if (lastArgument != null &amp;&amp; lastArgumentType != null &amp;&amp; lastParameterType.isAssignableFrom(lastArgumentType)) {</span>
+<span class="fc" id="L275">				cf.generateCodeForArgument(mv, lastArgument, parameterDescriptors[p]);</span>
+			}
+			else {
+<span class="fc" id="L278">				String arrayComponentType = parameterDescriptors[varargsIndex];</span>
+				// Trim the leading '[', potentially leaving other '[' characters.
+<span class="fc" id="L280">				arrayComponentType = arrayComponentType.substring(1);</span>
+				// Build array big enough to hold remaining arguments.
+<span class="fc" id="L282">				CodeFlow.insertNewArrayCode(mv, argumentCount - p, arrayComponentType);</span>
+				// Package up the remaining arguments into the array.
+<span class="fc" id="L284">				int arrayIndex = 0;</span>
+<span class="fc bfc" id="L285" title="All 2 branches covered.">				while (p &lt; argumentCount) {</span>
+<span class="fc" id="L286">					mv.visitInsn(DUP);</span>
+<span class="fc" id="L287">					CodeFlow.insertOptimalLoad(mv, arrayIndex++);</span>
+<span class="fc" id="L288">					cf.generateCodeForArgument(mv, arguments[p++], arrayComponentType);</span>
+<span class="fc" id="L289">					CodeFlow.insertArrayStore(mv, arrayComponentType);</span>
+				}
+			}
+<span class="fc" id="L292">		}</span>
+		else {
+<span class="fc bfc" id="L294" title="All 2 branches covered.">			for (int i = 0; i &lt; parameterCount; i++) {</span>
+<span class="fc" id="L295">				cf.generateCodeForArgument(mv, arguments[i], parameterDescriptors[i]);</span>
+			}
+		}
+<span class="fc" id="L298">	}</span>
+
+	private static @Nullable Class&lt;?&gt; loadClassForExitDescriptor(@Nullable String exitDescriptor, ClassLoader classLoader) {
+<span class="pc bpc" id="L301" title="1 of 2 branches missed.">		if (!StringUtils.hasText(exitDescriptor)) {</span>
+<span class="nc" id="L302">			return null;</span>
+		}
+<span class="fc" id="L304">		String typeDescriptor = exitDescriptor;</span>
+		// If the SpEL exitDescriptor is not for a primitive (single character),
+		// ASM expects the typeDescriptor to end with a ';'.
+<span class="fc bfc" id="L307" title="All 2 branches covered.">		if (typeDescriptor.length() &gt; 1) {</span>
+<span class="fc" id="L308">			typeDescriptor += &quot;;&quot;;</span>
+		}
+<span class="fc" id="L310">		String className = Type.getType(typeDescriptor).getClassName();</span>
+<span class="fc" id="L311">		return ClassUtils.resolveClassName(className, classLoader);</span>
+	}
+
+	/**
+	 * Generate bytecode that loads the supplied argument onto the stack.
+	 * &lt;p&gt;This method also performs any boxing, unboxing, or check-casting
+	 * necessary to ensure that the type of the argument on the stack matches the
+	 * supplied {@code paramDesc}.
+	 * @deprecated as of 6.2, in favor of
+	 * {@link CodeFlow#generateCodeForArgument(MethodVisitor, SpelNode, String)}
+	 */
+	@Deprecated(since = &quot;6.2&quot;)
+	protected static void generateCodeForArgument(MethodVisitor mv, CodeFlow cf, SpelNodeImpl argument, String paramDesc) {
+<span class="nc" id="L324">		cf.generateCodeForArgument(mv, argument, paramDesc);</span>
+<span class="nc" id="L325">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

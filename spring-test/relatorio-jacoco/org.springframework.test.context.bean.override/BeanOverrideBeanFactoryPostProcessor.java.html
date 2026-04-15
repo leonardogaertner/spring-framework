@@ -1,0 +1,515 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>BeanOverrideBeanFactoryPostProcessor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context.bean.override</a> &gt; <span class="el_source">BeanOverrideBeanFactoryPostProcessor.java</span></div><h1>BeanOverrideBeanFactoryPostProcessor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context.bean.override;
+
+import java.lang.reflect.AnnotatedElement;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.Set;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aop.scope.ScopedProxyUtils;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.factory.BeanFactoryUtils;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.NoUniqueBeanDefinitionException;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.BeanFactoryPostProcessor;
+import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
+import org.springframework.beans.factory.config.DependencyDescriptor;
+import org.springframework.beans.factory.support.BeanDefinitionRegistry;
+import org.springframework.beans.factory.support.BeanNameGenerator;
+import org.springframework.beans.factory.support.DefaultBeanNameGenerator;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.beans.factory.support.RootBeanDefinition;
+import org.springframework.context.aot.AbstractAotProcessor;
+import org.springframework.core.Ordered;
+import org.springframework.core.ResolvableType;
+import org.springframework.util.Assert;
+
+/**
+ * A {@link BeanFactoryPostProcessor} implementation that processes identified
+ * use of {@link BeanOverride @BeanOverride} and adapts the {@code BeanFactory}
+ * accordingly.
+ *
+ * &lt;p&gt;For each override, the bean factory is prepared according to the chosen
+ * {@linkplain BeanOverrideStrategy override strategy}. The bean override instance
+ * is created, if necessary, and the related infrastructure is updated to allow
+ * the bean override instance to be injected into the corresponding
+ * {@linkplain BeanOverrideHandler#getField() field} of the test class or
+ * {@linkplain BeanOverrideHandler#getParameter() parameter} of the test class
+ * constructor.
+ *
+ * &lt;p&gt;This processor does not work against a particular test class but rather
+ * only prepares the bean factory for the identified, unique set of bean overrides.
+ *
+ * @author Simon Baslé
+ * @author Stephane Nicoll
+ * @author Sam Brannen
+ * @author Yanming Zhou
+ * @since 6.2
+ */
+class BeanOverrideBeanFactoryPostProcessor implements BeanFactoryPostProcessor, Ordered {
+
+	private static final String PSEUDO_BEAN_NAME_PLACEHOLDER = &quot;&lt;&lt;&lt; PSEUDO BEAN NAME PLACEHOLDER &gt;&gt;&gt;&quot;;
+
+<span class="fc" id="L74">	private static final Log logger = LogFactory.getLog(BeanOverrideBeanFactoryPostProcessor.class);</span>
+
+<span class="fc" id="L76">	private static final BeanNameGenerator beanNameGenerator = DefaultBeanNameGenerator.INSTANCE;</span>
+
+	private final Set&lt;BeanOverrideHandler&gt; beanOverrideHandlers;
+
+	private final BeanOverrideRegistry beanOverrideRegistry;
+
+
+	/**
+	 * Create a new {@code BeanOverrideBeanFactoryPostProcessor} with the supplied
+	 * set of {@link BeanOverrideHandler BeanOverrideHandlers} to process, using
+	 * the given {@link BeanOverrideRegistry}.
+	 * @param beanOverrideHandlers the bean override handlers to process
+	 * @param beanOverrideRegistry the registry used to track bean override handlers
+	 */
+	BeanOverrideBeanFactoryPostProcessor(Set&lt;BeanOverrideHandler&gt; beanOverrideHandlers,
+<span class="fc" id="L91">			BeanOverrideRegistry beanOverrideRegistry) {</span>
+
+<span class="fc" id="L93">		this.beanOverrideHandlers = beanOverrideHandlers;</span>
+<span class="fc" id="L94">		this.beanOverrideRegistry = beanOverrideRegistry;</span>
+<span class="fc" id="L95">	}</span>
+
+
+	@Override
+	public int getOrder() {
+<span class="fc" id="L100">		return Ordered.LOWEST_PRECEDENCE - 10;</span>
+	}
+
+	@Override
+	public void postProcessBeanFactory(ConfigurableListableBeanFactory beanFactory) throws BeansException {
+<span class="fc" id="L105">		Set&lt;String&gt; generatedBeanNames = new HashSet&lt;&gt;();</span>
+<span class="fc bfc" id="L106" title="All 2 branches covered.">		for (BeanOverrideHandler handler : this.beanOverrideHandlers) {</span>
+<span class="fc" id="L107">			registerBeanOverride(beanFactory, handler, generatedBeanNames);</span>
+<span class="fc" id="L108">		}</span>
+<span class="fc" id="L109">	}</span>
+
+	private void registerBeanOverride(ConfigurableListableBeanFactory beanFactory, BeanOverrideHandler handler,
+			Set&lt;String&gt; generatedBeanNames) {
+
+<span class="fc" id="L114">		String beanName = handler.getBeanName();</span>
+<span class="fc bfc" id="L115" title="All 2 branches covered.">		Assert.state(!BeanFactoryUtils.isFactoryDereference(beanName), () -&gt; &quot;&quot;&quot;</span>
+				Unable to override bean '%s'%s: a FactoryBean cannot be overridden. \
+				To override the bean created by the FactoryBean, remove the '&amp;' prefix.&quot;&quot;&quot;
+<span class="fc" id="L118">					.formatted(beanName, forDescription(handler)));</span>
+
+<span class="pc bpc" id="L120" title="1 of 4 branches missed.">		switch (handler.getStrategy()) {</span>
+<span class="fc" id="L121">			case REPLACE -&gt; replaceOrCreateBean(beanFactory, handler, generatedBeanNames, true);</span>
+<span class="fc" id="L122">			case REPLACE_OR_CREATE -&gt; replaceOrCreateBean(beanFactory, handler, generatedBeanNames, false);</span>
+<span class="fc" id="L123">			case WRAP -&gt; wrapBean(beanFactory, handler);</span>
+		}
+<span class="fc" id="L125">	}</span>
+
+	private void replaceOrCreateBean(ConfigurableListableBeanFactory beanFactory, BeanOverrideHandler handler,
+			Set&lt;String&gt; generatedBeanNames, boolean requireExistingBean) {
+
+		// NOTE: This method supports 3 distinct scenarios which must be accounted for.
+		//
+		// - JVM runtime
+		// - AOT processing
+		// - AOT runtime
+		//
+		// In addition, this method supports 4 distinct use cases.
+		//
+		// 1) Override existing bean by-type
+		// 2) Create bean by-type, with a generated name
+		// 3) Override existing bean by-name
+		// 4) Create bean by-name, with a provided name
+
+<span class="fc" id="L143">		String beanName = handler.getBeanName();</span>
+<span class="fc" id="L144">		BeanDefinition existingBeanDefinition = null;</span>
+<span class="fc bfc" id="L145" title="All 2 branches covered.">		if (beanName == null) {</span>
+<span class="fc" id="L146">			beanName = getBeanNameForType(beanFactory, handler, requireExistingBean);</span>
+			// If the generatedBeanNames set already contains the beanName that we
+			// just found by-type, that means we are experiencing a &quot;phantom read&quot;
+			// (i.e., we found a bean that was not previously there). Consequently,
+			// we cannot &quot;override the override&quot;, because we would lose one of the
+			// overrides. Instead, we must create a new override for the current
+			// handler. For example, if one handler creates an override for a SubType
+			// and a subsequent handler creates an override for a SuperType of that
+			// SubType, we must end up with overrides for both SuperType and SubType.
+<span class="fc bfc" id="L155" title="All 4 branches covered.">			if (beanName != null &amp;&amp; !generatedBeanNames.contains(beanName)) {</span>
+				// 1) We are overriding an existing bean by-type.
+<span class="fc" id="L157">				beanName = BeanFactoryUtils.transformedBeanName(beanName);</span>
+				// If we are overriding a manually registered singleton, we won't find
+				// an existing bean definition.
+<span class="fc bfc" id="L160" title="All 2 branches covered.">				if (beanFactory.containsBeanDefinition(beanName)) {</span>
+<span class="fc" id="L161">					existingBeanDefinition = beanFactory.getBeanDefinition(beanName);</span>
+<span class="fc" id="L162">					setQualifiedElement(existingBeanDefinition, handler);</span>
+				}
+			}
+			else {
+				// 2) We are creating a bean by-type, with a generated name.
+				// Since NullAway will reject leaving the beanName set to null,
+				// we set it to a placeholder that will be replaced later.
+<span class="fc" id="L169">				beanName = PSEUDO_BEAN_NAME_PLACEHOLDER;</span>
+			}
+		}
+		else {
+<span class="fc" id="L173">			Set&lt;String&gt; candidates = getExistingBeanNamesByType(beanFactory, handler, false);</span>
+<span class="fc bfc" id="L174" title="All 2 branches covered.">			if (candidates.contains(beanName)) {</span>
+				// 3) We are overriding an existing bean by-name.
+<span class="fc" id="L176">				existingBeanDefinition = beanFactory.getBeanDefinition(beanName);</span>
+<span class="fc" id="L177">				setQualifiedElement(existingBeanDefinition, handler);</span>
+			}
+<span class="fc bfc" id="L179" title="All 2 branches covered.">			else if (requireExistingBean) {</span>
+<span class="fc" id="L180">				throw new IllegalStateException(&quot;&quot;&quot;</span>
+						Unable to replace bean: there is no bean with name '%s' and type %s%s. \
+						If the bean is defined in a @Bean method, make sure the return type is the \
+						most specific type possible (for example, the concrete implementation type).&quot;&quot;&quot;
+<span class="fc" id="L184">							.formatted(beanName, handler.getBeanType(), requiredByDescription(handler)));</span>
+			}
+			// 4) We are creating a bean by-name with the provided beanName.
+		}
+
+<span class="fc bfc" id="L189" title="All 2 branches covered.">		if (existingBeanDefinition != null) {</span>
+			// Process the existing bean definition.
+			//
+			// Applies during &quot;JVM runtime&quot;, &quot;AOT processing&quot;, and &quot;AOT runtime&quot;.
+<span class="fc" id="L193">			convertToSingletonIfNecessary(existingBeanDefinition, beanName);</span>
+		}
+<span class="pc bpc" id="L195" title="1 of 2 branches missed.">		else if (Boolean.getBoolean(AbstractAotProcessor.AOT_PROCESSING)) {</span>
+			// There was no existing bean definition, but during &quot;AOT processing&quot; we
+			// do not register the &quot;pseudo&quot; bean definition since our AOT support
+			// cannot automatically convert that to a functional bean definition for
+			// use at &quot;AOT runtime&quot;. Furthermore, by not registering a bean definition
+			// for a nonexistent bean, we allow the &quot;JVM runtime&quot; and &quot;AOT runtime&quot;
+			// to operate the same in the following else-block.
+		}
+		else {
+			// There was no existing bean definition, so we register a &quot;pseudo&quot; bean
+			// definition to ensure that a suitable bean definition exists for the given
+			// bean name for proper autowiring candidate resolution.
+			//
+			// Applies during &quot;JVM runtime&quot; and &quot;AOT runtime&quot;.
+
+<span class="pc bpc" id="L210" title="1 of 2 branches missed.">			if (!(beanFactory instanceof BeanDefinitionRegistry registry)) {</span>
+<span class="nc" id="L211">				throw new IllegalStateException(&quot;Cannot process bean override with a BeanFactory &quot; +</span>
+<span class="nc" id="L212">						&quot;that does not implement BeanDefinitionRegistry: &quot; + beanFactory.getClass().getName());</span>
+			}
+
+<span class="fc" id="L215">			RootBeanDefinition pseudoBeanDefinition = createPseudoBeanDefinition(handler);</span>
+
+			// Generate a name for the nonexistent bean.
+<span class="fc bfc" id="L218" title="All 2 branches covered.">			if (PSEUDO_BEAN_NAME_PLACEHOLDER.equals(beanName)) {</span>
+<span class="fc" id="L219">				beanName = beanNameGenerator.generateBeanName(pseudoBeanDefinition, registry);</span>
+<span class="fc" id="L220">				generatedBeanNames.add(beanName);</span>
+			}
+
+<span class="fc" id="L223">			registry.registerBeanDefinition(beanName, pseudoBeanDefinition);</span>
+		}
+
+<span class="fc" id="L226">		Object override = handler.createOverrideInstance(beanName, existingBeanDefinition, null, beanFactory);</span>
+<span class="fc" id="L227">		this.beanOverrideRegistry.registerBeanOverrideHandler(handler, beanName);</span>
+
+		// Now we have an instance (the override) that we can manually register as a singleton.
+		//
+		// However, we need to remove any existing singleton instance -- for example, a
+		// manually registered singleton.
+		//
+		// As a bonus, by manually registering a singleton during &quot;AOT processing&quot;, we allow
+		// GenericApplicationContext's preDetermineBeanType() method to transparently register
+		// runtime hints for a proxy generated by the above createOverrideInstance() invocation --
+		// for example, when @MockitoBean creates a mock based on a JDK dynamic proxy.
+<span class="fc bfc" id="L238" title="All 2 branches covered.">		if (beanFactory.containsSingleton(beanName)) {</span>
+<span class="fc" id="L239">			destroySingleton(beanFactory, beanName);</span>
+		}
+<span class="fc" id="L241">		beanFactory.registerSingleton(beanName, override);</span>
+<span class="fc" id="L242">	}</span>
+
+	/**
+	 * Check that a bean with the specified {@link BeanOverrideHandler#getBeanName() name}
+	 * or {@link BeanOverrideHandler#getBeanType() type} has already been registered
+	 * in the {@code BeanFactory}.
+	 * &lt;p&gt;If so, register the {@link BeanOverrideHandler} and the corresponding bean
+	 * name in the {@link BeanOverrideRegistry}.
+	 * &lt;p&gt;The registry will later be checked to see if a given bean should be wrapped
+	 * upon creation, during the early bean post-processing phase.
+	 * @see BeanOverrideRegistry#registerBeanOverrideHandler(BeanOverrideHandler, String)
+	 * @see WrapEarlyBeanPostProcessor#getEarlyBeanReference(Object, String)
+	 */
+	private void wrapBean(ConfigurableListableBeanFactory beanFactory, BeanOverrideHandler handler) {
+<span class="fc" id="L256">		String beanName = handler.getBeanName();</span>
+<span class="fc" id="L257">		ResolvableType beanType = handler.getBeanType();</span>
+
+<span class="fc bfc" id="L259" title="All 2 branches covered.">		if (beanName == null) {</span>
+			// We are wrapping an existing bean by-type.
+<span class="fc" id="L261">			Set&lt;String&gt; candidateNames = getExistingBeanNamesByType(beanFactory, handler, true);</span>
+<span class="fc" id="L262">			String uniqueCandidate = determineUniqueCandidate(beanFactory, candidateNames, beanType, handler);</span>
+<span class="fc bfc" id="L263" title="All 2 branches covered.">			if (uniqueCandidate != null) {</span>
+<span class="fc" id="L264">				beanName = uniqueCandidate;</span>
+			}
+			else {
+<span class="fc" id="L267">				String message = &quot;Unable to select a bean to wrap: &quot;;</span>
+<span class="fc" id="L268">				int candidateCount = candidateNames.size();</span>
+<span class="fc bfc" id="L269" title="All 2 branches covered.">				if (candidateCount == 0) {</span>
+<span class="fc" id="L270">					message += &quot;&quot;&quot;</span>
+							there are no beans of type %s%s. \
+							If the bean is defined in a @Bean method, make sure the return type is the \
+							most specific type possible (for example, the concrete implementation type).&quot;&quot;&quot;
+<span class="fc" id="L274">								.formatted(beanType, requiredByDescription(handler));</span>
+				}
+				else {
+<span class="fc" id="L277">					message += &quot;found %d beans of type %s%s: %s&quot;</span>
+<span class="fc" id="L278">							.formatted(candidateCount, beanType, requiredByDescription(handler), candidateNames);</span>
+				}
+<span class="fc" id="L280">				throw new IllegalStateException(message);</span>
+			}
+<span class="fc" id="L282">			beanName = BeanFactoryUtils.transformedBeanName(beanName);</span>
+<span class="fc" id="L283">		}</span>
+		else {
+			// We are wrapping an existing bean by-name.
+<span class="fc" id="L286">			Set&lt;String&gt; candidates = getExistingBeanNamesByType(beanFactory, handler, false);</span>
+<span class="fc bfc" id="L287" title="All 2 branches covered.">			if (!candidates.contains(beanName)) {</span>
+<span class="fc" id="L288">				throw new IllegalStateException(&quot;&quot;&quot;</span>
+						Unable to wrap bean: there is no bean with name '%s' and type %s%s. \
+						If the bean is defined in a @Bean method, make sure the return type is the \
+						most specific type possible (for example, the concrete implementation type).&quot;&quot;&quot;
+<span class="fc" id="L292">							.formatted(beanName, beanType, requiredByDescription(handler)));</span>
+			}
+		}
+
+<span class="fc" id="L296">		BeanDefinition beanDefinition = beanFactory.getBeanDefinition(beanName);</span>
+<span class="fc" id="L297">		convertToSingletonIfNecessary(beanDefinition, beanName);</span>
+<span class="fc" id="L298">		this.beanOverrideRegistry.registerBeanOverrideHandler(handler, beanName);</span>
+<span class="fc" id="L299">	}</span>
+
+	private static @Nullable String getBeanNameForType(ConfigurableListableBeanFactory beanFactory, BeanOverrideHandler handler,
+			boolean requireExistingBean) {
+
+<span class="fc" id="L304">		ResolvableType beanType = handler.getBeanType();</span>
+
+<span class="fc" id="L306">		Set&lt;String&gt; candidateNames = getExistingBeanNamesByType(beanFactory, handler, true);</span>
+<span class="fc" id="L307">		String uniqueCandidate = determineUniqueCandidate(beanFactory, candidateNames, beanType, handler);</span>
+<span class="fc bfc" id="L308" title="All 2 branches covered.">		if (uniqueCandidate != null) {</span>
+<span class="fc" id="L309">			return uniqueCandidate;</span>
+		}
+
+<span class="fc" id="L312">		int candidateCount = candidateNames.size();</span>
+<span class="fc bfc" id="L313" title="All 2 branches covered.">		if (candidateCount == 0) {</span>
+<span class="fc bfc" id="L314" title="All 2 branches covered.">			if (requireExistingBean) {</span>
+<span class="fc" id="L315">				throw new IllegalStateException(&quot;&quot;&quot;</span>
+						Unable to override bean: there are no beans of type %s%s. \
+						If the bean is defined in a @Bean method, make sure the return type is the \
+						most specific type possible (for example, the concrete implementation type).&quot;&quot;&quot;
+<span class="fc" id="L319">							.formatted(beanType, requiredByDescription(handler)));</span>
+			}
+<span class="fc" id="L321">			return null;</span>
+		}
+
+<span class="fc" id="L324">		throw new IllegalStateException(</span>
+				&quot;Unable to select a bean to override: found %d beans of type %s%s: %s&quot;
+<span class="fc" id="L326">					.formatted(candidateCount, beanType, requiredByDescription(handler), candidateNames));</span>
+	}
+
+	private static Set&lt;String&gt; getExistingBeanNamesByType(ConfigurableListableBeanFactory beanFactory,
+			BeanOverrideHandler handler, boolean checkAutowiredCandidate) {
+
+<span class="fc" id="L332">		ResolvableType resolvableType = handler.getBeanType();</span>
+<span class="fc" id="L333">		Class&lt;?&gt; type = resolvableType.toClass();</span>
+
+		// Start with matching bean names for type, excluding FactoryBeans.
+<span class="fc" id="L336">		Set&lt;String&gt; beanNames = new LinkedHashSet&lt;&gt;(</span>
+<span class="fc" id="L337">				Arrays.asList(beanFactory.getBeanNamesForType(resolvableType, true, false)));</span>
+
+		// Add matching FactoryBeans as well.
+<span class="fc bfc" id="L340" title="All 2 branches covered.">		for (String beanName : beanFactory.getBeanNamesForType(FactoryBean.class, true, false)) {</span>
+<span class="fc" id="L341">			beanName = BeanFactoryUtils.transformedBeanName(beanName);</span>
+<span class="fc" id="L342">			Class&lt;?&gt; producedType = beanFactory.getType(beanName, false);</span>
+<span class="fc bfc" id="L343" title="All 2 branches covered.">			if (type.equals(producedType)) {</span>
+<span class="fc" id="L344">				beanNames.add(beanName);</span>
+			}
+		}
+
+		// Filter out non-matching autowire candidates.
+<span class="fc bfc" id="L349" title="All 2 branches covered.">		if (checkAutowiredCandidate) {</span>
+<span class="fc" id="L350">			DependencyDescriptor descriptor = handler.fieldOrParameterDependencyDescriptor();</span>
+<span class="fc bfc" id="L351" title="All 2 branches covered.">			if (descriptor != null) {</span>
+<span class="fc bfc" id="L352" title="All 2 branches covered.">				beanNames.removeIf(beanName -&gt; !beanFactory.isAutowireCandidate(beanName, descriptor));</span>
+			}
+		}
+		// Filter out scoped proxy targets.
+<span class="fc" id="L356">		beanNames.removeIf(ScopedProxyUtils::isScopedTarget);</span>
+
+<span class="fc" id="L358">		return beanNames;</span>
+	}
+
+	/**
+	 * Determine the unique candidate in the given set of bean names.
+	 * &lt;p&gt;Honors both &lt;em&gt;primary&lt;/em&gt; and &lt;em&gt;fallback&lt;/em&gt; semantics, and
+	 * otherwise matches against the field name or parameter name as a &lt;em&gt;fallback
+	 * qualifier&lt;/em&gt;.
+	 * @return the name of the unique candidate, or {@code null} if none found
+	 * @since 6.2.3
+	 * @see org.springframework.beans.factory.support.DefaultListableBeanFactory#determineAutowireCandidate
+	 */
+	private static @Nullable String determineUniqueCandidate(ConfigurableListableBeanFactory beanFactory,
+			Set&lt;String&gt; candidateNames, ResolvableType beanType, BeanOverrideHandler handler) {
+
+		// Step 0: none or only one
+<span class="fc" id="L374">		int candidateCount = candidateNames.size();</span>
+<span class="fc bfc" id="L375" title="All 2 branches covered.">		if (candidateCount == 0) {</span>
+<span class="fc" id="L376">			return null;</span>
+		}
+<span class="fc bfc" id="L378" title="All 2 branches covered.">		if (candidateCount == 1) {</span>
+<span class="fc" id="L379">			return candidateNames.iterator().next();</span>
+		}
+
+		// Step 1: check primary candidate
+<span class="fc" id="L383">		String primaryCandidate = determinePrimaryCandidate(beanFactory, candidateNames, beanType.toClass());</span>
+<span class="fc bfc" id="L384" title="All 2 branches covered.">		if (primaryCandidate != null) {</span>
+<span class="fc" id="L385">			return primaryCandidate;</span>
+		}
+
+		// Step 2: use the field name or parameter name as a fallback qualifier
+<span class="fc" id="L389">		String fieldOrPropertyName = handler.fieldOrParameterName();</span>
+<span class="pc bpc" id="L390" title="1 of 4 branches missed.">		if (fieldOrPropertyName != null &amp;&amp; candidateNames.contains(fieldOrPropertyName)) {</span>
+<span class="fc" id="L391">			return fieldOrPropertyName;</span>
+		}
+
+<span class="fc" id="L394">		return null;</span>
+	}
+
+	/**
+	 * Determine the primary candidate in the given set of bean names.
+	 * &lt;p&gt;Honors both &lt;em&gt;primary&lt;/em&gt; and &lt;em&gt;fallback&lt;/em&gt; semantics.
+	 * @return the name of the primary candidate, or {@code null} if none found
+	 * @see org.springframework.beans.factory.support.DefaultListableBeanFactory#determinePrimaryCandidate
+	 */
+	private static @Nullable String determinePrimaryCandidate(ConfigurableListableBeanFactory beanFactory,
+			Set&lt;String&gt; candidateBeanNames, Class&lt;?&gt; beanType) {
+
+<span class="pc bpc" id="L406" title="1 of 2 branches missed.">		if (candidateBeanNames.isEmpty()) {</span>
+<span class="nc" id="L407">			return null;</span>
+		}
+
+<span class="fc" id="L410">		String primaryBeanName = null;</span>
+		// First pass: identify unique primary candidate
+<span class="fc bfc" id="L412" title="All 2 branches covered.">		for (String candidateBeanName : candidateBeanNames) {</span>
+<span class="pc bpc" id="L413" title="1 of 2 branches missed.">			if (beanFactory.containsBeanDefinition(candidateBeanName)) {</span>
+<span class="fc" id="L414">				BeanDefinition beanDefinition = beanFactory.getBeanDefinition(candidateBeanName);</span>
+<span class="fc bfc" id="L415" title="All 2 branches covered.">				if (beanDefinition.isPrimary()) {</span>
+<span class="fc bfc" id="L416" title="All 2 branches covered.">					if (primaryBeanName != null) {</span>
+<span class="fc" id="L417">						throw new NoUniqueBeanDefinitionException(beanType, candidateBeanNames.size(),</span>
+							&quot;more than one 'primary' bean found among candidates: &quot; + candidateBeanNames);
+					}
+<span class="fc" id="L420">					primaryBeanName = candidateBeanName;</span>
+				}
+			}
+<span class="fc" id="L423">		}</span>
+		// Second pass: identify unique non-fallback candidate
+<span class="fc bfc" id="L425" title="All 2 branches covered.">		if (primaryBeanName == null) {</span>
+<span class="fc bfc" id="L426" title="All 2 branches covered.">			for (String candidateBeanName : candidateBeanNames) {</span>
+<span class="pc bpc" id="L427" title="1 of 2 branches missed.">				if (beanFactory.containsBeanDefinition(candidateBeanName)) {</span>
+<span class="fc" id="L428">					BeanDefinition beanDefinition = beanFactory.getBeanDefinition(candidateBeanName);</span>
+<span class="fc bfc" id="L429" title="All 2 branches covered.">					if (!beanDefinition.isFallback()) {</span>
+<span class="fc bfc" id="L430" title="All 2 branches covered.">						if (primaryBeanName != null) {</span>
+							// More than one non-fallback bean found among candidates.
+<span class="fc" id="L432">							return null;</span>
+						}
+<span class="fc" id="L434">						primaryBeanName = candidateBeanName;</span>
+					}
+				}
+<span class="fc" id="L437">			}</span>
+		}
+<span class="fc" id="L439">		return primaryBeanName;</span>
+	}
+
+	/**
+	 * Create a pseudo-{@link BeanDefinition} for the supplied {@link BeanOverrideHandler},
+	 * whose {@linkplain RootBeanDefinition#getTargetType() target type} and
+	 * {@linkplain RootBeanDefinition#getQualifiedElement() qualified element} are
+	 * the {@linkplain BeanOverrideHandler#getBeanType() bean type} and
+	 * the {@linkplain BeanOverrideHandler#getField() field} or
+	 * {@linkplain BeanOverrideHandler#getParameter() parameter} of the
+	 * {@code BeanOverrideHandler}, respectively.
+	 * &lt;p&gt;The returned bean definition should &lt;strong&gt;not&lt;/strong&gt; be used to create
+	 * a bean instance but rather only for the purpose of having suitable bean
+	 * definition metadata available in the {@code BeanFactory} &amp;mdash; for example,
+	 * for autowiring candidate resolution.
+	 */
+	private static RootBeanDefinition createPseudoBeanDefinition(BeanOverrideHandler handler) {
+<span class="fc" id="L456">		RootBeanDefinition definition = new RootBeanDefinition(handler.getBeanType().resolve());</span>
+<span class="fc" id="L457">		definition.setTargetType(handler.getBeanType());</span>
+<span class="fc" id="L458">		setQualifiedElement(definition, handler);</span>
+<span class="fc" id="L459">		return definition;</span>
+	}
+
+	/**
+	 * Set the {@linkplain RootBeanDefinition#setQualifiedElement(java.lang.reflect.AnnotatedElement)
+	 * qualified element} in the supplied {@link BeanDefinition} to the
+	 * {@linkplain BeanOverrideHandler#getField() field} or
+	 * {@linkplain BeanOverrideHandler#getParameter() parameter} of the supplied
+	 * {@code BeanOverrideHandler}.
+	 * &lt;p&gt;This is necessary for proper autowiring candidate resolution.
+	 * @since 6.2.6
+	 */
+	private static void setQualifiedElement(BeanDefinition beanDefinition, BeanOverrideHandler handler) {
+<span class="fc" id="L472">		AnnotatedElement fieldOrParameter = handler.fieldOrParameter();</span>
+<span class="fc bfc" id="L473" title="All 4 branches covered.">		if (fieldOrParameter != null &amp;&amp; beanDefinition instanceof RootBeanDefinition rbd) {</span>
+<span class="fc" id="L474">			rbd.setQualifiedElement(fieldOrParameter);</span>
+		}
+<span class="fc" id="L476">	}</span>
+
+	/**
+	 * Convert the supplied {@link BeanDefinition} for the supplied bean name to
+	 * a singleton, if necessary.
+	 * @since 7.0
+	 */
+	private static void convertToSingletonIfNecessary(BeanDefinition beanDefinition, String beanName) {
+		// Due to https://github.com/spring-projects/spring-framework/issues/33800, we do NOT invoke
+		// beanFactory.isSingleton(beanName), since doing so can result in a BeanCreationException for
+		// certain beans -- for example, a Spring Data FactoryBean for a JpaRepository.
+<span class="fc bfc" id="L487" title="All 2 branches covered.">		if (!beanDefinition.isSingleton()) {</span>
+<span class="pc bpc" id="L488" title="1 of 2 branches missed.">			if (logger.isWarnEnabled()) {</span>
+<span class="fc" id="L489">				logger.warn(&quot;Converting '%s' scoped bean definition '%s' to a singleton.&quot;</span>
+<span class="fc" id="L490">						.formatted(beanDefinition.getScope(), beanName));</span>
+			}
+<span class="fc" id="L492">			beanDefinition.setScope(BeanDefinition.SCOPE_SINGLETON);</span>
+		}
+<span class="fc" id="L494">	}</span>
+
+	private static void destroySingleton(ConfigurableListableBeanFactory beanFactory, String beanName) {
+<span class="pc bpc" id="L497" title="1 of 2 branches missed.">		if (!(beanFactory instanceof DefaultListableBeanFactory dlbf)) {</span>
+<span class="nc" id="L498">			throw new IllegalStateException(&quot;Cannot process bean override with a BeanFactory &quot; +</span>
+<span class="nc" id="L499">					&quot;that does not implement DefaultListableBeanFactory: &quot; + beanFactory.getClass().getName());</span>
+		}
+<span class="fc" id="L501">		dlbf.destroySingleton(beanName);</span>
+<span class="fc" id="L502">	}</span>
+
+	private static String forDescription(BeanOverrideHandler handler) {
+<span class="fc" id="L505">		String description = handler.fieldOrParameterDescription();</span>
+<span class="pc bpc" id="L506" title="1 of 2 branches missed.">		return (description != null ? &quot; for &quot; + description : &quot;&quot;);</span>
+	}
+
+	private static String requiredByDescription(BeanOverrideHandler handler) {
+<span class="fc" id="L510">		String description = handler.fieldOrParameterDescription();</span>
+<span class="pc bpc" id="L511" title="1 of 2 branches missed.">		return (description != null ? &quot; (as required by %s)&quot;.formatted(description) : &quot;&quot;);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

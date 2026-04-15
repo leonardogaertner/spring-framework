@@ -1,0 +1,744 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>UrlPathHelper.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.util</a> &gt; <span class="el_source">UrlPathHelper.java</span></div><h1>UrlPathHelper.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.util;
+
+import java.net.URLDecoder;
+import java.nio.charset.UnsupportedCharsetException;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Properties;
+
+import jakarta.servlet.RequestDispatcher;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.http.HttpServletMapping;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.MappingMatch;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.StringUtils;
+
+/**
+ * Helper class for URL path matching. Provides support for URL paths in
+ * {@code RequestDispatcher} includes and support for consistent URL decoding.
+ *
+ * &lt;p&gt;Used by {@link org.springframework.web.servlet.handler.AbstractUrlHandlerMapping}
+ * and {@link org.springframework.web.servlet.support.RequestContext} for path matching
+ * and/or URI determination.
+ *
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @author Rossen Stoyanchev
+ * @since 14.01.2004
+ * @see #getLookupPathForRequest
+ * @see jakarta.servlet.RequestDispatcher
+ */
+<span class="nc" id="L55">public class UrlPathHelper {</span>
+
+	/**
+	 * Name of Servlet request attribute that holds a
+	 * {@link #getLookupPathForRequest resolved} lookupPath.
+	 * @since 5.3
+	 */
+<span class="nc" id="L62">	public static final String PATH_ATTRIBUTE = UrlPathHelper.class.getName() + &quot;.PATH&quot;;</span>
+
+	/**
+	 * Special WebSphere request attribute, indicating the original request URI.
+	 * Preferable over the standard Servlet 2.4 forward attribute on WebSphere,
+	 * simply because we need the very first URI in the request forwarding chain.
+	 */
+	private static final String WEBSPHERE_URI_ATTRIBUTE = &quot;com.ibm.websphere.servlet.uri_non_decoded&quot;;
+
+<span class="nc" id="L71">	private static final Log logger = LogFactory.getLog(UrlPathHelper.class);</span>
+
+	static @Nullable volatile Boolean websphereComplianceFlag;
+
+
+<span class="nc" id="L76">	private boolean alwaysUseFullPath = false;</span>
+
+<span class="nc" id="L78">	private boolean urlDecode = true;</span>
+
+<span class="nc" id="L80">	private boolean removeSemicolonContent = true;</span>
+
+<span class="nc" id="L82">	private String defaultEncoding = WebUtils.DEFAULT_CHARACTER_ENCODING;</span>
+
+<span class="nc" id="L84">	private boolean readOnly = false;</span>
+
+
+	/**
+	 * Whether URL lookups should always use the full path within the current
+	 * web application context, i.e. within
+	 * {@link jakarta.servlet.ServletContext#getContextPath()}.
+	 * &lt;p&gt;If set to {@literal false} the path within the current servlet mapping
+	 * is used instead if applicable (i.e. in the case of a prefix based Servlet
+	 * mapping such as &quot;/myServlet/*&quot;).
+	 * &lt;p&gt;By default this is set to &quot;false&quot;.
+	 */
+	public void setAlwaysUseFullPath(boolean alwaysUseFullPath) {
+<span class="nc" id="L97">		checkReadOnly();</span>
+<span class="nc" id="L98">		this.alwaysUseFullPath = alwaysUseFullPath;</span>
+<span class="nc" id="L99">	}</span>
+
+	/**
+	 * Whether the context path and request URI should be decoded -- both of
+	 * which are returned &lt;i&gt;undecoded&lt;/i&gt; by the Servlet API, in contrast to
+	 * the servlet path.
+	 * &lt;p&gt;Either the request encoding or the default Servlet spec encoding
+	 * (ISO-8859-1) is used when set to &quot;true&quot;.
+	 * &lt;p&gt;By default this is set to {@literal true}.
+	 * &lt;p&gt;&lt;strong&gt;Note:&lt;/strong&gt; Be aware the servlet path will not match when
+	 * compared to encoded paths. Therefore use of {@code urlDecode=false} is
+	 * not compatible with a prefix-based Servlet mapping and likewise implies
+	 * also setting {@code alwaysUseFullPath=true}.
+	 * @see #getServletPath
+	 * @see #getContextPath
+	 * @see #getRequestUri
+	 * @see WebUtils#DEFAULT_CHARACTER_ENCODING
+	 * @see jakarta.servlet.ServletRequest#getCharacterEncoding()
+	 * @see java.net.URLDecoder#decode(String, String)
+	 */
+	public void setUrlDecode(boolean urlDecode) {
+<span class="nc" id="L120">		checkReadOnly();</span>
+<span class="nc" id="L121">		this.urlDecode = urlDecode;</span>
+<span class="nc" id="L122">	}</span>
+
+	/**
+	 * Whether to decode the request URI when determining the lookup path.
+	 * @since 4.3.13
+	 */
+	public boolean isUrlDecode() {
+<span class="nc" id="L129">		return this.urlDecode;</span>
+	}
+
+	/**
+	 * Set if &quot;;&quot; (semicolon) content should be stripped from the request URI.
+	 * &lt;p&gt;Default is &quot;true&quot;.
+	 */
+	public void setRemoveSemicolonContent(boolean removeSemicolonContent) {
+<span class="nc" id="L137">		checkReadOnly();</span>
+<span class="nc" id="L138">		this.removeSemicolonContent = removeSemicolonContent;</span>
+<span class="nc" id="L139">	}</span>
+
+	/**
+	 * Whether configured to remove &quot;;&quot; (semicolon) content from the request URI.
+	 */
+	public boolean shouldRemoveSemicolonContent() {
+<span class="nc" id="L145">		return this.removeSemicolonContent;</span>
+	}
+
+	/**
+	 * Set the default character encoding to use for URL decoding.
+	 * Default is ISO-8859-1, according to the Servlet spec.
+	 * &lt;p&gt;If the request specifies a character encoding itself, the request
+	 * encoding will override this setting. This also allows for generically
+	 * overriding the character encoding in a filter that invokes the
+	 * {@code ServletRequest.setCharacterEncoding} method.
+	 * @param defaultEncoding the character encoding to use
+	 * @see #determineEncoding
+	 * @see jakarta.servlet.ServletRequest#getCharacterEncoding()
+	 * @see jakarta.servlet.ServletRequest#setCharacterEncoding(String)
+	 * @see WebUtils#DEFAULT_CHARACTER_ENCODING
+	 */
+	public void setDefaultEncoding(String defaultEncoding) {
+<span class="nc" id="L162">		checkReadOnly();</span>
+<span class="nc" id="L163">		this.defaultEncoding = defaultEncoding;</span>
+<span class="nc" id="L164">	}</span>
+
+	/**
+	 * Return the default character encoding to use for URL decoding.
+	 */
+	protected String getDefaultEncoding() {
+<span class="nc" id="L170">		return this.defaultEncoding;</span>
+	}
+
+	/**
+	 * Switch to read-only mode where further configuration changes are not allowed.
+	 */
+	private void setReadOnly() {
+<span class="nc" id="L177">		this.readOnly = true;</span>
+<span class="nc" id="L178">	}</span>
+
+	private void checkReadOnly() {
+<span class="nc bnc" id="L181" title="All 2 branches missed.">		Assert.isTrue(!this.readOnly, &quot;This instance cannot be modified&quot;);</span>
+<span class="nc" id="L182">	}</span>
+
+
+	/**
+	 * {@link #getLookupPathForRequest Resolve} the lookupPath and cache it in a
+	 * request attribute with the key {@link #PATH_ATTRIBUTE} for subsequent
+	 * access via {@link #getResolvedLookupPath(ServletRequest)}.
+	 * @param request the current request
+	 * @return the resolved path
+	 * @since 5.3
+	 */
+	public String resolveAndCacheLookupPath(HttpServletRequest request) {
+<span class="nc" id="L194">		String lookupPath = getLookupPathForRequest(request);</span>
+<span class="nc" id="L195">		request.setAttribute(PATH_ATTRIBUTE, lookupPath);</span>
+<span class="nc" id="L196">		return lookupPath;</span>
+	}
+
+	/**
+	 * Return a previously {@link #getLookupPathForRequest resolved} lookupPath.
+	 * @param request the current request
+	 * @return the previously resolved lookupPath
+	 * @throws IllegalArgumentException if the lookup path is not found
+	 * @since 5.3
+	 */
+	public static String getResolvedLookupPath(ServletRequest request) {
+<span class="nc" id="L207">		String lookupPath = (String) request.getAttribute(PATH_ATTRIBUTE);</span>
+<span class="nc" id="L208">		Assert.notNull(lookupPath, () -&gt; &quot;Expected lookupPath in request attribute \&quot;&quot; + PATH_ATTRIBUTE + &quot;\&quot;.&quot;);</span>
+<span class="nc" id="L209">		return lookupPath;</span>
+	}
+
+	/**
+	 * Return the mapping lookup path for the given request, within the current
+	 * servlet mapping if applicable, else within the web application.
+	 * &lt;p&gt;Detects include request URL if called within a RequestDispatcher include.
+	 * @param request current HTTP request
+	 * @return the lookup path
+	 * @see #getPathWithinServletMapping
+	 * @see #getPathWithinApplication
+	 */
+	public String getLookupPathForRequest(HttpServletRequest request) {
+<span class="nc" id="L222">		String pathWithinApp = getPathWithinApplication(request);</span>
+		// Always use full path within current servlet context?
+<span class="nc bnc" id="L224" title="All 4 branches missed.">		if (this.alwaysUseFullPath || ignoreServletPath(request)) {</span>
+<span class="nc" id="L225">			return pathWithinApp;</span>
+		}
+		// Else, use path within current servlet mapping if applicable
+<span class="nc" id="L228">		String rest = getPathWithinServletMapping(request, pathWithinApp);</span>
+<span class="nc bnc" id="L229" title="All 2 branches missed.">		if (StringUtils.hasLength(rest)) {</span>
+<span class="nc" id="L230">			return rest;</span>
+		}
+		else {
+<span class="nc" id="L233">			return pathWithinApp;</span>
+		}
+	}
+
+	/**
+	 * Whether we can ignore the servletPath and pathInfo for mapping purposes,
+	 * which is the case when we can establish that the Servlet is not mapped
+	 * by servletPath prefix.
+	 */
+	private boolean ignoreServletPath(HttpServletRequest request) {
+<span class="nc" id="L243">		HttpServletMapping mapping = (HttpServletMapping) request.getAttribute(RequestDispatcher.INCLUDE_MAPPING);</span>
+<span class="nc bnc" id="L244" title="All 2 branches missed.">		mapping = (mapping == null ? request.getHttpServletMapping() : mapping);</span>
+<span class="nc" id="L245">		MappingMatch match = mapping.getMappingMatch();</span>
+<span class="nc bnc" id="L246" title="All 6 branches missed.">		return (match != null &amp;&amp; (!match.equals(MappingMatch.PATH) || mapping.getPattern().equals(&quot;/*&quot;)));</span>
+	}
+
+	/**
+	 * Return the path within the servlet mapping for the given request,
+	 * i.e. the part of the request's URL beyond the part that called the servlet,
+	 * or &quot;&quot; if the whole URL has been used to identify the servlet.
+	 * @param request current HTTP request
+	 * @return the path within the servlet mapping, or &quot;&quot;
+	 * @see #getPathWithinServletMapping(HttpServletRequest, String)
+	 */
+	public String getPathWithinServletMapping(HttpServletRequest request) {
+<span class="nc" id="L258">		return getPathWithinServletMapping(request, getPathWithinApplication(request));</span>
+	}
+
+	/**
+	 * Return the path within the servlet mapping for the given request,
+	 * i.e. the part of the request's URL beyond the part that called the servlet,
+	 * or &quot;&quot; if the whole URL has been used to identify the servlet.
+	 * &lt;p&gt;Detects include request URL if called within a RequestDispatcher include.
+	 * &lt;p&gt;For example: servlet mapping = &quot;/*&quot;; request URI = &quot;/test/a&quot; &amp;rarr; &quot;/test/a&quot;.
+	 * &lt;p&gt;For example: servlet mapping = &quot;/&quot;; request URI = &quot;/test/a&quot; &amp;rarr; &quot;/test/a&quot;.
+	 * &lt;p&gt;For example: servlet mapping = &quot;/test/*&quot;; request URI = &quot;/test/a&quot; &amp;rarr; &quot;/a&quot;.
+	 * &lt;p&gt;For example: servlet mapping = &quot;/test&quot;; request URI = &quot;/test&quot; &amp;rarr; &quot;&quot;.
+	 * &lt;p&gt;For example: servlet mapping = &quot;/*.test&quot;; request URI = &quot;/a.test&quot; &amp;rarr; &quot;&quot;.
+	 * @param request current HTTP request
+	 * @param pathWithinApp a precomputed path within the application
+	 * @return the path within the servlet mapping, or &quot;&quot;
+	 * @since 5.2.9
+	 * @see #getLookupPathForRequest
+	 */
+	protected String getPathWithinServletMapping(HttpServletRequest request, String pathWithinApp) {
+<span class="nc" id="L278">		String servletPath = getServletPath(request);</span>
+<span class="nc" id="L279">		String sanitizedPathWithinApp = getSanitizedPath(pathWithinApp);</span>
+		String path;
+
+		// If the app container sanitized the servletPath, check against the sanitized version
+<span class="nc bnc" id="L283" title="All 2 branches missed.">		if (servletPath.contains(sanitizedPathWithinApp)) {</span>
+<span class="nc" id="L284">			path = getRemainingPath(sanitizedPathWithinApp, servletPath, false);</span>
+		}
+		else {
+<span class="nc" id="L287">			path = getRemainingPath(pathWithinApp, servletPath, false);</span>
+		}
+
+<span class="nc bnc" id="L290" title="All 2 branches missed.">		if (path != null) {</span>
+			// Normal case: URI contains servlet path.
+<span class="nc" id="L292">			return path;</span>
+		}
+		else {
+			// Special case: URI is different from servlet path.
+<span class="nc" id="L296">			String pathInfo = request.getPathInfo();</span>
+<span class="nc bnc" id="L297" title="All 2 branches missed.">			if (pathInfo != null) {</span>
+				// Use path info if available. Indicates index page within a servlet mapping?
+				// for example, with index page: URI=&quot;/&quot;, servletPath=&quot;/index.html&quot;
+<span class="nc" id="L300">				return pathInfo;</span>
+			}
+<span class="nc bnc" id="L302" title="All 2 branches missed.">			if (!this.urlDecode) {</span>
+				// No path info... (not mapped by prefix, nor by extension, nor &quot;/*&quot;)
+				// For the default servlet mapping (i.e. &quot;/&quot;), urlDecode=false can
+				// cause issues since getServletPath() returns a decoded path.
+				// If decoding pathWithinApp yields a match just use pathWithinApp.
+<span class="nc" id="L307">				path = getRemainingPath(decodeInternal(request, pathWithinApp), servletPath, false);</span>
+<span class="nc bnc" id="L308" title="All 2 branches missed.">				if (path != null) {</span>
+<span class="nc" id="L309">					return pathWithinApp;</span>
+				}
+			}
+			// Otherwise, use the full servlet path.
+<span class="nc" id="L313">			return servletPath;</span>
+		}
+	}
+
+	/**
+	 * Return the path within the web application for the given request.
+	 * &lt;p&gt;Detects include request URL if called within a RequestDispatcher include.
+	 * @param request current HTTP request
+	 * @return the path within the web application
+	 * @see #getLookupPathForRequest
+	 */
+	public String getPathWithinApplication(HttpServletRequest request) {
+<span class="nc" id="L325">		String contextPath = getContextPath(request);</span>
+<span class="nc" id="L326">		String requestUri = getRequestUri(request);</span>
+<span class="nc" id="L327">		String path = getRemainingPath(requestUri, contextPath, true);</span>
+<span class="nc bnc" id="L328" title="All 2 branches missed.">		if (path != null) {</span>
+			// Normal case: URI contains context path.
+<span class="nc bnc" id="L330" title="All 2 branches missed.">			return (StringUtils.hasText(path) ? path : &quot;/&quot;);</span>
+		}
+		else {
+<span class="nc" id="L333">			return requestUri;</span>
+		}
+	}
+
+	/**
+	 * Match the given &quot;mapping&quot; to the start of the &quot;requestUri&quot; and if there
+	 * is a match return the extra part. This method is needed because the
+	 * context path and the servlet path returned by the HttpServletRequest are
+	 * stripped of semicolon content unlike the requestUri.
+	 */
+	private @Nullable String getRemainingPath(String requestUri, String mapping, boolean ignoreCase) {
+<span class="nc" id="L344">		int index1 = 0;</span>
+<span class="nc" id="L345">		int index2 = 0;</span>
+<span class="nc bnc" id="L346" title="All 4 branches missed.">		for (; (index1 &lt; requestUri.length()) &amp;&amp; (index2 &lt; mapping.length()); index1++, index2++) {</span>
+<span class="nc" id="L347">			char c1 = requestUri.charAt(index1);</span>
+<span class="nc" id="L348">			char c2 = mapping.charAt(index2);</span>
+<span class="nc bnc" id="L349" title="All 2 branches missed.">			if (c1 == ';') {</span>
+<span class="nc" id="L350">				index1 = requestUri.indexOf('/', index1);</span>
+<span class="nc bnc" id="L351" title="All 2 branches missed.">				if (index1 == -1) {</span>
+<span class="nc" id="L352">					return null;</span>
+				}
+<span class="nc" id="L354">				c1 = requestUri.charAt(index1);</span>
+			}
+<span class="nc bnc" id="L356" title="All 6 branches missed.">			if (c1 == c2 || (ignoreCase &amp;&amp; (Character.toLowerCase(c1) == Character.toLowerCase(c2)))) {</span>
+<span class="nc" id="L357">				continue;</span>
+			}
+<span class="nc" id="L359">			return null;</span>
+		}
+<span class="nc bnc" id="L361" title="All 2 branches missed.">		if (index2 != mapping.length()) {</span>
+<span class="nc" id="L362">			return null;</span>
+		}
+<span class="nc bnc" id="L364" title="All 2 branches missed.">		else if (index1 == requestUri.length()) {</span>
+<span class="nc" id="L365">			return &quot;&quot;;</span>
+		}
+<span class="nc bnc" id="L367" title="All 2 branches missed.">		else if (requestUri.charAt(index1) == ';') {</span>
+<span class="nc" id="L368">			index1 = requestUri.indexOf('/', index1);</span>
+		}
+<span class="nc bnc" id="L370" title="All 2 branches missed.">		return (index1 != -1 ? requestUri.substring(index1) : &quot;&quot;);</span>
+	}
+
+	/**
+	 * Sanitize the given path. Uses the following rules:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;replace all &quot;//&quot; by &quot;/&quot;&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 */
+	private static String getSanitizedPath(final String path) {
+<span class="nc" id="L380">		int start = path.indexOf(&quot;//&quot;);</span>
+<span class="nc bnc" id="L381" title="All 2 branches missed.">		if (start == -1) {</span>
+<span class="nc" id="L382">			return path;</span>
+		}
+<span class="nc" id="L384">		char[] content = path.toCharArray();</span>
+<span class="nc" id="L385">		int slowIndex = start;</span>
+<span class="nc bnc" id="L386" title="All 2 branches missed.">		for (int fastIndex = start + 1; fastIndex &lt; content.length; fastIndex++) {</span>
+<span class="nc bnc" id="L387" title="All 4 branches missed.">			if (content[fastIndex] != '/' || content[slowIndex] != '/') {</span>
+<span class="nc" id="L388">				content[++slowIndex] = content[fastIndex];</span>
+			}
+		}
+<span class="nc" id="L391">		return new String(content, 0, slowIndex + 1);</span>
+	}
+
+	/**
+	 * Return the request URI for the given request, detecting an include request
+	 * URL if called within a RequestDispatcher include.
+	 * &lt;p&gt;As the value returned by {@code request.getRequestURI()} is &lt;i&gt;not&lt;/i&gt;
+	 * decoded by the servlet container, this method will decode it.
+	 * &lt;p&gt;The URI that the web container resolves &lt;i&gt;should&lt;/i&gt; be correct, but some
+	 * containers like JBoss/Jetty incorrectly include &quot;;&quot; strings like &quot;;jsessionid&quot;
+	 * in the URI. This method cuts off such incorrect appendices.
+	 * @param request current HTTP request
+	 * @return the request URI
+	 */
+	public String getRequestUri(HttpServletRequest request) {
+<span class="nc" id="L406">		String uri = (String) request.getAttribute(WebUtils.INCLUDE_REQUEST_URI_ATTRIBUTE);</span>
+<span class="nc bnc" id="L407" title="All 2 branches missed.">		if (uri == null) {</span>
+<span class="nc" id="L408">			uri = request.getRequestURI();</span>
+		}
+<span class="nc" id="L410">		return decodeAndCleanUriString(request, uri);</span>
+	}
+
+	/**
+	 * Return the context path for the given request, detecting an include request
+	 * URL if called within a RequestDispatcher include.
+	 * &lt;p&gt;As the value returned by {@code request.getContextPath()} is &lt;i&gt;not&lt;/i&gt;
+	 * decoded by the servlet container, this method will decode it.
+	 * @param request current HTTP request
+	 * @return the context path
+	 */
+	public String getContextPath(HttpServletRequest request) {
+<span class="nc" id="L422">		String contextPath = (String) request.getAttribute(WebUtils.INCLUDE_CONTEXT_PATH_ATTRIBUTE);</span>
+<span class="nc bnc" id="L423" title="All 2 branches missed.">		if (contextPath == null) {</span>
+<span class="nc" id="L424">			contextPath = request.getContextPath();</span>
+		}
+<span class="nc bnc" id="L426" title="All 2 branches missed.">		if (StringUtils.matchesCharacter(contextPath, '/')) {</span>
+			// Invalid case, but happens for includes on Jetty: silently adapt it.
+<span class="nc" id="L428">			contextPath = &quot;&quot;;</span>
+		}
+<span class="nc" id="L430">		return decodeRequestString(request, contextPath);</span>
+	}
+
+	/**
+	 * Return the servlet path for the given request, regarding an include request
+	 * URL if called within a RequestDispatcher include.
+	 * &lt;p&gt;As the value returned by {@code request.getServletPath()} is already
+	 * decoded by the servlet container, this method will not attempt to decode it.
+	 * @param request current HTTP request
+	 * @return the servlet path
+	 */
+	public String getServletPath(HttpServletRequest request) {
+<span class="nc" id="L442">		String servletPath = (String) request.getAttribute(WebUtils.INCLUDE_SERVLET_PATH_ATTRIBUTE);</span>
+<span class="nc bnc" id="L443" title="All 2 branches missed.">		if (servletPath == null) {</span>
+<span class="nc" id="L444">			servletPath = request.getServletPath();</span>
+		}
+<span class="nc bnc" id="L446" title="All 6 branches missed.">		if (servletPath.length() &gt; 1 &amp;&amp; servletPath.endsWith(&quot;/&quot;) &amp;&amp; shouldRemoveTrailingServletPathSlash(request)) {</span>
+			// On WebSphere, in non-compliant mode, for a &quot;/foo/&quot; case that would be &quot;/foo&quot;
+			// on all other servlet containers: removing trailing slash, proceeding with
+			// that remaining slash as final lookup path...
+<span class="nc" id="L450">			servletPath = servletPath.substring(0, servletPath.length() - 1);</span>
+		}
+<span class="nc" id="L452">		return servletPath;</span>
+	}
+
+
+	/**
+	 * Return the request URI for the given request. If this is a forwarded request,
+	 * correctly resolves to the request URI of the original request.
+	 */
+	public String getOriginatingRequestUri(HttpServletRequest request) {
+<span class="nc" id="L461">		String uri = (String) request.getAttribute(WEBSPHERE_URI_ATTRIBUTE);</span>
+<span class="nc bnc" id="L462" title="All 2 branches missed.">		if (uri == null) {</span>
+<span class="nc" id="L463">			uri = (String) request.getAttribute(WebUtils.FORWARD_REQUEST_URI_ATTRIBUTE);</span>
+<span class="nc bnc" id="L464" title="All 2 branches missed.">			if (uri == null) {</span>
+<span class="nc" id="L465">				uri = request.getRequestURI();</span>
+			}
+		}
+<span class="nc" id="L468">		return decodeAndCleanUriString(request, uri);</span>
+	}
+
+	/**
+	 * Return the context path for the given request, detecting an include request
+	 * URL if called within a RequestDispatcher include.
+	 * &lt;p&gt;As the value returned by {@code request.getContextPath()} is &lt;i&gt;not&lt;/i&gt;
+	 * decoded by the servlet container, this method will decode it.
+	 * @param request current HTTP request
+	 * @return the context path
+	 */
+	public String getOriginatingContextPath(HttpServletRequest request) {
+<span class="nc" id="L480">		String contextPath = (String) request.getAttribute(WebUtils.FORWARD_CONTEXT_PATH_ATTRIBUTE);</span>
+<span class="nc bnc" id="L481" title="All 2 branches missed.">		if (contextPath == null) {</span>
+<span class="nc" id="L482">			contextPath = request.getContextPath();</span>
+		}
+<span class="nc" id="L484">		return decodeRequestString(request, contextPath);</span>
+	}
+
+	/**
+	 * Return the servlet path for the given request, detecting an include request
+	 * URL if called within a RequestDispatcher include.
+	 * @param request current HTTP request
+	 * @return the servlet path
+	 */
+	public String getOriginatingServletPath(HttpServletRequest request) {
+<span class="nc" id="L494">		String servletPath = (String) request.getAttribute(WebUtils.FORWARD_SERVLET_PATH_ATTRIBUTE);</span>
+<span class="nc bnc" id="L495" title="All 2 branches missed.">		if (servletPath == null) {</span>
+<span class="nc" id="L496">			servletPath = request.getServletPath();</span>
+		}
+<span class="nc" id="L498">		return servletPath;</span>
+	}
+
+	/**
+	 * Return the query string part of the given request's URL. If this is a forwarded request,
+	 * correctly resolves to the query string of the original request.
+	 * @param request current HTTP request
+	 * @return the query string
+	 */
+	public String getOriginatingQueryString(HttpServletRequest request) {
+<span class="nc bnc" id="L508" title="All 2 branches missed.">		if ((request.getAttribute(WebUtils.FORWARD_REQUEST_URI_ATTRIBUTE) != null) ||</span>
+<span class="nc bnc" id="L509" title="All 2 branches missed.">				(request.getAttribute(WebUtils.ERROR_REQUEST_URI_ATTRIBUTE) != null)) {</span>
+<span class="nc" id="L510">			return (String) request.getAttribute(WebUtils.FORWARD_QUERY_STRING_ATTRIBUTE);</span>
+		}
+		else {
+<span class="nc" id="L513">			return request.getQueryString();</span>
+		}
+	}
+
+	/**
+	 * Decode the supplied URI string and strips any extraneous portion after a ';'.
+	 */
+	private String decodeAndCleanUriString(HttpServletRequest request, String uri) {
+<span class="nc" id="L521">		uri = removeSemicolonContent(uri);</span>
+<span class="nc" id="L522">		uri = decodeRequestString(request, uri);</span>
+<span class="nc" id="L523">		uri = getSanitizedPath(uri);</span>
+<span class="nc" id="L524">		return uri;</span>
+	}
+
+	/**
+	 * Decode the given source string with a URLDecoder. The encoding will be taken
+	 * from the request, falling back to the default &quot;ISO-8859-1&quot;.
+	 * &lt;p&gt;The default implementation uses {@code URLDecoder.decode(input, enc)}.
+	 * @param request current HTTP request
+	 * @param source the String to decode
+	 * @return the decoded String
+	 * @see WebUtils#DEFAULT_CHARACTER_ENCODING
+	 * @see jakarta.servlet.ServletRequest#getCharacterEncoding
+	 * @see java.net.URLDecoder#decode(String, String)
+	 * @see java.net.URLDecoder#decode(String)
+	 */
+	public String decodeRequestString(HttpServletRequest request, String source) {
+<span class="nc bnc" id="L540" title="All 2 branches missed.">		if (this.urlDecode) {</span>
+<span class="nc" id="L541">			return decodeInternal(request, source);</span>
+		}
+<span class="nc" id="L543">		return source;</span>
+	}
+
+	@SuppressWarnings(&quot;deprecation&quot;)
+	private String decodeInternal(HttpServletRequest request, String source) {
+<span class="nc" id="L548">		String enc = determineEncoding(request);</span>
+		try {
+<span class="nc" id="L550">			return UriUtils.decode(source, enc);</span>
+		}
+<span class="nc" id="L552">		catch (UnsupportedCharsetException ex) {</span>
+<span class="nc bnc" id="L553" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L554">				logger.debug(&quot;Could not decode request string [&quot; + source + &quot;] with encoding '&quot; + enc +</span>
+<span class="nc" id="L555">						&quot;': falling back to platform default encoding; exception message: &quot; + ex.getMessage());</span>
+			}
+<span class="nc" id="L557">			return URLDecoder.decode(source);</span>
+		}
+	}
+
+	/**
+	 * Determine the encoding for the given request.
+	 * Can be overridden in subclasses.
+	 * &lt;p&gt;The default implementation checks the request encoding,
+	 * falling back to the default encoding specified for this resolver.
+	 * @param request current HTTP request
+	 * @return the encoding for the request (never {@code null})
+	 * @see jakarta.servlet.ServletRequest#getCharacterEncoding()
+	 * @see #setDefaultEncoding
+	 */
+	protected String determineEncoding(HttpServletRequest request) {
+<span class="nc" id="L572">		String enc = request.getCharacterEncoding();</span>
+<span class="nc bnc" id="L573" title="All 2 branches missed.">		if (enc == null) {</span>
+<span class="nc" id="L574">			enc = getDefaultEncoding();</span>
+		}
+<span class="nc" id="L576">		return enc;</span>
+	}
+
+	/**
+	 * Remove &quot;;&quot; (semicolon) content from the given request URI if the
+	 * {@linkplain #setRemoveSemicolonContent removeSemicolonContent}
+	 * property is set to &quot;true&quot;. Note that &quot;jsessionid&quot; is always removed.
+	 * @param requestUri the request URI string to remove &quot;;&quot; content from
+	 * @return the updated URI string
+	 */
+	public String removeSemicolonContent(String requestUri) {
+<span class="nc bnc" id="L587" title="All 2 branches missed.">		return (this.removeSemicolonContent ?</span>
+<span class="nc" id="L588">				removeSemicolonContentInternal(requestUri) : removeJsessionid(requestUri));</span>
+	}
+
+	private static String removeSemicolonContentInternal(String requestUri) {
+<span class="nc" id="L592">		int semicolonIndex = requestUri.indexOf(';');</span>
+<span class="nc bnc" id="L593" title="All 2 branches missed.">		if (semicolonIndex == -1) {</span>
+<span class="nc" id="L594">			return requestUri;</span>
+		}
+<span class="nc" id="L596">		StringBuilder sb = new StringBuilder(requestUri);</span>
+<span class="nc bnc" id="L597" title="All 2 branches missed.">		while (semicolonIndex != -1) {</span>
+<span class="nc" id="L598">			int slashIndex = sb.indexOf(&quot;/&quot;, semicolonIndex + 1);</span>
+<span class="nc bnc" id="L599" title="All 2 branches missed.">			if (slashIndex == -1) {</span>
+<span class="nc" id="L600">				return sb.substring(0, semicolonIndex);</span>
+			}
+<span class="nc" id="L602">			sb.delete(semicolonIndex, slashIndex);</span>
+<span class="nc" id="L603">			semicolonIndex = sb.indexOf(&quot;;&quot;, semicolonIndex);</span>
+<span class="nc" id="L604">		}</span>
+<span class="nc" id="L605">		return sb.toString();</span>
+	}
+
+	private String removeJsessionid(String requestUri) {
+<span class="nc" id="L609">		String key = &quot;;jsessionid=&quot;;</span>
+<span class="nc" id="L610">		int index = requestUri.toLowerCase(Locale.ROOT).indexOf(key);</span>
+<span class="nc bnc" id="L611" title="All 2 branches missed.">		if (index == -1) {</span>
+<span class="nc" id="L612">			return requestUri;</span>
+		}
+<span class="nc" id="L614">		String start = requestUri.substring(0, index);</span>
+<span class="nc bnc" id="L615" title="All 2 branches missed.">		for (int i = index + key.length(); i &lt; requestUri.length(); i++) {</span>
+<span class="nc" id="L616">			char c = requestUri.charAt(i);</span>
+<span class="nc bnc" id="L617" title="All 4 branches missed.">			if (c == ';' || c == '/') {</span>
+<span class="nc" id="L618">				return start + requestUri.substring(i);</span>
+			}
+		}
+<span class="nc" id="L621">		return start;</span>
+	}
+
+	/**
+	 * Decode the given URI path variables via {@link #decodeRequestString} unless
+	 * {@link #setUrlDecode} is set to {@code true} in which case it is assumed
+	 * the URL path from which the variables were extracted is already decoded
+	 * through a call to {@link #getLookupPathForRequest(HttpServletRequest)}.
+	 * @param request current HTTP request
+	 * @param vars the URI variables extracted from the URL path
+	 * @return the same Map or a new Map instance
+	 */
+	public Map&lt;String, String&gt; decodePathVariables(HttpServletRequest request, Map&lt;String, String&gt; vars) {
+<span class="nc bnc" id="L634" title="All 2 branches missed.">		if (this.urlDecode) {</span>
+<span class="nc" id="L635">			return vars;</span>
+		}
+		else {
+<span class="nc" id="L638">			Map&lt;String, String&gt; decodedVars = CollectionUtils.newLinkedHashMap(vars.size());</span>
+<span class="nc" id="L639">			vars.forEach((key, value) -&gt; decodedVars.put(key, decodeInternal(request, value)));</span>
+<span class="nc" id="L640">			return decodedVars;</span>
+		}
+	}
+
+	/**
+	 * Decode the given matrix variables via {@link #decodeRequestString} unless
+	 * {@link #setUrlDecode} is set to {@code true} in which case it is assumed
+	 * the URL path from which the variables were extracted is already decoded
+	 * through a call to {@link #getLookupPathForRequest(HttpServletRequest)}.
+	 * @param request current HTTP request
+	 * @param vars the URI variables extracted from the URL path
+	 * @return the same Map or a new Map instance
+	 */
+	public MultiValueMap&lt;String, String&gt; decodeMatrixVariables(
+			HttpServletRequest request, MultiValueMap&lt;String, String&gt; vars) {
+
+<span class="nc bnc" id="L656" title="All 2 branches missed.">		if (this.urlDecode) {</span>
+<span class="nc" id="L657">			return vars;</span>
+		}
+		else {
+<span class="nc" id="L660">			MultiValueMap&lt;String, String&gt; decodedVars = new LinkedMultiValueMap&lt;&gt;(vars.size());</span>
+<span class="nc" id="L661">			vars.forEach((key, values) -&gt; {</span>
+<span class="nc bnc" id="L662" title="All 2 branches missed.">				for (String value : values) {</span>
+<span class="nc" id="L663">					decodedVars.add(key, decodeInternal(request, value));</span>
+<span class="nc" id="L664">				}</span>
+<span class="nc" id="L665">			});</span>
+<span class="nc" id="L666">			return decodedVars;</span>
+		}
+	}
+
+	private boolean shouldRemoveTrailingServletPathSlash(HttpServletRequest request) {
+<span class="nc bnc" id="L671" title="All 2 branches missed.">		if (request.getAttribute(WEBSPHERE_URI_ATTRIBUTE) == null) {</span>
+			// Regular servlet container: behaves as expected in any case,
+			// so the trailing slash is the result of a &quot;/&quot; url-pattern mapping.
+			// Don't remove that slash.
+<span class="nc" id="L675">			return false;</span>
+		}
+<span class="nc" id="L677">		Boolean flagToUse = websphereComplianceFlag;</span>
+<span class="nc bnc" id="L678" title="All 2 branches missed.">		if (flagToUse == null) {</span>
+<span class="nc" id="L679">			ClassLoader classLoader = UrlPathHelper.class.getClassLoader();</span>
+<span class="nc" id="L680">			String className = &quot;com.ibm.ws.webcontainer.WebContainer&quot;;</span>
+<span class="nc" id="L681">			String methodName = &quot;getWebContainerProperties&quot;;</span>
+<span class="nc" id="L682">			String propName = &quot;com.ibm.ws.webcontainer.removetrailingservletpathslash&quot;;</span>
+<span class="nc" id="L683">			boolean flag = false;</span>
+			try {
+<span class="nc" id="L685">				Class&lt;?&gt; cl = classLoader.loadClass(className);</span>
+<span class="nc" id="L686">				Properties prop = (Properties) cl.getMethod(methodName).invoke(null);</span>
+<span class="nc" id="L687">				flag = Boolean.parseBoolean(prop.getProperty(propName));</span>
+			}
+<span class="nc" id="L689">			catch (Throwable ex) {</span>
+<span class="nc bnc" id="L690" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L691">					logger.debug(&quot;Could not introspect WebSphere web container properties: &quot; + ex);</span>
+				}
+<span class="nc" id="L693">			}</span>
+<span class="nc" id="L694">			flagToUse = flag;</span>
+<span class="nc" id="L695">			websphereComplianceFlag = flag;</span>
+		}
+		// Don't bother if WebSphere is configured to be fully Servlet compliant.
+		// However, if it is not compliant, do remove the improper trailing slash!
+<span class="nc bnc" id="L699" title="All 2 branches missed.">		return !flagToUse;</span>
+	}
+
+
+	/**
+	 * Shared, read-only instance with defaults. The following apply:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;{@code alwaysUseFullPath=false}
+	 * &lt;li&gt;{@code urlDecode=true}
+	 * &lt;li&gt;{@code removeSemicolon=true}
+	 * &lt;li&gt;{@code defaultEncoding=}{@link WebUtils#DEFAULT_CHARACTER_ENCODING}
+	 * &lt;/ul&gt;
+	 */
+<span class="nc" id="L712">	public static final UrlPathHelper defaultInstance = new UrlPathHelper();</span>
+
+	static {
+<span class="nc" id="L715">		defaultInstance.setReadOnly();</span>
+	}
+
+
+	/**
+	 * Shared, read-only instance for the full, encoded path. The following apply:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;{@code alwaysUseFullPath=true}
+	 * &lt;li&gt;{@code urlDecode=false}
+	 * &lt;li&gt;{@code removeSemicolon=false}
+	 * &lt;li&gt;{@code defaultEncoding=}{@link WebUtils#DEFAULT_CHARACTER_ENCODING}
+	 * &lt;/ul&gt;
+	 */
+<span class="nc" id="L728">	public static final UrlPathHelper rawPathInstance = new UrlPathHelper() {</span>
+
+		@Override
+		public String removeSemicolonContent(String requestUri) {
+<span class="nc" id="L732">			return requestUri;</span>
+		}
+	};
+
+	static {
+<span class="nc" id="L737">		rawPathInstance.setAlwaysUseFullPath(true);</span>
+<span class="nc" id="L738">		rawPathInstance.setUrlDecode(false);</span>
+<span class="nc" id="L739">		rawPathInstance.setRemoveSemicolonContent(false);</span>
+<span class="nc" id="L740">		rawPathInstance.setReadOnly();</span>
+<span class="nc" id="L741">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

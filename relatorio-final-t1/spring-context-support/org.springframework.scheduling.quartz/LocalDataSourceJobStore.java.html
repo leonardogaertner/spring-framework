@@ -1,0 +1,186 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>LocalDataSourceJobStore.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-context-support</a> &gt; <a href="index.source.html" class="el_package">org.springframework.scheduling.quartz</a> &gt; <span class="el_source">LocalDataSourceJobStore.java</span></div><h1>LocalDataSourceJobStore.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.scheduling.quartz;
+
+import java.sql.Connection;
+import java.sql.DatabaseMetaData;
+import java.sql.SQLException;
+import java.util.Locale;
+
+import javax.sql.DataSource;
+
+import org.jspecify.annotations.Nullable;
+import org.quartz.SchedulerConfigException;
+import org.quartz.impl.jdbcjobstore.JobStoreCMT;
+import org.quartz.impl.jdbcjobstore.SimpleSemaphore;
+import org.quartz.spi.ClassLoadHelper;
+import org.quartz.spi.SchedulerSignaler;
+import org.quartz.utils.ConnectionProvider;
+import org.quartz.utils.DBConnectionManager;
+
+import org.springframework.jdbc.datasource.DataSourceUtils;
+import org.springframework.jdbc.support.JdbcUtils;
+import org.springframework.jdbc.support.MetaDataAccessException;
+import org.springframework.util.Assert;
+
+/**
+ * Subclass of Quartz's {@link JobStoreCMT} class that delegates to a Spring-managed
+ * {@link DataSource} instead of using a Quartz-managed JDBC connection pool.
+ * This JobStore will be used if SchedulerFactoryBean's &quot;dataSource&quot; property is set.
+ * You may also configure it explicitly, possibly as a custom subclass of this
+ * {@code LocalDataSourceJobStore} or as an equivalent {@code JobStoreCMT} variant.
+ *
+ * &lt;p&gt;Supports both transactional and non-transactional DataSource access.
+ * With a non-XA DataSource and local Spring transactions, a single DataSource
+ * argument is sufficient. In case of an XA DataSource and global JTA transactions,
+ * SchedulerFactoryBean's &quot;nonTransactionalDataSource&quot; property should be set,
+ * passing in a non-XA DataSource that will not participate in global transactions.
+ *
+ * &lt;p&gt;Operations performed by this JobStore will properly participate in any
+ * kind of Spring-managed transaction, as it uses Spring's DataSourceUtils
+ * connection handling methods that are aware of a current transaction.
+ *
+ * &lt;p&gt;Note that all Quartz Scheduler operations that affect the persistent
+ * job store should usually be performed within active transactions,
+ * as they assume to get proper locks etc.
+ *
+ * @author Juergen Hoeller
+ * @since 1.1
+ * @see SchedulerFactoryBean#setDataSource
+ * @see SchedulerFactoryBean#setNonTransactionalDataSource
+ * @see SchedulerFactoryBean#getConfigTimeDataSource()
+ * @see SchedulerFactoryBean#getConfigTimeNonTransactionalDataSource()
+ * @see org.springframework.jdbc.datasource.DataSourceUtils#doGetConnection
+ * @see org.springframework.jdbc.datasource.DataSourceUtils#releaseConnection
+ */
+@SuppressWarnings(&quot;unchecked&quot;)  // due to a warning in Quartz 2.2's JobStoreCMT
+<span class="fc" id="L71">public class LocalDataSourceJobStore extends JobStoreCMT {</span>
+
+	/**
+	 * Name used for the transactional ConnectionProvider for Quartz.
+	 * This provider will delegate to the local Spring-managed DataSource.
+	 * @see org.quartz.utils.DBConnectionManager#addConnectionProvider
+	 * @see SchedulerFactoryBean#setDataSource
+	 */
+	public static final String TX_DATA_SOURCE_PREFIX = &quot;springTxDataSource.&quot;;
+
+	/**
+	 * Name used for the non-transactional ConnectionProvider for Quartz.
+	 * This provider will delegate to the local Spring-managed DataSource.
+	 * @see org.quartz.utils.DBConnectionManager#addConnectionProvider
+	 * @see SchedulerFactoryBean#setDataSource
+	 */
+	public static final String NON_TX_DATA_SOURCE_PREFIX = &quot;springNonTxDataSource.&quot;;
+
+
+	private @Nullable DataSource dataSource;
+
+	private @Nullable DataSource nonTransactionalDataSource;
+
+
+	@Override
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	public void initialize(ClassLoadHelper loadHelper, SchedulerSignaler signaler) throws SchedulerConfigException {
+		// Absolutely needs thread-bound DataSource to initialize.
+<span class="fc" id="L99">		this.dataSource = SchedulerFactoryBean.getConfigTimeDataSource();</span>
+<span class="pc bpc" id="L100" title="1 of 2 branches missed.">		if (this.dataSource == null) {</span>
+<span class="nc" id="L101">			throw new SchedulerConfigException(&quot;No local DataSource found for configuration - &quot; +</span>
+					&quot;'dataSource' property must be set on SchedulerFactoryBean&quot;);
+		}
+		// Non-transactional DataSource is optional: fall back to default
+		// DataSource if not explicitly specified.
+<span class="fc" id="L106">		this.nonTransactionalDataSource = SchedulerFactoryBean.getConfigTimeNonTransactionalDataSource();</span>
+
+		// Configure connection settings for Quartz.
+<span class="fc" id="L109">		setDataSource(TX_DATA_SOURCE_PREFIX + getInstanceName());</span>
+<span class="fc" id="L110">		setNonManagedTXDataSource(NON_TX_DATA_SOURCE_PREFIX + getInstanceName());</span>
+<span class="fc" id="L111">		setDontSetAutoCommitFalse(true);</span>
+
+<span class="fc" id="L113">		initializeConnectionProvider();</span>
+
+		// No, if HSQL is the platform, we really don't want to use locks...
+		try {
+<span class="fc" id="L117">			String productName = JdbcUtils.extractDatabaseMetaData(this.dataSource,</span>
+					DatabaseMetaData::getDatabaseProductName);
+<span class="fc" id="L119">			productName = JdbcUtils.commonDatabaseName(productName);</span>
+<span class="pc bpc" id="L120" title="2 of 4 branches missed.">			if (productName != null &amp;&amp; productName.toLowerCase(Locale.ROOT).contains(&quot;hsql&quot;)) {</span>
+<span class="fc" id="L121">				setUseDBLocks(false);</span>
+<span class="fc" id="L122">				setLockHandler(new SimpleSemaphore());</span>
+			}
+		}
+<span class="nc" id="L125">		catch (MetaDataAccessException ex) {</span>
+<span class="nc" id="L126">			logWarnIfNonZero(1, &quot;Could not detect database type. Assuming locks can be taken.&quot;);</span>
+<span class="fc" id="L127">		}</span>
+
+<span class="fc" id="L129">		super.initialize(loadHelper, signaler);</span>
+<span class="fc" id="L130">	}</span>
+
+	void initializeConnectionProvider() {
+<span class="fc" id="L133">		final DataSource dataSourceToUse = this.dataSource;</span>
+<span class="pc bpc" id="L134" title="1 of 2 branches missed.">		Assert.state(dataSourceToUse != null, &quot;DataSource must not be null&quot;);</span>
+		final DataSource nonTxDataSourceToUse =
+<span class="pc bpc" id="L136" title="1 of 2 branches missed.">				(this.nonTransactionalDataSource != null ? this.nonTransactionalDataSource : dataSourceToUse);</span>
+
+		// Register transactional ConnectionProvider for Quartz.
+<span class="fc" id="L139">		DBConnectionManager.getInstance().addConnectionProvider(</span>
+<span class="fc" id="L140">				TX_DATA_SOURCE_PREFIX + getInstanceName(),</span>
+<span class="fc" id="L141">				new ConnectionProvider() {</span>
+					@Override
+					public Connection getConnection() throws SQLException {
+						// Return a transactional Connection, if any.
+<span class="fc" id="L145">						return DataSourceUtils.doGetConnection(dataSourceToUse);</span>
+					}
+					@Override
+					public void shutdown() {
+						// Do nothing - a Spring-managed DataSource has its own lifecycle.
+<span class="fc" id="L150">					}</span>
+					@Override
+					public void initialize() {
+						// Do nothing - a Spring-managed DataSource has its own lifecycle.
+<span class="nc" id="L154">					}</span>
+				}
+		);
+
+		// Register non-transactional ConnectionProvider for Quartz.
+<span class="fc" id="L159">		DBConnectionManager.getInstance().addConnectionProvider(</span>
+<span class="fc" id="L160">				NON_TX_DATA_SOURCE_PREFIX + getInstanceName(),</span>
+<span class="fc" id="L161">				new ConnectionProvider() {</span>
+					@Override
+					public Connection getConnection() throws SQLException {
+						// Always return a non-transactional Connection.
+<span class="fc" id="L165">						return nonTxDataSourceToUse.getConnection();</span>
+					}
+					@Override
+					public void shutdown() {
+						// Do nothing - a Spring-managed DataSource has its own lifecycle.
+<span class="fc" id="L170">					}</span>
+					@Override
+					public void initialize() {
+						// Do nothing - a Spring-managed DataSource has its own lifecycle.
+<span class="nc" id="L174">					}</span>
+				}
+		);
+<span class="fc" id="L177">	}</span>
+
+	@Override
+	protected void closeConnection(Connection con) {
+		// Will work for transactional and non-transactional connections.
+<span class="fc" id="L182">		DataSourceUtils.releaseConnection(con, this.dataSource);</span>
+<span class="fc" id="L183">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

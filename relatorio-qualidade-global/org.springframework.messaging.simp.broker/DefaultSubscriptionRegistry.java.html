@@ -1,0 +1,546 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DefaultSubscriptionRegistry.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.simp.broker</a> &gt; <span class="el_source">DefaultSubscriptionRegistry.java</span></div><h1>DefaultSubscriptionRegistry.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.simp.broker;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.expression.EvaluationContext;
+import org.springframework.expression.Expression;
+import org.springframework.expression.ExpressionParser;
+import org.springframework.expression.PropertyAccessor;
+import org.springframework.expression.TypedValue;
+import org.springframework.expression.spel.SpelEvaluationException;
+import org.springframework.expression.spel.standard.SpelExpressionParser;
+import org.springframework.expression.spel.support.SimpleEvaluationContext;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageHeaders;
+import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
+import org.springframework.messaging.support.MessageHeaderAccessor;
+import org.springframework.messaging.support.NativeMessageHeaderAccessor;
+import org.springframework.util.AntPathMatcher;
+import org.springframework.util.Assert;
+import org.springframework.util.LinkedMultiValueMap;
+import org.springframework.util.MultiValueMap;
+import org.springframework.util.PathMatcher;
+import org.springframework.util.StringUtils;
+
+/**
+ * Implementation of {@link SubscriptionRegistry} that stores subscriptions
+ * in memory and uses a {@link org.springframework.util.PathMatcher PathMatcher}
+ * for matching destinations.
+ *
+ * &lt;p&gt;This class also supports an optional &lt;em&gt;selector&lt;/em&gt; header on subscription
+ * messages with Spring Expression Language (SpEL) expressions evaluated against
+ * the headers to filter out messages in addition to destination matching. As of
+ * Spring Framework 6.1, the SpEL support is disabled by default, but it can be
+ * enabled by setting a {@linkplain #setSelectorHeaderName selector header name}.
+ *
+ * @author Rossen Stoyanchev
+ * @author Sebastien Deleuze
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 4.0
+ */
+<span class="fc" id="L70">public class DefaultSubscriptionRegistry extends AbstractSubscriptionRegistry {</span>
+
+	/** Default maximum number of entries for the destination cache: 1024. */
+	public static final int DEFAULT_CACHE_LIMIT = 1024;
+
+	/** Static evaluation context to reuse. */
+<span class="fc" id="L76">	private static final EvaluationContext messageEvalContext =</span>
+<span class="fc" id="L77">			SimpleEvaluationContext.forPropertyAccessors(new SimpMessageHeaderPropertyAccessor()).build();</span>
+
+
+<span class="fc" id="L80">	private PathMatcher pathMatcher = new AntPathMatcher();</span>
+
+<span class="fc" id="L82">	private int cacheLimit = DEFAULT_CACHE_LIMIT;</span>
+
+	private @Nullable String selectorHeaderName;
+
+	private volatile boolean selectorHeaderInUse;
+
+<span class="fc" id="L88">	private final ExpressionParser expressionParser = new SpelExpressionParser();</span>
+
+<span class="fc" id="L90">	private final DestinationCache destinationCache = new DestinationCache();</span>
+
+<span class="fc" id="L92">	private final SessionRegistry sessionRegistry = new SessionRegistry();</span>
+
+
+	/**
+	 * Specify the {@link PathMatcher} to use.
+	 */
+	public void setPathMatcher(PathMatcher pathMatcher) {
+<span class="fc" id="L99">		this.pathMatcher = pathMatcher;</span>
+<span class="fc" id="L100">	}</span>
+
+	/**
+	 * Return the configured {@link PathMatcher}.
+	 */
+	public PathMatcher getPathMatcher() {
+<span class="fc" id="L106">		return this.pathMatcher;</span>
+	}
+
+	/**
+	 * Specify the maximum number of entries for the resolved destination cache.
+	 * Default is 1024.
+	 */
+	public void setCacheLimit(int cacheLimit) {
+<span class="fc" id="L114">		this.cacheLimit = cacheLimit;</span>
+<span class="fc" id="L115">		this.destinationCache.ensureCacheLimit();</span>
+<span class="fc" id="L116">	}</span>
+
+	/**
+	 * Return the maximum number of entries for the resolved destination cache.
+	 */
+	public int getCacheLimit() {
+<span class="fc" id="L122">		return this.cacheLimit;</span>
+	}
+
+	/**
+	 * Configure the name of a header that a subscription message can have for
+	 * the purpose of filtering messages matched to the subscription.
+	 * &lt;p&gt;The header value is expected to be a Spring Expression Language (SpEL)
+	 * boolean expression to be applied to the headers of messages matched to the
+	 * subscription.
+	 * &lt;p&gt;For example:
+	 * &lt;pre style=&quot;code&quot;&gt;
+	 * headers.foo == 'bar'
+	 * &lt;/pre&gt;
+	 * &lt;p&gt;By default the selector header name is set to {@code null} which disables
+	 * this feature. You can set it to {@code &quot;selector&quot;} or a different name to
+	 * enable support for a selector header.
+	 * @param selectorHeaderName the name to use for a selector header, or {@code null}
+	 * or blank to disable selector header support
+	 * @since 4.2
+	 */
+	public void setSelectorHeaderName(@Nullable String selectorHeaderName) {
+<span class="fc bfc" id="L143" title="All 2 branches covered.">		this.selectorHeaderName = (StringUtils.hasText(selectorHeaderName) ? selectorHeaderName : null);</span>
+<span class="fc" id="L144">	}</span>
+
+	/**
+	 * Return the name of the selector header.
+	 * @since 4.2
+	 * @see #setSelectorHeaderName(String)
+	 */
+	public @Nullable String getSelectorHeaderName() {
+<span class="fc" id="L152">		return this.selectorHeaderName;</span>
+	}
+
+	@Override
+	protected void addSubscriptionInternal(
+			String sessionId, String subscriptionId, String destination, Message&lt;?&gt; message) {
+
+<span class="fc" id="L159">		boolean isPattern = this.pathMatcher.isPattern(destination);</span>
+<span class="fc" id="L160">		Expression expression = getSelectorExpression(message.getHeaders());</span>
+<span class="fc" id="L161">		Subscription subscription = new Subscription(subscriptionId, destination, isPattern, expression);</span>
+
+<span class="fc" id="L163">		this.sessionRegistry.addSubscription(sessionId, subscription);</span>
+<span class="fc" id="L164">		this.destinationCache.updateAfterNewSubscription(sessionId, subscription);</span>
+<span class="fc" id="L165">	}</span>
+
+	private @Nullable Expression getSelectorExpression(MessageHeaders headers) {
+<span class="fc bfc" id="L168" title="All 2 branches covered.">		if (getSelectorHeaderName() == null) {</span>
+<span class="fc" id="L169">			return null;</span>
+		}
+<span class="fc" id="L171">		String selector = NativeMessageHeaderAccessor.getFirstNativeHeader(getSelectorHeaderName(), headers);</span>
+<span class="fc bfc" id="L172" title="All 2 branches covered.">		if (selector == null) {</span>
+<span class="fc" id="L173">			return null;</span>
+		}
+<span class="fc" id="L175">		Expression expression = null;</span>
+		try {
+<span class="fc" id="L177">			expression = this.expressionParser.parseExpression(selector);</span>
+<span class="fc" id="L178">			this.selectorHeaderInUse = true;</span>
+<span class="pc bpc" id="L179" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L180">				logger.trace(&quot;Subscription selector: [&quot; + selector + &quot;]&quot;);</span>
+			}
+		}
+<span class="nc" id="L183">		catch (Throwable ex) {</span>
+<span class="nc bnc" id="L184" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L185">				logger.debug(&quot;Failed to parse selector: &quot; + selector, ex);</span>
+			}
+<span class="fc" id="L187">		}</span>
+<span class="fc" id="L188">		return expression;</span>
+	}
+
+	@Override
+	protected void removeSubscriptionInternal(String sessionId, String subscriptionId, Message&lt;?&gt; message) {
+<span class="fc" id="L193">		SessionInfo info = this.sessionRegistry.getSession(sessionId);</span>
+<span class="pc bpc" id="L194" title="1 of 2 branches missed.">		if (info != null) {</span>
+<span class="fc" id="L195">			Subscription subscription = info.removeSubscription(subscriptionId);</span>
+<span class="pc bpc" id="L196" title="1 of 2 branches missed.">			if (subscription != null) {</span>
+<span class="fc" id="L197">				this.destinationCache.updateAfterRemovedSubscription(sessionId, subscription);</span>
+			}
+		}
+<span class="fc" id="L200">	}</span>
+
+	@Override
+	public void unregisterAllSubscriptions(String sessionId) {
+<span class="fc" id="L204">		SessionInfo info = this.sessionRegistry.removeSubscriptions(sessionId);</span>
+<span class="fc bfc" id="L205" title="All 2 branches covered.">		if (info != null) {</span>
+<span class="fc" id="L206">			this.destinationCache.updateAfterRemovedSession(sessionId, info);</span>
+		}
+<span class="fc" id="L208">	}</span>
+
+	@Override
+	protected MultiValueMap&lt;String, String&gt; findSubscriptionsInternal(String destination, Message&lt;?&gt; message) {
+<span class="fc" id="L212">		MultiValueMap&lt;String, String&gt; allMatches = this.destinationCache.getSubscriptions(destination);</span>
+<span class="fc bfc" id="L213" title="All 2 branches covered.">		if (!this.selectorHeaderInUse) {</span>
+<span class="fc" id="L214">			return allMatches;</span>
+		}
+<span class="fc" id="L216">		MultiValueMap&lt;String, String&gt; result = new LinkedMultiValueMap&lt;&gt;(allMatches.size());</span>
+<span class="fc" id="L217">		allMatches.forEach((sessionId, subscriptionIds) -&gt; {</span>
+<span class="fc" id="L218">			SessionInfo info = this.sessionRegistry.getSession(sessionId);</span>
+<span class="pc bpc" id="L219" title="1 of 2 branches missed.">			if (info != null) {</span>
+<span class="fc bfc" id="L220" title="All 2 branches covered.">				for (String subscriptionId : subscriptionIds) {</span>
+<span class="fc" id="L221">					Subscription subscription = info.getSubscription(subscriptionId);</span>
+<span class="pc bpc" id="L222" title="1 of 4 branches missed.">					if (subscription != null &amp;&amp; evaluateExpression(subscription.getSelector(), message)) {</span>
+<span class="fc" id="L223">						result.add(sessionId, subscription.getId());</span>
+					}
+<span class="fc" id="L225">				}</span>
+			}
+<span class="fc" id="L227">		});</span>
+<span class="fc" id="L228">		return result;</span>
+	}
+
+	private boolean evaluateExpression(@Nullable Expression expression, Message&lt;?&gt; message) {
+<span class="fc bfc" id="L232" title="All 2 branches covered.">		if (expression == null) {</span>
+<span class="fc" id="L233">			return true;</span>
+		}
+		try {
+<span class="fc" id="L236">			Boolean result = expression.getValue(messageEvalContext, message, Boolean.class);</span>
+<span class="fc bfc" id="L237" title="All 2 branches covered.">			if (Boolean.TRUE.equals(result)) {</span>
+<span class="fc" id="L238">				return true;</span>
+			}
+		}
+<span class="nc" id="L241">		catch (SpelEvaluationException ex) {</span>
+<span class="nc bnc" id="L242" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L243">				logger.debug(&quot;Failed to evaluate selector: &quot; + ex.getMessage());</span>
+			}
+		}
+<span class="nc" id="L246">		catch (Throwable ex) {</span>
+<span class="nc" id="L247">			logger.debug(&quot;Failed to evaluate selector&quot;, ex);</span>
+<span class="pc" id="L248">		}</span>
+<span class="fc" id="L249">		return false;</span>
+	}
+
+
+	/**
+	 * Cache for destinations resolved previously via
+	 * {@link DefaultSubscriptionRegistry#findSubscriptionsInternal(String, Message)}.
+	 */
+<span class="fc" id="L257">	private final class DestinationCache {</span>
+
+		// destination -&gt; [sessionId -&gt; subscriptionId's]
+<span class="fc" id="L260">		private final Map&lt;String, LinkedMultiValueMap&lt;String, String&gt;&gt; destinationCache =</span>
+				new ConcurrentHashMap&lt;&gt;(DEFAULT_CACHE_LIMIT);
+
+<span class="fc" id="L263">		private final AtomicInteger cacheSize = new AtomicInteger();</span>
+
+<span class="fc" id="L265">		private final Queue&lt;String&gt; cacheEvictionPolicy = new ConcurrentLinkedQueue&lt;&gt;();</span>
+
+		public LinkedMultiValueMap&lt;String, String&gt; getSubscriptions(String destination) {
+<span class="fc" id="L268">			LinkedMultiValueMap&lt;String, String&gt; sessionIdToSubscriptionIds = this.destinationCache.get(destination);</span>
+<span class="fc bfc" id="L269" title="All 2 branches covered.">			if (sessionIdToSubscriptionIds == null) {</span>
+<span class="fc" id="L270">				sessionIdToSubscriptionIds = this.destinationCache.computeIfAbsent(destination, _destination -&gt; {</span>
+<span class="fc" id="L271">					LinkedMultiValueMap&lt;String, String&gt; matches = computeMatchingSubscriptions(destination);</span>
+					// Update queue first, so that cacheSize &lt;= queue.size(
+<span class="fc" id="L273">					this.cacheEvictionPolicy.add(destination);</span>
+<span class="fc" id="L274">					this.cacheSize.incrementAndGet();</span>
+<span class="fc" id="L275">					return matches;</span>
+				});
+<span class="fc" id="L277">				ensureCacheLimit();</span>
+			}
+<span class="fc" id="L279">			return sessionIdToSubscriptionIds;</span>
+		}
+
+		private LinkedMultiValueMap&lt;String, String&gt; computeMatchingSubscriptions(String destination) {
+<span class="fc" id="L283">			LinkedMultiValueMap&lt;String, String&gt; sessionIdToSubscriptionIds = new LinkedMultiValueMap&lt;&gt;();</span>
+<span class="fc" id="L284">			DefaultSubscriptionRegistry.this.sessionRegistry.forEachSubscription((sessionId, subscription) -&gt; {</span>
+<span class="fc bfc" id="L285" title="All 2 branches covered.">				if (subscription.isPattern()) {</span>
+<span class="fc bfc" id="L286" title="All 2 branches covered.">					if (pathMatcher.match(subscription.getDestination(), destination)) {</span>
+<span class="fc" id="L287">						addMatchedSubscriptionId(sessionIdToSubscriptionIds, sessionId, subscription.getId());</span>
+					}
+				}
+<span class="fc bfc" id="L290" title="All 2 branches covered.">				else if (destination.equals(subscription.getDestination())) {</span>
+<span class="fc" id="L291">					addMatchedSubscriptionId(sessionIdToSubscriptionIds, sessionId, subscription.getId());</span>
+				}
+<span class="fc" id="L293">			});</span>
+<span class="fc" id="L294">			return sessionIdToSubscriptionIds;</span>
+		}
+
+		private void addMatchedSubscriptionId(
+				LinkedMultiValueMap&lt;String, String&gt; sessionIdToSubscriptionIds,
+				String sessionId, String subscriptionId) {
+
+<span class="fc" id="L301">			sessionIdToSubscriptionIds.compute(sessionId, (_sessionId, subscriptionIds) -&gt; {</span>
+<span class="fc bfc" id="L302" title="All 2 branches covered.">				if (subscriptionIds == null) {</span>
+<span class="fc" id="L303">					return Collections.singletonList(subscriptionId);</span>
+				}
+				else {
+<span class="fc bfc" id="L306" title="All 2 branches covered.">					if (subscriptionIds.contains(subscriptionId)) {</span>
+<span class="fc" id="L307">						return subscriptionIds;</span>
+					}
+<span class="fc" id="L309">					List&lt;String&gt; result = new ArrayList&lt;&gt;(subscriptionIds.size() + 1);</span>
+<span class="fc" id="L310">					result.addAll(subscriptionIds);</span>
+<span class="fc" id="L311">					result.add(subscriptionId);</span>
+<span class="fc" id="L312">					return result;</span>
+				}
+			});
+<span class="fc" id="L315">		}</span>
+
+		private void ensureCacheLimit() {
+<span class="fc" id="L318">			int size = this.cacheSize.get();</span>
+<span class="fc bfc" id="L319" title="All 2 branches covered.">			if (size &gt; cacheLimit) {</span>
+				do {
+<span class="pc bpc" id="L321" title="1 of 2 branches missed.">					if (this.cacheSize.compareAndSet(size, size - 1)) {</span>
+						// Remove (vs poll): we expect an element
+<span class="fc" id="L323">						String head = this.cacheEvictionPolicy.remove();</span>
+<span class="fc" id="L324">						this.destinationCache.remove(head);</span>
+					}
+<span class="pc bpc" id="L326" title="1 of 2 branches missed.">				} while ((size = this.cacheSize.get()) &gt; cacheLimit);</span>
+			}
+<span class="fc" id="L328">		}</span>
+
+		public void updateAfterNewSubscription(String sessionId, Subscription subscription) {
+<span class="fc bfc" id="L331" title="All 2 branches covered.">			if (subscription.isPattern()) {</span>
+<span class="fc bfc" id="L332" title="All 2 branches covered.">				for (String cachedDestination : this.destinationCache.keySet()) {</span>
+<span class="pc bpc" id="L333" title="1 of 2 branches missed.">					if (pathMatcher.match(subscription.getDestination(), cachedDestination)) {</span>
+<span class="fc" id="L334">						addToDestination(cachedDestination, sessionId, subscription.getId());</span>
+					}
+<span class="fc" id="L336">				}</span>
+			}
+			else {
+<span class="fc" id="L339">				addToDestination(subscription.getDestination(), sessionId, subscription.getId());</span>
+			}
+<span class="fc" id="L341">		}</span>
+
+		private void addToDestination(String destination, String sessionId, String subscriptionId) {
+<span class="fc" id="L344">			this.destinationCache.computeIfPresent(destination, (_destination, sessionIdToSubscriptionIds) -&gt; {</span>
+<span class="fc" id="L345">				sessionIdToSubscriptionIds = sessionIdToSubscriptionIds.clone();</span>
+<span class="fc" id="L346">				addMatchedSubscriptionId(sessionIdToSubscriptionIds, sessionId, subscriptionId);</span>
+<span class="fc" id="L347">				return sessionIdToSubscriptionIds;</span>
+			});
+<span class="fc" id="L349">		}</span>
+
+		public void updateAfterRemovedSubscription(String sessionId, Subscription subscription) {
+<span class="fc bfc" id="L352" title="All 2 branches covered.">			if (subscription.isPattern()) {</span>
+<span class="fc" id="L353">				String subscriptionId = subscription.getId();</span>
+<span class="fc" id="L354">				this.destinationCache.forEach((destination, sessionIdToSubscriptionIds) -&gt; {</span>
+<span class="fc" id="L355">					List&lt;String&gt; subscriptionIds = sessionIdToSubscriptionIds.get(sessionId);</span>
+<span class="pc bpc" id="L356" title="2 of 4 branches missed.">					if (subscriptionIds != null &amp;&amp; subscriptionIds.contains(subscriptionId)) {</span>
+<span class="fc" id="L357">						removeInternal(destination, sessionId, subscriptionId);</span>
+					}
+<span class="fc" id="L359">				});</span>
+<span class="fc" id="L360">			}</span>
+			else {
+<span class="fc" id="L362">				removeInternal(subscription.getDestination(), sessionId, subscription.getId());</span>
+			}
+<span class="fc" id="L364">		}</span>
+
+		private void removeInternal(String destination, String sessionId, String subscriptionId) {
+<span class="fc" id="L367">			this.destinationCache.computeIfPresent(destination, (_destination, sessionIdToSubscriptionIds) -&gt; {</span>
+<span class="fc" id="L368">				sessionIdToSubscriptionIds = sessionIdToSubscriptionIds.clone();</span>
+<span class="fc" id="L369">				sessionIdToSubscriptionIds.computeIfPresent(sessionId, (_sessionId, subscriptionIds) -&gt; {</span>
+					/* Most likely case: single subscription per destination per session. */
+<span class="pc bpc" id="L371" title="1 of 4 branches missed.">					if (subscriptionIds.size() == 1 &amp;&amp; subscriptionId.equals(subscriptionIds.get(0))) {</span>
+<span class="fc" id="L372">						return null;</span>
+					}
+<span class="fc" id="L374">					subscriptionIds = new ArrayList&lt;&gt;(subscriptionIds);</span>
+<span class="fc" id="L375">					subscriptionIds.remove(subscriptionId);</span>
+<span class="pc bpc" id="L376" title="1 of 2 branches missed.">					return (subscriptionIds.isEmpty() ? null : subscriptionIds);</span>
+				});
+<span class="fc" id="L378">				return sessionIdToSubscriptionIds;</span>
+			});
+<span class="fc" id="L380">		}</span>
+
+		public void updateAfterRemovedSession(String sessionId, SessionInfo info) {
+<span class="fc bfc" id="L383" title="All 2 branches covered.">			for (Subscription subscription : info.getSubscriptions()) {</span>
+<span class="fc" id="L384">				updateAfterRemovedSubscription(sessionId, subscription);</span>
+<span class="fc" id="L385">			}</span>
+<span class="fc" id="L386">		}</span>
+	}
+
+	/**
+	 * Registry for all session and their subscriptions.
+	 */
+<span class="fc" id="L392">	private static final class SessionRegistry {</span>
+
+<span class="fc" id="L394">		private final ConcurrentMap&lt;String, SessionInfo&gt; sessions = new ConcurrentHashMap&lt;&gt;();</span>
+
+		public @Nullable SessionInfo getSession(String sessionId) {
+<span class="fc" id="L397">			return this.sessions.get(sessionId);</span>
+		}
+
+		public void forEachSubscription(BiConsumer&lt;String, Subscription&gt; consumer) {
+<span class="fc" id="L401">			this.sessions.forEach((sessionId, info) -&gt;</span>
+<span class="fc" id="L402">				info.getSubscriptions().forEach(subscription -&gt; consumer.accept(sessionId, subscription)));</span>
+<span class="fc" id="L403">		}</span>
+
+		public void addSubscription(String sessionId, Subscription subscription) {
+<span class="fc" id="L406">			SessionInfo info = this.sessions.computeIfAbsent(sessionId, _sessionId -&gt; new SessionInfo());</span>
+<span class="fc" id="L407">			info.addSubscription(subscription);</span>
+<span class="fc" id="L408">		}</span>
+
+		public @Nullable SessionInfo removeSubscriptions(String sessionId) {
+<span class="fc" id="L411">			return this.sessions.remove(sessionId);</span>
+		}
+	}
+
+	/**
+	 * Container for the subscriptions of a session.
+	 */
+<span class="fc" id="L418">	private static final class SessionInfo {</span>
+
+		// subscriptionId -&gt; Subscription
+<span class="fc" id="L421">		private final Map&lt;String, Subscription&gt; subscriptionMap = new ConcurrentHashMap&lt;&gt;();</span>
+
+		public Collection&lt;Subscription&gt; getSubscriptions() {
+<span class="fc" id="L424">			return this.subscriptionMap.values();</span>
+		}
+
+		public @Nullable Subscription getSubscription(String subscriptionId) {
+<span class="fc" id="L428">			return this.subscriptionMap.get(subscriptionId);</span>
+		}
+
+		public void addSubscription(Subscription subscription) {
+<span class="fc" id="L432">			this.subscriptionMap.putIfAbsent(subscription.getId(), subscription);</span>
+<span class="fc" id="L433">		}</span>
+
+		public @Nullable Subscription removeSubscription(String subscriptionId) {
+<span class="fc" id="L436">			return this.subscriptionMap.remove(subscriptionId);</span>
+		}
+	}
+
+	/**
+	 * Represents a subscription.
+	 */
+	private static final class Subscription {
+
+		private final String id;
+
+		private final String destination;
+
+		private final boolean isPattern;
+
+		private final @Nullable Expression selector;
+
+<span class="fc" id="L453">		public Subscription(String id, String destination, boolean isPattern, @Nullable Expression selector) {</span>
+<span class="fc" id="L454">			Assert.notNull(id, &quot;Subscription id must not be null&quot;);</span>
+<span class="fc" id="L455">			Assert.notNull(destination, &quot;Subscription destination must not be null&quot;);</span>
+<span class="fc" id="L456">			this.id = id;</span>
+<span class="fc" id="L457">			this.selector = selector;</span>
+<span class="fc" id="L458">			this.destination = destination;</span>
+<span class="fc" id="L459">			this.isPattern = isPattern;</span>
+<span class="fc" id="L460">		}</span>
+
+		public String getId() {
+<span class="fc" id="L463">			return this.id;</span>
+		}
+
+		public String getDestination() {
+<span class="fc" id="L467">			return this.destination;</span>
+		}
+
+		public boolean isPattern() {
+<span class="fc" id="L471">			return this.isPattern;</span>
+		}
+
+		public @Nullable Expression getSelector() {
+<span class="fc" id="L475">			return this.selector;</span>
+		}
+
+		@Override
+		public boolean equals(@Nullable Object other) {
+<span class="nc bnc" id="L480" title="All 6 branches missed.">			return (this == other || (other instanceof Subscription that &amp;&amp; this.id.equals(that.id)));</span>
+		}
+
+		@Override
+		public int hashCode() {
+<span class="nc" id="L485">			return this.id.hashCode();</span>
+		}
+
+		@Override
+		public String toString() {
+<span class="nc" id="L490">			return &quot;subscription(id=&quot; + this.id + &quot;)&quot;;</span>
+		}
+	}
+
+
+	private static class SimpMessageHeaderPropertyAccessor implements PropertyAccessor {
+
+		@Override
+		public Class&lt;?&gt;[] getSpecificTargetClasses() {
+<span class="fc" id="L499">			return new Class&lt;?&gt;[] {Message.class, MessageHeaders.class};</span>
+		}
+
+		@Override
+		public boolean canRead(EvaluationContext context, @Nullable Object target, String name) {
+<span class="fc" id="L504">			return true;</span>
+		}
+
+		@Override
+		@SuppressWarnings(&quot;rawtypes&quot;)
+		public TypedValue read(EvaluationContext context, @Nullable Object target, String name) {
+			Object value;
+<span class="fc bfc" id="L511" title="All 2 branches covered.">			if (target instanceof Message message) {</span>
+<span class="pc bpc" id="L512" title="1 of 2 branches missed.">				value = name.equals(&quot;headers&quot;) ? message.getHeaders() : null;</span>
+			}
+<span class="pc bpc" id="L514" title="1 of 2 branches missed.">			else if (target instanceof MessageHeaders headers) {</span>
+<span class="fc" id="L515">				SimpMessageHeaderAccessor accessor =</span>
+<span class="fc" id="L516">						MessageHeaderAccessor.getAccessor(headers, SimpMessageHeaderAccessor.class);</span>
+<span class="pc bpc" id="L517" title="1 of 2 branches missed.">				Assert.state(accessor != null, &quot;No SimpMessageHeaderAccessor&quot;);</span>
+<span class="pc bpc" id="L518" title="1 of 2 branches missed.">				if (&quot;destination&quot;.equalsIgnoreCase(name)) {</span>
+<span class="nc" id="L519">					value = accessor.getDestination();</span>
+				}
+				else {
+<span class="fc" id="L522">					value = accessor.getFirstNativeHeader(name);</span>
+<span class="fc bfc" id="L523" title="All 2 branches covered.">					if (value == null) {</span>
+<span class="fc" id="L524">						value = headers.get(name);</span>
+					}
+				}
+<span class="fc" id="L527">			}</span>
+			else {
+				// Should never happen...
+<span class="nc" id="L530">				throw new IllegalStateException(&quot;Expected Message or MessageHeaders.&quot;);</span>
+			}
+<span class="fc" id="L532">			return new TypedValue(value);</span>
+		}
+
+		@Override
+		public boolean canWrite(EvaluationContext context, @Nullable Object target, String name) {
+<span class="nc" id="L537">			return false;</span>
+		}
+
+		@Override
+		public void write(EvaluationContext context, @Nullable Object target, String name, @Nullable Object value) {
+<span class="nc" id="L542">		}</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

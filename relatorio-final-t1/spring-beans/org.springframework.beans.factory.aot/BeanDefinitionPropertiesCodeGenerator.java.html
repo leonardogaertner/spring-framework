@@ -1,0 +1,438 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>BeanDefinitionPropertiesCodeGenerator.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.aot</a> &gt; <span class="el_source">BeanDefinitionPropertiesCodeGenerator.java</span></div><h1>BeanDefinitionPropertiesCodeGenerator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.aot;
+
+import java.beans.PropertyDescriptor;
+import java.lang.reflect.Method;
+import java.util.ArrayDeque;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.function.BiFunction;
+import java.util.function.BiPredicate;
+import java.util.function.Function;
+import java.util.function.Predicate;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aot.generate.GeneratedMethods;
+import org.springframework.aot.generate.ValueCodeGenerator;
+import org.springframework.aot.generate.ValueCodeGenerator.Delegate;
+import org.springframework.aot.hint.ExecutableMode;
+import org.springframework.aot.hint.MemberCategory;
+import org.springframework.aot.hint.RuntimeHints;
+import org.springframework.aot.hint.TypeReference;
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.MutablePropertyValues;
+import org.springframework.beans.PropertyValue;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.config.ConstructorArgumentValues;
+import org.springframework.beans.factory.config.ConstructorArgumentValues.ValueHolder;
+import org.springframework.beans.factory.support.AbstractBeanDefinition;
+import org.springframework.beans.factory.support.AutowireCandidateQualifier;
+import org.springframework.beans.factory.support.InstanceSupplier;
+import org.springframework.beans.factory.support.LookupOverride;
+import org.springframework.beans.factory.support.MethodOverride;
+import org.springframework.beans.factory.support.ReplaceOverride;
+import org.springframework.beans.factory.support.RootBeanDefinition;
+import org.springframework.javapoet.CodeBlock;
+import org.springframework.javapoet.CodeBlock.Builder;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.StringUtils;
+
+/**
+ * Internal code generator to set {@link RootBeanDefinition} properties.
+ *
+ * &lt;p&gt;Generates code in the following form:&lt;pre class=&quot;code&quot;&gt;
+ * beanDefinition.setPrimary(true);
+ * beanDefinition.setScope(BeanDefinition.SCOPE_PROTOTYPE);
+ * ...
+ * &lt;/pre&gt;
+ *
+ * &lt;p&gt;The generated code expects the following variables to be available:
+ * &lt;ul&gt;
+ * &lt;li&gt;{@code beanDefinition}: the {@link RootBeanDefinition} to configure&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;Note that this generator does &lt;b&gt;not&lt;/b&gt; set the {@link InstanceSupplier}.
+ *
+ * @author Phillip Webb
+ * @author Stephane Nicoll
+ * @author Sam Brannen
+ * @since 6.0
+ */
+class BeanDefinitionPropertiesCodeGenerator {
+
+<span class="fc" id="L90">	private static final RootBeanDefinition DEFAULT_BEAN_DEFINITION = new RootBeanDefinition();</span>
+
+	private static final String BEAN_DEFINITION_VARIABLE = BeanRegistrationCodeFragments.BEAN_DEFINITION_VARIABLE;
+
+	private final RuntimeHints hints;
+
+	private final Predicate&lt;String&gt; attributeFilter;
+
+	private final ValueCodeGenerator valueCodeGenerator;
+
+
+	BeanDefinitionPropertiesCodeGenerator(RuntimeHints hints,
+			Predicate&lt;String&gt; attributeFilter, GeneratedMethods generatedMethods,
+			List&lt;Delegate&gt; additionalDelegates,
+<span class="fc" id="L104">			BiFunction&lt;String, Object, CodeBlock&gt; customValueCodeGenerator) {</span>
+
+<span class="fc" id="L106">		this.hints = hints;</span>
+<span class="fc" id="L107">		this.attributeFilter = attributeFilter;</span>
+<span class="fc" id="L108">		List&lt;Delegate&gt; customDelegates = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L109">		customDelegates.add((valueCodeGenerator, value) -&gt;</span>
+<span class="fc" id="L110">				customValueCodeGenerator.apply(PropertyNamesStack.peek(), value));</span>
+<span class="fc" id="L111">		customDelegates.addAll(additionalDelegates);</span>
+<span class="fc" id="L112">		this.valueCodeGenerator = BeanDefinitionPropertyValueCodeGeneratorDelegates</span>
+<span class="fc" id="L113">				.createValueCodeGenerator(generatedMethods, customDelegates);</span>
+<span class="fc" id="L114">	}</span>
+
+	CodeBlock generateCode(RootBeanDefinition beanDefinition) {
+<span class="fc" id="L117">		CodeBlock.Builder code = CodeBlock.builder();</span>
+<span class="fc" id="L118">		addStatementForValue(code, beanDefinition, BeanDefinition::getScope,</span>
+				this::hasScope, &quot;$L.setScope($S)&quot;);
+<span class="fc" id="L120">		addStatementForValue(code, beanDefinition, AbstractBeanDefinition::isBackgroundInit,</span>
+				&quot;$L.setBackgroundInit($L)&quot;);
+<span class="fc" id="L122">		addStatementForValue(code, beanDefinition, AbstractBeanDefinition::getLazyInit,</span>
+				&quot;$L.setLazyInit($L)&quot;);
+<span class="fc" id="L124">		addStatementForValue(code, beanDefinition, BeanDefinition::getDependsOn,</span>
+				this::hasDependsOn, &quot;$L.setDependsOn($L)&quot;, this::toStringVarArgs);
+<span class="fc" id="L126">		addStatementForValue(code, beanDefinition, BeanDefinition::isAutowireCandidate,</span>
+				&quot;$L.setAutowireCandidate($L)&quot;);
+<span class="fc" id="L128">		addStatementForValue(code, beanDefinition, AbstractBeanDefinition::isDefaultCandidate,</span>
+				&quot;$L.setDefaultCandidate($L)&quot;);
+<span class="fc" id="L130">		addStatementForValue(code, beanDefinition, BeanDefinition::isPrimary,</span>
+				&quot;$L.setPrimary($L)&quot;);
+<span class="fc" id="L132">		addStatementForValue(code, beanDefinition, BeanDefinition::isFallback,</span>
+				&quot;$L.setFallback($L)&quot;);
+<span class="fc" id="L134">		addStatementForValue(code, beanDefinition, AbstractBeanDefinition::isSynthetic,</span>
+				&quot;$L.setSynthetic($L)&quot;);
+<span class="fc" id="L136">		addStatementForValue(code, beanDefinition, BeanDefinition::getRole,</span>
+				this::hasRole, &quot;$L.setRole($L)&quot;, this::toRole);
+<span class="fc" id="L138">		addInitDestroyMethods(code, beanDefinition, beanDefinition.getInitMethodNames(),</span>
+				&quot;$L.setInitMethodNames($L)&quot;);
+<span class="fc" id="L140">		addInitDestroyMethods(code, beanDefinition, beanDefinition.getDestroyMethodNames(),</span>
+				&quot;$L.setDestroyMethodNames($L)&quot;);
+<span class="fc bfc" id="L142" title="All 2 branches covered.">		if (beanDefinition.getFactoryBeanName() != null) {</span>
+<span class="fc" id="L143">			addStatementForValue(code, beanDefinition, BeanDefinition::getFactoryBeanName,</span>
+					&quot;$L.setFactoryBeanName(\&quot;$L\&quot;)&quot;);
+		}
+<span class="fc" id="L146">		addConstructorArgumentValues(code, beanDefinition);</span>
+<span class="fc" id="L147">		addPropertyValues(code, beanDefinition);</span>
+<span class="fc" id="L148">		addAttributes(code, beanDefinition);</span>
+<span class="fc" id="L149">		addQualifiers(code, beanDefinition);</span>
+<span class="fc" id="L150">		addMethodOverrides(code, beanDefinition);</span>
+<span class="fc" id="L151">		return code.build();</span>
+	}
+
+	private void addInitDestroyMethods(Builder code, AbstractBeanDefinition beanDefinition,
+			String @Nullable [] methodNames, String format) {
+
+		// For Publisher-based destroy methods
+<span class="fc" id="L158">		this.hints.reflection().registerType(TypeReference.of(&quot;org.reactivestreams.Publisher&quot;));</span>
+<span class="fc bfc" id="L159" title="All 2 branches covered.">		if (!ObjectUtils.isEmpty(methodNames)) {</span>
+<span class="fc" id="L160">			Class&lt;?&gt; beanType = ClassUtils.getUserClass(beanDefinition.getResolvableType().toClass());</span>
+<span class="fc" id="L161">			Arrays.stream(methodNames).forEach(methodName -&gt; addInitDestroyHint(beanType, methodName));</span>
+<span class="fc" id="L162">			CodeBlock arguments = Arrays.stream(methodNames)</span>
+<span class="fc" id="L163">					.map(name -&gt; CodeBlock.of(&quot;$S&quot;, name))</span>
+<span class="fc" id="L164">					.collect(CodeBlock.joining(&quot;, &quot;));</span>
+<span class="fc" id="L165">			code.addStatement(format, BEAN_DEFINITION_VARIABLE, arguments);</span>
+		}
+<span class="fc" id="L167">	}</span>
+
+	private void addInitDestroyHint(Class&lt;?&gt; beanUserClass, String methodName) {
+<span class="fc" id="L170">		Class&lt;?&gt; methodDeclaringClass = beanUserClass;</span>
+
+		// Parse fully-qualified method name if necessary.
+<span class="fc" id="L173">		int indexOfDot = methodName.lastIndexOf('.');</span>
+<span class="fc bfc" id="L174" title="All 2 branches covered.">		if (indexOfDot &gt; 0) {</span>
+<span class="fc" id="L175">			String className = methodName.substring(0, indexOfDot);</span>
+<span class="fc" id="L176">			methodName = methodName.substring(indexOfDot + 1);</span>
+<span class="pc bpc" id="L177" title="1 of 2 branches missed.">			if (!beanUserClass.getName().equals(className)) {</span>
+				try {
+<span class="nc" id="L179">					methodDeclaringClass = ClassUtils.forName(className, beanUserClass.getClassLoader());</span>
+				}
+<span class="nc" id="L181">				catch (Throwable ex) {</span>
+<span class="nc" id="L182">					throw new IllegalStateException(&quot;Failed to load Class [&quot; + className +</span>
+<span class="nc" id="L183">							&quot;] from ClassLoader [&quot; + beanUserClass.getClassLoader() + &quot;]&quot;, ex);</span>
+<span class="nc" id="L184">				}</span>
+			}
+		}
+
+<span class="fc" id="L188">		Method method = ReflectionUtils.findMethod(methodDeclaringClass, methodName);</span>
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">		if (method != null) {</span>
+<span class="fc" id="L190">			this.hints.reflection().registerMethod(method, ExecutableMode.INVOKE);</span>
+<span class="fc" id="L191">			Method publiclyAccessibleMethod = ClassUtils.getPubliclyAccessibleMethodIfPossible(method, beanUserClass);</span>
+<span class="fc bfc" id="L192" title="All 2 branches covered.">			if (!publiclyAccessibleMethod.equals(method)) {</span>
+<span class="fc" id="L193">				this.hints.reflection().registerMethod(publiclyAccessibleMethod, ExecutableMode.INVOKE);</span>
+			}
+		}
+<span class="fc" id="L196">	}</span>
+
+	private void addConstructorArgumentValues(CodeBlock.Builder code, BeanDefinition beanDefinition) {
+<span class="fc" id="L199">		ConstructorArgumentValues constructorValues = beanDefinition.getConstructorArgumentValues();</span>
+<span class="fc" id="L200">		Map&lt;Integer, ValueHolder&gt; indexedValues = constructorValues.getIndexedArgumentValues();</span>
+<span class="fc bfc" id="L201" title="All 2 branches covered.">		if (!indexedValues.isEmpty()) {</span>
+<span class="fc" id="L202">			indexedValues.forEach((index, valueHolder) -&gt; {</span>
+<span class="fc" id="L203">				Object value = valueHolder.getValue();</span>
+<span class="fc bfc" id="L204" title="All 2 branches covered.">				CodeBlock valueCode = castIfNecessary(value == null, Object.class,</span>
+<span class="fc" id="L205">						generateValue(valueHolder.getName(), value));</span>
+<span class="fc" id="L206">				code.addStatement(</span>
+						&quot;$L.getConstructorArgumentValues().addIndexedArgumentValue($L, $L)&quot;,
+						BEAN_DEFINITION_VARIABLE, index, valueCode);
+<span class="fc" id="L209">			});</span>
+		}
+<span class="fc" id="L211">		List&lt;ValueHolder&gt; genericValues = constructorValues.getGenericArgumentValues();</span>
+<span class="fc bfc" id="L212" title="All 2 branches covered.">		if (!genericValues.isEmpty()) {</span>
+<span class="fc" id="L213">			genericValues.forEach(valueHolder -&gt; {</span>
+<span class="fc" id="L214">				String valueName = valueHolder.getName();</span>
+<span class="fc" id="L215">				CodeBlock valueCode = generateValue(valueName, valueHolder.getValue());</span>
+<span class="fc bfc" id="L216" title="All 2 branches covered.">				if (valueName != null) {</span>
+<span class="fc" id="L217">					CodeBlock valueTypeCode = this.valueCodeGenerator.generateCode(valueHolder.getType());</span>
+<span class="fc" id="L218">					code.addStatement(</span>
+							&quot;$L.getConstructorArgumentValues().addGenericArgumentValue(new $T($L, $L, $S))&quot;,
+							BEAN_DEFINITION_VARIABLE, ValueHolder.class, valueCode, valueTypeCode, valueName);
+<span class="fc" id="L221">				}</span>
+<span class="fc bfc" id="L222" title="All 2 branches covered.">				else if (valueHolder.getType() != null) {</span>
+<span class="fc" id="L223">					code.addStatement(&quot;$L.getConstructorArgumentValues().addGenericArgumentValue($L, $S)&quot;,</span>
+<span class="fc" id="L224">							BEAN_DEFINITION_VARIABLE, valueCode, valueHolder.getType());</span>
+				}
+				else {
+<span class="fc" id="L227">					code.addStatement(&quot;$L.getConstructorArgumentValues().addGenericArgumentValue($L)&quot;,</span>
+							BEAN_DEFINITION_VARIABLE, valueCode);
+				}
+<span class="fc" id="L230">			});</span>
+		}
+<span class="fc" id="L232">	}</span>
+
+	private void addPropertyValues(CodeBlock.Builder code, RootBeanDefinition beanDefinition) {
+<span class="fc" id="L235">		MutablePropertyValues propertyValues = beanDefinition.getPropertyValues();</span>
+<span class="fc bfc" id="L236" title="All 2 branches covered.">		if (!propertyValues.isEmpty()) {</span>
+<span class="fc" id="L237">			Class&lt;?&gt; infrastructureType = getInfrastructureType(beanDefinition);</span>
+<span class="fc bfc" id="L238" title="All 2 branches covered.">			Map&lt;String, Method&gt; writeMethods = (infrastructureType != Object.class ?</span>
+<span class="fc" id="L239">					getWriteMethods(infrastructureType) : Collections.emptyMap());</span>
+<span class="fc bfc" id="L240" title="All 2 branches covered.">			for (PropertyValue propertyValue : propertyValues) {</span>
+<span class="fc" id="L241">				String name = propertyValue.getName();</span>
+<span class="fc" id="L242">				CodeBlock valueCode = generateValue(name, propertyValue.getValue());</span>
+<span class="fc" id="L243">				code.addStatement(&quot;$L.getPropertyValues().addPropertyValue($S, $L)&quot;,</span>
+						BEAN_DEFINITION_VARIABLE, name, valueCode);
+<span class="fc" id="L245">				Method writeMethod = writeMethods.get(name);</span>
+<span class="fc bfc" id="L246" title="All 2 branches covered.">				if (writeMethod != null) {</span>
+<span class="fc" id="L247">					registerReflectionHints(beanDefinition, writeMethod);</span>
+				}
+<span class="fc" id="L249">			}</span>
+		}
+<span class="fc" id="L251">	}</span>
+
+	private void registerReflectionHints(RootBeanDefinition beanDefinition, Method writeMethod) {
+<span class="fc" id="L254">		this.hints.reflection().registerMethod(writeMethod, ExecutableMode.INVOKE);</span>
+		// ReflectionUtils#findField searches recursively in the type hierarchy
+<span class="fc" id="L256">		Class&lt;?&gt; searchType = beanDefinition.getTargetType();</span>
+<span class="fc bfc" id="L257" title="All 4 branches covered.">		while (searchType != null &amp;&amp; searchType != writeMethod.getDeclaringClass()) {</span>
+<span class="fc" id="L258">			this.hints.reflection().registerType(searchType, MemberCategory.ACCESS_DECLARED_FIELDS);</span>
+<span class="fc" id="L259">			searchType = searchType.getSuperclass();</span>
+		}
+<span class="fc" id="L261">		this.hints.reflection().registerType(writeMethod.getDeclaringClass(), MemberCategory.ACCESS_DECLARED_FIELDS);</span>
+<span class="fc" id="L262">	}</span>
+
+	private void addQualifiers(CodeBlock.Builder code, RootBeanDefinition beanDefinition) {
+<span class="fc" id="L265">		Set&lt;AutowireCandidateQualifier&gt; qualifiers = beanDefinition.getQualifiers();</span>
+<span class="fc bfc" id="L266" title="All 2 branches covered.">		if (!qualifiers.isEmpty()) {</span>
+<span class="fc bfc" id="L267" title="All 2 branches covered.">			for (AutowireCandidateQualifier qualifier : qualifiers) {</span>
+<span class="fc" id="L268">				Collection&lt;CodeBlock&gt; arguments = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L269">				arguments.add(CodeBlock.of(&quot;$S&quot;, qualifier.getTypeName()));</span>
+<span class="fc" id="L270">				Object qualifierValue = qualifier.getAttribute(AutowireCandidateQualifier.VALUE_KEY);</span>
+<span class="fc bfc" id="L271" title="All 2 branches covered.">				if (qualifierValue != null) {</span>
+<span class="fc" id="L272">					arguments.add(generateValue(&quot;value&quot;, qualifierValue));</span>
+				}
+<span class="fc" id="L274">				code.addStatement(&quot;$L.addQualifier(new $T($L))&quot;, BEAN_DEFINITION_VARIABLE,</span>
+<span class="fc" id="L275">						AutowireCandidateQualifier.class, CodeBlock.join(arguments, &quot;, &quot;));</span>
+<span class="fc" id="L276">			}</span>
+		}
+<span class="fc" id="L278">	}</span>
+
+	private void addMethodOverrides(CodeBlock.Builder code, RootBeanDefinition beanDefinition) {
+<span class="fc bfc" id="L281" title="All 2 branches covered.">		if (beanDefinition.hasMethodOverrides()) {</span>
+<span class="fc bfc" id="L282" title="All 2 branches covered.">			for (MethodOverride methodOverride : beanDefinition.getMethodOverrides().getOverrides()) {</span>
+<span class="fc bfc" id="L283" title="All 2 branches covered.">				if (methodOverride instanceof LookupOverride lookupOverride) {</span>
+<span class="fc" id="L284">					Collection&lt;CodeBlock&gt; arguments = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L285">					arguments.add(CodeBlock.of(&quot;$S&quot;, lookupOverride.getMethodName()));</span>
+<span class="fc" id="L286">					arguments.add(CodeBlock.of(&quot;$S&quot;, lookupOverride.getBeanName()));</span>
+<span class="fc" id="L287">					code.addStatement(&quot;$L.getMethodOverrides().addOverride(new $T($L))&quot;, BEAN_DEFINITION_VARIABLE,</span>
+<span class="fc" id="L288">							LookupOverride.class, CodeBlock.join(arguments, &quot;, &quot;));</span>
+<span class="fc" id="L289">				}</span>
+<span class="pc bpc" id="L290" title="1 of 2 branches missed.">				else if (methodOverride instanceof ReplaceOverride replaceOverride) {</span>
+<span class="fc" id="L291">					Collection&lt;CodeBlock&gt; arguments = new ArrayList&lt;&gt;();</span>
+<span class="fc" id="L292">					arguments.add(CodeBlock.of(&quot;$S&quot;, replaceOverride.getMethodName()));</span>
+<span class="fc" id="L293">					arguments.add(CodeBlock.of(&quot;$S&quot;, replaceOverride.getMethodReplacerBeanName()));</span>
+<span class="fc" id="L294">					List&lt;String&gt; typeIdentifiers = replaceOverride.getTypeIdentifiers();</span>
+<span class="fc bfc" id="L295" title="All 2 branches covered.">					if (!typeIdentifiers.isEmpty()) {</span>
+<span class="fc" id="L296">						arguments.add(CodeBlock.of(&quot;java.util.List.of($S)&quot;,</span>
+<span class="fc" id="L297">								StringUtils.collectionToDelimitedString(typeIdentifiers, &quot;, &quot;)));</span>
+					}
+<span class="fc" id="L299">					code.addStatement(&quot;$L.getMethodOverrides().addOverride(new $T($L))&quot;, BEAN_DEFINITION_VARIABLE,</span>
+<span class="fc" id="L300">							ReplaceOverride.class, CodeBlock.join(arguments, &quot;, &quot;));</span>
+<span class="fc" id="L301">				}</span>
+				else {
+<span class="nc" id="L303">					throw new UnsupportedOperationException(&quot;Unexpected MethodOverride subclass: &quot; +</span>
+<span class="nc" id="L304">							methodOverride.getClass().getName());</span>
+				}
+<span class="fc" id="L306">			}</span>
+		}
+<span class="fc" id="L308">	}</span>
+
+	private CodeBlock generateValue(@Nullable String name, @Nullable Object value) {
+<span class="fc" id="L311">		PropertyNamesStack.push(name);</span>
+		try {
+<span class="fc" id="L313">			return this.valueCodeGenerator.generateCode(value);</span>
+		}
+		finally {
+<span class="fc" id="L316">			PropertyNamesStack.pop();</span>
+		}
+	}
+
+	private Class&lt;?&gt; getInfrastructureType(RootBeanDefinition beanDefinition) {
+<span class="fc bfc" id="L321" title="All 2 branches covered.">		if (beanDefinition.hasBeanClass()) {</span>
+<span class="fc" id="L322">			Class&lt;?&gt; beanClass = beanDefinition.getBeanClass();</span>
+<span class="fc bfc" id="L323" title="All 2 branches covered.">			if (FactoryBean.class.isAssignableFrom(beanClass)) {</span>
+<span class="fc" id="L324">				return beanClass;</span>
+			}
+		}
+<span class="fc" id="L327">		return ClassUtils.getUserClass(beanDefinition.getResolvableType().toClass());</span>
+	}
+
+	private Map&lt;String, Method&gt; getWriteMethods(Class&lt;?&gt; clazz) {
+<span class="fc" id="L331">		Map&lt;String, Method&gt; writeMethods = new HashMap&lt;&gt;();</span>
+<span class="fc bfc" id="L332" title="All 2 branches covered.">		for (PropertyDescriptor propertyDescriptor : BeanUtils.getPropertyDescriptors(clazz)) {</span>
+<span class="fc" id="L333">			writeMethods.put(propertyDescriptor.getName(), propertyDescriptor.getWriteMethod());</span>
+		}
+<span class="fc" id="L335">		return Collections.unmodifiableMap(writeMethods);</span>
+	}
+
+	private void addAttributes(CodeBlock.Builder code, BeanDefinition beanDefinition) {
+<span class="fc" id="L339">		String[] attributeNames = beanDefinition.attributeNames();</span>
+<span class="fc bfc" id="L340" title="All 2 branches covered.">		if (!ObjectUtils.isEmpty(attributeNames)) {</span>
+<span class="fc bfc" id="L341" title="All 2 branches covered.">			for (String attributeName : attributeNames) {</span>
+<span class="fc bfc" id="L342" title="All 2 branches covered.">				if (this.attributeFilter.test(attributeName)) {</span>
+<span class="fc" id="L343">					CodeBlock value = this.valueCodeGenerator</span>
+<span class="fc" id="L344">							.generateCode(beanDefinition.getAttribute(attributeName));</span>
+<span class="fc" id="L345">					code.addStatement(&quot;$L.setAttribute($S, $L)&quot;,</span>
+							BEAN_DEFINITION_VARIABLE, attributeName, value);
+				}
+			}
+		}
+<span class="fc" id="L350">	}</span>
+
+	private boolean hasScope(String defaultValue, String actualValue) {
+<span class="fc bfc" id="L353" title="All 4 branches covered.">		return (StringUtils.hasText(actualValue) &amp;&amp; !ConfigurableBeanFactory.SCOPE_SINGLETON.equals(actualValue));</span>
+	}
+
+	private boolean hasDependsOn(String[] defaultValue, String[] actualValue) {
+<span class="fc bfc" id="L357" title="All 2 branches covered.">		return !ObjectUtils.isEmpty(actualValue);</span>
+	}
+
+	private boolean hasRole(int defaultValue, int actualValue) {
+<span class="fc bfc" id="L361" title="All 2 branches covered.">		return actualValue != BeanDefinition.ROLE_APPLICATION;</span>
+	}
+
+	private CodeBlock toStringVarArgs(String[] strings) {
+<span class="fc" id="L365">		return Arrays.stream(strings).map(string -&gt; CodeBlock.of(&quot;$S&quot;, string)).collect(CodeBlock.joining(&quot;,&quot;));</span>
+	}
+
+	private Object toRole(int value) {
+<span class="fc bfc" id="L369" title="All 3 branches covered.">		return switch (value) {</span>
+			case BeanDefinition.ROLE_INFRASTRUCTURE -&gt;
+<span class="fc" id="L371">				CodeBlock.builder().add(&quot;$T.ROLE_INFRASTRUCTURE&quot;, BeanDefinition.class).build();</span>
+			case BeanDefinition.ROLE_SUPPORT -&gt;
+<span class="fc" id="L373">				CodeBlock.builder().add(&quot;$T.ROLE_SUPPORT&quot;, BeanDefinition.class).build();</span>
+<span class="fc" id="L374">			default -&gt; value;</span>
+		};
+	}
+
+	private &lt;B extends BeanDefinition, T&gt; void addStatementForValue(
+			CodeBlock.Builder code, BeanDefinition beanDefinition, Function&lt;B, @Nullable T&gt; getter, String format) {
+
+<span class="fc" id="L381">		addStatementForValue(code, beanDefinition, getter,</span>
+<span class="fc bfc" id="L382" title="All 2 branches covered.">				(defaultValue, actualValue) -&gt; !Objects.equals(defaultValue, actualValue), format);</span>
+<span class="fc" id="L383">	}</span>
+
+	private &lt;B extends BeanDefinition, T&gt; void addStatementForValue(
+			CodeBlock.Builder code, BeanDefinition beanDefinition,
+			Function&lt;B, @Nullable T&gt; getter, BiPredicate&lt;T, T&gt; filter, String format) {
+
+<span class="fc" id="L389">		addStatementForValue(code, beanDefinition, getter, filter, format, actualValue -&gt; actualValue);</span>
+<span class="fc" id="L390">	}</span>
+
+	@SuppressWarnings({&quot;unchecked&quot;, &quot;NullAway&quot;})
+	private &lt;B extends BeanDefinition, T&gt; void addStatementForValue(
+			CodeBlock.Builder code, BeanDefinition beanDefinition, Function&lt;B, @Nullable T&gt; getter,
+			BiPredicate&lt;T, T&gt; filter, String format, Function&lt;T, Object&gt; formatter) {
+
+<span class="fc" id="L397">		T defaultValue = getter.apply((B) DEFAULT_BEAN_DEFINITION);</span>
+<span class="fc" id="L398">		T actualValue = getter.apply((B) beanDefinition);</span>
+<span class="fc bfc" id="L399" title="All 2 branches covered.">		if (filter.test(defaultValue, actualValue)) {</span>
+<span class="fc" id="L400">			code.addStatement(format, BEAN_DEFINITION_VARIABLE, formatter.apply(actualValue));</span>
+		}
+<span class="fc" id="L402">	}</span>
+
+	/**
+	 * Cast the specified {@code valueCode} to the specified {@code castType} if the
+	 * {@code castNecessary} is {@code true}. Otherwise, return the valueCode as-is.
+	 * @param castNecessary whether a cast is necessary
+	 * @param castType the type to cast to
+	 * @param valueCode the code for the value
+	 * @return the existing value or a form of {@code (castType) valueCode} if a
+	 * cast is necessary
+	 */
+	private CodeBlock castIfNecessary(boolean castNecessary, Class&lt;?&gt; castType, CodeBlock valueCode) {
+<span class="fc bfc" id="L414" title="All 2 branches covered.">		return (castNecessary ? CodeBlock.of(&quot;($T) $L&quot;, castType, valueCode) : valueCode);</span>
+	}
+
+
+<span class="nc" id="L418">	static class PropertyNamesStack {</span>
+
+<span class="fc" id="L420">		private static final ThreadLocal&lt;ArrayDeque&lt;String&gt;&gt; threadLocal = ThreadLocal.withInitial(ArrayDeque::new);</span>
+
+		static void push(@Nullable String name) {
+<span class="fc bfc" id="L423" title="All 2 branches covered.">			String valueToSet = (name != null ? name : &quot;&quot;);</span>
+<span class="fc" id="L424">			threadLocal.get().push(valueToSet);</span>
+<span class="fc" id="L425">		}</span>
+
+		static void pop() {
+<span class="fc" id="L428">			threadLocal.get().pop();</span>
+<span class="fc" id="L429">		}</span>
+
+		static @Nullable String peek() {
+<span class="fc" id="L432">			String value = threadLocal.get().peek();</span>
+<span class="fc bfc" id="L433" title="All 2 branches covered.">			return (&quot;&quot;.equals(value) ? null : value);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

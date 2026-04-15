@@ -1,0 +1,373 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>ConcurrentTaskScheduler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.scheduling.concurrent</a> &gt; <span class="el_source">ConcurrentTaskScheduler.java</span></div><h1>ConcurrentTaskScheduler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.scheduling.concurrent;
+
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.Date;
+import java.util.concurrent.Callable;
+import java.util.concurrent.Executor;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+
+import jakarta.enterprise.concurrent.LastExecution;
+import jakarta.enterprise.concurrent.ManagedScheduledExecutorService;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.task.TaskRejectedException;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.scheduling.Trigger;
+import org.springframework.scheduling.TriggerContext;
+import org.springframework.scheduling.support.TaskUtils;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ErrorHandler;
+
+/**
+ * Adapter that takes a {@code java.util.concurrent.ScheduledExecutorService} and
+ * exposes a Spring {@link org.springframework.scheduling.TaskScheduler} for it.
+ * Extends {@link ConcurrentTaskExecutor} in order to implement the
+ * {@link org.springframework.scheduling.SchedulingTaskExecutor} interface as well.
+ *
+ * &lt;p&gt;Autodetects a JSR-236 {@link jakarta.enterprise.concurrent.ManagedScheduledExecutorService}
+ * in order to use it for trigger-based scheduling if possible, instead of Spring's
+ * local trigger management which ends up delegating to regular delay-based scheduling
+ * against the {@code java.util.concurrent.ScheduledExecutorService} API. For JSR-236 style
+ * lookup in a Jakarta EE environment, consider using {@link DefaultManagedTaskScheduler}.
+ *
+ * &lt;p&gt;Note that there is a pre-built {@link ThreadPoolTaskScheduler} that allows for
+ * defining a {@link java.util.concurrent.ScheduledThreadPoolExecutor} in bean style,
+ * exposing it as a Spring {@link org.springframework.scheduling.TaskScheduler} directly.
+ * This is a convenient alternative to a raw ScheduledThreadPoolExecutor definition with
+ * a separate definition of the present adapter class.
+ *
+ * @author Juergen Hoeller
+ * @author Mark Fisher
+ * @author Arjen Poutsma
+ * @since 3.0
+ * @see java.util.concurrent.ScheduledExecutorService
+ * @see java.util.concurrent.ScheduledThreadPoolExecutor
+ * @see java.util.concurrent.Executors
+ * @see DefaultManagedTaskScheduler
+ * @see ThreadPoolTaskScheduler
+ */
+public class ConcurrentTaskScheduler extends ConcurrentTaskExecutor implements TaskScheduler {
+
+<span class="fc" id="L75">	private static final TimeUnit NANO = TimeUnit.NANOSECONDS;</span>
+
+
+	private static @Nullable Class&lt;?&gt; managedScheduledExecutorServiceClass;
+
+	static {
+		try {
+<span class="fc" id="L82">			managedScheduledExecutorServiceClass = ClassUtils.forName(</span>
+					&quot;jakarta.enterprise.concurrent.ManagedScheduledExecutorService&quot;,
+<span class="fc" id="L84">					ConcurrentTaskScheduler.class.getClassLoader());</span>
+		}
+<span class="nc" id="L86">		catch (ClassNotFoundException ex) {</span>
+			// JSR-236 API not available...
+<span class="nc" id="L88">			managedScheduledExecutorServiceClass = null;</span>
+<span class="fc" id="L89">		}</span>
+<span class="fc" id="L90">	}</span>
+
+
+	private @Nullable ScheduledExecutorService scheduledExecutor;
+
+<span class="pc" id="L95">	private boolean enterpriseConcurrentScheduler = false;</span>
+
+	private @Nullable ErrorHandler errorHandler;
+
+<span class="pc" id="L99">	private Clock clock = Clock.systemDefaultZone();</span>
+
+
+	/**
+	 * Create a new ConcurrentTaskScheduler,
+	 * using a single thread executor as default.
+	 * @see java.util.concurrent.Executors#newSingleThreadScheduledExecutor()
+	 * @deprecated in favor of {@link #ConcurrentTaskScheduler(ScheduledExecutorService)}
+	 * with an externally provided Executor
+	 */
+	@Deprecated(since = &quot;6.1&quot;)
+	public ConcurrentTaskScheduler() {
+<span class="nc" id="L111">		super();</span>
+<span class="nc" id="L112">		this.scheduledExecutor = Executors.newSingleThreadScheduledExecutor();</span>
+<span class="nc" id="L113">		this.enterpriseConcurrentScheduler = false;</span>
+<span class="nc" id="L114">	}</span>
+
+	/**
+	 * Create a new ConcurrentTaskScheduler, using the given
+	 * {@link java.util.concurrent.ScheduledExecutorService} as shared delegate.
+	 * &lt;p&gt;Autodetects a JSR-236 {@link jakarta.enterprise.concurrent.ManagedScheduledExecutorService}
+	 * in order to use it for trigger-based scheduling if possible,
+	 * instead of Spring's local trigger management.
+	 * @param scheduledExecutor the {@link java.util.concurrent.ScheduledExecutorService}
+	 * to delegate to for {@link org.springframework.scheduling.SchedulingTaskExecutor}
+	 * as well as {@link TaskScheduler} invocations
+	 */
+	public ConcurrentTaskScheduler(@Nullable ScheduledExecutorService scheduledExecutor) {
+<span class="fc" id="L127">		super(scheduledExecutor);</span>
+<span class="fc bfc" id="L128" title="All 2 branches covered.">		if (scheduledExecutor != null) {</span>
+<span class="fc" id="L129">			initScheduledExecutor(scheduledExecutor);</span>
+		}
+<span class="fc" id="L131">	}</span>
+
+	/**
+	 * Create a new ConcurrentTaskScheduler, using the given {@link java.util.concurrent.Executor}
+	 * and {@link java.util.concurrent.ScheduledExecutorService} as delegates.
+	 * &lt;p&gt;Autodetects a JSR-236 {@link jakarta.enterprise.concurrent.ManagedScheduledExecutorService}
+	 * in order to use it for trigger-based scheduling if possible,
+	 * instead of Spring's local trigger management.
+	 * @param concurrentExecutor the {@link java.util.concurrent.Executor} to delegate to
+	 * for {@link org.springframework.scheduling.SchedulingTaskExecutor} invocations
+	 * @param scheduledExecutor the {@link java.util.concurrent.ScheduledExecutorService}
+	 * to delegate to for {@link TaskScheduler} invocations
+	 */
+	public ConcurrentTaskScheduler(Executor concurrentExecutor, ScheduledExecutorService scheduledExecutor) {
+<span class="nc" id="L145">		super(concurrentExecutor);</span>
+<span class="nc" id="L146">		initScheduledExecutor(scheduledExecutor);</span>
+<span class="nc" id="L147">	}</span>
+
+
+	private void initScheduledExecutor(ScheduledExecutorService scheduledExecutor) {
+<span class="fc" id="L151">		this.scheduledExecutor = scheduledExecutor;</span>
+<span class="pc bpc" id="L152" title="1 of 2 branches missed.">		this.enterpriseConcurrentScheduler = (managedScheduledExecutorServiceClass != null &amp;&amp;</span>
+<span class="pc bpc" id="L153" title="1 of 2 branches missed.">				managedScheduledExecutorServiceClass.isInstance(scheduledExecutor));</span>
+<span class="fc" id="L154">	}</span>
+
+	/**
+	 * Specify the {@link java.util.concurrent.ScheduledExecutorService} to delegate to.
+	 * &lt;p&gt;Autodetects a JSR-236 {@link jakarta.enterprise.concurrent.ManagedScheduledExecutorService}
+	 * in order to use it for trigger-based scheduling if possible,
+	 * instead of Spring's local trigger management.
+	 * &lt;p&gt;Note: This will only apply to {@link TaskScheduler} invocations.
+	 * If you want the given executor to apply to
+	 * {@link org.springframework.scheduling.SchedulingTaskExecutor} invocations
+	 * as well, pass the same executor reference to {@link #setConcurrentExecutor}.
+	 * @see #setConcurrentExecutor
+	 */
+	public void setScheduledExecutor(ScheduledExecutorService scheduledExecutor) {
+<span class="nc" id="L168">		initScheduledExecutor(scheduledExecutor);</span>
+<span class="nc" id="L169">	}</span>
+
+	private ScheduledExecutorService getScheduledExecutor() {
+<span class="fc bfc" id="L172" title="All 2 branches covered.">		if (this.scheduledExecutor == null) {</span>
+<span class="fc" id="L173">			throw new IllegalStateException(&quot;No ScheduledExecutor is configured&quot;);</span>
+		}
+<span class="fc" id="L175">		return this.scheduledExecutor;</span>
+	}
+
+	/**
+	 * Provide an {@link ErrorHandler} strategy.
+	 */
+	public void setErrorHandler(ErrorHandler errorHandler) {
+<span class="fc" id="L182">		Assert.notNull(errorHandler, &quot;ErrorHandler must not be null&quot;);</span>
+<span class="fc" id="L183">		this.errorHandler = errorHandler;</span>
+<span class="fc" id="L184">	}</span>
+
+	/**
+	 * Set the clock to use for scheduling purposes.
+	 * &lt;p&gt;The default clock is the system clock for the default time zone.
+	 * @since 5.3
+	 * @see Clock#systemDefaultZone()
+	 */
+	public void setClock(Clock clock) {
+<span class="nc" id="L193">		Assert.notNull(clock, &quot;Clock must not be null&quot;);</span>
+<span class="nc" id="L194">		this.clock = clock;</span>
+<span class="nc" id="L195">	}</span>
+
+	@Override
+	public Clock getClock() {
+<span class="nc" id="L199">		return this.clock;</span>
+	}
+
+
+	@Override
+	public void execute(Runnable task) {
+<span class="fc" id="L205">		super.execute(TaskUtils.decorateTaskWithErrorHandler(task, this.errorHandler, false));</span>
+<span class="fc" id="L206">	}</span>
+
+	@Override
+	public Future&lt;?&gt; submit(Runnable task) {
+<span class="fc" id="L210">		return super.submit(TaskUtils.decorateTaskWithErrorHandler(task, this.errorHandler, false));</span>
+	}
+
+	@Override
+	public &lt;T&gt; Future&lt;T&gt; submit(Callable&lt;T&gt; task) {
+<span class="fc" id="L215">		return super.submit(new DelegatingErrorHandlingCallable&lt;&gt;(task, this.errorHandler));</span>
+	}
+
+	@Override
+	public @Nullable ScheduledFuture&lt;?&gt; schedule(Runnable task, Trigger trigger) {
+<span class="fc" id="L220">		ScheduledExecutorService scheduleExecutorToUse = getScheduledExecutor();</span>
+		try {
+<span class="pc bpc" id="L222" title="1 of 2 branches missed.">			if (this.enterpriseConcurrentScheduler) {</span>
+<span class="nc" id="L223">				return new EnterpriseConcurrentTriggerScheduler().schedule(decorateTask(task, true), trigger);</span>
+			}
+			else {
+				ErrorHandler errorHandler =
+<span class="pc bpc" id="L227" title="1 of 2 branches missed.">						(this.errorHandler != null ? this.errorHandler : TaskUtils.getDefaultErrorHandler(true));</span>
+<span class="fc" id="L228">				return new ReschedulingRunnable(</span>
+<span class="fc" id="L229">						decorateTaskIfNecessary(task), trigger, this.clock, scheduleExecutorToUse, errorHandler)</span>
+<span class="fc" id="L230">						.schedule();</span>
+			}
+		}
+<span class="nc" id="L233">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L234">			throw new TaskRejectedException(scheduleExecutorToUse, task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; schedule(Runnable task, Instant startTime) {
+<span class="fc" id="L240">		ScheduledExecutorService scheduleExecutorToUse = getScheduledExecutor();</span>
+<span class="fc" id="L241">		Duration delay = Duration.between(this.clock.instant(), startTime);</span>
+		try {
+<span class="fc" id="L243">			return scheduleExecutorToUse.schedule(decorateTask(task, false), NANO.convert(delay), NANO);</span>
+		}
+<span class="nc" id="L245">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L246">			throw new TaskRejectedException(scheduleExecutorToUse, task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleAtFixedRate(Runnable task, Instant startTime, Duration period) {
+<span class="fc" id="L252">		ScheduledExecutorService scheduleExecutorToUse = getScheduledExecutor();</span>
+<span class="fc" id="L253">		Duration initialDelay = Duration.between(this.clock.instant(), startTime);</span>
+		try {
+<span class="fc" id="L255">			return scheduleExecutorToUse.scheduleAtFixedRate(decorateTask(task, true),</span>
+<span class="fc" id="L256">					NANO.convert(initialDelay), NANO.convert(period), NANO);</span>
+		}
+<span class="nc" id="L258">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L259">			throw new TaskRejectedException(scheduleExecutorToUse, task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleAtFixedRate(Runnable task, Duration period) {
+<span class="fc" id="L265">		ScheduledExecutorService scheduleExecutorToUse = getScheduledExecutor();</span>
+		try {
+<span class="fc" id="L267">			return scheduleExecutorToUse.scheduleAtFixedRate(decorateTask(task, true),</span>
+<span class="fc" id="L268">					0, NANO.convert(period), NANO);</span>
+		}
+<span class="nc" id="L270">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L271">			throw new TaskRejectedException(scheduleExecutorToUse, task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleWithFixedDelay(Runnable task, Instant startTime, Duration delay) {
+<span class="fc" id="L277">		ScheduledExecutorService scheduleExecutorToUse = getScheduledExecutor();</span>
+<span class="fc" id="L278">		Duration initialDelay = Duration.between(this.clock.instant(), startTime);</span>
+		try {
+<span class="fc" id="L280">			return scheduleExecutorToUse.scheduleWithFixedDelay(decorateTask(task, true),</span>
+<span class="fc" id="L281">					NANO.convert(initialDelay), NANO.convert(delay), NANO);</span>
+		}
+<span class="nc" id="L283">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L284">			throw new TaskRejectedException(scheduleExecutorToUse, task, ex);</span>
+		}
+	}
+
+	@Override
+	public ScheduledFuture&lt;?&gt; scheduleWithFixedDelay(Runnable task, Duration delay) {
+<span class="nc" id="L290">		ScheduledExecutorService scheduleExecutorToUse = getScheduledExecutor();</span>
+		try {
+<span class="nc" id="L292">			return scheduleExecutorToUse.scheduleWithFixedDelay(decorateTask(task, true),</span>
+<span class="nc" id="L293">					0, NANO.convert(delay), NANO);</span>
+		}
+<span class="nc" id="L295">		catch (RejectedExecutionException ex) {</span>
+<span class="nc" id="L296">			throw new TaskRejectedException(scheduleExecutorToUse, task, ex);</span>
+		}
+	}
+
+	private Runnable decorateTask(Runnable task, boolean isRepeatingTask) {
+<span class="fc" id="L301">		Runnable result = TaskUtils.decorateTaskWithErrorHandler(task, this.errorHandler, isRepeatingTask);</span>
+<span class="fc" id="L302">		result = decorateTaskIfNecessary(result);</span>
+<span class="pc bpc" id="L303" title="1 of 2 branches missed.">		if (this.enterpriseConcurrentScheduler) {</span>
+<span class="nc" id="L304">			result = ManagedTaskBuilder.buildManagedTask(result, task.toString());</span>
+		}
+<span class="fc" id="L306">		return result;</span>
+	}
+
+
+	/**
+	 * Delegate that adapts a Spring Trigger to a JSR-236 Trigger.
+	 * Separated into an inner class in order to avoid a hard dependency on the JSR-236 API.
+	 */
+<span class="nc" id="L314">	private class EnterpriseConcurrentTriggerScheduler {</span>
+
+		public ScheduledFuture&lt;?&gt; schedule(Runnable task, Trigger trigger) {
+<span class="nc" id="L317">			ManagedScheduledExecutorService executor = (ManagedScheduledExecutorService) getScheduledExecutor();</span>
+<span class="nc" id="L318">			return executor.schedule(task, new TriggerAdapter(trigger));</span>
+		}
+
+
+		private static class TriggerAdapter implements jakarta.enterprise.concurrent.Trigger {
+
+			private final Trigger adaptee;
+
+<span class="nc" id="L326">			public TriggerAdapter(Trigger adaptee) {</span>
+<span class="nc" id="L327">				this.adaptee = adaptee;</span>
+<span class="nc" id="L328">			}</span>
+
+			@Override
+			public @Nullable Date getNextRunTime(@Nullable LastExecution le, Date taskScheduledTime) {
+<span class="nc" id="L332">				Instant instant = this.adaptee.nextExecution(new LastExecutionAdapter(le));</span>
+<span class="nc bnc" id="L333" title="All 2 branches missed.">				return (instant != null ? Date.from(instant) : null);</span>
+			}
+
+			@Override
+			public boolean skipRun(LastExecution lastExecutionInfo, Date scheduledRunTime) {
+<span class="nc" id="L338">				return false;</span>
+			}
+
+
+			private static class LastExecutionAdapter implements TriggerContext {
+
+				private final @Nullable LastExecution le;
+
+<span class="nc" id="L346">				public LastExecutionAdapter(@Nullable LastExecution le) {</span>
+<span class="nc" id="L347">					this.le = le;</span>
+<span class="nc" id="L348">				}</span>
+
+				@Override
+				public @Nullable Instant lastScheduledExecution() {
+<span class="nc bnc" id="L352" title="All 2 branches missed.">					return (this.le != null ? toInstant(this.le.getScheduledStart()) : null);</span>
+				}
+
+				@Override
+				public @Nullable Instant lastActualExecution() {
+<span class="nc bnc" id="L357" title="All 2 branches missed.">					return (this.le != null ? toInstant(this.le.getRunStart()) : null);</span>
+				}
+
+				@Override
+				public @Nullable Instant lastCompletion() {
+<span class="nc bnc" id="L362" title="All 2 branches missed.">					return (this.le != null ? toInstant(this.le.getRunEnd()) : null);</span>
+				}
+
+				private static @Nullable Instant toInstant(@Nullable Date date) {
+<span class="nc bnc" id="L366" title="All 2 branches missed.">					return (date != null ? date.toInstant() : null);</span>
+				}
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

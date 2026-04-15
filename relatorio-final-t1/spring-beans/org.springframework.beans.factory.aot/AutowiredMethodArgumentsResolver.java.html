@@ -1,0 +1,208 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>AutowiredMethodArgumentsResolver.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-beans</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.aot</a> &gt; <span class="el_source">AutowiredMethodArgumentsResolver.java</span></div><h1>AutowiredMethodArgumentsResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.aot;
+
+import java.lang.reflect.Method;
+import java.util.Arrays;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aot.hint.ExecutableMode;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.TypeConverter;
+import org.springframework.beans.factory.InjectionPoint;
+import org.springframework.beans.factory.UnsatisfiedDependencyException;
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.config.DependencyDescriptor;
+import org.springframework.beans.factory.support.RegisteredBean;
+import org.springframework.core.MethodParameter;
+import org.springframework.util.Assert;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.function.ThrowingConsumer;
+
+/**
+ * Resolver used to support the autowiring of methods. Typically used in
+ * AOT-processed applications as a targeted alternative to the
+ * {@link org.springframework.beans.factory.annotation.AutowiredAnnotationBeanPostProcessor
+ * AutowiredAnnotationBeanPostProcessor}.
+ *
+ * &lt;p&gt;When resolving arguments in a native image, the {@link Method} being used
+ * must be marked with an {@link ExecutableMode#INTROSPECT introspection} hint
+ * so that field annotations can be read. Full {@link ExecutableMode#INVOKE
+ * invocation} hints are only required if the
+ * {@link #resolveAndInvoke(RegisteredBean, Object)} method of this class is
+ * being used (typically to support private methods).
+ *
+ * @author Phillip Webb
+ * @author Stephane Nicoll
+ * @since 6.0
+ */
+public final class AutowiredMethodArgumentsResolver extends AutowiredElementResolver {
+
+	private final String methodName;
+
+	private final Class&lt;?&gt;[] parameterTypes;
+
+	private final boolean required;
+
+	private final String @Nullable [] shortcutBeanNames;
+
+
+	private AutowiredMethodArgumentsResolver(String methodName, Class&lt;?&gt;[] parameterTypes,
+<span class="fc" id="L70">			boolean required, String @Nullable [] shortcutBeanNames) {</span>
+
+<span class="fc" id="L72">		Assert.hasText(methodName, &quot;'methodName' must not be empty&quot;);</span>
+<span class="fc" id="L73">		this.methodName = methodName;</span>
+<span class="fc" id="L74">		this.parameterTypes = parameterTypes;</span>
+<span class="fc" id="L75">		this.required = required;</span>
+<span class="fc" id="L76">		this.shortcutBeanNames = shortcutBeanNames;</span>
+<span class="fc" id="L77">	}</span>
+
+
+	/**
+	 * Create a new {@link AutowiredMethodArgumentsResolver} for the specified
+	 * method where injection is optional.
+	 * @param methodName the method name
+	 * @param parameterTypes the factory method parameter types
+	 * @return a new {@link AutowiredFieldValueResolver} instance
+	 */
+	public static AutowiredMethodArgumentsResolver forMethod(String methodName, Class&lt;?&gt;... parameterTypes) {
+<span class="fc" id="L88">		return new AutowiredMethodArgumentsResolver(methodName, parameterTypes, false, null);</span>
+	}
+
+	/**
+	 * Create a new {@link AutowiredMethodArgumentsResolver} for the specified
+	 * method where injection is required.
+	 * @param methodName the method name
+	 * @param parameterTypes the factory method parameter types
+	 * @return a new {@link AutowiredFieldValueResolver} instance
+	 */
+	public static AutowiredMethodArgumentsResolver forRequiredMethod(String methodName, Class&lt;?&gt;... parameterTypes) {
+<span class="fc" id="L99">		return new AutowiredMethodArgumentsResolver(methodName, parameterTypes, true, null);</span>
+	}
+
+	/**
+	 * Return a new {@link AutowiredMethodArgumentsResolver} instance
+	 * that uses direct bean name injection shortcuts for specific parameters.
+	 * @param beanNames the bean names to use as shortcuts (aligned with the
+	 * method parameters)
+	 * @return a new {@link AutowiredMethodArgumentsResolver} instance that uses
+	 * the given shortcut bean names
+	 */
+	public AutowiredMethodArgumentsResolver withShortcut(String... beanNames) {
+<span class="fc" id="L111">		return new AutowiredMethodArgumentsResolver(this.methodName, this.parameterTypes, this.required, beanNames);</span>
+	}
+
+	/**
+	 * Resolve the method arguments for the specified registered bean and
+	 * provide it to the given action.
+	 * @param registeredBean the registered bean
+	 * @param action the action to execute with the resolved method arguments
+	 */
+	public void resolve(RegisteredBean registeredBean, ThrowingConsumer&lt;AutowiredArguments&gt; action) {
+<span class="fc" id="L121">		Assert.notNull(registeredBean, &quot;'registeredBean' must not be null&quot;);</span>
+<span class="fc" id="L122">		Assert.notNull(action, &quot;'action' must not be null&quot;);</span>
+<span class="fc" id="L123">		AutowiredArguments resolved = resolve(registeredBean);</span>
+<span class="pc bpc" id="L124" title="1 of 2 branches missed.">		if (resolved != null) {</span>
+<span class="fc" id="L125">			action.accept(resolved);</span>
+		}
+<span class="fc" id="L127">	}</span>
+
+	/**
+	 * Resolve the method arguments for the specified registered bean.
+	 * @param registeredBean the registered bean
+	 * @return the resolved method arguments
+	 */
+	public @Nullable AutowiredArguments resolve(RegisteredBean registeredBean) {
+<span class="fc" id="L135">		Assert.notNull(registeredBean, &quot;'registeredBean' must not be null&quot;);</span>
+<span class="fc" id="L136">		return resolveArguments(registeredBean, getMethod(registeredBean));</span>
+	}
+
+	/**
+	 * Resolve the method arguments for the specified registered bean and invoke
+	 * the method using reflection.
+	 * @param registeredBean the registered bean
+	 * @param instance the bean instance
+	 */
+	public void resolveAndInvoke(RegisteredBean registeredBean, Object instance) {
+<span class="fc" id="L146">		Assert.notNull(registeredBean, &quot;'registeredBean' must not be null&quot;);</span>
+<span class="fc" id="L147">		Assert.notNull(instance, &quot;'instance' must not be null&quot;);</span>
+<span class="fc" id="L148">		Method method = getMethod(registeredBean);</span>
+<span class="fc" id="L149">		AutowiredArguments resolved = resolveArguments(registeredBean, method);</span>
+<span class="pc bpc" id="L150" title="1 of 2 branches missed.">		if (resolved != null) {</span>
+<span class="fc" id="L151">			ReflectionUtils.makeAccessible(method);</span>
+<span class="fc" id="L152">			ReflectionUtils.invokeMethod(method, instance, resolved.toArray());</span>
+		}
+<span class="fc" id="L154">	}</span>
+
+	private @Nullable AutowiredArguments resolveArguments(RegisteredBean registeredBean,
+			Method method) {
+
+<span class="fc" id="L159">		String beanName = registeredBean.getBeanName();</span>
+<span class="fc" id="L160">		Class&lt;?&gt; beanClass = registeredBean.getBeanClass();</span>
+<span class="fc" id="L161">		ConfigurableBeanFactory beanFactory = registeredBean.getBeanFactory();</span>
+<span class="fc" id="L162">		Assert.isInstanceOf(AutowireCapableBeanFactory.class, beanFactory);</span>
+<span class="fc" id="L163">		AutowireCapableBeanFactory autowireCapableBeanFactory = (AutowireCapableBeanFactory) beanFactory;</span>
+<span class="fc" id="L164">		int argumentCount = method.getParameterCount();</span>
+<span class="fc" id="L165">		@Nullable Object[] arguments = new Object[argumentCount];</span>
+<span class="fc" id="L166">		Set&lt;String&gt; autowiredBeanNames = CollectionUtils.newLinkedHashSet(argumentCount);</span>
+<span class="fc" id="L167">		TypeConverter typeConverter = beanFactory.getTypeConverter();</span>
+<span class="fc bfc" id="L168" title="All 2 branches covered.">		for (int i = 0; i &lt; argumentCount; i++) {</span>
+<span class="fc" id="L169">			MethodParameter parameter = new MethodParameter(method, i);</span>
+<span class="fc" id="L170">			DependencyDescriptor descriptor = new DependencyDescriptor(parameter, this.required);</span>
+<span class="fc" id="L171">			descriptor.setContainingClass(beanClass);</span>
+<span class="fc bfc" id="L172" title="All 2 branches covered.">			String shortcut = (this.shortcutBeanNames != null ? this.shortcutBeanNames[i] : null);</span>
+<span class="fc bfc" id="L173" title="All 2 branches covered.">			if (shortcut != null) {</span>
+<span class="fc" id="L174">				descriptor = new ShortcutDependencyDescriptor(descriptor, shortcut);</span>
+			}
+			try {
+<span class="fc" id="L177">				Object argument = autowireCapableBeanFactory.resolveDependency(</span>
+						descriptor, beanName, autowiredBeanNames, typeConverter);
+<span class="pc bpc" id="L179" title="1 of 4 branches missed.">				if (argument == null &amp;&amp; !this.required) {</span>
+<span class="fc" id="L180">					return null;</span>
+				}
+<span class="fc" id="L182">				arguments[i] = argument;</span>
+			}
+<span class="fc" id="L184">			catch (BeansException ex) {</span>
+<span class="fc" id="L185">				throw new UnsatisfiedDependencyException(null, beanName, new InjectionPoint(parameter), ex);</span>
+<span class="fc" id="L186">			}</span>
+		}
+<span class="fc" id="L188">		registerDependentBeans(beanFactory, beanName, autowiredBeanNames);</span>
+<span class="fc" id="L189">		return AutowiredArguments.of(arguments);</span>
+	}
+
+	private Method getMethod(RegisteredBean registeredBean) {
+<span class="fc" id="L193">		Method method = ReflectionUtils.findMethod(registeredBean.getBeanClass(),</span>
+				this.methodName, this.parameterTypes);
+<span class="fc" id="L195">		Assert.notNull(method, () -&gt;</span>
+<span class="fc" id="L196">				&quot;Method '%s' with parameter types [%s] declared on %s could not be found.&quot;.formatted(</span>
+<span class="fc" id="L197">						this.methodName, toCommaSeparatedNames(this.parameterTypes),</span>
+<span class="fc" id="L198">						registeredBean.getBeanClass().getName()));</span>
+<span class="fc" id="L199">		return method;</span>
+	}
+
+	private String toCommaSeparatedNames(Class&lt;?&gt;... parameterTypes) {
+<span class="fc" id="L203">		return Arrays.stream(parameterTypes).map(Class::getName)</span>
+<span class="fc" id="L204">				.collect(Collectors.joining(&quot;, &quot;));</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

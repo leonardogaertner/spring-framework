@@ -1,0 +1,655 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SpringExtension.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.test.context.junit.jupiter</a> &gt; <span class="el_source">SpringExtension.java</span></div><h1>SpringExtension.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.test.context.junit.jupiter;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
+import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
+import java.util.Arrays;
+import java.util.List;
+import java.util.Locale;
+
+import org.jspecify.annotations.Nullable;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.TestInstance.Lifecycle;
+import org.junit.jupiter.api.extension.AfterAllCallback;
+import org.junit.jupiter.api.extension.AfterEachCallback;
+import org.junit.jupiter.api.extension.AfterTestExecutionCallback;
+import org.junit.jupiter.api.extension.BeforeAllCallback;
+import org.junit.jupiter.api.extension.BeforeEachCallback;
+import org.junit.jupiter.api.extension.BeforeTestExecutionCallback;
+import org.junit.jupiter.api.extension.ExtensionContext;
+import org.junit.jupiter.api.extension.ExtensionContext.Namespace;
+import org.junit.jupiter.api.extension.ExtensionContext.Store;
+import org.junit.jupiter.api.extension.ParameterContext;
+import org.junit.jupiter.api.extension.ParameterResolver;
+import org.junit.jupiter.api.extension.TestInstancePostProcessor;
+import org.junit.jupiter.api.extension.TestInstantiationAwareExtension;
+import org.junit.jupiter.api.parallel.ExecutionMode;
+import org.junit.platform.commons.annotation.Testable;
+
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.ParameterResolutionDelegate;
+import org.springframework.context.ApplicationContext;
+import org.springframework.core.SpringProperties;
+import org.springframework.core.annotation.MergedAnnotation;
+import org.springframework.core.annotation.MergedAnnotations;
+import org.springframework.core.annotation.MergedAnnotations.SearchStrategy;
+import org.springframework.core.annotation.RepeatableContainers;
+import org.springframework.test.context.MethodInvoker;
+import org.springframework.test.context.TestContextAnnotationUtils;
+import org.springframework.test.context.TestContextManager;
+import org.springframework.test.context.bean.override.BeanOverride;
+import org.springframework.test.context.bean.override.BeanOverrideHandler;
+import org.springframework.test.context.bean.override.BeanOverrideUtils;
+import org.springframework.test.context.event.ApplicationEvents;
+import org.springframework.test.context.event.RecordApplicationEvents;
+import org.springframework.test.context.support.PropertyProvider;
+import org.springframework.test.context.support.TestConstructorUtils;
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.ReflectionUtils.MethodFilter;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@code SpringExtension} integrates the &lt;em&gt;Spring TestContext Framework&lt;/em&gt;
+ * into the JUnit Jupiter testing framework.
+ *
+ * &lt;p&gt;To use this extension, annotate a JUnit Jupiter based test class with
+ * {@code @ExtendWith(SpringExtension.class)}, {@code @SpringJUnitConfig},
+ * {@code @SpringJUnitWebConfig}, or any other annotation that is meta-annotated
+ * with {@code @ExtendWith(SpringExtension.class)} such as {@code @SpringBootTest},
+ * etc.
+ *
+ * &lt;p&gt;As of Spring Framework 7.0, the {@code SpringExtension} is
+ * {@linkplain #getTestInstantiationExtensionContextScope(ExtensionContext)
+ * configured} to use a test-method scoped {@link ExtensionContext}, which
+ * enables consistent dependency injection into fields and constructors from the
+ * {@link ApplicationContext} for the current test method in a
+ * {@link org.junit.jupiter.api.Nested @Nested} test class hierarchy. However,
+ * if a third-party {@link org.junit.platform.launcher.TestExecutionListener
+ * TestExecutionListener} is not compatible with the semantics associated with
+ * a test-method scoped extension context &amp;mdash; or if a developer wishes to
+ * switch to test-class scoped semantics &amp;mdash; the {@code SpringExtension} can
+ * be configured by annotating a top-level test class with
+ * {@link SpringExtensionConfig#useTestClassScopedExtensionContext()
+ * &amp;#64;SpringExtensionConfig(useTestClassScopedExtensionContext = true)} or by
+ * setting the {@value #EXTENSION_CONTEXT_SCOPE_PROPERTY_NAME} property to
+ * {@link ExtensionContextScope#TEST_CLASS test_class}. Note that an explicit
+ * {@code @SpringExtensionConfig} declaration overrides the globally configured
+ * property. Furthermore, the {@code SpringExtension} will always use a test-class
+ * scoped {@code ExtensionContext} for a test class that is configured to use JUnit
+ * Jupiter’s {@code @TestInstance(Lifecycle.PER_CLASS)} semantics.
+ *
+ * &lt;p&gt;&lt;strong&gt;NOTE:&lt;/strong&gt; This class requires JUnit Jupiter 6.0 or higher.
+ *
+ * @author Sam Brannen
+ * @author Simon Baslé
+ * @since 5.0
+ * @see org.junit.jupiter.api.extension.ExtendWith @ExtendWith
+ * @see org.springframework.test.context.junit.jupiter.SpringExtensionConfig @SpringExtensionConfig
+ * @see org.springframework.test.context.junit.jupiter.SpringJUnitConfig @SpringJUnitConfig
+ * @see org.springframework.test.context.junit.jupiter.web.SpringJUnitWebConfig @SpringJUnitWebConfig
+ * @see org.springframework.test.context.junit.jupiter.EnabledIf @EnabledIf
+ * @see org.springframework.test.context.junit.jupiter.DisabledIf @DisabledIf
+ * @see org.springframework.test.context.TestContextManager TestContextManager
+ */
+<span class="fc" id="L117">public class SpringExtension implements BeforeAllCallback, AfterAllCallback, TestInstancePostProcessor,</span>
+		BeforeEachCallback, AfterEachCallback, BeforeTestExecutionCallback, AfterTestExecutionCallback,
+		ParameterResolver {
+
+	/**
+	 * JVM system property used to configure the default {@link ExtensionContextScope}
+	 * for the {@code SpringExtension}: {@value}.
+	 * &lt;p&gt;Acceptable values include enum constants defined in {@code ExtensionContextScope},
+	 * ignoring case. For example, the default may be changed to
+	 * {@link ExtensionContextScope#TEST_CLASS} by supplying the following JVM
+	 * system property via the command line.
+	 * &lt;pre style=&quot;code&quot;&gt;-Dspring.test.extension.context.scope=test_class&lt;/pre&gt;
+	 * &lt;p&gt;If the property is not set, {@link ExtensionContextScope#TEST_METHOD}
+	 * semantics will apply. Note, however, that {@code @SpringExtensionConfig}
+	 * takes precedence over this property.
+	 * &lt;p&gt;May alternatively be configured via the
+	 * {@link org.springframework.core.SpringProperties SpringProperties}
+	 * mechanism or as a
+	 * &lt;a href=&quot;https://docs.junit.org/current/running-tests/configuration-parameters.html&quot;&gt;JUnit
+	 * Platform configuration parameter&lt;/a&gt;.
+	 * @since 7.0.7
+	 * @see ExtensionContextScope
+	 * @see SpringExtensionConfig
+	 */
+	public static final String EXTENSION_CONTEXT_SCOPE_PROPERTY_NAME = &quot;spring.test.extension.context.scope&quot;;
+
+	/**
+	 * {@link Namespace} in which {@code TestContextManagers} are stored, keyed
+	 * by test class.
+	 */
+<span class="fc" id="L147">	private static final Namespace TEST_CONTEXT_MANAGER_NAMESPACE = Namespace.create(SpringExtension.class);</span>
+
+	/**
+	 * {@link Namespace} in which the resolved default {@link ExtensionContextScope}
+	 * is stored.
+	 * @since 7.0.7
+	 */
+<span class="fc" id="L154">	private static final Namespace DEFAULT_EXTENSION_CONTEXT_SCOPE_NAMESPACE =</span>
+<span class="fc" id="L155">			Namespace.create(SpringExtension.class.getName() + &quot;#default.extension.context.scope&quot;);</span>
+
+	/**
+	 * {@link Namespace} in which {@code @Autowired} validation error messages
+	 * are stored, keyed by test class.
+	 */
+<span class="fc" id="L161">	private static final Namespace AUTOWIRED_VALIDATION_NAMESPACE =</span>
+<span class="fc" id="L162">			Namespace.create(SpringExtension.class.getName() + &quot;#autowired.validation&quot;);</span>
+
+	/**
+	 * &lt;em&gt;Marker&lt;/em&gt; string constant to represent that no violations were detected.
+	 * &lt;p&gt;The value is an empty string which allows this class to perform quick
+	 * {@code isEmpty()} checks instead of performing unnecessary string comparisons.
+	 */
+	private static final String NO_VIOLATIONS_DETECTED = &quot;&quot;;
+
+	/**
+	 * {@link Namespace} in which {@code @RecordApplicationEvents} validation error messages
+	 * are stored, keyed by test class.
+	 */
+<span class="fc" id="L175">	private static final Namespace RECORD_APPLICATION_EVENTS_VALIDATION_NAMESPACE =</span>
+<span class="fc" id="L176">			Namespace.create(SpringExtension.class.getName() + &quot;#recordApplicationEvents.validation&quot;);</span>
+
+	// Note that @Test, @TestFactory, @TestTemplate, @RepeatedTest, and @ParameterizedTest
+	// are all meta-annotated with @Testable.
+<span class="fc" id="L180">	private static final List&lt;Class&lt;? extends Annotation&gt;&gt; JUPITER_ANNOTATION_TYPES =</span>
+<span class="fc" id="L181">			List.of(BeforeAll.class, AfterAll.class, BeforeEach.class, AfterEach.class, Testable.class);</span>
+
+<span class="fc" id="L183">	private static final MethodFilter autowiredTestOrLifecycleMethodFilter =</span>
+<span class="fc" id="L184">			ReflectionUtils.USER_DECLARED_METHODS.and(SpringExtension::isAutowiredTestOrLifecycleMethod);</span>
+
+
+	/**
+	 * Returns {@link TestInstantiationAwareExtension.ExtensionContextScope#TEST_METHOD
+	 * ExtensionContextScope.TEST_METHOD}.
+	 * &lt;p&gt;This can be overridden &lt;em&gt;locally&lt;/em&gt; via the
+	 * {@link SpringExtensionConfig @SpringExtensionConfig} annotation or
+	 * &lt;em&gt;globally&lt;/em&gt; via the {@value #EXTENSION_CONTEXT_SCOPE_PROPERTY_NAME}
+	 * property. See the {@linkplain SpringExtension class-level Javadoc} for further
+	 * details.
+	 * @since 7.0
+	 * @see SpringExtensionConfig#useTestClassScopedExtensionContext()
+	 * @see #EXTENSION_CONTEXT_SCOPE_PROPERTY_NAME
+	 * @see ExtensionContextScope
+	 */
+	@Override
+	public TestInstantiationAwareExtension.ExtensionContextScope getTestInstantiationExtensionContextScope(
+			ExtensionContext rootContext) {
+
+<span class="fc" id="L204">		return TestInstantiationAwareExtension.ExtensionContextScope.TEST_METHOD;</span>
+	}
+
+	/**
+	 * Delegates to {@link TestContextManager#beforeTestClass}.
+	 */
+	@Override
+	public void beforeAll(ExtensionContext context) throws Exception {
+<span class="fc" id="L212">		TestContextManager testContextManager = getTestContextManager(context);</span>
+<span class="fc" id="L213">		registerMethodInvoker(testContextManager, context);</span>
+<span class="fc" id="L214">		testContextManager.beforeTestClass();</span>
+<span class="fc" id="L215">	}</span>
+
+	/**
+	 * Delegates to {@link TestContextManager#afterTestClass}.
+	 */
+	@Override
+	public void afterAll(ExtensionContext context) throws Exception {
+		try {
+<span class="fc" id="L223">			TestContextManager testContextManager = getTestContextManager(context);</span>
+<span class="fc" id="L224">			registerMethodInvoker(testContextManager, context);</span>
+<span class="fc" id="L225">			testContextManager.afterTestClass();</span>
+		}
+		finally {
+<span class="fc" id="L228">			getStore(context).remove(context.getRequiredTestClass());</span>
+		}
+<span class="fc" id="L230">	}</span>
+
+	/**
+	 * Delegates to {@link TestContextManager#prepareTestInstance}.
+	 * &lt;p&gt;This method also validates that test methods and test lifecycle methods
+	 * are not annotated with {@link Autowired @Autowired}.
+	 */
+	@Override
+	public void postProcessTestInstance(Object testInstance, ExtensionContext context) throws Exception {
+<span class="fc" id="L239">		context = findProperlyScopedExtensionContext(testInstance.getClass(), context);</span>
+
+<span class="fc" id="L241">		validateAutowiredConfig(context);</span>
+<span class="fc" id="L242">		validateRecordApplicationEventsConfig(context);</span>
+<span class="fc" id="L243">		TestContextManager testContextManager = getTestContextManager(context);</span>
+<span class="fc" id="L244">		registerMethodInvoker(testContextManager, context);</span>
+<span class="fc" id="L245">		testContextManager.prepareTestInstance(testInstance);</span>
+<span class="fc" id="L246">	}</span>
+
+	/**
+	 * Validate that test methods and test lifecycle methods in the supplied
+	 * test class are not annotated with {@link Autowired @Autowired}.
+	 * @since 5.3.2
+	 */
+	private void validateAutowiredConfig(ExtensionContext context) {
+		// We save the result in the ExtensionContext.Store so that we don't
+		// re-validate all methods for the same test class multiple times.
+<span class="fc" id="L256">		Store store = context.getStore(AUTOWIRED_VALIDATION_NAMESPACE);</span>
+
+<span class="fc" id="L258">		String errorMessage = store.computeIfAbsent(context.getRequiredTestClass(), testClass -&gt; {</span>
+<span class="fc" id="L259">				Method[] methodsWithErrors =</span>
+<span class="fc" id="L260">						ReflectionUtils.getUniqueDeclaredMethods(testClass, autowiredTestOrLifecycleMethodFilter);</span>
+<span class="fc bfc" id="L261" title="All 2 branches covered.">				return (methodsWithErrors.length == 0 ? NO_VIOLATIONS_DETECTED :</span>
+<span class="fc" id="L262">						String.format(</span>
+								&quot;Test methods and test lifecycle methods must not be annotated with @Autowired. &quot; +
+								&quot;You should instead annotate individual method parameters with @Autowired, &quot; +
+								&quot;@Qualifier, or @Value. Offending methods in test class %s: %s&quot;,
+<span class="fc" id="L266">								testClass.getName(), Arrays.toString(methodsWithErrors)));</span>
+			}, String.class);
+
+<span class="fc bfc" id="L269" title="All 2 branches covered.">		if (!errorMessage.isEmpty()) {</span>
+<span class="fc" id="L270">			throw new IllegalStateException(errorMessage);</span>
+		}
+<span class="fc" id="L272">	}</span>
+
+	/**
+	 * Validate that the test class or its enclosing class doesn't attempt to record
+	 * application events in a parallel mode that makes it non-deterministic
+	 * ({@code @TestInstance(PER_CLASS)} and {@code @Execution(CONCURRENT)}
+	 * combination).
+	 * @since 6.1
+	 */
+	private void validateRecordApplicationEventsConfig(ExtensionContext context) {
+		// We save the result in the ExtensionContext.Store so that we don't
+		// re-validate the configuration for the same test class multiple times.
+<span class="fc" id="L284">		Store store = context.getStore(RECORD_APPLICATION_EVENTS_VALIDATION_NAMESPACE);</span>
+
+<span class="fc" id="L286">		String errorMessage = store.computeIfAbsent(context.getRequiredTestClass(), testClass -&gt; {</span>
+<span class="fc" id="L287">			boolean recording = TestContextAnnotationUtils.hasAnnotation(testClass, RecordApplicationEvents.class);</span>
+<span class="fc bfc" id="L288" title="All 2 branches covered.">			if (!recording) {</span>
+<span class="fc" id="L289">				return NO_VIOLATIONS_DETECTED;</span>
+			}
+
+<span class="fc bfc" id="L292" title="All 2 branches covered.">			if (context.getTestInstanceLifecycle().orElse(Lifecycle.PER_METHOD) == Lifecycle.PER_METHOD) {</span>
+<span class="fc" id="L293">				return NO_VIOLATIONS_DETECTED;</span>
+			}
+
+<span class="fc bfc" id="L296" title="All 2 branches covered.">			if (context.getExecutionMode() == ExecutionMode.SAME_THREAD) {</span>
+<span class="fc" id="L297">				return NO_VIOLATIONS_DETECTED;</span>
+			}
+
+<span class="fc" id="L300">			return &quot;&quot;&quot;</span>
+					Test classes or @Nested test classes that @RecordApplicationEvents must not be run \
+					in parallel with the @TestInstance(PER_CLASS) lifecycle mode. Configure either \
+					@Execution(SAME_THREAD) or @TestInstance(PER_METHOD) semantics, or disable parallel \
+					execution altogether. Note that when recording events in parallel, one might see events \
+					published by other tests since the application context may be shared.&quot;&quot;&quot;;
+		}, String.class);
+
+<span class="fc bfc" id="L308" title="All 2 branches covered.">		if (!errorMessage.isEmpty()) {</span>
+<span class="fc" id="L309">			throw new IllegalStateException(errorMessage);</span>
+		}
+<span class="fc" id="L311">	}</span>
+
+	/**
+	 * Delegates to {@link TestContextManager#beforeTestMethod}.
+	 */
+	@Override
+	public void beforeEach(ExtensionContext context) throws Exception {
+<span class="fc" id="L318">		Object testInstance = context.getRequiredTestInstance();</span>
+<span class="fc" id="L319">		Method testMethod = context.getRequiredTestMethod();</span>
+<span class="fc" id="L320">		TestContextManager testContextManager = getTestContextManager(context);</span>
+<span class="fc" id="L321">		registerMethodInvoker(testContextManager, context);</span>
+<span class="fc" id="L322">		testContextManager.beforeTestMethod(testInstance, testMethod);</span>
+<span class="fc" id="L323">	}</span>
+
+	/**
+	 * Delegates to {@link TestContextManager#beforeTestExecution}.
+	 */
+	@Override
+	public void beforeTestExecution(ExtensionContext context) throws Exception {
+<span class="fc" id="L330">		Object testInstance = context.getRequiredTestInstance();</span>
+<span class="fc" id="L331">		Method testMethod = context.getRequiredTestMethod();</span>
+<span class="fc" id="L332">		TestContextManager testContextManager = getTestContextManager(context);</span>
+<span class="fc" id="L333">		registerMethodInvoker(testContextManager, context);</span>
+<span class="fc" id="L334">		testContextManager.beforeTestExecution(testInstance, testMethod);</span>
+<span class="fc" id="L335">	}</span>
+
+	/**
+	 * Delegates to {@link TestContextManager#afterTestExecution}.
+	 */
+	@Override
+	public void afterTestExecution(ExtensionContext context) throws Exception {
+<span class="fc" id="L342">		Object testInstance = context.getRequiredTestInstance();</span>
+<span class="fc" id="L343">		Method testMethod = context.getRequiredTestMethod();</span>
+<span class="fc" id="L344">		Throwable testException = context.getExecutionException().orElse(null);</span>
+<span class="fc" id="L345">		TestContextManager testContextManager = getTestContextManager(context);</span>
+<span class="fc" id="L346">		registerMethodInvoker(testContextManager, context);</span>
+<span class="fc" id="L347">		testContextManager.afterTestExecution(testInstance, testMethod, testException);</span>
+<span class="fc" id="L348">	}</span>
+
+	/**
+	 * Delegates to {@link TestContextManager#afterTestMethod}.
+	 */
+	@Override
+	public void afterEach(ExtensionContext context) throws Exception {
+<span class="fc" id="L355">		Object testInstance = context.getRequiredTestInstance();</span>
+<span class="fc" id="L356">		Method testMethod = context.getRequiredTestMethod();</span>
+<span class="fc" id="L357">		Throwable testException = context.getExecutionException().orElse(null);</span>
+<span class="fc" id="L358">		TestContextManager testContextManager = getTestContextManager(context);</span>
+<span class="fc" id="L359">		registerMethodInvoker(testContextManager, context);</span>
+<span class="fc" id="L360">		testContextManager.afterTestMethod(testInstance, testMethod, testException);</span>
+<span class="fc" id="L361">	}</span>
+
+	/**
+	 * Determine if the value for the {@link Parameter} in the supplied {@link ParameterContext}
+	 * should be autowired from the test's {@link ApplicationContext}.
+	 * &lt;p&gt;A parameter is considered to be autowirable if one of the following
+	 * conditions is {@code true}.
+	 * &lt;ol&gt;
+	 * &lt;li&gt;The {@linkplain ParameterContext#getDeclaringExecutable() declaring
+	 * executable} is a {@link Constructor} and
+	 * {@link TestConstructorUtils#isAutowirableConstructor(Executable, PropertyProvider)}
+	 * returns {@code true}. Note that {@code isAutowirableConstructor()} will be
+	 * invoked with a fallback {@link PropertyProvider} that delegates its lookup
+	 * to {@link ExtensionContext#getConfigurationParameter(String)}.&lt;/li&gt;
+	 * &lt;li&gt;The parameter is of type {@link ApplicationContext} or a sub-type thereof.&lt;/li&gt;
+	 * &lt;li&gt;The parameter is annotated or meta-annotated with a
+	 * {@link BeanOverride @BeanOverride} composed annotation &amp;mdash; for example,
+	 * {@code @MockitoBean} or {@code @MockitoSpyBean}.&lt;/li&gt;
+	 * &lt;li&gt;The parameter is of type {@link ApplicationEvents} or a sub-type thereof.&lt;/li&gt;
+	 * &lt;li&gt;{@link ParameterResolutionDelegate#isAutowirable} returns {@code true}.&lt;/li&gt;
+	 * &lt;/ol&gt;
+	 * &lt;p&gt;This method does not {@linkplain #getApplicationContext(ExtensionContext)
+	 * load} the {@code ApplicationContext} or verify that the application context
+	 * actually contains a matching candidate bean, since doing so would potentially
+	 * load an application context too early or unnecessarily.
+	 * &lt;p&gt;&lt;strong&gt;WARNING&lt;/strong&gt;: If a test class {@code Constructor} is annotated
+	 * with {@code @Autowired} or automatically autowirable (see
+	 * {@link org.springframework.test.context.TestConstructor @TestConstructor}),
+	 * Spring will assume the responsibility for resolving all parameters in the
+	 * constructor. Consequently, no other registered {@link ParameterResolver}
+	 * will be able to resolve parameters.
+	 * @see #resolveParameter
+	 * @see TestConstructorUtils#isAutowirableConstructor(Executable, PropertyProvider)
+	 * @see ParameterResolutionDelegate#isAutowirable
+	 */
+	@Override
+	public boolean supportsParameter(ParameterContext parameterContext, ExtensionContext extensionContext) {
+<span class="fc" id="L398">		Parameter parameter = parameterContext.getParameter();</span>
+<span class="fc" id="L399">		Class&lt;?&gt; parameterType = parameter.getType();</span>
+<span class="fc" id="L400">		Executable executable = parameter.getDeclaringExecutable();</span>
+<span class="fc" id="L401">		PropertyProvider junitPropertyProvider = propertyName -&gt;</span>
+<span class="fc" id="L402">				extensionContext.getConfigurationParameter(propertyName).orElse(null);</span>
+<span class="fc bfc" id="L403" title="All 2 branches covered.">		return (TestConstructorUtils.isAutowirableConstructor(executable, junitPropertyProvider) ||</span>
+<span class="fc bfc" id="L404" title="All 2 branches covered.">				ApplicationContext.class.isAssignableFrom(parameterType) ||</span>
+<span class="fc bfc" id="L405" title="All 2 branches covered.">				isBeanOverride(parameter) ||</span>
+<span class="fc bfc" id="L406" title="All 2 branches covered.">				supportsApplicationEvents(parameterType, executable) ||</span>
+<span class="fc bfc" id="L407" title="All 2 branches covered.">				ParameterResolutionDelegate.isAutowirable(parameter, parameterContext.getIndex()));</span>
+	}
+
+	private static boolean supportsApplicationEvents(Class&lt;?&gt; parameterType, Executable executable) {
+<span class="fc bfc" id="L411" title="All 2 branches covered.">		if (ApplicationEvents.class.isAssignableFrom(parameterType)) {</span>
+<span class="fc" id="L412">			Assert.isTrue(executable instanceof Method,</span>
+					&quot;ApplicationEvents can only be injected into test and lifecycle methods&quot;);
+<span class="fc" id="L414">			return true;</span>
+		}
+<span class="fc" id="L416">		return false;</span>
+	}
+
+	/**
+	 * Resolve a value for the {@link Parameter} in the supplied {@link ParameterContext} by
+	 * retrieving the corresponding dependency from the test's {@link ApplicationContext}.
+	 * &lt;p&gt;Delegates to {@link ParameterResolutionDelegate}.
+	 * @see #supportsParameter
+	 * @see ParameterResolutionDelegate#resolveDependency(Parameter, int, String, Class, org.springframework.beans.factory.config.AutowireCapableBeanFactory)
+	 */
+	@Override
+	public @Nullable Object resolveParameter(ParameterContext parameterContext, ExtensionContext extensionContext) {
+<span class="fc" id="L428">		Parameter parameter = parameterContext.getParameter();</span>
+<span class="fc" id="L429">		int index = parameterContext.getIndex();</span>
+<span class="fc" id="L430">		Executable executable = parameterContext.getDeclaringExecutable();</span>
+<span class="fc" id="L431">		Class&lt;?&gt; testClass = extensionContext.getRequiredTestClass();</span>
+<span class="fc bfc" id="L432" title="All 2 branches covered.">		if (executable instanceof Constructor&lt;?&gt; constructor) {</span>
+<span class="fc" id="L433">			testClass = constructor.getDeclaringClass();</span>
+<span class="fc" id="L434">			extensionContext = findProperlyScopedExtensionContext(testClass, extensionContext);</span>
+		}
+
+<span class="fc" id="L437">		ApplicationContext applicationContext = getApplicationContext(extensionContext);</span>
+
+		// If the parameter is a @BeanOverride with an explicit name, we simply look
+		// up the bean by name instead of performing full dependency resolution.
+<span class="fc bfc" id="L441" title="All 2 branches covered.">		if (isBeanOverride(parameter)) {</span>
+<span class="fc" id="L442">			BeanOverrideHandler handler = BeanOverrideUtils.resolveHandlerForParameter(parameter, testClass);</span>
+<span class="pc bpc" id="L443" title="1 of 4 branches missed.">			if (handler != null &amp;&amp; handler.getBeanName() != null) {</span>
+<span class="fc" id="L444">				return applicationContext.getBean(handler.getBeanName());</span>
+			}
+		}
+<span class="fc" id="L447">		return ParameterResolutionDelegate.resolveDependency(parameter, index, testClass,</span>
+<span class="fc" id="L448">				applicationContext.getAutowireCapableBeanFactory());</span>
+	}
+
+
+	/**
+	 * Get the {@link ApplicationContext} associated with the supplied {@link ExtensionContext}.
+	 * &lt;p&gt;&lt;strong&gt;NOTE&lt;/strong&gt;: As of Spring Framework 7.0, the supplied
+	 * {@code ExtensionContext} may not be properly &lt;em&gt;scoped&lt;/em&gt;. See the
+	 * {@linkplain SpringExtension class-level Javadoc} for further details.
+	 * &lt;p&gt;&lt;strong&gt;WARNING&lt;/strong&gt;: Invoking this method ensures that the
+	 * corresponding {@code ApplicationContext} is
+	 * {@linkplain org.springframework.test.context.TestContext#getApplicationContext()
+	 * loaded}. Consequently, this method should not be used if eager loading of
+	 * the application context is undesired. For example,
+	 * {@link #supportsParameter(ParameterContext, ExtensionContext)} intentionally
+	 * does not invoke this method, since doing so would potentially load an
+	 * application context too early or unnecessarily.
+	 * @param context the current {@code ExtensionContext} (never {@code null})
+	 * @return the application context
+	 * @throws IllegalStateException if an error occurs while retrieving the application context
+	 * @see org.springframework.test.context.TestContext#getApplicationContext()
+	 */
+	public static ApplicationContext getApplicationContext(ExtensionContext context) {
+<span class="fc" id="L471">		return getTestContextManager(context).getTestContext().getApplicationContext();</span>
+	}
+
+	/**
+	 * Get the {@link TestContextManager} associated with the supplied {@link ExtensionContext}.
+	 * @return the {@code TestContextManager} (never {@code null})
+	 */
+	static TestContextManager getTestContextManager(ExtensionContext context) {
+<span class="fc" id="L479">		Assert.notNull(context, &quot;ExtensionContext must not be null&quot;);</span>
+<span class="fc" id="L480">		Class&lt;?&gt; testClass = context.getRequiredTestClass();</span>
+<span class="fc" id="L481">		Store store = getStore(context);</span>
+<span class="fc" id="L482">		return store.computeIfAbsent(testClass, TestContextManager::new, TestContextManager.class);</span>
+	}
+
+	private static Store getStore(ExtensionContext context) {
+<span class="fc" id="L486">		return context.getRoot().getStore(TEST_CONTEXT_MANAGER_NAMESPACE);</span>
+	}
+
+	/**
+	 * Register a {@link MethodInvoker} adaptor for Jupiter's
+	 * {@link org.junit.jupiter.api.extension.ExecutableInvoker ExecutableInvoker}
+	 * in the {@link org.springframework.test.context.TestContext TestContext} for
+	 * the supplied {@link TestContextManager}.
+	 * @since 6.1
+	 */
+	private static void registerMethodInvoker(TestContextManager testContextManager, ExtensionContext context) {
+<span class="fc" id="L497">		testContextManager.getTestContext().setMethodInvoker(context.getExecutableInvoker()::invoke);</span>
+<span class="fc" id="L498">	}</span>
+
+	private static boolean isAutowiredTestOrLifecycleMethod(Method method) {
+<span class="fc" id="L501">		MergedAnnotations mergedAnnotations =</span>
+<span class="fc" id="L502">				MergedAnnotations.from(method, SearchStrategy.DIRECT, RepeatableContainers.none());</span>
+<span class="fc bfc" id="L503" title="All 2 branches covered.">		if (!mergedAnnotations.isPresent(Autowired.class)) {</span>
+<span class="fc" id="L504">			return false;</span>
+		}
+<span class="fc bfc" id="L506" title="All 2 branches covered.">		for (Class&lt;? extends Annotation&gt; annotationType : JUPITER_ANNOTATION_TYPES) {</span>
+<span class="fc bfc" id="L507" title="All 2 branches covered.">			if (mergedAnnotations.isPresent(annotationType)) {</span>
+<span class="fc" id="L508">				return true;</span>
+			}
+<span class="fc" id="L510">		}</span>
+<span class="fc" id="L511">		return false;</span>
+	}
+
+	private static boolean isBeanOverride(Parameter parameter) {
+<span class="fc bfc" id="L515" title="All 2 branches covered.">		return (parameter.getDeclaringExecutable() instanceof Constructor &amp;&amp;</span>
+<span class="fc bfc" id="L516" title="All 2 branches covered.">				MergedAnnotations.from(parameter).isPresent(BeanOverride.class));</span>
+	}
+
+	/**
+	 * Find the properly scoped {@link ExtensionContext} for the supplied test class.
+	 * &lt;p&gt;If the supplied {@code ExtensionContext} is already properly scoped, it
+	 * will be returned. Otherwise, if test-class scoped semantics apply (see
+	 * {@linkplain SpringExtension class-level Javadoc}), this method searches the
+	 * {@code ExtensionContext} hierarchy for an {@code ExtensionContext} whose test
+	 * class is the same as the supplied test class.
+	 * @since 7.0
+	 * @see SpringExtensionConfig#useTestClassScopedExtensionContext()
+	 * @see #EXTENSION_CONTEXT_SCOPE_PROPERTY_NAME
+	 * @see ExtensionContextScope
+	 */
+	private static ExtensionContext findProperlyScopedExtensionContext(Class&lt;?&gt; testClass, ExtensionContext context) {
+<span class="fc bfc" id="L532" title="All 2 branches covered.">		if (shouldUseTestClassScopedExtensionContext(testClass, context)) {</span>
+<span class="fc bfc" id="L533" title="All 2 branches covered.">			while (context.getRequiredTestClass() != testClass) {</span>
+<span class="fc" id="L534">				context = context.getParent().get();</span>
+			}
+		}
+<span class="fc" id="L537">		return context;</span>
+	}
+
+	/**
+	 * Determine whether test-class scoped {@code ExtensionContext} semantics apply
+	 * for the supplied test class.
+	 * @since 7.0
+	 */
+	private static boolean shouldUseTestClassScopedExtensionContext(Class&lt;?&gt; testClass, ExtensionContext context) {
+<span class="fc" id="L546">		MergedAnnotation&lt;SpringExtensionConfig&gt; mergedAnnotation =</span>
+<span class="fc" id="L547">				MergedAnnotations.search(SearchStrategy.TYPE_HIERARCHY)</span>
+<span class="fc" id="L548">						.withEnclosingClasses(ClassUtils::isInnerClass)</span>
+<span class="fc" id="L549">						.from(testClass)</span>
+<span class="fc" id="L550">						.get(SpringExtensionConfig.class);</span>
+
+<span class="fc bfc" id="L552" title="All 2 branches covered.">		if (mergedAnnotation.isPresent()) {</span>
+<span class="pc bpc" id="L553" title="2 of 4 branches missed.">			if (mergedAnnotation.getSource() instanceof Class&lt;?&gt; source &amp;&amp; ClassUtils.isInnerClass(source)) {</span>
+<span class="nc" id="L554">				throw new IllegalStateException(&quot;&quot;&quot;</span>
+						Test class [%s] must not be annotated with @SpringExtensionConfig. \
+						@SpringExtensionConfig is only supported on top-level classes.\
+<span class="nc" id="L557">						&quot;&quot;&quot;.formatted(source.getName()));</span>
+			}
+<span class="fc" id="L559">			return mergedAnnotation.getBoolean(&quot;useTestClassScopedExtensionContext&quot;);</span>
+		}
+
+<span class="fc bfc" id="L562" title="All 2 branches covered.">		return (resolveDefaultExtensionContextScope(context) == ExtensionContextScope.TEST_CLASS);</span>
+	}
+
+	/**
+	 * Resolve the default {@link ExtensionContextScope} from the
+	 * {@value #EXTENSION_CONTEXT_SCOPE_PROPERTY_NAME} property, first via
+	 * {@link SpringProperties} and then via
+	 * {@link ExtensionContext#getConfigurationParameter(String)} as a fallback
+	 * strategy if the Spring property is not set.
+	 * @param context the current {@code ExtensionContext}
+	 * @return the resolved scope, or {@link ExtensionContextScope#TEST_METHOD}
+	 * if the property is not set
+	 * @since 7.0.7
+	 */
+	private static ExtensionContextScope resolveDefaultExtensionContextScope(ExtensionContext context) {
+<span class="fc" id="L577">		return context.getRoot().getStore(DEFAULT_EXTENSION_CONTEXT_SCOPE_NAMESPACE)</span>
+<span class="fc" id="L578">				.computeIfAbsent(ExtensionContextScope.class, key -&gt; {</span>
+<span class="fc" id="L579">					String springValue = SpringProperties.getProperty(EXTENSION_CONTEXT_SCOPE_PROPERTY_NAME);</span>
+<span class="fc" id="L580">					ExtensionContextScope scope = ExtensionContextScope.from(springValue);</span>
+<span class="fc bfc" id="L581" title="All 2 branches covered.">					if (scope != null) {</span>
+<span class="fc" id="L582">						return scope;</span>
+					}
+<span class="fc" id="L584">					rejectUnsupportedScope(springValue);</span>
+
+<span class="fc" id="L586">					String junitValue = context.getConfigurationParameter(EXTENSION_CONTEXT_SCOPE_PROPERTY_NAME)</span>
+<span class="fc" id="L587">							.orElse(null);</span>
+<span class="fc" id="L588">					scope = ExtensionContextScope.from(junitValue);</span>
+<span class="fc bfc" id="L589" title="All 2 branches covered.">					if (scope != null) {</span>
+<span class="fc" id="L590">						return scope;</span>
+					}
+<span class="fc" id="L592">					rejectUnsupportedScope(junitValue);</span>
+
+					// Default to test-method scope.
+<span class="fc" id="L595">					return ExtensionContextScope.TEST_METHOD;</span>
+				}, ExtensionContextScope.class);
+	}
+
+	private static void rejectUnsupportedScope(@Nullable String scope) {
+<span class="fc bfc" id="L600" title="All 2 branches covered.">		if (StringUtils.hasText(scope)) {</span>
+<span class="fc" id="L601">			throw new IllegalArgumentException(&quot;Unsupported value '%s' for property '%s'&quot;</span>
+<span class="fc" id="L602">					.formatted(scope.strip(), EXTENSION_CONTEXT_SCOPE_PROPERTY_NAME));</span>
+		}
+<span class="fc" id="L604">	}</span>
+
+
+	/**
+	 * Enumeration of &lt;em&gt;extension context scopes&lt;/em&gt; for configuring how the
+	 * {@link SpringExtension} resolves an {@link ExtensionContext} within
+	 * {@code @Nested} test class hierarchies.
+	 *
+	 * @since 7.0.7
+	 * @see SpringExtension#EXTENSION_CONTEXT_SCOPE_PROPERTY_NAME
+	 * @see SpringExtensionConfig
+	 * @see org.junit.jupiter.api.extension.TestInstantiationAwareExtension.ExtensionContextScope
+	 */
+<span class="fc" id="L617">	public enum ExtensionContextScope {</span>
+
+		/**
+		 * Use a test-method scoped {@link ExtensionContext} within {@code @Nested}
+		 * test class hierarchies.
+		 * @see org.junit.jupiter.api.extension.TestInstantiationAwareExtension.ExtensionContextScope#TEST_METHOD
+		 */
+<span class="fc" id="L624">		TEST_METHOD,</span>
+
+		/**
+		 * Use a test-class scoped {@link ExtensionContext} within {@code @Nested}
+		 * test class hierarchies.
+		 * @see org.junit.jupiter.api.extension.TestInstantiationAwareExtension.ExtensionContextScope#DEFAULT
+		 */
+<span class="fc" id="L631">		TEST_CLASS;</span>
+
+
+		/**
+		 * Get the {@link ExtensionContextScope} enum constant with the supplied name,
+		 * {@linkplain String#strip() stripped} and ignoring case.
+		 * @param name the name of the enum constant to retrieve
+		 * @return the corresponding enum constant, or {@code null} if not found
+		 * @see ExtensionContextScope#valueOf(String)
+		 */
+		static @Nullable ExtensionContextScope from(@Nullable String name) {
+<span class="fc bfc" id="L642" title="All 2 branches covered.">			if (!StringUtils.hasText(name)) {</span>
+<span class="fc" id="L643">				return null;</span>
+			}
+			try {
+<span class="fc" id="L646">				return ExtensionContextScope.valueOf(name.strip().toUpperCase(Locale.ROOT));</span>
+			}
+<span class="fc" id="L648">			catch (IllegalArgumentException ex) {</span>
+<span class="fc" id="L649">				return null;</span>
+			}
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

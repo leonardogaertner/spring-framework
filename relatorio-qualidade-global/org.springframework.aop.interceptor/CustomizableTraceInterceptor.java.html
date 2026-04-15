@@ -1,0 +1,403 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>CustomizableTraceInterceptor.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.aop.interceptor</a> &gt; <span class="el_source">CustomizableTraceInterceptor.java</span></div><h1>CustomizableTraceInterceptor.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.aop.interceptor;
+
+import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+import org.aopalliance.intercept.MethodInvocation;
+import org.apache.commons.logging.Log;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.util.Assert;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.StopWatch;
+import org.springframework.util.StringUtils;
+
+/**
+ * {@code MethodInterceptor} implementation that allows for highly customizable
+ * method-level tracing, using placeholders.
+ *
+ * &lt;p&gt;Trace messages are written on method entry, and if the method invocation succeeds
+ * on method exit. If an invocation results in an exception, then an exception message
+ * is written. The contents of these trace messages is fully customizable and special
+ * placeholders are available to allow you to include runtime information in your log
+ * messages. The placeholders available are:
+ *
+ * &lt;p&gt;&lt;ul&gt;
+ * &lt;li&gt;{@code $[methodName]} - replaced with the name of the method being invoked&lt;/li&gt;
+ * &lt;li&gt;{@code $[targetClassName]} - replaced with the name of the class that is
+ * the target of the invocation&lt;/li&gt;
+ * &lt;li&gt;{@code $[targetClassShortName]} - replaced with the short name of the class
+ * that is the target of the invocation&lt;/li&gt;
+ * &lt;li&gt;{@code $[returnValue]} - replaced with the value returned by the invocation&lt;/li&gt;
+ * &lt;li&gt;{@code $[argumentTypes]} - replaced with a comma-separated list of the
+ * short class names of the method arguments&lt;/li&gt;
+ * &lt;li&gt;{@code $[arguments]} - replaced with a comma-separated list of the
+ * {@code String} representation of the method arguments&lt;/li&gt;
+ * &lt;li&gt;{@code $[exception]} - replaced with the {@code String} representation
+ * of any {@code Throwable} raised during the invocation&lt;/li&gt;
+ * &lt;li&gt;{@code $[invocationTime]} - replaced with the time, in milliseconds,
+ * taken by the method invocation&lt;/li&gt;
+ * &lt;/ul&gt;
+ *
+ * &lt;p&gt;There are restrictions on which placeholders can be used in which messages:
+ * see the individual message properties for details on the valid placeholders.
+ *
+ * @author Rob Harrop
+ * @author Juergen Hoeller
+ * @author Sam Brannen
+ * @since 1.2
+ * @see #setEnterMessage
+ * @see #setExitMessage
+ * @see #setExceptionMessage
+ * @see SimpleTraceInterceptor
+ */
+@SuppressWarnings(&quot;serial&quot;)
+<span class="fc" id="L72">public class CustomizableTraceInterceptor extends AbstractTraceInterceptor {</span>
+
+	/**
+	 * The {@code $[methodName]} placeholder.
+	 * Replaced with the name of the method being invoked.
+	 */
+	public static final String PLACEHOLDER_METHOD_NAME = &quot;$[methodName]&quot;;
+
+	/**
+	 * The {@code $[targetClassName]} placeholder.
+	 * Replaced with the fully-qualified name of the {@code Class}
+	 * of the method invocation target.
+	 */
+	public static final String PLACEHOLDER_TARGET_CLASS_NAME = &quot;$[targetClassName]&quot;;
+
+	/**
+	 * The {@code $[targetClassShortName]} placeholder.
+	 * Replaced with the short name of the {@code Class} of the
+	 * method invocation target.
+	 */
+	public static final String PLACEHOLDER_TARGET_CLASS_SHORT_NAME = &quot;$[targetClassShortName]&quot;;
+
+	/**
+	 * The {@code $[returnValue]} placeholder.
+	 * Replaced with the {@code String} representation of the value
+	 * returned by the method invocation.
+	 */
+	public static final String PLACEHOLDER_RETURN_VALUE = &quot;$[returnValue]&quot;;
+
+	/**
+	 * The {@code $[argumentTypes]} placeholder.
+	 * Replaced with a comma-separated list of the argument types for the
+	 * method invocation. Argument types are written as short class names.
+	 */
+	public static final String PLACEHOLDER_ARGUMENT_TYPES = &quot;$[argumentTypes]&quot;;
+
+	/**
+	 * The {@code $[arguments]} placeholder.
+	 * Replaced with a comma separated list of the argument values for the
+	 * method invocation. Relies on the {@code toString()} method of
+	 * each argument type.
+	 */
+	public static final String PLACEHOLDER_ARGUMENTS = &quot;$[arguments]&quot;;
+
+	/**
+	 * The {@code $[exception]} placeholder.
+	 * Replaced with the {@code String} representation of any
+	 * {@code Throwable} raised during method invocation.
+	 */
+	public static final String PLACEHOLDER_EXCEPTION = &quot;$[exception]&quot;;
+
+	/**
+	 * The {@code $[invocationTime]} placeholder.
+	 * Replaced with the time taken by the invocation (in milliseconds).
+	 */
+	public static final String PLACEHOLDER_INVOCATION_TIME = &quot;$[invocationTime]&quot;;
+
+	/**
+	 * The default message used for writing method entry messages.
+	 */
+	private static final String DEFAULT_ENTER_MESSAGE = &quot;Entering method '&quot; +
+			PLACEHOLDER_METHOD_NAME + &quot;' of class [&quot; + PLACEHOLDER_TARGET_CLASS_NAME + &quot;]&quot;;
+
+	/**
+	 * The default message used for writing method exit messages.
+	 */
+	private static final String DEFAULT_EXIT_MESSAGE = &quot;Exiting method '&quot; +
+			PLACEHOLDER_METHOD_NAME + &quot;' of class [&quot; + PLACEHOLDER_TARGET_CLASS_NAME + &quot;]&quot;;
+
+	/**
+	 * The default message used for writing exception messages.
+	 */
+	private static final String DEFAULT_EXCEPTION_MESSAGE = &quot;Exception thrown in method '&quot; +
+			PLACEHOLDER_METHOD_NAME + &quot;' of class [&quot; + PLACEHOLDER_TARGET_CLASS_NAME + &quot;]&quot;;
+
+	/**
+	 * The {@code Pattern} used to match placeholders.
+	 */
+<span class="fc" id="L150">	private static final Pattern PATTERN = Pattern.compile(&quot;\\$\\[\\p{Alpha}+]&quot;);</span>
+
+	/**
+	 * The {@code Set} of allowed placeholders.
+	 */
+<span class="fc" id="L155">	static final Set&lt;String&gt; ALLOWED_PLACEHOLDERS = Set.of(</span>
+			PLACEHOLDER_METHOD_NAME,
+			PLACEHOLDER_TARGET_CLASS_NAME,
+			PLACEHOLDER_TARGET_CLASS_SHORT_NAME,
+			PLACEHOLDER_RETURN_VALUE,
+			PLACEHOLDER_ARGUMENT_TYPES,
+			PLACEHOLDER_ARGUMENTS,
+			PLACEHOLDER_EXCEPTION,
+			PLACEHOLDER_INVOCATION_TIME);
+
+
+	/**
+	 * The message for method entry.
+	 */
+<span class="fc" id="L169">	private String enterMessage = DEFAULT_ENTER_MESSAGE;</span>
+
+	/**
+	 * The message for method exit.
+	 */
+<span class="fc" id="L174">	private String exitMessage = DEFAULT_EXIT_MESSAGE;</span>
+
+	/**
+	 * The message for exceptions during method execution.
+	 */
+<span class="fc" id="L179">	private String exceptionMessage = DEFAULT_EXCEPTION_MESSAGE;</span>
+
+
+	/**
+	 * Set the template used for method entry log messages.
+	 * This template can contain any of the following placeholders:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;{@code $[targetClassName]}&lt;/li&gt;
+	 * &lt;li&gt;{@code $[targetClassShortName]}&lt;/li&gt;
+	 * &lt;li&gt;{@code $[argumentTypes]}&lt;/li&gt;
+	 * &lt;li&gt;{@code $[arguments]}&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 */
+	public void setEnterMessage(String enterMessage) throws IllegalArgumentException {
+<span class="fc" id="L193">		Assert.hasText(enterMessage, &quot;enterMessage must not be empty&quot;);</span>
+<span class="fc" id="L194">		checkForInvalidPlaceholders(enterMessage);</span>
+<span class="fc" id="L195">		Assert.doesNotContain(enterMessage, PLACEHOLDER_RETURN_VALUE,</span>
+				&quot;enterMessage cannot contain placeholder &quot; + PLACEHOLDER_RETURN_VALUE);
+<span class="fc" id="L197">		Assert.doesNotContain(enterMessage, PLACEHOLDER_EXCEPTION,</span>
+				&quot;enterMessage cannot contain placeholder &quot; + PLACEHOLDER_EXCEPTION);
+<span class="fc" id="L199">		Assert.doesNotContain(enterMessage, PLACEHOLDER_INVOCATION_TIME,</span>
+				&quot;enterMessage cannot contain placeholder &quot; + PLACEHOLDER_INVOCATION_TIME);
+<span class="fc" id="L201">		this.enterMessage = enterMessage;</span>
+<span class="fc" id="L202">	}</span>
+
+	/**
+	 * Set the template used for method exit log messages.
+	 * This template can contain any of the following placeholders:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;{@code $[targetClassName]}&lt;/li&gt;
+	 * &lt;li&gt;{@code $[targetClassShortName]}&lt;/li&gt;
+	 * &lt;li&gt;{@code $[argumentTypes]}&lt;/li&gt;
+	 * &lt;li&gt;{@code $[arguments]}&lt;/li&gt;
+	 * &lt;li&gt;{@code $[returnValue]}&lt;/li&gt;
+	 * &lt;li&gt;{@code $[invocationTime]}&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 */
+	public void setExitMessage(String exitMessage) {
+<span class="fc" id="L217">		Assert.hasText(exitMessage, &quot;exitMessage must not be empty&quot;);</span>
+<span class="fc" id="L218">		checkForInvalidPlaceholders(exitMessage);</span>
+<span class="fc" id="L219">		Assert.doesNotContain(exitMessage, PLACEHOLDER_EXCEPTION,</span>
+				&quot;exitMessage cannot contain placeholder&quot; + PLACEHOLDER_EXCEPTION);
+<span class="fc" id="L221">		this.exitMessage = exitMessage;</span>
+<span class="fc" id="L222">	}</span>
+
+	/**
+	 * Set the template used for method exception log messages.
+	 * This template can contain any of the following placeholders:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;{@code $[targetClassName]}&lt;/li&gt;
+	 * &lt;li&gt;{@code $[targetClassShortName]}&lt;/li&gt;
+	 * &lt;li&gt;{@code $[argumentTypes]}&lt;/li&gt;
+	 * &lt;li&gt;{@code $[arguments]}&lt;/li&gt;
+	 * &lt;li&gt;{@code $[exception]}&lt;/li&gt;
+	 * &lt;/ul&gt;
+	 */
+	public void setExceptionMessage(String exceptionMessage) {
+<span class="fc" id="L236">		Assert.hasText(exceptionMessage, &quot;exceptionMessage must not be empty&quot;);</span>
+<span class="fc" id="L237">		checkForInvalidPlaceholders(exceptionMessage);</span>
+<span class="nc" id="L238">		Assert.doesNotContain(exceptionMessage, PLACEHOLDER_RETURN_VALUE,</span>
+				&quot;exceptionMessage cannot contain placeholder &quot; + PLACEHOLDER_RETURN_VALUE);
+<span class="nc" id="L240">		this.exceptionMessage = exceptionMessage;</span>
+<span class="nc" id="L241">	}</span>
+
+
+	/**
+	 * Writes a log message before the invocation based on the value of {@code enterMessage}.
+	 * If the invocation succeeds, then a log message is written on exit based on the value
+	 * {@code exitMessage}. If an exception occurs during invocation, then a message is
+	 * written based on the value of {@code exceptionMessage}.
+	 * @see #setEnterMessage
+	 * @see #setExitMessage
+	 * @see #setExceptionMessage
+	 */
+	@Override
+	protected @Nullable Object invokeUnderTrace(MethodInvocation invocation, Log logger) throws Throwable {
+<span class="fc" id="L255">		String name = ClassUtils.getQualifiedMethodName(invocation.getMethod());</span>
+<span class="fc" id="L256">		StopWatch stopWatch = new StopWatch(name);</span>
+<span class="fc" id="L257">		Object returnValue = null;</span>
+<span class="fc" id="L258">		boolean exitThroughException = false;</span>
+		try {
+<span class="fc" id="L260">			stopWatch.start(name);</span>
+<span class="fc" id="L261">			writeToLog(logger,</span>
+<span class="fc" id="L262">					replacePlaceholders(this.enterMessage, invocation, null, null, -1));</span>
+<span class="fc" id="L263">			returnValue = invocation.proceed();</span>
+<span class="fc" id="L264">			return returnValue;</span>
+		}
+<span class="fc" id="L266">		catch (Throwable ex) {</span>
+<span class="pc bpc" id="L267" title="1 of 2 branches missed.">			if (stopWatch.isRunning()) {</span>
+<span class="fc" id="L268">				stopWatch.stop();</span>
+			}
+<span class="fc" id="L270">			exitThroughException = true;</span>
+<span class="fc" id="L271">			writeToLog(logger, replacePlaceholders(</span>
+<span class="fc" id="L272">					this.exceptionMessage, invocation, null, ex, stopWatch.getTotalTimeMillis()), ex);</span>
+<span class="fc" id="L273">			throw ex;</span>
+		}
+		finally {
+<span class="fc bfc" id="L276" title="All 2 branches covered.">			if (!exitThroughException) {</span>
+<span class="pc bpc" id="L277" title="1 of 2 branches missed.">				if (stopWatch.isRunning()) {</span>
+<span class="fc" id="L278">					stopWatch.stop();</span>
+				}
+<span class="fc" id="L280">				writeToLog(logger, replacePlaceholders(</span>
+<span class="fc" id="L281">						this.exitMessage, invocation, returnValue, null, stopWatch.getTotalTimeMillis()));</span>
+			}
+		}
+	}
+
+	/**
+	 * Replace the placeholders in the given message with the supplied values,
+	 * or values derived from those supplied.
+	 * @param message the message template containing the placeholders to be replaced
+	 * @param methodInvocation the {@code MethodInvocation} being logged.
+	 * Used to derive values for all placeholders except {@code $[exception]}
+	 * and {@code $[returnValue]}.
+	 * @param returnValue any value returned by the invocation.
+	 * Used to replace the {@code $[returnValue]} placeholder. May be {@code null}.
+	 * @param throwable any {@code Throwable} raised during the invocation.
+	 * The value of {@code Throwable.toString()} is replaced for the
+	 * {@code $[exception]} placeholder. May be {@code null}.
+	 * @param invocationTime the value to write in place of the
+	 * {@code $[invocationTime]} placeholder
+	 * @return the formatted output to write to the log
+	 */
+	protected String replacePlaceholders(String message, MethodInvocation methodInvocation,
+			@Nullable Object returnValue, @Nullable Throwable throwable, long invocationTime) {
+
+<span class="fc" id="L305">		Object target = methodInvocation.getThis();</span>
+<span class="pc bpc" id="L306" title="1 of 2 branches missed.">		Assert.state(target != null, &quot;Target must not be null&quot;);</span>
+
+<span class="fc" id="L308">		StringBuilder output = new StringBuilder();</span>
+<span class="fc" id="L309">		Matcher matcher = PATTERN.matcher(message);</span>
+<span class="fc bfc" id="L310" title="All 2 branches covered.">		while (matcher.find()) {</span>
+<span class="fc" id="L311">			String match = matcher.group();</span>
+<span class="pc bpc" id="L312" title="2 of 9 branches missed.">			switch (match) {</span>
+<span class="fc" id="L313">				case PLACEHOLDER_METHOD_NAME -&gt; matcher.appendReplacement(output,</span>
+<span class="fc" id="L314">						Matcher.quoteReplacement(methodInvocation.getMethod().getName()));</span>
+				case PLACEHOLDER_TARGET_CLASS_NAME -&gt; {
+<span class="fc" id="L316">					String className = getClassForLogging(target).getName();</span>
+<span class="fc" id="L317">					matcher.appendReplacement(output, Matcher.quoteReplacement(className));</span>
+<span class="fc" id="L318">				}</span>
+				case PLACEHOLDER_TARGET_CLASS_SHORT_NAME -&gt; {
+<span class="fc" id="L320">					String shortName = ClassUtils.getShortName(getClassForLogging(target));</span>
+<span class="fc" id="L321">					matcher.appendReplacement(output, Matcher.quoteReplacement(shortName));</span>
+<span class="fc" id="L322">				}</span>
+<span class="fc" id="L323">				case PLACEHOLDER_ARGUMENTS -&gt; matcher.appendReplacement(output,</span>
+<span class="fc" id="L324">						Matcher.quoteReplacement(StringUtils.arrayToCommaDelimitedString(methodInvocation.getArguments())));</span>
+<span class="fc" id="L325">				case PLACEHOLDER_ARGUMENT_TYPES -&gt; appendArgumentTypes(methodInvocation, matcher, output);</span>
+<span class="fc" id="L326">				case PLACEHOLDER_RETURN_VALUE -&gt; appendReturnValue(methodInvocation, matcher, output, returnValue);</span>
+				case PLACEHOLDER_EXCEPTION -&gt; {
+<span class="nc bnc" id="L328" title="All 2 branches missed.">					if (throwable != null) {</span>
+<span class="nc" id="L329">						matcher.appendReplacement(output, Matcher.quoteReplacement(throwable.toString()));</span>
+					}
+				}
+<span class="fc" id="L332">				case PLACEHOLDER_INVOCATION_TIME -&gt; matcher.appendReplacement(output, Long.toString(invocationTime));</span>
+				default -&gt; {
+					// Should not happen since placeholders are checked earlier.
+<span class="nc" id="L335">					throw new IllegalArgumentException(&quot;Unknown placeholder [&quot; + match + &quot;]&quot;);</span>
+				}
+			}
+<span class="fc" id="L338">		}</span>
+<span class="fc" id="L339">		matcher.appendTail(output);</span>
+
+<span class="fc" id="L341">		return output.toString();</span>
+	}
+
+	/**
+	 * Adds the {@code String} representation of the method return value
+	 * to the supplied {@code StringBuilder}. Correctly handles
+	 * {@code null} and {@code void} results.
+	 * @param methodInvocation the {@code MethodInvocation} that returned the value
+	 * @param matcher the {@code Matcher} containing the matched placeholder
+	 * @param output the {@code StringBuilder} to write output to
+	 * @param returnValue the value returned by the method invocation.
+	 */
+	private static void appendReturnValue(
+			MethodInvocation methodInvocation, Matcher matcher, StringBuilder output, @Nullable Object returnValue) {
+
+<span class="pc bpc" id="L356" title="1 of 2 branches missed.">		if (methodInvocation.getMethod().getReturnType() == void.class) {</span>
+<span class="nc" id="L357">			matcher.appendReplacement(output, &quot;void&quot;);</span>
+		}
+<span class="pc bpc" id="L359" title="1 of 2 branches missed.">		else if (returnValue == null) {</span>
+<span class="nc" id="L360">			matcher.appendReplacement(output, &quot;null&quot;);</span>
+		}
+		else {
+<span class="fc" id="L363">			matcher.appendReplacement(output, Matcher.quoteReplacement(returnValue.toString()));</span>
+		}
+<span class="fc" id="L365">	}</span>
+
+	/**
+	 * Adds a comma-separated list of the short {@code Class} names of the
+	 * method argument types to the output. For example, if a method has signature
+	 * {@code put(java.lang.String, java.lang.Object)} then the value returned
+	 * will be {@code String, Object}.
+	 * @param methodInvocation the {@code MethodInvocation} being logged.
+	 * Arguments will be retrieved from the corresponding {@code Method}.
+	 * @param matcher the {@code Matcher} containing the state of the output
+	 * @param output the {@code StringBuilder} containing the output
+	 */
+	private static void appendArgumentTypes(MethodInvocation methodInvocation, Matcher matcher, StringBuilder output) {
+<span class="fc" id="L378">		Class&lt;?&gt;[] argumentTypes = methodInvocation.getMethod().getParameterTypes();</span>
+<span class="fc" id="L379">		String[] argumentTypeShortNames = new String[argumentTypes.length];</span>
+<span class="pc bpc" id="L380" title="1 of 2 branches missed.">		for (int i = 0; i &lt; argumentTypeShortNames.length; i++) {</span>
+<span class="nc" id="L381">			argumentTypeShortNames[i] = ClassUtils.getShortName(argumentTypes[i]);</span>
+		}
+<span class="fc" id="L383">		matcher.appendReplacement(output,</span>
+<span class="fc" id="L384">				Matcher.quoteReplacement(StringUtils.arrayToCommaDelimitedString(argumentTypeShortNames)));</span>
+<span class="fc" id="L385">	}</span>
+
+	/**
+	 * Checks to see if the supplied {@code String} has any placeholders
+	 * that are not specified as constants on this class and throws an
+	 * {@code IllegalArgumentException} if so.
+	 */
+	private static void checkForInvalidPlaceholders(String message) throws IllegalArgumentException {
+<span class="fc" id="L393">		Matcher matcher = PATTERN.matcher(message);</span>
+<span class="fc bfc" id="L394" title="All 2 branches covered.">		while (matcher.find()) {</span>
+<span class="fc" id="L395">			String match = matcher.group();</span>
+<span class="pc bpc" id="L396" title="1 of 2 branches missed.">			if (!ALLOWED_PLACEHOLDERS.contains(match)) {</span>
+<span class="nc" id="L397">				throw new IllegalArgumentException(&quot;Placeholder [&quot; + match + &quot;] is not valid&quot;);</span>
+			}
+<span class="fc" id="L399">		}</span>
+<span class="fc" id="L400">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

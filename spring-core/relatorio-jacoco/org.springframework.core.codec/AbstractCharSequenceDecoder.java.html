@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractCharSequenceDecoder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.codec</a> &gt; <span class="el_source">AbstractCharSequenceDecoder.java</span></div><h1>AbstractCharSequenceDecoder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.codec;
+
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.ResolvableType;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.LimitedDataBufferList;
+import org.springframework.core.log.LogFormatUtils;
+import org.springframework.util.Assert;
+import org.springframework.util.MimeType;
+
+/**
+ * Abstract base class that decodes from a data buffer stream to a
+ * {@code CharSequence} stream.
+ *
+ * @author Arjen Poutsma
+ * @since 6.1
+ * @param &lt;T&gt; the character sequence type
+ */
+public abstract class AbstractCharSequenceDecoder&lt;T extends CharSequence&gt; extends AbstractDataBufferDecoder&lt;T&gt; {
+
+	/** The default charset to use, i.e. &quot;UTF-8&quot;. */
+<span class="nc" id="L53">	public static final Charset DEFAULT_CHARSET = StandardCharsets.UTF_8;</span>
+
+	/** The default delimiter strings to use, i.e. {@code \r\n} and {@code \n}. */
+<span class="nc" id="L56">	public static final List&lt;String&gt; DEFAULT_DELIMITERS = List.of(&quot;\r\n&quot;, &quot;\n&quot;);</span>
+
+
+	private final List&lt;String&gt; delimiters;
+
+	private final boolean stripDelimiter;
+
+<span class="nc" id="L63">	private Charset defaultCharset = DEFAULT_CHARSET;</span>
+
+<span class="nc" id="L65">	private final ConcurrentMap&lt;Charset, byte[][]&gt; delimitersCache = new ConcurrentHashMap&lt;&gt;();</span>
+
+
+	/**
+	 * Create a new {@code AbstractCharSequenceDecoder} with the given parameters.
+	 */
+	protected AbstractCharSequenceDecoder(List&lt;String&gt; delimiters, boolean stripDelimiter, MimeType... mimeTypes) {
+<span class="nc" id="L72">		super(mimeTypes);</span>
+<span class="nc" id="L73">		Assert.notEmpty(delimiters, &quot;'delimiters' must not be empty&quot;);</span>
+<span class="nc" id="L74">		this.delimiters = new ArrayList&lt;&gt;(delimiters);</span>
+<span class="nc" id="L75">		this.stripDelimiter = stripDelimiter;</span>
+<span class="nc" id="L76">	}</span>
+
+
+	/**
+	 * Set the default character set to fall back on if the MimeType does not specify any.
+	 * &lt;p&gt;By default this is {@code UTF-8}.
+	 * @param defaultCharset the charset to fall back on
+	 */
+	public void setDefaultCharset(Charset defaultCharset) {
+<span class="nc" id="L85">		this.defaultCharset = defaultCharset;</span>
+<span class="nc" id="L86">	}</span>
+
+	/**
+	 * Return the configured {@link #setDefaultCharset(Charset) defaultCharset}.
+	 */
+	public Charset getDefaultCharset() {
+<span class="nc" id="L92">		return this.defaultCharset;</span>
+	}
+
+
+	@Override
+	public final Flux&lt;T&gt; decode(Publisher&lt;DataBuffer&gt; input, ResolvableType elementType,
+			@Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="nc" id="L100">		byte[][] delimiterBytes = getDelimiterBytes(mimeType);</span>
+
+<span class="nc" id="L102">		LimitedDataBufferList chunks = new LimitedDataBufferList(getMaxInMemorySize());</span>
+<span class="nc" id="L103">		DataBufferUtils.Matcher matcher = DataBufferUtils.matcher(delimiterBytes);</span>
+
+<span class="nc" id="L105">		return Flux.from(input)</span>
+<span class="nc" id="L106">				.concatMapIterable(buffer -&gt; processDataBuffer(buffer, matcher, chunks))</span>
+<span class="nc" id="L107">				.concatWith(Mono.defer(() -&gt; {</span>
+<span class="nc bnc" id="L108" title="All 2 branches missed.">					if (chunks.isEmpty()) {</span>
+<span class="nc" id="L109">						return Mono.empty();</span>
+					}
+<span class="nc" id="L111">					DataBuffer lastBuffer = chunks.get(0).factory().join(chunks);</span>
+<span class="nc" id="L112">					chunks.clear();</span>
+<span class="nc" id="L113">					return Mono.just(lastBuffer);</span>
+				}))
+<span class="nc" id="L115">				.doFinally(signalType -&gt; chunks.releaseAndClear())</span>
+<span class="nc" id="L116">				.doOnDiscard(DataBuffer.class, DataBufferUtils::release)</span>
+<span class="nc" id="L117">				.map(buffer -&gt; decode(buffer, elementType, mimeType, hints));</span>
+	}
+
+	private byte[][] getDelimiterBytes(@Nullable MimeType mimeType) {
+<span class="nc" id="L121">		return this.delimitersCache.computeIfAbsent(getCharset(mimeType), charset -&gt; {</span>
+<span class="nc" id="L122">			byte[][] result = new byte[this.delimiters.size()][];</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">			for (int i = 0; i &lt; this.delimiters.size(); i++) {</span>
+<span class="nc" id="L124">				result[i] = this.delimiters.get(i).getBytes(charset);</span>
+			}
+<span class="nc" id="L126">			return result;</span>
+		});
+	}
+
+	private Collection&lt;DataBuffer&gt; processDataBuffer(DataBuffer buffer, DataBufferUtils.Matcher matcher,
+			LimitedDataBufferList chunks) {
+
+<span class="nc" id="L133">		boolean release = true;</span>
+		try {
+<span class="nc" id="L135">			List&lt;DataBuffer&gt; result = null;</span>
+			do {
+<span class="nc" id="L137">				int endIndex = matcher.match(buffer);</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">				if (endIndex == -1) {</span>
+<span class="nc" id="L139">					chunks.add(buffer);</span>
+<span class="nc" id="L140">					release = false;</span>
+<span class="nc" id="L141">					break;</span>
+				}
+<span class="nc" id="L143">				DataBuffer split = buffer.split(endIndex + 1);</span>
+<span class="nc bnc" id="L144" title="All 2 branches missed.">				if (result == null) {</span>
+<span class="nc" id="L145">					result = new ArrayList&lt;&gt;();</span>
+				}
+<span class="nc" id="L147">				int delimiterLength = matcher.delimiter().length;</span>
+<span class="nc bnc" id="L148" title="All 2 branches missed.">				if (chunks.isEmpty()) {</span>
+<span class="nc bnc" id="L149" title="All 2 branches missed.">					if (this.stripDelimiter) {</span>
+<span class="nc" id="L150">						split.writePosition(split.writePosition() - delimiterLength);</span>
+					}
+<span class="nc" id="L152">					result.add(split);</span>
+				}
+				else {
+<span class="nc" id="L155">					chunks.add(split);</span>
+<span class="nc" id="L156">					DataBuffer joined = buffer.factory().join(chunks);</span>
+<span class="nc bnc" id="L157" title="All 2 branches missed.">					if (this.stripDelimiter) {</span>
+<span class="nc" id="L158">						joined.writePosition(joined.writePosition() - delimiterLength);</span>
+					}
+<span class="nc" id="L160">					result.add(joined);</span>
+<span class="nc" id="L161">					chunks.clear();</span>
+				}
+			}
+<span class="nc bnc" id="L164" title="All 2 branches missed.">			while (buffer.readableByteCount() &gt; 0);</span>
+<span class="nc bnc" id="L165" title="All 2 branches missed.">			return (result != null ? result : Collections.emptyList());</span>
+		}
+		finally {
+<span class="nc bnc" id="L168" title="All 2 branches missed.">			if (release) {</span>
+<span class="nc" id="L169">				DataBufferUtils.release(buffer);</span>
+			}
+		}
+	}
+
+	@Override
+	public final T decode(DataBuffer dataBuffer, ResolvableType elementType,
+			@Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+		try {
+<span class="nc" id="L179">			Charset charset = getCharset(mimeType);</span>
+<span class="nc" id="L180">			T value = decodeInternal(dataBuffer, charset);</span>
+<span class="nc" id="L181">			LogFormatUtils.traceDebug(logger, traceOn -&gt; {</span>
+<span class="nc bnc" id="L182" title="All 2 branches missed.">				String formatted = LogFormatUtils.formatValue(value, !traceOn);</span>
+<span class="nc" id="L183">				return Hints.getLogPrefix(hints) + &quot;Decoded &quot; + formatted;</span>
+			});
+<span class="nc" id="L185">			return value;</span>
+		}
+		finally {
+<span class="nc" id="L188">			DataBufferUtils.release(dataBuffer);</span>
+		}
+	}
+
+	private Charset getCharset(@Nullable MimeType mimeType) {
+<span class="nc bnc" id="L193" title="All 2 branches missed.">		if (mimeType != null) {</span>
+<span class="nc" id="L194">			Charset charset = mimeType.getCharset();</span>
+<span class="nc bnc" id="L195" title="All 2 branches missed.">			if (charset != null) {</span>
+<span class="nc" id="L196">				return charset;</span>
+			}
+		}
+<span class="nc" id="L199">		return getDefaultCharset();</span>
+	}
+
+
+	/**
+	 * Template method that decodes the given data buffer into {@code T}, given
+	 * the charset.
+	 */
+	protected abstract T decodeInternal(DataBuffer dataBuffer, Charset charset);
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

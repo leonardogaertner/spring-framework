@@ -1,0 +1,334 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>SendToMethodReturnValueHandler.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.messaging.simp.annotation.support</a> &gt; <span class="el_source">SendToMethodReturnValueHandler.java</span></div><h1>SendToMethodReturnValueHandler.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.messaging.simp.annotation.support;
+
+import java.lang.annotation.Annotation;
+import java.security.Principal;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.function.Predicate;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.MethodParameter;
+import org.springframework.core.annotation.AnnotatedElementUtils;
+import org.springframework.core.annotation.AnnotationUtils;
+import org.springframework.messaging.Message;
+import org.springframework.messaging.MessageChannel;
+import org.springframework.messaging.MessageHeaders;
+import org.springframework.messaging.core.AbstractMessageSendingTemplate;
+import org.springframework.messaging.handler.DestinationPatternsMessageCondition;
+import org.springframework.messaging.handler.annotation.SendTo;
+import org.springframework.messaging.handler.annotation.support.DestinationVariableMethodArgumentResolver;
+import org.springframework.messaging.handler.invocation.HandlerMethodReturnValueHandler;
+import org.springframework.messaging.simp.SimpMessageHeaderAccessor;
+import org.springframework.messaging.simp.SimpMessageSendingOperations;
+import org.springframework.messaging.simp.SimpMessageType;
+import org.springframework.messaging.simp.annotation.SendToUser;
+import org.springframework.messaging.simp.user.DestinationUserNameProvider;
+import org.springframework.messaging.support.MessageHeaderInitializer;
+import org.springframework.messaging.support.NativeMessageHeaderAccessor;
+import org.springframework.util.Assert;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.PropertyPlaceholderHelper;
+import org.springframework.util.PropertyPlaceholderHelper.PlaceholderResolver;
+import org.springframework.util.StringUtils;
+
+/**
+ * A {@link HandlerMethodReturnValueHandler} for sending to destinations specified in a
+ * {@link SendTo} or {@link SendToUser} method-level annotations.
+ *
+ * &lt;p&gt;The value returned from the method is converted, and turned to a {@link Message} and
+ * sent through the provided {@link MessageChannel}. The message is then enriched with the
+ * session id of the input message as well as the destination from the annotation(s).
+ * If multiple destinations are specified, a copy of the message is sent to each destination.
+ *
+ * @author Rossen Stoyanchev
+ * @author Sebastien Deleuze
+ * @since 4.0
+ */
+public class SendToMethodReturnValueHandler implements HandlerMethodReturnValueHandler {
+
+	private final SimpMessageSendingOperations messagingTemplate;
+
+	private final boolean annotationRequired;
+
+<span class="fc" id="L71">	private String defaultDestinationPrefix = &quot;/topic&quot;;</span>
+
+<span class="fc" id="L73">	private String defaultUserDestinationPrefix = &quot;/queue&quot;;</span>
+
+<span class="fc" id="L75">	private final PropertyPlaceholderHelper placeholderHelper = new PropertyPlaceholderHelper(&quot;{&quot;, &quot;}&quot;, null, null, false);</span>
+
+	private @Nullable MessageHeaderInitializer headerInitializer;
+
+	private @Nullable Predicate&lt;String&gt; headerFilter;
+
+
+<span class="fc" id="L82">	public SendToMethodReturnValueHandler(SimpMessageSendingOperations messagingTemplate, boolean annotationRequired) {</span>
+<span class="fc" id="L83">		Assert.notNull(messagingTemplate, &quot;'messagingTemplate' must not be null&quot;);</span>
+<span class="fc" id="L84">		this.messagingTemplate = messagingTemplate;</span>
+<span class="fc" id="L85">		this.annotationRequired = annotationRequired;</span>
+<span class="fc" id="L86">	}</span>
+
+
+	/**
+	 * Configure a default prefix to add to message destinations in cases where a method
+	 * is not annotated with {@link SendTo @SendTo} or does not specify any destinations
+	 * through the annotation's value attribute.
+	 * &lt;p&gt;By default, the prefix is set to &quot;/topic&quot;.
+	 */
+	public void setDefaultDestinationPrefix(String defaultDestinationPrefix) {
+<span class="nc" id="L96">		this.defaultDestinationPrefix = defaultDestinationPrefix;</span>
+<span class="nc" id="L97">	}</span>
+
+	/**
+	 * Return the configured default destination prefix.
+	 * @see #setDefaultDestinationPrefix(String)
+	 */
+	public String getDefaultDestinationPrefix() {
+<span class="nc" id="L104">		return this.defaultDestinationPrefix;</span>
+	}
+
+	/**
+	 * Configure a default prefix to add to message destinations in cases where a
+	 * method is annotated with {@link SendToUser @SendToUser} but does not specify
+	 * any destinations through the annotation's value attribute.
+	 * &lt;p&gt;By default, the prefix is set to &quot;/queue&quot;.
+	 */
+	public void setDefaultUserDestinationPrefix(String prefix) {
+<span class="nc" id="L114">		this.defaultUserDestinationPrefix = prefix;</span>
+<span class="nc" id="L115">	}</span>
+
+	/**
+	 * Return the configured default user destination prefix.
+	 * @see #setDefaultUserDestinationPrefix(String)
+	 */
+	public String getDefaultUserDestinationPrefix() {
+<span class="nc" id="L122">		return this.defaultUserDestinationPrefix;</span>
+	}
+
+	/**
+	 * Configure a {@link MessageHeaderInitializer} to apply to the headers of all
+	 * messages sent to the client outbound channel.
+	 * &lt;p&gt;By default this property is not set.
+	 */
+	public void setHeaderInitializer(@Nullable MessageHeaderInitializer headerInitializer) {
+<span class="fc" id="L131">		this.headerInitializer = headerInitializer;</span>
+<span class="fc" id="L132">	}</span>
+
+	/**
+	 * Return the configured header initializer.
+	 */
+	public @Nullable MessageHeaderInitializer getHeaderInitializer() {
+<span class="fc" id="L138">		return this.headerInitializer;</span>
+	}
+
+	/**
+	 * Add a filter to determine which headers from the input message should be
+	 * propagated to the output message. The filter is applied to the &quot;native
+	 * headers&quot; submap. Multiple filters are combined with
+	 * {@link Predicate#or(Predicate)}.
+	 * &lt;p&gt;By default, no headers are propagated if this is not set.
+	 * @since 7.0.4
+	 */
+	public void addHeaderFilter(Predicate&lt;String&gt; filter) {
+<span class="fc" id="L150">		Assert.notNull(filter, &quot;'headerFilter' predicate must not be null&quot;);</span>
+<span class="fc bfc" id="L151" title="All 2 branches covered.">		this.headerFilter = (this.headerFilter != null ? this.headerFilter.or(filter) : filter);</span>
+<span class="fc" id="L152">	}</span>
+
+	/**
+	 * Return the configured header filter.
+	 * @since 7.0.4
+	 */
+	public @Nullable Predicate&lt;String&gt; getHeaderFilter() {
+<span class="nc" id="L159">		return this.headerFilter;</span>
+	}
+
+
+	@Override
+	public boolean supportsReturnType(MethodParameter returnType) {
+<span class="fc bfc" id="L165" title="All 2 branches covered.">		return (returnType.hasMethodAnnotation(SendTo.class) ||</span>
+<span class="fc bfc" id="L166" title="All 2 branches covered.">				AnnotatedElementUtils.hasAnnotation(returnType.getDeclaringClass(), SendTo.class) ||</span>
+<span class="fc bfc" id="L167" title="All 2 branches covered.">				returnType.hasMethodAnnotation(SendToUser.class) ||</span>
+<span class="fc bfc" id="L168" title="All 4 branches covered.">				AnnotatedElementUtils.hasAnnotation(returnType.getDeclaringClass(), SendToUser.class) ||</span>
+				!this.annotationRequired);
+	}
+
+	@Override
+	public void handleReturnValue(@Nullable Object returnValue, MethodParameter returnType, Message&lt;?&gt; message)
+			throws Exception {
+
+<span class="pc bpc" id="L176" title="1 of 2 branches missed.">		if (returnValue == null) {</span>
+<span class="nc" id="L177">			return;</span>
+		}
+
+<span class="fc" id="L180">		MessageHeaders headers = message.getHeaders();</span>
+<span class="fc" id="L181">		String sessionId = SimpMessageHeaderAccessor.getSessionId(headers);</span>
+<span class="fc" id="L182">		DestinationHelper destinationHelper = getDestinationHelper(headers, returnType);</span>
+
+<span class="fc" id="L184">		SendToUser sendToUser = destinationHelper.getSendToUser();</span>
+<span class="fc bfc" id="L185" title="All 2 branches covered.">		if (sendToUser != null) {</span>
+<span class="fc" id="L186">			boolean broadcast = sendToUser.broadcast();</span>
+<span class="fc" id="L187">			String user = getUserName(message, headers);</span>
+<span class="fc bfc" id="L188" title="All 2 branches covered.">			if (user == null) {</span>
+<span class="pc bpc" id="L189" title="1 of 2 branches missed.">				if (sessionId == null) {</span>
+<span class="nc" id="L190">					throw new MissingSessionUserException(message);</span>
+				}
+<span class="fc" id="L192">				user = sessionId;</span>
+<span class="fc" id="L193">				broadcast = false;</span>
+			}
+<span class="fc" id="L195">			String[] destinations = getTargetDestinations(sendToUser, message, this.defaultUserDestinationPrefix);</span>
+<span class="fc bfc" id="L196" title="All 2 branches covered.">			for (String destination : destinations) {</span>
+<span class="fc" id="L197">				destination = destinationHelper.expandTemplateVars(destination);</span>
+<span class="fc bfc" id="L198" title="All 2 branches covered.">				if (broadcast) {</span>
+<span class="fc" id="L199">					this.messagingTemplate.convertAndSendToUser(</span>
+<span class="fc" id="L200">							user, destination, returnValue, createHeaders(null, returnType, message));</span>
+				}
+				else {
+<span class="fc" id="L203">					this.messagingTemplate.convertAndSendToUser(</span>
+<span class="fc" id="L204">							user, destination, returnValue, createHeaders(sessionId, returnType, message));</span>
+				}
+			}
+		}
+
+<span class="fc" id="L209">		SendTo sendTo = destinationHelper.getSendTo();</span>
+<span class="fc bfc" id="L210" title="All 4 branches covered.">		if (sendTo != null || sendToUser == null) {</span>
+<span class="fc" id="L211">			String[] destinations = getTargetDestinations(sendTo, message, this.defaultDestinationPrefix);</span>
+<span class="fc bfc" id="L212" title="All 2 branches covered.">			for (String destination : destinations) {</span>
+<span class="fc" id="L213">				destination = destinationHelper.expandTemplateVars(destination);</span>
+<span class="fc" id="L214">				this.messagingTemplate.convertAndSend(destination, returnValue, createHeaders(sessionId, returnType, message));</span>
+			}
+		}
+<span class="fc" id="L217">	}</span>
+
+	private DestinationHelper getDestinationHelper(MessageHeaders headers, MethodParameter returnType) {
+<span class="fc" id="L220">		SendToUser m1 = AnnotatedElementUtils.findMergedAnnotation(returnType.getExecutable(), SendToUser.class);</span>
+<span class="fc" id="L221">		SendTo m2 = AnnotatedElementUtils.findMergedAnnotation(returnType.getExecutable(), SendTo.class);</span>
+<span class="fc bfc" id="L222" title="All 8 branches covered.">		if ((m1 != null &amp;&amp; !ObjectUtils.isEmpty(m1.value())) || (m2 != null &amp;&amp; !ObjectUtils.isEmpty(m2.value()))) {</span>
+<span class="fc" id="L223">			return new DestinationHelper(headers, m1, m2);</span>
+		}
+
+<span class="fc" id="L226">		SendToUser c1 = AnnotatedElementUtils.findMergedAnnotation(returnType.getDeclaringClass(), SendToUser.class);</span>
+<span class="fc" id="L227">		SendTo c2 = AnnotatedElementUtils.findMergedAnnotation(returnType.getDeclaringClass(), SendTo.class);</span>
+<span class="pc bpc" id="L228" title="2 of 8 branches missed.">		if ((c1 != null &amp;&amp; !ObjectUtils.isEmpty(c1.value())) || (c2 != null &amp;&amp; !ObjectUtils.isEmpty(c2.value()))) {</span>
+<span class="fc" id="L229">			return new DestinationHelper(headers, c1, c2);</span>
+		}
+
+<span class="fc bfc" id="L232" title="All 4 branches covered.">		return (m1 != null || m2 != null ?</span>
+<span class="fc" id="L233">				new DestinationHelper(headers, m1, m2) : new DestinationHelper(headers, c1, c2));</span>
+	}
+
+	protected @Nullable String getUserName(Message&lt;?&gt; message, MessageHeaders headers) {
+<span class="fc" id="L237">		Principal principal = SimpMessageHeaderAccessor.getUser(headers);</span>
+<span class="fc bfc" id="L238" title="All 2 branches covered.">		if (principal != null) {</span>
+<span class="fc bfc" id="L239" title="All 2 branches covered.">			return (principal instanceof DestinationUserNameProvider provider ?</span>
+<span class="fc" id="L240">					provider.getDestinationUserName() : principal.getName());</span>
+		}
+<span class="fc" id="L242">		return null;</span>
+	}
+
+	protected String[] getTargetDestinations(@Nullable Annotation annotation, Message&lt;?&gt; message, String defaultPrefix) {
+<span class="fc bfc" id="L246" title="All 2 branches covered.">		if (annotation != null) {</span>
+<span class="fc" id="L247">			String[] value = (String[]) AnnotationUtils.getValue(annotation);</span>
+<span class="fc bfc" id="L248" title="All 2 branches covered.">			if (!ObjectUtils.isEmpty(value)) {</span>
+<span class="fc" id="L249">				return value;</span>
+			}
+		}
+
+<span class="fc" id="L253">		String name = DestinationPatternsMessageCondition.LOOKUP_DESTINATION_HEADER;</span>
+<span class="fc" id="L254">		String destination = (String) message.getHeaders().get(name);</span>
+<span class="pc bpc" id="L255" title="1 of 2 branches missed.">		if (!StringUtils.hasText(destination)) {</span>
+<span class="nc" id="L256">			throw new IllegalStateException(&quot;No lookup destination header in &quot; + message);</span>
+		}
+
+<span class="fc bfc" id="L259" title="All 2 branches covered.">		return (destination.startsWith(&quot;/&quot;) ?</span>
+<span class="fc" id="L260">				new String[] {defaultPrefix + destination} : new String[] {defaultPrefix + '/' + destination});</span>
+	}
+
+	private MessageHeaders createHeaders(
+			@Nullable String sessionId, MethodParameter returnType, @Nullable Message&lt;?&gt; inputMessage) {
+
+<span class="fc" id="L266">		SimpMessageHeaderAccessor headerAccessor = SimpMessageHeaderAccessor.create(SimpMessageType.MESSAGE);</span>
+<span class="pc bpc" id="L267" title="1 of 2 branches missed.">		if (getHeaderInitializer() != null) {</span>
+<span class="nc" id="L268">			getHeaderInitializer().initHeaders(headerAccessor);</span>
+		}
+<span class="pc bpc" id="L270" title="1 of 4 branches missed.">		if (inputMessage != null &amp;&amp; this.headerFilter != null) {</span>
+<span class="fc" id="L271">			getNativeHeaders(inputMessage).forEach((name, values) -&gt; {</span>
+<span class="pc bpc" id="L272" title="1 of 2 branches missed.">				if (this.headerFilter.test(name)) {</span>
+<span class="fc" id="L273">					headerAccessor.setNativeHeaderValues(name, values);</span>
+				}
+<span class="fc" id="L275">			});</span>
+		}
+<span class="fc bfc" id="L277" title="All 2 branches covered.">		if (sessionId != null) {</span>
+<span class="fc" id="L278">			headerAccessor.setSessionId(sessionId);</span>
+		}
+<span class="fc" id="L280">		headerAccessor.setHeader(AbstractMessageSendingTemplate.CONVERSION_HINT_HEADER, returnType);</span>
+<span class="fc" id="L281">		headerAccessor.setLeaveMutable(true);</span>
+<span class="fc" id="L282">		return headerAccessor.getMessageHeaders();</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private static Map&lt;String, List&lt;String&gt;&gt; getNativeHeaders(Message&lt;?&gt; message) {
+<span class="fc" id="L287">		Object value = message.getHeaders().get(NativeMessageHeaderAccessor.NATIVE_HEADERS);</span>
+<span class="pc bpc" id="L288" title="1 of 2 branches missed.">		return (value != null ? (Map&lt;String, List&lt;String&gt;&gt;) value : Collections.emptyMap());</span>
+	}
+
+
+	@Override
+	public String toString() {
+<span class="nc" id="L294">		return &quot;SendToMethodReturnValueHandler [annotationRequired=&quot; + this.annotationRequired + &quot;]&quot;;</span>
+	}
+
+
+	private class DestinationHelper {
+
+		private final PlaceholderResolver placeholderResolver;
+
+		private final @Nullable SendTo sendTo;
+
+		private final @Nullable SendToUser sendToUser;
+
+
+<span class="fc" id="L307">		public DestinationHelper(MessageHeaders headers, @Nullable SendToUser sendToUser, @Nullable SendTo sendTo) {</span>
+<span class="fc" id="L308">			Map&lt;String, String&gt; variables = getTemplateVariables(headers);</span>
+<span class="fc" id="L309">			this.placeholderResolver = variables::get;</span>
+<span class="fc" id="L310">			this.sendTo = sendTo;</span>
+<span class="fc" id="L311">			this.sendToUser = sendToUser;</span>
+<span class="fc" id="L312">		}</span>
+
+		@SuppressWarnings(&quot;unchecked&quot;)
+		private Map&lt;String, String&gt; getTemplateVariables(MessageHeaders headers) {
+<span class="fc" id="L316">			String name = DestinationVariableMethodArgumentResolver.DESTINATION_TEMPLATE_VARIABLES_HEADER;</span>
+<span class="fc" id="L317">			return (Map&lt;String, String&gt;) headers.getOrDefault(name, Collections.emptyMap());</span>
+		}
+
+		public @Nullable SendTo getSendTo() {
+<span class="fc" id="L321">			return this.sendTo;</span>
+		}
+
+		public @Nullable SendToUser getSendToUser() {
+<span class="fc" id="L325">			return this.sendToUser;</span>
+		}
+
+		public String expandTemplateVars(String destination) {
+<span class="fc" id="L329">			return placeholderHelper.replacePlaceholders(destination, this.placeholderResolver);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

@@ -1,0 +1,178 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../../jacoco-resources/report.gif" type="image/gif"/><title>RequestPartMethodArgumentResolver.java</title><link rel="stylesheet" href="../../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../../index.html" class="el_report">Relatório Unificado - Spring Framework</a> &gt; <a href="../index.html" class="el_bundle">spring-webflux</a> &gt; <a href="index.source.html" class="el_package">org.springframework.web.reactive.result.method.annotation</a> &gt; <span class="el_source">RequestPartMethodArgumentResolver.java</span></div><h1>RequestPartMethodArgumentResolver.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.web.reactive.result.method.annotation;
+
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ReactiveAdapter;
+import org.springframework.core.ReactiveAdapterRegistry;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.codec.HttpMessageReader;
+import org.springframework.http.codec.multipart.Part;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpRequestDecorator;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.bind.annotation.RequestPart;
+import org.springframework.web.reactive.BindingContext;
+import org.springframework.web.server.MissingRequestValueException;
+import org.springframework.web.server.ServerWebExchange;
+
+/**
+ * Resolver for {@code @RequestPart} arguments where the named part is decoded
+ * much like an {@code @RequestBody} argument but based on the content of an
+ * individual part instead. The arguments may be wrapped with a reactive type
+ * for a single value (for example, Reactor {@code Mono}, RxJava {@code Single}).
+ *
+ * &lt;p&gt;This resolver also supports arguments of type {@link Part} which may be
+ * wrapped with a reactive type for a single value or multiple values.
+ *
+ * @author Rossen Stoyanchev
+ * @since 5.0
+ */
+public class RequestPartMethodArgumentResolver extends AbstractMessageReaderArgumentResolver {
+
+	public RequestPartMethodArgumentResolver(List&lt;HttpMessageReader&lt;?&gt;&gt; readers, ReactiveAdapterRegistry registry) {
+<span class="fc" id="L58">		super(readers, registry);</span>
+<span class="fc" id="L59">	}</span>
+
+
+	@Override
+	public boolean supportsParameter(MethodParameter parameter) {
+<span class="fc bfc" id="L64" title="All 2 branches covered.">		return (parameter.hasParameterAnnotation(RequestPart.class) ||</span>
+<span class="pc bpc" id="L65" title="1 of 2 branches missed.">				checkParameterType(parameter, Part.class::isAssignableFrom));</span>
+	}
+
+	@Override
+	public Mono&lt;Object&gt; resolveArgument(
+			MethodParameter parameter, BindingContext bindingContext, ServerWebExchange exchange) {
+
+<span class="fc" id="L72">		RequestPart requestPart = parameter.getParameterAnnotation(RequestPart.class);</span>
+<span class="pc bpc" id="L73" title="1 of 4 branches missed.">		boolean isRequired = (requestPart == null || requestPart.required());</span>
+<span class="fc" id="L74">		Class&lt;?&gt; paramType = parameter.getParameterType();</span>
+<span class="fc" id="L75">		Flux&lt;Part&gt; partValues = getPartValues(parameter, requestPart, isRequired, exchange);</span>
+
+<span class="fc bfc" id="L77" title="All 2 branches covered.">		if (Part.class.isAssignableFrom(paramType)) {</span>
+<span class="fc" id="L78">			return partValues.next().cast(Object.class);</span>
+		}
+
+<span class="pc bpc" id="L81" title="1 of 4 branches missed.">		if (Collection.class.isAssignableFrom(paramType) || List.class.isAssignableFrom(paramType)) {</span>
+<span class="fc" id="L82">			MethodParameter elementType = parameter.nested();</span>
+<span class="fc bfc" id="L83" title="All 2 branches covered.">			if (Part.class.isAssignableFrom(elementType.getNestedParameterType())) {</span>
+<span class="fc" id="L84">				return partValues.collectList().cast(Object.class);</span>
+			}
+			else {
+<span class="fc" id="L87">				return partValues.next()</span>
+<span class="fc" id="L88">						.flatMap(part -&gt; decode(part, parameter, bindingContext, exchange, isRequired))</span>
+<span class="fc" id="L89">						.defaultIfEmpty(Collections.emptyList());</span>
+			}
+		}
+
+<span class="fc" id="L93">		ReactiveAdapter adapter = getAdapterRegistry().getAdapter(paramType);</span>
+<span class="fc bfc" id="L94" title="All 2 branches covered.">		if (adapter == null) {</span>
+<span class="fc" id="L95">			return partValues.next().flatMap(part -&gt;</span>
+<span class="fc" id="L96">					decode(part, parameter, bindingContext, exchange, isRequired));</span>
+		}
+
+<span class="fc" id="L99">		MethodParameter elementType = parameter.nested();</span>
+<span class="fc bfc" id="L100" title="All 2 branches covered.">		if (Part.class.isAssignableFrom(elementType.getNestedParameterType())) {</span>
+<span class="fc" id="L101">			return Mono.just(adapter.fromPublisher(partValues));</span>
+		}
+
+<span class="fc" id="L104">		Flux&lt;?&gt; flux = partValues.flatMap(part -&gt; decode(part, elementType, bindingContext, exchange, isRequired));</span>
+<span class="fc" id="L105">		return Mono.just(adapter.fromPublisher(flux));</span>
+	}
+
+	public Flux&lt;Part&gt; getPartValues(
+			MethodParameter parameter, @Nullable RequestPart requestPart, boolean isRequired,
+			ServerWebExchange exchange) {
+
+<span class="fc" id="L112">		String name = getPartName(parameter, requestPart);</span>
+<span class="fc" id="L113">		return exchange.getMultipartData()</span>
+<span class="fc" id="L114">				.flatMapIterable(map -&gt; {</span>
+<span class="fc" id="L115">					List&lt;Part&gt; list = map.get(name);</span>
+<span class="fc bfc" id="L116" title="All 2 branches covered.">					if (CollectionUtils.isEmpty(list)) {</span>
+<span class="fc bfc" id="L117" title="All 2 branches covered.">						if (isRequired) {</span>
+<span class="fc" id="L118">							throw new MissingRequestValueException(</span>
+<span class="fc" id="L119">									name, parameter.getParameterType(), &quot;request part&quot;, parameter);</span>
+						}
+<span class="fc" id="L121">						return Collections.emptyList();</span>
+					}
+<span class="fc" id="L123">					return list;</span>
+				});
+	}
+
+	private String getPartName(MethodParameter methodParam, @Nullable RequestPart requestPart) {
+<span class="fc" id="L128">		String name = null;</span>
+<span class="pc bpc" id="L129" title="1 of 2 branches missed.">		if (requestPart != null) {</span>
+<span class="fc" id="L130">			name = requestPart.name();</span>
+		}
+<span class="pc bpc" id="L132" title="1 of 2 branches missed.">		if (!StringUtils.hasLength(name)) {</span>
+<span class="nc" id="L133">			name = methodParam.getParameterName();</span>
+		}
+<span class="pc bpc" id="L135" title="1 of 2 branches missed.">		if (!StringUtils.hasLength(name)) {</span>
+<span class="nc" id="L136">			throw new IllegalArgumentException(&quot;Request part name for argument type [&quot; +</span>
+<span class="nc" id="L137">					methodParam.getNestedParameterType().getName() +</span>
+					&quot;] not specified, and parameter name information not found in class file either.&quot;);
+		}
+<span class="fc" id="L140">		return name;</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	private &lt;T&gt; Mono&lt;T&gt; decode(
+			Part part, MethodParameter elementType, BindingContext bindingContext,
+			ServerWebExchange exchange, boolean isRequired) {
+
+<span class="fc" id="L148">		ServerHttpRequest partRequest = new PartServerHttpRequest(exchange.getRequest(), part);</span>
+<span class="fc" id="L149">		ServerWebExchange partExchange = exchange.mutate().request(partRequest).build();</span>
+<span class="pc bpc" id="L150" title="1 of 2 branches missed.">		if (logger.isDebugEnabled()) {</span>
+<span class="fc" id="L151">			logger.debug(exchange.getLogPrefix() + &quot;Decoding part '&quot; + part.name() + &quot;'&quot;);</span>
+		}
+<span class="fc" id="L153">		return (Mono&lt;T&gt;) readBody(elementType, isRequired, bindingContext, partExchange);</span>
+	}
+
+
+	private static class PartServerHttpRequest extends ServerHttpRequestDecorator {
+
+		private final Part part;
+
+		public PartServerHttpRequest(ServerHttpRequest delegate, Part part) {
+<span class="fc" id="L162">			super(delegate);</span>
+<span class="fc" id="L163">			this.part = part;</span>
+<span class="fc" id="L164">		}</span>
+
+		@Override
+		public HttpHeaders getHeaders() {
+<span class="fc" id="L168">			return this.part.headers();</span>
+		}
+
+		@Override
+		public Flux&lt;DataBuffer&gt; getBody() {
+<span class="fc" id="L173">			return this.part.content();</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.11.202310140853</span></div></body></html>

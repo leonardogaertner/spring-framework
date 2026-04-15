@@ -1,0 +1,525 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AnnotationsScanner.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.core.annotation</a> &gt; <span class="el_source">AnnotationsScanner.java</span></div><h1>AnnotationsScanner.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.core.annotation;
+
+import java.lang.annotation.Annotation;
+import java.lang.reflect.AnnotatedElement;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.Arrays;
+import java.util.Map;
+import java.util.function.Predicate;
+
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.core.BridgeMethodResolver;
+import org.springframework.core.Ordered;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.annotation.MergedAnnotations.Search;
+import org.springframework.core.annotation.MergedAnnotations.SearchStrategy;
+import org.springframework.util.ConcurrentReferenceHashMap;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+
+/**
+ * Scanner to search for relevant annotations in the annotation hierarchy of an
+ * {@link AnnotatedElement}.
+ *
+ * @author Phillip Webb
+ * @author Sam Brannen
+ * @since 5.2
+ * @see AnnotationsProcessor
+ */
+abstract class AnnotationsScanner {
+
+<span class="nc" id="L50">	private static final @Nullable Annotation[] NO_ANNOTATIONS = {};</span>
+
+<span class="nc" id="L52">	private static final Method[] NO_METHODS = {};</span>
+
+
+<span class="nc" id="L55">	private static final Map&lt;AnnotatedElement, Annotation[]&gt; declaredAnnotationCache =</span>
+			new ConcurrentReferenceHashMap&lt;&gt;(256);
+
+<span class="nc" id="L58">	private static final Map&lt;Class&lt;?&gt;, @Nullable Method[]&gt; baseTypeMethodsCache =</span>
+			new ConcurrentReferenceHashMap&lt;&gt;(256);
+
+
+	private AnnotationsScanner() {
+	}
+
+
+	/**
+	 * Scan the hierarchy of the specified element for relevant annotations and
+	 * call the processor as required.
+	 * @param context an optional context object that will be passed back to the
+	 * processor
+	 * @param source the source element to scan
+	 * @param searchStrategy the search strategy to use
+	 * @param searchEnclosingClass a predicate which evaluates to {@code true}
+	 * if a search should be performed on the enclosing class of the class
+	 * supplied to the predicate
+	 * @param processor the processor that receives the annotations
+	 * @return the result of {@link AnnotationsProcessor#finish(Object)}
+	 */
+	static &lt;C, R&gt; @Nullable R scan(C context, AnnotatedElement source, SearchStrategy searchStrategy,
+			Predicate&lt;Class&lt;?&gt;&gt; searchEnclosingClass, AnnotationsProcessor&lt;C, R&gt; processor) {
+
+<span class="nc" id="L82">		R result = process(context, source, searchStrategy, searchEnclosingClass, processor);</span>
+<span class="nc" id="L83">		return processor.finish(result);</span>
+	}
+
+	private static &lt;C, R&gt; @Nullable R process(C context, AnnotatedElement source,
+			SearchStrategy searchStrategy, Predicate&lt;Class&lt;?&gt;&gt; searchEnclosingClass,
+			AnnotationsProcessor&lt;C, R&gt; processor) {
+
+<span class="nc bnc" id="L90" title="All 2 branches missed.">		if (source instanceof Class&lt;?&gt; clazz) {</span>
+<span class="nc" id="L91">			return processClass(context, clazz, searchStrategy, searchEnclosingClass, processor);</span>
+		}
+<span class="nc bnc" id="L93" title="All 2 branches missed.">		if (source instanceof Method method) {</span>
+<span class="nc" id="L94">			return processMethod(context, method, searchStrategy, processor);</span>
+		}
+<span class="nc" id="L96">		return processElement(context, source, processor);</span>
+	}
+
+	private static &lt;C, R&gt; @Nullable R processClass(C context, Class&lt;?&gt; source, SearchStrategy searchStrategy,
+			Predicate&lt;Class&lt;?&gt;&gt; searchEnclosingClass, AnnotationsProcessor&lt;C, R&gt; processor) {
+
+<span class="nc bnc" id="L102" title="All 4 branches missed.">		return switch (searchStrategy) {</span>
+<span class="nc" id="L103">			case DIRECT -&gt; processElement(context, source, processor);</span>
+<span class="nc" id="L104">			case INHERITED_ANNOTATIONS -&gt; processClassInheritedAnnotations(context, source, processor);</span>
+<span class="nc" id="L105">			case SUPERCLASS -&gt; processClassHierarchy(context, source, processor, false, Search.never);</span>
+<span class="nc" id="L106">			case TYPE_HIERARCHY -&gt; processClassHierarchy(context, source, processor, true, searchEnclosingClass);</span>
+		};
+	}
+
+	private static &lt;C, R&gt; @Nullable R processClassInheritedAnnotations(C context, Class&lt;?&gt; source,
+			AnnotationsProcessor&lt;C, R&gt; processor) {
+
+		try {
+<span class="nc bnc" id="L114" title="All 2 branches missed.">			if (isWithoutHierarchy(source, Search.never)) {</span>
+<span class="nc" id="L115">				return processElement(context, source, processor);</span>
+			}
+<span class="nc" id="L117">			@Nullable Annotation[] relevant = null;</span>
+<span class="nc" id="L118">			int remaining = Integer.MAX_VALUE;</span>
+<span class="nc" id="L119">			int aggregateIndex = 0;</span>
+<span class="nc" id="L120">			Class&lt;?&gt; root = source;</span>
+<span class="nc bnc" id="L121" title="All 8 branches missed.">			while (source != null &amp;&amp; source != Object.class &amp;&amp; remaining &gt; 0 &amp;&amp; !hasPlainJavaAnnotationsOnly(source)) {</span>
+<span class="nc" id="L122">				R result = processor.doWithAggregate(context, aggregateIndex);</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">				if (result != null) {</span>
+<span class="nc" id="L124">					return result;</span>
+				}
+<span class="nc" id="L126">				@Nullable Annotation[] declaredAnns = getDeclaredAnnotations(source, true);</span>
+<span class="nc bnc" id="L127" title="All 2 branches missed.">				if (declaredAnns.length &gt; 0) {</span>
+<span class="nc bnc" id="L128" title="All 2 branches missed.">					if (relevant == null) {</span>
+<span class="nc" id="L129">						relevant = root.getAnnotations();</span>
+<span class="nc" id="L130">						remaining = relevant.length;</span>
+					}
+<span class="nc bnc" id="L132" title="All 2 branches missed.">					for (int i = 0; i &lt; declaredAnns.length; i++) {</span>
+<span class="nc bnc" id="L133" title="All 2 branches missed.">						if (declaredAnns[i] != null) {</span>
+<span class="nc" id="L134">							boolean isRelevant = false;</span>
+<span class="nc bnc" id="L135" title="All 2 branches missed.">							for (int relevantIndex = 0; relevantIndex &lt; relevant.length; relevantIndex++) {</span>
+								//noinspection DataFlowIssue
+<span class="nc bnc" id="L137" title="All 2 branches missed.">								if (relevant[relevantIndex] != null &amp;&amp;</span>
+<span class="nc bnc" id="L138" title="All 2 branches missed.">										declaredAnns[i].annotationType() == relevant[relevantIndex].annotationType()) {</span>
+<span class="nc" id="L139">									isRelevant = true;</span>
+<span class="nc" id="L140">									relevant[relevantIndex] = null;</span>
+<span class="nc" id="L141">									remaining--;</span>
+<span class="nc" id="L142">									break;</span>
+								}
+							}
+<span class="nc bnc" id="L145" title="All 2 branches missed.">							if (!isRelevant) {</span>
+<span class="nc" id="L146">								declaredAnns[i] = null;</span>
+							}
+						}
+					}
+				}
+<span class="nc" id="L151">				result = processor.doWithAnnotations(context, aggregateIndex, source, declaredAnns);</span>
+<span class="nc bnc" id="L152" title="All 2 branches missed.">				if (result != null) {</span>
+<span class="nc" id="L153">					return result;</span>
+				}
+<span class="nc" id="L155">				source = source.getSuperclass();</span>
+<span class="nc" id="L156">				aggregateIndex++;</span>
+<span class="nc" id="L157">			}</span>
+		}
+<span class="nc" id="L159">		catch (Throwable ex) {</span>
+<span class="nc" id="L160">			AnnotationUtils.handleIntrospectionFailure(source, ex);</span>
+<span class="nc" id="L161">		}</span>
+<span class="nc" id="L162">		return null;</span>
+	}
+
+	private static &lt;C, R&gt; @Nullable R processClassHierarchy(C context, Class&lt;?&gt; source,
+			AnnotationsProcessor&lt;C, R&gt; processor, boolean includeInterfaces,
+			Predicate&lt;Class&lt;?&gt;&gt; searchEnclosingClass) {
+
+<span class="nc" id="L169">		return processClassHierarchy(context, new int[] {0}, source, processor,</span>
+				includeInterfaces, searchEnclosingClass);
+	}
+
+	private static &lt;C, R&gt; @Nullable R processClassHierarchy(C context, int[] aggregateIndex, Class&lt;?&gt; source,
+			AnnotationsProcessor&lt;C, R&gt; processor, boolean includeInterfaces,
+			Predicate&lt;Class&lt;?&gt;&gt; searchEnclosingClass) {
+
+		try {
+<span class="nc" id="L178">			R result = processor.doWithAggregate(context, aggregateIndex[0]);</span>
+<span class="nc bnc" id="L179" title="All 2 branches missed.">			if (result != null) {</span>
+<span class="nc" id="L180">				return result;</span>
+			}
+<span class="nc bnc" id="L182" title="All 2 branches missed.">			if (hasPlainJavaAnnotationsOnly(source)) {</span>
+<span class="nc" id="L183">				return null;</span>
+			}
+<span class="nc" id="L185">			@Nullable Annotation[] annotations = getDeclaredAnnotations(source, false);</span>
+<span class="nc" id="L186">			result = processor.doWithAnnotations(context, aggregateIndex[0], source, annotations);</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">			if (result != null) {</span>
+<span class="nc" id="L188">				return result;</span>
+			}
+<span class="nc" id="L190">			aggregateIndex[0]++;</span>
+<span class="nc bnc" id="L191" title="All 2 branches missed.">			if (includeInterfaces) {</span>
+<span class="nc bnc" id="L192" title="All 2 branches missed.">				for (Class&lt;?&gt; interfaceType : source.getInterfaces()) {</span>
+<span class="nc" id="L193">					R interfacesResult = processClassHierarchy(context, aggregateIndex,</span>
+						interfaceType, processor, true, searchEnclosingClass);
+<span class="nc bnc" id="L195" title="All 2 branches missed.">					if (interfacesResult != null) {</span>
+<span class="nc" id="L196">						return interfacesResult;</span>
+					}
+				}
+			}
+<span class="nc" id="L200">			Class&lt;?&gt; superclass = source.getSuperclass();</span>
+<span class="nc bnc" id="L201" title="All 4 branches missed.">			if (superclass != Object.class &amp;&amp; superclass != null) {</span>
+<span class="nc" id="L202">				R superclassResult = processClassHierarchy(context, aggregateIndex,</span>
+					superclass, processor, includeInterfaces, searchEnclosingClass);
+<span class="nc bnc" id="L204" title="All 2 branches missed.">				if (superclassResult != null) {</span>
+<span class="nc" id="L205">					return superclassResult;</span>
+				}
+			}
+<span class="nc bnc" id="L208" title="All 2 branches missed.">			if (searchEnclosingClass.test(source)) {</span>
+				// Since merely attempting to load the enclosing class may result in
+				// automatic loading of sibling nested classes that in turn results
+				// in an exception such as NoClassDefFoundError, we wrap the following
+				// in its own dedicated try-catch block in order not to preemptively
+				// halt the annotation scanning process.
+				try {
+<span class="nc" id="L215">					Class&lt;?&gt; enclosingClass = source.getEnclosingClass();</span>
+<span class="nc bnc" id="L216" title="All 2 branches missed.">					if (enclosingClass != null) {</span>
+<span class="nc" id="L217">						R enclosingResult = processClassHierarchy(context, aggregateIndex,</span>
+							enclosingClass, processor, includeInterfaces, searchEnclosingClass);
+<span class="nc bnc" id="L219" title="All 2 branches missed.">						if (enclosingResult != null) {</span>
+<span class="nc" id="L220">							return enclosingResult;</span>
+						}
+					}
+				}
+<span class="nc" id="L224">				catch (Throwable ex) {</span>
+<span class="nc" id="L225">					AnnotationUtils.handleIntrospectionFailure(source, ex);</span>
+<span class="nc" id="L226">				}</span>
+			}
+		}
+<span class="nc" id="L229">		catch (Throwable ex) {</span>
+<span class="nc" id="L230">			AnnotationUtils.handleIntrospectionFailure(source, ex);</span>
+<span class="nc" id="L231">		}</span>
+<span class="nc" id="L232">		return null;</span>
+	}
+
+	private static &lt;C, R&gt; @Nullable R processMethod(C context, Method source,
+			SearchStrategy searchStrategy, AnnotationsProcessor&lt;C, R&gt; processor) {
+
+<span class="nc bnc" id="L238" title="All 3 branches missed.">		return switch (searchStrategy) {</span>
+<span class="nc" id="L239">			case DIRECT, INHERITED_ANNOTATIONS -&gt; processMethodInheritedAnnotations(context, source, processor);</span>
+<span class="nc" id="L240">			case SUPERCLASS -&gt; processMethodHierarchy(context, new int[]{0}, source.getDeclaringClass(),</span>
+					processor, source, false);
+<span class="nc" id="L242">			case TYPE_HIERARCHY -&gt; processMethodHierarchy(context, new int[]{0}, source.getDeclaringClass(),</span>
+					processor, source, true);
+		};
+	}
+
+	private static &lt;C, R&gt; @Nullable R processMethodInheritedAnnotations(C context, Method source,
+			AnnotationsProcessor&lt;C, R&gt; processor) {
+
+		try {
+<span class="nc" id="L251">			R result = processor.doWithAggregate(context, 0);</span>
+<span class="nc bnc" id="L252" title="All 2 branches missed.">			return (result != null ? result :</span>
+<span class="nc" id="L253">				processMethodAnnotations(context, 0, source, processor));</span>
+		}
+<span class="nc" id="L255">		catch (Throwable ex) {</span>
+<span class="nc" id="L256">			AnnotationUtils.handleIntrospectionFailure(source, ex);</span>
+		}
+<span class="nc" id="L258">		return null;</span>
+	}
+
+	private static &lt;C, R&gt; @Nullable R processMethodHierarchy(C context, int[] aggregateIndex,
+			Class&lt;?&gt; sourceClass, AnnotationsProcessor&lt;C, R&gt; processor, Method rootMethod,
+			boolean includeInterfaces) {
+
+		try {
+<span class="nc" id="L266">			R result = processor.doWithAggregate(context, aggregateIndex[0]);</span>
+<span class="nc bnc" id="L267" title="All 2 branches missed.">			if (result != null) {</span>
+<span class="nc" id="L268">				return result;</span>
+			}
+<span class="nc bnc" id="L270" title="All 2 branches missed.">			if (hasPlainJavaAnnotationsOnly(sourceClass)) {</span>
+<span class="nc" id="L271">				return null;</span>
+			}
+<span class="nc" id="L273">			boolean calledProcessor = false;</span>
+<span class="nc bnc" id="L274" title="All 2 branches missed.">			if (sourceClass == rootMethod.getDeclaringClass()) {</span>
+<span class="nc" id="L275">				result = processMethodAnnotations(context, aggregateIndex[0],</span>
+					rootMethod, processor);
+<span class="nc" id="L277">				calledProcessor = true;</span>
+<span class="nc bnc" id="L278" title="All 2 branches missed.">				if (result != null) {</span>
+<span class="nc" id="L279">					return result;</span>
+				}
+			}
+			else {
+<span class="nc bnc" id="L283" title="All 2 branches missed.">				for (Method candidateMethod : getBaseTypeMethods(context, sourceClass)) {</span>
+<span class="nc bnc" id="L284" title="All 4 branches missed.">					if (candidateMethod != null &amp;&amp; isOverride(rootMethod, candidateMethod)) {</span>
+<span class="nc" id="L285">						result = processMethodAnnotations(context, aggregateIndex[0],</span>
+							candidateMethod, processor);
+<span class="nc" id="L287">						calledProcessor = true;</span>
+<span class="nc bnc" id="L288" title="All 2 branches missed.">						if (result != null) {</span>
+<span class="nc" id="L289">							return result;</span>
+						}
+					}
+				}
+			}
+<span class="nc bnc" id="L294" title="All 2 branches missed.">			if (Modifier.isPrivate(rootMethod.getModifiers())) {</span>
+<span class="nc" id="L295">				return null;</span>
+			}
+<span class="nc bnc" id="L297" title="All 2 branches missed.">			if (calledProcessor) {</span>
+<span class="nc" id="L298">				aggregateIndex[0]++;</span>
+			}
+<span class="nc bnc" id="L300" title="All 2 branches missed.">			if (includeInterfaces) {</span>
+<span class="nc bnc" id="L301" title="All 2 branches missed.">				for (Class&lt;?&gt; interfaceType : sourceClass.getInterfaces()) {</span>
+<span class="nc" id="L302">					R interfacesResult = processMethodHierarchy(context, aggregateIndex,</span>
+						interfaceType, processor, rootMethod, true);
+<span class="nc bnc" id="L304" title="All 2 branches missed.">					if (interfacesResult != null) {</span>
+<span class="nc" id="L305">						return interfacesResult;</span>
+					}
+				}
+			}
+<span class="nc" id="L309">			Class&lt;?&gt; superclass = sourceClass.getSuperclass();</span>
+<span class="nc bnc" id="L310" title="All 4 branches missed.">			if (superclass != Object.class &amp;&amp; superclass != null) {</span>
+<span class="nc" id="L311">				R superclassResult = processMethodHierarchy(context, aggregateIndex,</span>
+					superclass, processor, rootMethod, includeInterfaces);
+<span class="nc bnc" id="L313" title="All 2 branches missed.">				if (superclassResult != null) {</span>
+<span class="nc" id="L314">					return superclassResult;</span>
+				}
+			}
+		}
+<span class="nc" id="L318">		catch (Throwable ex) {</span>
+<span class="nc" id="L319">			AnnotationUtils.handleIntrospectionFailure(rootMethod, ex);</span>
+<span class="nc" id="L320">		}</span>
+<span class="nc" id="L321">		return null;</span>
+	}
+
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	private static &lt;C&gt; @Nullable Method[] getBaseTypeMethods(C context, Class&lt;?&gt; baseType) {
+<span class="nc bnc" id="L326" title="All 4 branches missed.">		if (baseType == Object.class || hasPlainJavaAnnotationsOnly(baseType)) {</span>
+<span class="nc" id="L327">			return NO_METHODS;</span>
+		}
+
+<span class="nc" id="L330">		@Nullable Method[] methods = baseTypeMethodsCache.get(baseType);</span>
+<span class="nc bnc" id="L331" title="All 2 branches missed.">		if (methods == null) {</span>
+<span class="nc" id="L332">			methods = ReflectionUtils.getDeclaredMethods(baseType);</span>
+<span class="nc" id="L333">			int cleared = 0;</span>
+<span class="nc bnc" id="L334" title="All 2 branches missed.">			for (int i = 0; i &lt; methods.length; i++) {</span>
+				//noinspection DataFlowIssue
+<span class="nc bnc" id="L336" title="All 2 branches missed.">				if (Modifier.isPrivate(methods[i].getModifiers()) ||</span>
+<span class="nc bnc" id="L337" title="All 2 branches missed.">						hasPlainJavaAnnotationsOnly(methods[i]) ||</span>
+<span class="nc bnc" id="L338" title="All 2 branches missed.">						getDeclaredAnnotations(methods[i], false).length == 0) {</span>
+<span class="nc" id="L339">					methods[i] = null;</span>
+<span class="nc" id="L340">					cleared++;</span>
+				}
+			}
+<span class="nc bnc" id="L343" title="All 2 branches missed.">			if (cleared == methods.length) {</span>
+<span class="nc" id="L344">				methods = NO_METHODS;</span>
+			}
+<span class="nc" id="L346">			baseTypeMethodsCache.put(baseType, methods);</span>
+		}
+<span class="nc" id="L348">		return methods;</span>
+	}
+
+	private static boolean isOverride(Method rootMethod, Method candidateMethod) {
+<span class="nc bnc" id="L352" title="All 2 branches missed.">		return (!Modifier.isPrivate(candidateMethod.getModifiers()) &amp;&amp;</span>
+<span class="nc bnc" id="L353" title="All 2 branches missed.">				candidateMethod.getParameterCount() == rootMethod.getParameterCount() &amp;&amp;</span>
+<span class="nc bnc" id="L354" title="All 2 branches missed.">				candidateMethod.getName().equals(rootMethod.getName()) &amp;&amp;</span>
+<span class="nc bnc" id="L355" title="All 2 branches missed.">				hasSameParameterTypes(rootMethod, candidateMethod));</span>
+	}
+
+	private static boolean hasSameParameterTypes(Method rootMethod, Method candidateMethod) {
+<span class="nc" id="L359">		Class&lt;?&gt;[] rootParameterTypes = rootMethod.getParameterTypes();</span>
+<span class="nc" id="L360">		Class&lt;?&gt;[] candidateParameterTypes = candidateMethod.getParameterTypes();</span>
+<span class="nc bnc" id="L361" title="All 2 branches missed.">		if (Arrays.equals(candidateParameterTypes, rootParameterTypes)) {</span>
+<span class="nc" id="L362">			return true;</span>
+		}
+<span class="nc" id="L364">		return hasSameGenericTypeParameters(rootMethod, candidateMethod, rootParameterTypes);</span>
+	}
+
+	private static boolean hasSameGenericTypeParameters(
+			Method rootMethod, Method candidateMethod, Class&lt;?&gt;[] rootParameterTypes) {
+
+<span class="nc" id="L370">		Class&lt;?&gt; rootDeclaringClass = rootMethod.getDeclaringClass();</span>
+<span class="nc" id="L371">		Class&lt;?&gt; candidateDeclaringClass = candidateMethod.getDeclaringClass();</span>
+<span class="nc bnc" id="L372" title="All 2 branches missed.">		if (!candidateDeclaringClass.isAssignableFrom(rootDeclaringClass)) {</span>
+<span class="nc" id="L373">			return false;</span>
+		}
+<span class="nc bnc" id="L375" title="All 2 branches missed.">		for (int i = 0; i &lt; rootParameterTypes.length; i++) {</span>
+<span class="nc" id="L376">			Class&lt;?&gt; resolvedParameterType = ResolvableType.forMethodParameter(</span>
+<span class="nc" id="L377">					candidateMethod, i, rootDeclaringClass).toClass();</span>
+<span class="nc bnc" id="L378" title="All 2 branches missed.">			if (rootParameterTypes[i] != resolvedParameterType) {</span>
+<span class="nc" id="L379">				return false;</span>
+			}
+		}
+<span class="nc" id="L382">		return true;</span>
+	}
+
+	private static &lt;C, R&gt; @Nullable R processMethodAnnotations(C context, int aggregateIndex, Method source,
+			AnnotationsProcessor&lt;C, R&gt; processor) {
+
+<span class="nc" id="L388">		@Nullable Annotation[] annotations = getDeclaredAnnotations(source, false);</span>
+<span class="nc" id="L389">		R result = processor.doWithAnnotations(context, aggregateIndex, source, annotations);</span>
+<span class="nc bnc" id="L390" title="All 2 branches missed.">		if (result != null) {</span>
+<span class="nc" id="L391">			return result;</span>
+		}
+<span class="nc" id="L393">		Method bridgedMethod = BridgeMethodResolver.findBridgedMethod(source);</span>
+<span class="nc bnc" id="L394" title="All 2 branches missed.">		if (bridgedMethod != source) {</span>
+<span class="nc" id="L395">			@Nullable Annotation[] bridgedAnnotations = getDeclaredAnnotations(bridgedMethod, true);</span>
+<span class="nc bnc" id="L396" title="All 2 branches missed.">			for (int i = 0; i &lt; bridgedAnnotations.length; i++) {</span>
+<span class="nc bnc" id="L397" title="All 2 branches missed.">				if (ObjectUtils.containsElement(annotations, bridgedAnnotations[i])) {</span>
+<span class="nc" id="L398">					bridgedAnnotations[i] = null;</span>
+				}
+			}
+<span class="nc" id="L401">			return processor.doWithAnnotations(context, aggregateIndex, source, bridgedAnnotations);</span>
+		}
+<span class="nc" id="L403">		return null;</span>
+	}
+
+	private static &lt;C, R&gt; @Nullable R processElement(C context, AnnotatedElement source,
+			AnnotationsProcessor&lt;C, R&gt; processor) {
+
+		try {
+<span class="nc" id="L410">			R result = processor.doWithAggregate(context, 0);</span>
+<span class="nc bnc" id="L411" title="All 2 branches missed.">			return (result != null ? result : processor.doWithAnnotations(</span>
+<span class="nc" id="L412">				context, 0, source, getDeclaredAnnotations(source, false)));</span>
+		}
+<span class="nc" id="L414">		catch (Throwable ex) {</span>
+<span class="nc" id="L415">			AnnotationUtils.handleIntrospectionFailure(source, ex);</span>
+		}
+<span class="nc" id="L417">		return null;</span>
+	}
+
+	@SuppressWarnings(&quot;unchecked&quot;)
+	static &lt;A extends Annotation&gt; @Nullable A getDeclaredAnnotation(AnnotatedElement source, Class&lt;A&gt; annotationType) {
+<span class="nc" id="L422">		@Nullable Annotation[] annotations = getDeclaredAnnotations(source, false);</span>
+<span class="nc bnc" id="L423" title="All 2 branches missed.">		for (Annotation annotation : annotations) {</span>
+<span class="nc bnc" id="L424" title="All 4 branches missed.">			if (annotation != null &amp;&amp; annotationType == annotation.annotationType()) {</span>
+<span class="nc" id="L425">				return (A) annotation;</span>
+			}
+		}
+<span class="nc" id="L428">		return null;</span>
+	}
+
+	@SuppressWarnings(&quot;NullAway&quot;) // Dataflow analysis limitation
+	static @Nullable Annotation[] getDeclaredAnnotations(AnnotatedElement source, boolean defensive) {
+<span class="nc" id="L433">		boolean cached = false;</span>
+<span class="nc" id="L434">		@Nullable Annotation[] annotations = declaredAnnotationCache.get(source);</span>
+<span class="nc bnc" id="L435" title="All 2 branches missed.">		if (annotations != null) {</span>
+<span class="nc" id="L436">			cached = true;</span>
+		}
+		else {
+<span class="nc" id="L439">			annotations = source.getDeclaredAnnotations();</span>
+<span class="nc bnc" id="L440" title="All 2 branches missed.">			if (annotations.length != 0) {</span>
+<span class="nc" id="L441">				boolean allIgnored = true;</span>
+<span class="nc bnc" id="L442" title="All 2 branches missed.">				for (int i = 0; i &lt; annotations.length; i++) {</span>
+<span class="nc" id="L443">					Annotation annotation = annotations[i];</span>
+					//noinspection DataFlowIssue
+<span class="nc bnc" id="L445" title="All 2 branches missed.">					if (isIgnorable(annotation.annotationType()) ||</span>
+<span class="nc bnc" id="L446" title="All 2 branches missed.">							!AttributeMethods.forAnnotationType(annotation.annotationType()).canLoad(annotation, source)) {</span>
+<span class="nc" id="L447">						annotations[i] = null;</span>
+					}
+					else {
+<span class="nc" id="L450">						allIgnored = false;</span>
+					}
+				}
+<span class="nc bnc" id="L453" title="All 2 branches missed.">				annotations = (allIgnored ? NO_ANNOTATIONS : annotations);</span>
+<span class="nc bnc" id="L454" title="All 4 branches missed.">				if (source instanceof Class || source instanceof Member) {</span>
+					//noinspection NullableProblems
+<span class="nc" id="L456">					declaredAnnotationCache.put(source, annotations);</span>
+<span class="nc" id="L457">					cached = true;</span>
+				}
+			}
+		}
+<span class="nc bnc" id="L461" title="All 6 branches missed.">		if (!defensive || annotations.length == 0 || !cached) {</span>
+<span class="nc" id="L462">			return annotations;</span>
+		}
+<span class="nc" id="L464">		return annotations.clone();</span>
+	}
+
+	private static boolean isIgnorable(Class&lt;?&gt; annotationType) {
+<span class="nc" id="L468">		return AnnotationFilter.PLAIN.matches(annotationType);</span>
+	}
+
+	static boolean isKnownEmpty(AnnotatedElement source, SearchStrategy searchStrategy,
+			Predicate&lt;Class&lt;?&gt;&gt; searchEnclosingClass) {
+
+<span class="nc bnc" id="L474" title="All 2 branches missed.">		if (hasPlainJavaAnnotationsOnly(source)) {</span>
+<span class="nc" id="L475">			return true;</span>
+		}
+<span class="nc bnc" id="L477" title="All 4 branches missed.">		if (searchStrategy == SearchStrategy.DIRECT || isWithoutHierarchy(source, searchEnclosingClass)) {</span>
+<span class="nc bnc" id="L478" title="All 4 branches missed.">			if (source instanceof Method method &amp;&amp; method.isBridge()) {</span>
+<span class="nc" id="L479">				return false;</span>
+			}
+<span class="nc bnc" id="L481" title="All 2 branches missed.">			return getDeclaredAnnotations(source, false).length == 0;</span>
+		}
+<span class="nc" id="L483">		return false;</span>
+	}
+
+	static boolean hasPlainJavaAnnotationsOnly(@Nullable Object annotatedElement) {
+<span class="nc bnc" id="L487" title="All 2 branches missed.">		if (annotatedElement instanceof Class&lt;?&gt; clazz) {</span>
+<span class="nc" id="L488">			return hasPlainJavaAnnotationsOnly(clazz);</span>
+		}
+<span class="nc bnc" id="L490" title="All 2 branches missed.">		else if (annotatedElement instanceof Member member) {</span>
+<span class="nc" id="L491">			return hasPlainJavaAnnotationsOnly(member.getDeclaringClass());</span>
+		}
+		else {
+<span class="nc" id="L494">			return false;</span>
+		}
+	}
+
+	static boolean hasPlainJavaAnnotationsOnly(Class&lt;?&gt; type) {
+<span class="nc bnc" id="L499" title="All 4 branches missed.">		return (type.getName().startsWith(&quot;java.&quot;) || type == Ordered.class);</span>
+	}
+
+	private static boolean isWithoutHierarchy(AnnotatedElement source, Predicate&lt;Class&lt;?&gt;&gt; searchEnclosingClass) {
+<span class="nc bnc" id="L503" title="All 2 branches missed.">		if (source == Object.class) {</span>
+<span class="nc" id="L504">			return true;</span>
+		}
+<span class="nc bnc" id="L506" title="All 2 branches missed.">		if (source instanceof Class&lt;?&gt; sourceClass) {</span>
+<span class="nc bnc" id="L507" title="All 2 branches missed.">			boolean noSuperTypes = (sourceClass.getSuperclass() == Object.class &amp;&amp;</span>
+<span class="nc bnc" id="L508" title="All 2 branches missed.">					sourceClass.getInterfaces().length == 0);</span>
+<span class="nc bnc" id="L509" title="All 4 branches missed.">			return (searchEnclosingClass.test(sourceClass) ? noSuperTypes &amp;&amp;</span>
+<span class="nc bnc" id="L510" title="All 2 branches missed.">					sourceClass.getEnclosingClass() == null : noSuperTypes);</span>
+		}
+<span class="nc bnc" id="L512" title="All 2 branches missed.">		if (source instanceof Method sourceMethod) {</span>
+<span class="nc bnc" id="L513" title="All 2 branches missed.">			return (Modifier.isPrivate(sourceMethod.getModifiers()) ||</span>
+<span class="nc bnc" id="L514" title="All 2 branches missed.">					isWithoutHierarchy(sourceMethod.getDeclaringClass(), searchEnclosingClass));</span>
+		}
+<span class="nc" id="L516">		return true;</span>
+	}
+
+	static void clearCache() {
+<span class="nc" id="L520">		declaredAnnotationCache.clear();</span>
+<span class="nc" id="L521">		baseTypeMethodsCache.clear();</span>
+<span class="nc" id="L522">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

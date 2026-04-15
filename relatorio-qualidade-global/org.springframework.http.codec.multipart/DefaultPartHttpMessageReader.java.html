@@ -1,0 +1,221 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>DefaultPartHttpMessageReader.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.codec.multipart</a> &gt; <span class="el_source">DefaultPartHttpMessageReader.java</span></div><h1>DefaultPartHttpMessageReader.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.codec.multipart;
+
+import java.io.IOException;
+import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Path;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Scheduler;
+import reactor.core.scheduler.Schedulers;
+
+import org.springframework.core.ResolvableType;
+import org.springframework.core.codec.DecodingException;
+import org.springframework.core.io.buffer.DataBufferLimitException;
+import org.springframework.http.MediaType;
+import org.springframework.http.ReactiveHttpInputMessage;
+import org.springframework.http.codec.HttpMessageReader;
+import org.springframework.http.codec.LoggingCodecSupport;
+import org.springframework.util.Assert;
+
+/**
+ * Default {@code HttpMessageReader} for parsing {@code &quot;multipart/form-data&quot;}
+ * requests to a stream of {@link Part}s.
+ *
+ * &lt;p&gt;In default, non-streaming mode, this message reader stores the
+ * {@linkplain Part#content() contents} of parts smaller than
+ * {@link #setMaxInMemorySize(int) maxInMemorySize} in memory, and parts larger
+ * than that to a temporary file in
+ * {@link #setFileStorageDirectory(Path) fileStorageDirectory}.
+ *
+ * &lt;p&gt;This reader can be provided to {@link MultipartHttpMessageReader} in order
+ * to aggregate all parts into a Map.
+ *
+ * @author Arjen Poutsma
+ * @since 5.3
+ */
+<span class="fc" id="L59">public class DefaultPartHttpMessageReader extends LoggingCodecSupport implements HttpMessageReader&lt;Part&gt; {</span>
+
+<span class="fc" id="L61">	private int maxInMemorySize = 256 * 1024;</span>
+
+<span class="fc" id="L63">	private int maxHeadersSize = 10 * 1024;</span>
+
+<span class="fc" id="L65">	private long maxDiskUsagePerPart = -1;</span>
+
+<span class="fc" id="L67">	private int maxParts = -1;</span>
+
+	private @Nullable Scheduler blockingOperationScheduler;
+
+<span class="fc" id="L71">	private FileStorage fileStorage = FileStorage.tempDirectory(this::getBlockingOperationScheduler);</span>
+
+<span class="fc" id="L73">	private Charset headersCharset = StandardCharsets.UTF_8;</span>
+
+
+	/**
+	 * Configure the maximum amount of memory that is allowed per headers section of each part.
+	 * @param byteCount the maximum amount of memory for headers
+	 */
+	public void setMaxHeadersSize(int byteCount) {
+<span class="nc" id="L81">		this.maxHeadersSize = byteCount;</span>
+<span class="nc" id="L82">	}</span>
+
+	/**
+	 * Get the {@link #setMaxInMemorySize configured} maximum in-memory size.
+	 */
+	public int getMaxInMemorySize() {
+<span class="nc" id="L88">		return this.maxInMemorySize;</span>
+	}
+
+	/**
+	 * Configure the maximum amount of memory allowed per part.
+	 * When the limit is exceeded:
+	 * &lt;ul&gt;
+	 * &lt;li&gt;File parts are written to a temporary file.
+	 * &lt;li&gt;Non-file parts are rejected with {@link DataBufferLimitException}.
+	 * &lt;/ul&gt;
+	 * &lt;p&gt;By default this is set to 256K.
+	 * @param maxInMemorySize the in-memory limit in bytes; if set to -1 the entire
+	 * contents will be stored in memory
+	 */
+	public void setMaxInMemorySize(int maxInMemorySize) {
+<span class="nc" id="L103">		this.maxInMemorySize = maxInMemorySize;</span>
+<span class="nc" id="L104">	}</span>
+
+	/**
+	 * Configure the maximum amount of disk space allowed for file parts.
+	 * &lt;p&gt;By default this is set to -1, meaning that there is no maximum.
+	 * &lt;p&gt;Note that this property is ignored when
+	 * {@link #setMaxInMemorySize(int) maxInMemorySize} is set to -1.
+	 */
+	public void setMaxDiskUsagePerPart(long maxDiskUsagePerPart) {
+<span class="nc" id="L113">		this.maxDiskUsagePerPart = maxDiskUsagePerPart;</span>
+<span class="nc" id="L114">	}</span>
+
+	/**
+	 * Specify the maximum number of parts allowed in a given multipart request.
+	 * &lt;p&gt;By default this is set to -1, meaning that there is no maximum.
+	 */
+	public void setMaxParts(int maxParts) {
+<span class="nc" id="L121">		this.maxParts = maxParts;</span>
+<span class="nc" id="L122">	}</span>
+
+	/**
+	 * Set the directory used to store parts larger than
+	 * {@link #setMaxInMemorySize(int) maxInMemorySize}. By default, a directory
+	 * named {@code spring-webflux-multipart} is created under the system
+	 * temporary directory.
+	 * &lt;p&gt;Note that this property is ignored when
+	 * {@link #setMaxInMemorySize(int) maxInMemorySize} is set to -1.
+	 * @throws IOException if an I/O error occurs, or the parent directory
+	 * does not exist
+	 */
+	public void setFileStorageDirectory(Path fileStorageDirectory) throws IOException {
+<span class="nc" id="L135">		Assert.notNull(fileStorageDirectory, &quot;FileStorageDirectory must not be null&quot;);</span>
+<span class="nc" id="L136">		this.fileStorage = FileStorage.fromPath(fileStorageDirectory);</span>
+<span class="nc" id="L137">	}</span>
+
+	/**
+	 * Set the Reactor {@link Scheduler} to be used for creating files and
+	 * directories, and writing to files. By default,
+	 * {@link Schedulers#boundedElastic()} is used, but this property allows for
+	 * changing it to an externally managed scheduler.
+	 * &lt;p&gt;Note that this property is ignored when
+	 * {@link #setMaxInMemorySize(int) maxInMemorySize} is set to -1.
+	 * @see Schedulers#boundedElastic
+	 */
+	public void setBlockingOperationScheduler(Scheduler blockingOperationScheduler) {
+<span class="nc" id="L149">		Assert.notNull(blockingOperationScheduler, &quot;'blockingOperationScheduler' must not be null&quot;);</span>
+<span class="nc" id="L150">		this.blockingOperationScheduler = blockingOperationScheduler;</span>
+<span class="nc" id="L151">	}</span>
+
+	private Scheduler getBlockingOperationScheduler() {
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">		return (this.blockingOperationScheduler != null ?</span>
+<span class="pc" id="L155">				this.blockingOperationScheduler : Schedulers.boundedElastic());</span>
+	}
+
+	/**
+	 * Set the character set used to decode headers.
+	 * &lt;p&gt;Defaults to UTF-8 as per RFC 7578.
+	 * @param headersCharset the charset to use for decoding headers
+	 * @since 5.3.6
+	 * @see &lt;a href=&quot;https://tools.ietf.org/html/rfc7578#section-5.1&quot;&gt;RFC-7578 Section 5.1&lt;/a&gt;
+	 */
+	public void setHeadersCharset(Charset headersCharset) {
+<span class="nc" id="L166">		Assert.notNull(headersCharset, &quot;HeadersCharset must not be null&quot;);</span>
+<span class="nc" id="L167">		this.headersCharset = headersCharset;</span>
+<span class="nc" id="L168">	}</span>
+
+	@Override
+	public List&lt;MediaType&gt; getReadableMediaTypes() {
+<span class="nc" id="L172">		return Collections.singletonList(MediaType.MULTIPART_FORM_DATA);</span>
+	}
+
+	@Override
+	public boolean canRead(ResolvableType elementType, @Nullable MediaType mediaType) {
+<span class="pc bpc" id="L177" title="1 of 4 branches missed.">		return Part.class.equals(elementType.toClass()) &amp;&amp;</span>
+<span class="pc bpc" id="L178" title="1 of 2 branches missed.">				(mediaType == null || MediaType.MULTIPART_FORM_DATA.isCompatibleWith(mediaType));</span>
+	}
+
+	@Override
+	public Mono&lt;Part&gt; readMono(ResolvableType elementType, ReactiveHttpInputMessage message,
+			Map&lt;String, Object&gt; hints) {
+<span class="nc" id="L184">		return Mono.error(new UnsupportedOperationException(&quot;Cannot read multipart request body into single Part&quot;));</span>
+	}
+
+	@Override
+	public Flux&lt;Part&gt; read(ResolvableType elementType, ReactiveHttpInputMessage message, Map&lt;String, Object&gt; hints) {
+<span class="fc" id="L189">		return Flux.defer(() -&gt; {</span>
+<span class="fc" id="L190">			byte[] boundary = MultipartUtils.boundary(message, this.headersCharset);</span>
+<span class="pc bpc" id="L191" title="1 of 2 branches missed.">			if (boundary == null) {</span>
+<span class="nc" id="L192">				return Flux.error(new DecodingException(&quot;No multipart boundary found in Content-Type: \&quot;&quot; +</span>
+<span class="nc" id="L193">						message.getHeaders().getContentType() + &quot;\&quot;&quot;));</span>
+			}
+<span class="fc" id="L195">			Flux&lt;MultipartParser.Token&gt; allPartsTokens = MultipartParser.parse(message.getBody(), boundary,</span>
+					this.maxHeadersSize, this.headersCharset);
+
+<span class="fc" id="L198">			AtomicInteger partCount = new AtomicInteger();</span>
+<span class="fc" id="L199">			return allPartsTokens</span>
+<span class="fc" id="L200">					.windowUntil(MultipartParser.Token::isLast)</span>
+<span class="fc" id="L201">					.concatMap(partsTokens -&gt; {</span>
+<span class="pc bpc" id="L202" title="1 of 2 branches missed.">						if (tooManyParts(partCount)) {</span>
+<span class="nc" id="L203">							return Mono.error(new DecodingException(&quot;Too many parts (&quot; + partCount.get() + &quot;/&quot; +</span>
+									this.maxParts + &quot; allowed)&quot;));
+						}
+						else {
+<span class="fc" id="L207">							return PartGenerator.createPart(partsTokens,</span>
+									this.maxInMemorySize, this.maxDiskUsagePerPart,
+<span class="fc" id="L209">									this.fileStorage.directory(), getBlockingOperationScheduler());</span>
+						}
+					});
+		});
+	}
+
+	private boolean tooManyParts(AtomicInteger partCount) {
+<span class="fc" id="L216">		int count = partCount.incrementAndGet();</span>
+<span class="pc bpc" id="L217" title="3 of 4 branches missed.">		return this.maxParts &gt; 0 &amp;&amp; count &gt; this.maxParts;</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

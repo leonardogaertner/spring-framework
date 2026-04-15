@@ -1,0 +1,292 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractJacksonDecoder.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.http.codec</a> &gt; <span class="el_source">AbstractJacksonDecoder.java</span></div><h1>AbstractJacksonDecoder.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.http.codec;
+
+import java.lang.annotation.Annotation;
+import java.math.BigDecimal;
+import java.util.Collection;
+import java.util.List;
+import java.util.Map;
+
+import org.jspecify.annotations.Nullable;
+import org.reactivestreams.Publisher;
+import reactor.core.publisher.Flux;
+import reactor.core.publisher.Mono;
+import reactor.util.context.ContextView;
+import tools.jackson.core.JacksonException;
+import tools.jackson.core.exc.JacksonIOException;
+import tools.jackson.databind.DeserializationFeature;
+import tools.jackson.databind.JavaType;
+import tools.jackson.databind.ObjectMapper;
+import tools.jackson.databind.ObjectReader;
+import tools.jackson.databind.cfg.MapperBuilder;
+import tools.jackson.databind.exc.InvalidDefinitionException;
+import tools.jackson.databind.util.TokenBuffer;
+
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ResolvableType;
+import org.springframework.core.codec.CodecException;
+import org.springframework.core.codec.DecodingException;
+import org.springframework.core.codec.Hints;
+import org.springframework.core.io.buffer.DataBuffer;
+import org.springframework.core.io.buffer.DataBufferLimitException;
+import org.springframework.core.io.buffer.DataBufferUtils;
+import org.springframework.core.io.buffer.PooledDataBuffer;
+import org.springframework.core.log.LogFormatUtils;
+import org.springframework.http.server.reactive.ServerHttpRequest;
+import org.springframework.http.server.reactive.ServerHttpResponse;
+import org.springframework.util.Assert;
+import org.springframework.util.MimeType;
+
+/**
+ * Abstract base class for Jackson 3.x decoding, leveraging non-blocking parsing.
+ *
+ * @author Sebastien Deleuze
+ * @since 7.0
+ * @param &lt;T&gt; the type of {@link ObjectMapper}
+ */
+public abstract class AbstractJacksonDecoder&lt;T extends ObjectMapper&gt; extends JacksonCodecSupport&lt;T&gt; implements HttpMessageDecoder&lt;Object&gt; {
+
+<span class="nc" id="L64">	private int maxInMemorySize = 256 * 1024;</span>
+
+
+	/**
+	 * Construct a new instance with the provided {@link MapperBuilder builder}
+	 * customized with the {@link tools.jackson.databind.JacksonModule}s found
+	 * by {@link MapperBuilder#findModules(ClassLoader)} and {@link MimeType}s.
+	 */
+	protected AbstractJacksonDecoder(MapperBuilder&lt;T, ?&gt; builder, MimeType... mimeTypes) {
+<span class="nc" id="L73">		super(builder, mimeTypes);</span>
+<span class="nc" id="L74">	}</span>
+
+	/**
+	 * Construct a new instance with the provided {@link ObjectMapper} and {@link MimeType}s.
+	 */
+	protected AbstractJacksonDecoder(T mapper, MimeType... mimeTypes) {
+<span class="nc" id="L80">		super(mapper, mimeTypes);</span>
+<span class="nc" id="L81">	}</span>
+
+	/**
+	 * Set the max number of bytes that can be buffered by this decoder. This
+	 * is either the size of the entire input when decoding as a whole, or the
+	 * size of one top-level JSON object within a JSON stream. When the limit
+	 * is exceeded, {@link DataBufferLimitException} is raised.
+	 * &lt;p&gt;By default this is set to 256K.
+	 * @param byteCount the max number of bytes to buffer, or -1 for unlimited
+	 */
+	public void setMaxInMemorySize(int byteCount) {
+<span class="nc" id="L92">		this.maxInMemorySize = byteCount;</span>
+<span class="nc" id="L93">	}</span>
+
+	/**
+	 * Return the {@link #setMaxInMemorySize configured} byte count limit.
+	 */
+	public int getMaxInMemorySize() {
+<span class="nc" id="L99">		return this.maxInMemorySize;</span>
+	}
+
+
+	@Override
+	public boolean canDecode(ResolvableType elementType, @Nullable MimeType mimeType) {
+<span class="nc bnc" id="L105" title="All 4 branches missed.">		return supportsMimeType(mimeType) &amp;&amp; (selectMapper(elementType, mimeType) != null);</span>
+	}
+
+	@Override
+	public Flux&lt;Object&gt; decode(Publisher&lt;DataBuffer&gt; input, ResolvableType elementType,
+			@Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="nc" id="L112">		T mapper = selectMapper(elementType, mimeType);</span>
+<span class="nc bnc" id="L113" title="All 2 branches missed.">		if (mapper == null) {</span>
+<span class="nc" id="L114">			return Flux.error(new IllegalStateException(&quot;No ObjectMapper for &quot; + elementType));</span>
+		}
+
+<span class="nc" id="L117">		boolean forceUseOfBigDecimal = mapper.isEnabled(DeserializationFeature.USE_BIG_DECIMAL_FOR_FLOATS);</span>
+<span class="nc bnc" id="L118" title="All 2 branches missed.">		if (BigDecimal.class.equals(elementType.getType())) {</span>
+<span class="nc" id="L119">			forceUseOfBigDecimal = true;</span>
+		}
+
+<span class="nc bnc" id="L122" title="All 2 branches missed.">		boolean tokenizeArrays = (!elementType.isArray() &amp;&amp;</span>
+<span class="nc bnc" id="L123" title="All 2 branches missed.">				!Collection.class.isAssignableFrom(elementType.resolve(Object.class)));</span>
+
+<span class="nc" id="L125">		Flux&lt;DataBuffer&gt; processed = processInput(input, elementType, mimeType, hints);</span>
+<span class="nc" id="L126">		Flux&lt;TokenBuffer&gt; tokens = JacksonTokenizer.tokenize(processed, mapper,</span>
+<span class="nc" id="L127">				tokenizeArrays, forceUseOfBigDecimal, getMaxInMemorySize());</span>
+
+<span class="nc" id="L129">		return Flux.deferContextual(contextView -&gt; {</span>
+
+<span class="nc bnc" id="L131" title="All 2 branches missed.">			Map&lt;String, Object&gt; hintsToUse = contextView.isEmpty() ? hints :</span>
+<span class="nc" id="L132">					Hints.merge(hints, ContextView.class.getName(), contextView);</span>
+
+<span class="nc" id="L134">			ObjectReader reader = createObjectReader(mapper, elementType, hintsToUse);</span>
+
+<span class="nc" id="L136">			return tokens.handle((tokenBuffer, sink) -&gt; {</span>
+				try {
+<span class="nc" id="L138">					Object value = reader.readValue(tokenBuffer.asParser(getMapper()._deserializationContext()));</span>
+<span class="nc" id="L139">					logValue(value, hints);</span>
+<span class="nc bnc" id="L140" title="All 2 branches missed.">					if (value != null) {</span>
+<span class="nc" id="L141">						sink.next(value);</span>
+					}
+				}
+<span class="nc" id="L144">				catch (JacksonException ex) {</span>
+<span class="nc" id="L145">					sink.error(processException(ex));</span>
+<span class="nc" id="L146">				}</span>
+<span class="nc" id="L147">			})</span>
+<span class="nc" id="L148">			.doOnDiscard(PooledDataBuffer.class, DataBufferUtils::release);</span>
+		});
+	}
+
+	/**
+	 * Process the input publisher into a flux. Default implementation returns
+	 * {@link Flux#from(Publisher)}, but subclasses can choose to customize
+	 * this behavior.
+	 * @param input the {@code DataBuffer} input stream to process
+	 * @param elementType the expected type of elements in the output stream
+	 * @param mimeType the MIME type associated with the input stream (optional)
+	 * @param hints additional information about how to do encode
+	 * @return the processed flux
+	 */
+	protected Flux&lt;DataBuffer&gt; processInput(Publisher&lt;DataBuffer&gt; input, ResolvableType elementType,
+			@Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="nc" id="L165">		return Flux.from(input);</span>
+	}
+
+	@Override
+	public Mono&lt;Object&gt; decodeToMono(Publisher&lt;DataBuffer&gt; input, ResolvableType elementType,
+			@Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="nc" id="L172">		return Mono.deferContextual(contextView -&gt; {</span>
+
+<span class="nc bnc" id="L174" title="All 2 branches missed.">			Map&lt;String, Object&gt; hintsToUse = contextView.isEmpty() ? hints :</span>
+<span class="nc" id="L175">					Hints.merge(hints, ContextView.class.getName(), contextView);</span>
+
+<span class="nc" id="L177">			return DataBufferUtils.join(input, this.maxInMemorySize).flatMap(dataBuffer -&gt;</span>
+<span class="nc" id="L178">					Mono.justOrEmpty(decode(dataBuffer, elementType, mimeType, hintsToUse)));</span>
+		});
+	}
+
+	@Override
+	public Object decode(DataBuffer dataBuffer, ResolvableType targetType,
+			@Nullable MimeType mimeType, @Nullable Map&lt;String, Object&gt; hints) throws DecodingException {
+
+<span class="nc" id="L186">		T mapper = selectMapper(targetType, mimeType);</span>
+<span class="nc bnc" id="L187" title="All 2 branches missed.">		if (mapper == null) {</span>
+<span class="nc" id="L188">			throw new IllegalStateException(&quot;No ObjectMapper for &quot; + targetType);</span>
+		}
+
+		try {
+<span class="nc" id="L192">			ObjectReader objectReader = createObjectReader(mapper, targetType, hints);</span>
+<span class="nc" id="L193">			Object value = objectReader.readValue(dataBuffer.asInputStream());</span>
+<span class="nc" id="L194">			logValue(value, hints);</span>
+<span class="nc" id="L195">			return value;</span>
+		}
+<span class="nc" id="L197">		catch (JacksonException ex) {</span>
+<span class="nc" id="L198">			throw processException(ex);</span>
+		}
+		finally {
+<span class="nc" id="L201">			DataBufferUtils.release(dataBuffer);</span>
+		}
+	}
+
+	private ObjectReader createObjectReader(T mapper, ResolvableType elementType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="nc" id="L207">		Assert.notNull(elementType, &quot;'elementType' must not be null&quot;);</span>
+<span class="nc" id="L208">		Class&lt;?&gt; contextClass = getContextClass(elementType);</span>
+<span class="nc bnc" id="L209" title="All 4 branches missed.">		if (contextClass == null &amp;&amp; hints != null) {</span>
+<span class="nc" id="L210">			contextClass = getContextClass((ResolvableType) hints.get(ACTUAL_TYPE_HINT));</span>
+		}
+<span class="nc" id="L212">		JavaType javaType = getJavaType(elementType.getType(), contextClass);</span>
+<span class="nc bnc" id="L213" title="All 2 branches missed.">		Class&lt;?&gt; jsonView = (hints != null ? (Class&lt;?&gt;) hints.get(JacksonCodecSupport.JSON_VIEW_HINT) : null);</span>
+
+<span class="nc bnc" id="L215" title="All 2 branches missed.">		ObjectReader objectReader = (jsonView != null ?</span>
+<span class="nc" id="L216">				mapper.readerWithView(jsonView).forType(javaType) :</span>
+<span class="nc" id="L217">				mapper.readerFor(javaType));</span>
+
+<span class="nc" id="L219">		return customizeReader(objectReader, elementType, hints);</span>
+	}
+
+	/**
+	 * Subclasses can use this method to customize {@link ObjectReader} used
+	 * for reading values.
+	 * @param reader the reader instance to customize
+	 * @param elementType the target type of element values to read to
+	 * @param hints a map with serialization hints;
+	 * the Reactor Context, when available, may be accessed under the key
+	 * {@code ContextView.class.getName()}
+	 * @return the customized {@code ObjectReader} to use
+	 */
+	protected ObjectReader customizeReader(
+			ObjectReader reader, ResolvableType elementType, @Nullable Map&lt;String, Object&gt; hints) {
+
+<span class="nc" id="L235">		return reader;</span>
+	}
+
+	private @Nullable Class&lt;?&gt; getContextClass(@Nullable ResolvableType elementType) {
+<span class="nc bnc" id="L239" title="All 2 branches missed.">		MethodParameter param = (elementType != null ? getParameter(elementType) : null);</span>
+<span class="nc bnc" id="L240" title="All 2 branches missed.">		return (param != null ? param.getContainingClass() : null);</span>
+	}
+
+	private void logValue(@Nullable Object value, @Nullable Map&lt;String, Object&gt; hints) {
+<span class="nc bnc" id="L244" title="All 2 branches missed.">		if (!Hints.isLoggingSuppressed(hints)) {</span>
+<span class="nc" id="L245">			LogFormatUtils.traceDebug(logger, traceOn -&gt; {</span>
+<span class="nc bnc" id="L246" title="All 2 branches missed.">				String formatted = LogFormatUtils.formatValue(value, !traceOn);</span>
+<span class="nc" id="L247">				return Hints.getLogPrefix(hints) + &quot;Decoded [&quot; + formatted + &quot;]&quot;;</span>
+			});
+		}
+<span class="nc" id="L250">	}</span>
+
+	private CodecException processException(JacksonException ex) {
+<span class="nc bnc" id="L253" title="All 2 branches missed.">		if (ex instanceof InvalidDefinitionException ide) {</span>
+<span class="nc" id="L254">			JavaType type = ide.getType();</span>
+<span class="nc" id="L255">			return new CodecException(&quot;Type definition error: &quot; + type, ex);</span>
+		}
+<span class="nc bnc" id="L257" title="All 2 branches missed.">		if (ex instanceof JacksonIOException) {</span>
+<span class="nc" id="L258">			return new DecodingException(&quot;I/O error while parsing input stream&quot;, ex);</span>
+		}
+<span class="nc" id="L260">		String originalMessage = ex.getOriginalMessage();</span>
+<span class="nc" id="L261">		return new DecodingException(&quot;JSON decoding error: &quot; + originalMessage, ex);</span>
+	}
+
+
+	// HttpMessageDecoder
+
+	@Override
+	public Map&lt;String, Object&gt; getDecodeHints(ResolvableType actualType, ResolvableType elementType,
+			ServerHttpRequest request, ServerHttpResponse response) {
+
+<span class="nc" id="L271">		return getHints(actualType);</span>
+	}
+
+	@Override
+	public List&lt;MimeType&gt; getDecodableMimeTypes() {
+<span class="nc" id="L276">		return getMimeTypes();</span>
+	}
+
+	@Override
+	public List&lt;MimeType&gt; getDecodableMimeTypes(ResolvableType targetType) {
+<span class="nc" id="L281">		return getMimeTypes(targetType);</span>
+	}
+
+	// JacksonCodecSupport
+
+	@Override
+	protected &lt;A extends Annotation&gt; @Nullable A getAnnotation(MethodParameter parameter, Class&lt;A&gt; annotType) {
+<span class="nc" id="L288">		return parameter.getParameterAnnotation(annotType);</span>
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

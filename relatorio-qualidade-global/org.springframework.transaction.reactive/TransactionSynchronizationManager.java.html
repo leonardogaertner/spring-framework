@@ -1,0 +1,380 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>TransactionSynchronizationManager.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.transaction.reactive</a> &gt; <span class="el_source">TransactionSynchronizationManager.java</span></div><h1>TransactionSynchronizationManager.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.transaction.reactive;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.CopyOnWriteArraySet;
+
+import org.jspecify.annotations.Nullable;
+import reactor.core.publisher.Mono;
+
+import org.springframework.core.annotation.AnnotationAwareOrderComparator;
+import org.springframework.transaction.NoTransactionException;
+import org.springframework.util.Assert;
+
+/**
+ * Central delegate that manages resources and transaction synchronizations per
+ * subscriber context. To be used by resource management code but not by typical
+ * application code.
+ *
+ * &lt;p&gt;Supports one resource per key without overwriting, that is, a resource needs
+ * to be removed before a new one can be set for the same key.
+ * Supports a list of transaction synchronizations if synchronization is active.
+ *
+ * &lt;p&gt;Resource management code should check for context-bound resources, for example,
+ * database connections, via {@code getResource}. Such code is normally not
+ * supposed to bind resources to units of work, as this is the responsibility
+ * of transaction managers. A further option is to lazily bind on first use if
+ * transaction synchronization is active, for performing transactions that span
+ * an arbitrary number of resources.
+ *
+ * &lt;p&gt;Transaction synchronization must be activated and deactivated by a transaction
+ * manager via {@link #initSynchronization()} and {@link #clearSynchronization()}.
+ * This is automatically supported by {@link AbstractReactiveTransactionManager},
+ * and thus by all standard Spring transaction managers.
+ *
+ * &lt;p&gt;Resource management code should only register synchronizations when this
+ * manager is active, which can be checked via {@link #isSynchronizationActive};
+ * it should perform immediate resource cleanup else. If transaction synchronization
+ * isn't active, there is either no current transaction, or the transaction manager
+ * doesn't support transaction synchronization.
+ *
+ * &lt;p&gt;Synchronization is for example used to always return the same resources within
+ * a transaction, for example, a database connection for any given connection factory.
+ *
+ * @author Mark Paluch
+ * @author Juergen Hoeller
+ * @since 5.2
+ * @see #isSynchronizationActive
+ * @see #registerSynchronization
+ * @see TransactionSynchronization
+ */
+public class TransactionSynchronizationManager {
+
+	private final TransactionContext transactionContext;
+
+
+<span class="fc" id="L75">	public TransactionSynchronizationManager(TransactionContext transactionContext) {</span>
+<span class="fc" id="L76">		Assert.notNull(transactionContext, &quot;TransactionContext must not be null&quot;);</span>
+<span class="fc" id="L77">		this.transactionContext = transactionContext;</span>
+<span class="fc" id="L78">	}</span>
+
+
+	/**
+	 * Get the {@link TransactionSynchronizationManager} that is associated with
+	 * the current transaction context.
+	 * &lt;p&gt;Mainly intended for code that wants to bind resources or synchronizations.
+	 * @throws NoTransactionException if the transaction info cannot be found &amp;mdash;
+	 * for example, because the method was invoked outside a managed transaction
+	 */
+	public static Mono&lt;TransactionSynchronizationManager&gt; forCurrentTransaction() {
+<span class="fc" id="L89">		return TransactionContextManager.currentContext().map(TransactionSynchronizationManager::new);</span>
+	}
+
+
+	/**
+	 * Check if there is a resource for the given key bound to the current context.
+	 * @param key the key to check (usually the resource factory)
+	 * @return if there is a value bound to the current context
+	 */
+	public boolean hasResource(Object key) {
+<span class="fc" id="L99">		Object actualKey = TransactionSynchronizationUtils.unwrapResourceIfNecessary(key);</span>
+<span class="fc" id="L100">		Object value = doGetResource(actualKey);</span>
+<span class="pc bpc" id="L101" title="1 of 2 branches missed.">		return (value != null);</span>
+	}
+
+	/**
+	 * Retrieve a resource for the given key that is bound to the current context.
+	 * @param key the key to check (usually the resource factory)
+	 * @return a value bound to the current context (usually the active
+	 * resource object), or {@code null} if none
+	 */
+	public @Nullable Object getResource(Object key) {
+<span class="fc" id="L111">		Object actualKey = TransactionSynchronizationUtils.unwrapResourceIfNecessary(key);</span>
+<span class="fc" id="L112">		return doGetResource(actualKey);</span>
+	}
+
+	/**
+	 * Actually check the value of the resource that is bound for the given key.
+	 */
+	private @Nullable Object doGetResource(Object actualKey) {
+<span class="fc" id="L119">		return this.transactionContext.getResources().get(actualKey);</span>
+	}
+
+	/**
+	 * Bind the given resource for the given key to the current context.
+	 * @param key the key to bind the value to (usually the resource factory)
+	 * @param value the value to bind (usually the active resource object)
+	 * @throws IllegalStateException if there is already a value bound to the context
+	 */
+	public void bindResource(Object key, Object value) throws IllegalStateException {
+<span class="fc" id="L129">		Object actualKey = TransactionSynchronizationUtils.unwrapResourceIfNecessary(key);</span>
+<span class="fc" id="L130">		Assert.notNull(value, &quot;Value must not be null&quot;);</span>
+<span class="fc" id="L131">		Map&lt;Object, Object&gt; map = this.transactionContext.getResources();</span>
+<span class="fc" id="L132">		Object oldValue = map.put(actualKey, value);</span>
+<span class="pc bpc" id="L133" title="1 of 2 branches missed.">		if (oldValue != null) {</span>
+<span class="nc" id="L134">			throw new IllegalStateException(</span>
+					&quot;Already value [&quot; + oldValue + &quot;] for key [&quot; + actualKey + &quot;] bound to context&quot;);
+		}
+<span class="fc" id="L137">	}</span>
+
+	/**
+	 * Unbind a resource for the given key from the current context.
+	 * @param key the key to unbind (usually the resource factory)
+	 * @return the previously bound value (usually the active resource object)
+	 * @throws IllegalStateException if there is no value bound to the context
+	 */
+	public Object unbindResource(Object key) throws IllegalStateException {
+<span class="fc" id="L146">		Object actualKey = TransactionSynchronizationUtils.unwrapResourceIfNecessary(key);</span>
+<span class="fc" id="L147">		Object value = doUnbindResource(actualKey);</span>
+<span class="pc bpc" id="L148" title="1 of 2 branches missed.">		if (value == null) {</span>
+<span class="nc" id="L149">			throw new IllegalStateException(&quot;No value for key [&quot; + actualKey + &quot;] bound to context&quot;);</span>
+		}
+<span class="fc" id="L151">		return value;</span>
+	}
+
+	/**
+	 * Unbind a resource for the given key from the current context.
+	 * @param key the key to unbind (usually the resource factory)
+	 * @return the previously bound value, or {@code null} if none bound
+	 */
+	public @Nullable Object unbindResourceIfPossible(Object key) {
+<span class="nc" id="L160">		Object actualKey = TransactionSynchronizationUtils.unwrapResourceIfNecessary(key);</span>
+<span class="nc" id="L161">		return doUnbindResource(actualKey);</span>
+	}
+
+	/**
+	 * Actually remove the value of the resource that is bound for the given key.
+	 */
+	private @Nullable Object doUnbindResource(Object actualKey) {
+<span class="fc" id="L168">		Map&lt;Object, Object&gt; map = this.transactionContext.getResources();</span>
+<span class="fc" id="L169">		return map.remove(actualKey);</span>
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Management of transaction synchronizations
+	//-------------------------------------------------------------------------
+
+	/**
+	 * Return if transaction synchronization is active for the current context.
+	 * Can be called before register to avoid unnecessary instance creation.
+	 * @see #registerSynchronization
+	 */
+	public boolean isSynchronizationActive() {
+<span class="fc bfc" id="L183" title="All 2 branches covered.">		return (this.transactionContext.getSynchronizations() != null);</span>
+	}
+
+	/**
+	 * Activate transaction synchronization for the current context.
+	 * Called by a transaction manager on transaction begin.
+	 * @throws IllegalStateException if synchronization is already active
+	 */
+	public void initSynchronization() throws IllegalStateException {
+<span class="pc bpc" id="L192" title="1 of 2 branches missed.">		if (isSynchronizationActive()) {</span>
+<span class="nc" id="L193">			throw new IllegalStateException(&quot;Cannot activate transaction synchronization - already active&quot;);</span>
+		}
+<span class="fc" id="L195">		this.transactionContext.setSynchronizations(new CopyOnWriteArraySet&lt;&gt;());</span>
+<span class="fc" id="L196">	}</span>
+
+	/**
+	 * Register a new transaction synchronization for the current context.
+	 * Typically called by resource management code.
+	 * &lt;p&gt;Note that synchronizations can implement the
+	 * {@link org.springframework.core.Ordered} interface.
+	 * They will be executed in an order according to their order value (if any).
+	 * @param synchronization the synchronization object to register
+	 * @throws IllegalStateException if transaction synchronization is not active
+	 * @see org.springframework.core.Ordered
+	 */
+	public void registerSynchronization(TransactionSynchronization synchronization)
+			throws IllegalStateException {
+
+<span class="fc" id="L211">		Assert.notNull(synchronization, &quot;TransactionSynchronization must not be null&quot;);</span>
+<span class="fc" id="L212">		Set&lt;TransactionSynchronization&gt; synchs = this.transactionContext.getSynchronizations();</span>
+<span class="pc bpc" id="L213" title="1 of 2 branches missed.">		if (synchs == null) {</span>
+<span class="nc" id="L214">			throw new IllegalStateException(&quot;Transaction synchronization is not active&quot;);</span>
+		}
+<span class="fc" id="L216">		synchs.add(synchronization);</span>
+<span class="fc" id="L217">	}</span>
+
+	/**
+	 * Return an unmodifiable snapshot list of all registered synchronizations
+	 * for the current context.
+	 * @return unmodifiable List of TransactionSynchronization instances
+	 * @throws IllegalStateException if synchronization is not active
+	 * @see TransactionSynchronization
+	 */
+	public List&lt;TransactionSynchronization&gt; getSynchronizations() throws IllegalStateException {
+<span class="fc" id="L227">		Set&lt;TransactionSynchronization&gt; synchs = this.transactionContext.getSynchronizations();</span>
+<span class="pc bpc" id="L228" title="1 of 2 branches missed.">		if (synchs == null) {</span>
+<span class="nc" id="L229">			throw new IllegalStateException(&quot;Transaction synchronization is not active&quot;);</span>
+		}
+		// Return unmodifiable snapshot, to avoid ConcurrentModificationExceptions
+		// while iterating and invoking synchronization callbacks that in turn
+		// might register further synchronizations.
+<span class="fc bfc" id="L234" title="All 2 branches covered.">		if (synchs.isEmpty()) {</span>
+<span class="fc" id="L235">			return Collections.emptyList();</span>
+		}
+		else {
+			// Sort lazily here, not in registerSynchronization.
+<span class="fc" id="L239">			List&lt;TransactionSynchronization&gt; sortedSynchs = new ArrayList&lt;&gt;(synchs);</span>
+<span class="fc" id="L240">			AnnotationAwareOrderComparator.sort(sortedSynchs);</span>
+<span class="fc" id="L241">			return Collections.unmodifiableList(sortedSynchs);</span>
+		}
+	}
+
+	/**
+	 * Deactivate transaction synchronization for the current context.
+	 * Called by the transaction manager on transaction cleanup.
+	 * @throws IllegalStateException if synchronization is not active
+	 */
+	public void clearSynchronization() throws IllegalStateException {
+<span class="pc bpc" id="L251" title="1 of 2 branches missed.">		if (!isSynchronizationActive()) {</span>
+<span class="nc" id="L252">			throw new IllegalStateException(&quot;Cannot deactivate transaction synchronization - not active&quot;);</span>
+		}
+<span class="fc" id="L254">		this.transactionContext.setSynchronizations(null);</span>
+<span class="fc" id="L255">	}</span>
+
+
+	//-------------------------------------------------------------------------
+	// Exposure of transaction characteristics
+	//-------------------------------------------------------------------------
+
+	/**
+	 * Expose the name of the current transaction, if any.
+	 * Called by the transaction manager on transaction begin and on cleanup.
+	 * @param name the name of the transaction, or {@code null} to reset it
+	 * @see org.springframework.transaction.TransactionDefinition#getName()
+	 */
+	public void setCurrentTransactionName(@Nullable String name) {
+<span class="fc" id="L269">		this.transactionContext.setCurrentTransactionName(name);</span>
+<span class="fc" id="L270">	}</span>
+
+	/**
+	 * Return the name of the current transaction, or {@code null} if none set.
+	 * To be called by resource management code for optimizations per use case,
+	 * for example to optimize fetch strategies for specific named transactions.
+	 * @see org.springframework.transaction.TransactionDefinition#getName()
+	 */
+	public @Nullable String getCurrentTransactionName() {
+<span class="fc" id="L279">		return this.transactionContext.getCurrentTransactionName();</span>
+	}
+
+	/**
+	 * Expose a read-only flag for the current transaction.
+	 * Called by the transaction manager on transaction begin and on cleanup.
+	 * @param readOnly {@code true} to mark the current transaction
+	 * as read-only; {@code false} to reset such a read-only marker
+	 * @see org.springframework.transaction.TransactionDefinition#isReadOnly()
+	 */
+	public void setCurrentTransactionReadOnly(boolean readOnly) {
+<span class="fc" id="L290">		this.transactionContext.setCurrentTransactionReadOnly(readOnly);</span>
+<span class="fc" id="L291">	}</span>
+
+	/**
+	 * Return whether the current transaction is marked as read-only.
+	 * To be called by resource management code when preparing a newly
+	 * created resource.
+	 * &lt;p&gt;Note that transaction synchronizations receive the read-only flag
+	 * as argument for the {@code beforeCommit} callback, to be able
+	 * to suppress change detection on commit. The present method is meant
+	 * to be used for earlier read-only checks.
+	 * @see org.springframework.transaction.TransactionDefinition#isReadOnly()
+	 * @see TransactionSynchronization#beforeCommit(boolean)
+	 */
+	public boolean isCurrentTransactionReadOnly() {
+<span class="fc" id="L305">		return this.transactionContext.isCurrentTransactionReadOnly();</span>
+	}
+
+	/**
+	 * Expose an isolation level for the current transaction.
+	 * Called by the transaction manager on transaction begin and on cleanup.
+	 * @param isolationLevel the isolation level to expose, according to the
+	 * R2DBC Connection constants (equivalent to the corresponding Spring
+	 * TransactionDefinition constants), or {@code null} to reset it
+	 * @see org.springframework.transaction.TransactionDefinition#ISOLATION_READ_UNCOMMITTED
+	 * @see org.springframework.transaction.TransactionDefinition#ISOLATION_READ_COMMITTED
+	 * @see org.springframework.transaction.TransactionDefinition#ISOLATION_REPEATABLE_READ
+	 * @see org.springframework.transaction.TransactionDefinition#ISOLATION_SERIALIZABLE
+	 * @see org.springframework.transaction.TransactionDefinition#getIsolationLevel()
+	 */
+	public void setCurrentTransactionIsolationLevel(@Nullable Integer isolationLevel) {
+<span class="fc" id="L321">		this.transactionContext.setCurrentTransactionIsolationLevel(isolationLevel);</span>
+<span class="fc" id="L322">	}</span>
+
+	/**
+	 * Return the isolation level for the current transaction, if any.
+	 * To be called by resource management code when preparing a newly
+	 * created resource (for example, a R2DBC Connection).
+	 * @return the currently exposed isolation level, according to the
+	 * R2DBC Connection constants (equivalent to the corresponding Spring
+	 * TransactionDefinition constants), or {@code null} if none
+	 * @see org.springframework.transaction.TransactionDefinition#ISOLATION_READ_UNCOMMITTED
+	 * @see org.springframework.transaction.TransactionDefinition#ISOLATION_READ_COMMITTED
+	 * @see org.springframework.transaction.TransactionDefinition#ISOLATION_REPEATABLE_READ
+	 * @see org.springframework.transaction.TransactionDefinition#ISOLATION_SERIALIZABLE
+	 * @see org.springframework.transaction.TransactionDefinition#getIsolationLevel()
+	 */
+	public @Nullable Integer getCurrentTransactionIsolationLevel() {
+<span class="fc" id="L338">		return this.transactionContext.getCurrentTransactionIsolationLevel();</span>
+	}
+
+	/**
+	 * Expose whether there currently is an actual transaction active.
+	 * Called by the transaction manager on transaction begin and on cleanup.
+	 * @param active {@code true} to mark the current context as being associated
+	 * with an actual transaction; {@code false} to reset that marker
+	 */
+	public void setActualTransactionActive(boolean active) {
+<span class="fc" id="L348">		this.transactionContext.setActualTransactionActive(active);</span>
+<span class="fc" id="L349">	}</span>
+
+	/**
+	 * Return whether there currently is an actual transaction active.
+	 * This indicates whether the current context is associated with an actual
+	 * transaction rather than just with active transaction synchronization.
+	 * &lt;p&gt;To be called by resource management code that wants to differentiate
+	 * between active transaction synchronization (with or without a backing
+	 * resource transaction; also on PROPAGATION_SUPPORTS) and an actual
+	 * transaction being active (with a backing resource transaction;
+	 * on PROPAGATION_REQUIRED, PROPAGATION_REQUIRES_NEW, etc).
+	 * @see #isSynchronizationActive()
+	 */
+	public boolean isActualTransactionActive() {
+<span class="fc" id="L363">		return this.transactionContext.isActualTransactionActive();</span>
+	}
+
+	/**
+	 * Clear the entire transaction synchronization state:
+	 * registered synchronizations as well as the various transaction characteristics.
+	 * @see #clearSynchronization()
+	 * @see #setCurrentTransactionName
+	 * @see #setCurrentTransactionReadOnly
+	 * @see #setCurrentTransactionIsolationLevel
+	 * @see #setActualTransactionActive
+	 */
+	public void clear() {
+<span class="fc" id="L376">		this.transactionContext.clear();</span>
+<span class="fc" id="L377">	}</span>
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

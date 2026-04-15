@@ -1,0 +1,457 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>InstanceSupplierCodeGenerator.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.aot</a> &gt; <span class="el_source">InstanceSupplierCodeGenerator.java</span></div><h1>InstanceSupplierCodeGenerator.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.aot;
+
+import java.lang.reflect.Constructor;
+import java.lang.reflect.Executable;
+import java.lang.reflect.Member;
+import java.lang.reflect.Method;
+import java.lang.reflect.Parameter;
+import java.lang.reflect.Proxy;
+import java.util.Arrays;
+import java.util.function.Consumer;
+
+import kotlin.jvm.JvmClassMappingKt;
+import kotlin.reflect.KClass;
+import kotlin.reflect.KFunction;
+import kotlin.reflect.KParameter;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.aot.generate.AccessControl;
+import org.springframework.aot.generate.AccessControl.Visibility;
+import org.springframework.aot.generate.GeneratedMethod;
+import org.springframework.aot.generate.GeneratedMethods;
+import org.springframework.aot.generate.GenerationContext;
+import org.springframework.aot.generate.MethodReference.ArgumentCodeGenerator;
+import org.springframework.aot.hint.ExecutableMode;
+import org.springframework.aot.hint.MemberCategory;
+import org.springframework.aot.hint.ReflectionHints;
+import org.springframework.aot.hint.RuntimeHints;
+import org.springframework.beans.factory.config.DependencyDescriptor;
+import org.springframework.beans.factory.support.AutowireCandidateResolver;
+import org.springframework.beans.factory.support.DefaultListableBeanFactory;
+import org.springframework.beans.factory.support.InstanceSupplier;
+import org.springframework.beans.factory.support.RegisteredBean;
+import org.springframework.beans.factory.support.RegisteredBean.InstantiationDescriptor;
+import org.springframework.core.KotlinDetector;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.ResolvableType;
+import org.springframework.javapoet.ClassName;
+import org.springframework.javapoet.CodeBlock;
+import org.springframework.javapoet.CodeBlock.Builder;
+import org.springframework.javapoet.MethodSpec;
+import org.springframework.javapoet.ParameterizedTypeName;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.function.ThrowingSupplier;
+
+/**
+ * Default code generator to create an {@link InstanceSupplier}, usually in
+ * the form of a {@link BeanInstanceSupplier} that retains the executable
+ * that is used to instantiate the bean. Takes care of registering the
+ * necessary hints if reflection or a JDK proxy is required.
+ *
+ * &lt;p&gt;Generated code is usually a method reference that generates the
+ * {@link BeanInstanceSupplier}, but some shortcut can be used as well such as:
+ * &lt;pre class=&quot;code&quot;&gt;
+ * InstanceSupplier.of(TheGeneratedClass::getMyBeanInstance);
+ * &lt;/pre&gt;
+ *
+ * @author Phillip Webb
+ * @author Stephane Nicoll
+ * @author Juergen Hoeller
+ * @author Sebastien Deleuze
+ * @since 6.0
+ * @see BeanRegistrationCodeFragments
+ */
+public class InstanceSupplierCodeGenerator {
+
+	private static final String REGISTERED_BEAN_PARAMETER_NAME = &quot;registeredBean&quot;;
+
+	private static final String ARGS_PARAMETER_NAME = &quot;args&quot;;
+
+<span class="fc" id="L86">	private static final javax.lang.model.element.Modifier[] PRIVATE_STATIC =</span>
+			{javax.lang.model.element.Modifier.PRIVATE, javax.lang.model.element.Modifier.STATIC};
+
+<span class="fc" id="L89">	private static final CodeBlock NO_ARGS = CodeBlock.of(&quot;&quot;);</span>
+
+<span class="fc" id="L91">	private static final boolean KOTLIN_REFLECT_PRESENT = KotlinDetector.isKotlinReflectPresent();</span>
+
+
+	private final GenerationContext generationContext;
+
+	private final ClassName className;
+
+	private final GeneratedMethods generatedMethods;
+
+	private final boolean allowDirectSupplierShortcut;
+
+
+	/**
+	 * Create a new generator instance.
+	 * @param generationContext the generation context
+	 * @param className the class name of the bean to instantiate
+	 * @param generatedMethods the generated methods
+	 * @param allowDirectSupplierShortcut whether a direct supplier may be used rather
+	 * than always needing an {@link InstanceSupplier}
+	 */
+	public InstanceSupplierCodeGenerator(GenerationContext generationContext,
+<span class="fc" id="L112">			ClassName className, GeneratedMethods generatedMethods, boolean allowDirectSupplierShortcut) {</span>
+
+<span class="fc" id="L114">		this.generationContext = generationContext;</span>
+<span class="fc" id="L115">		this.className = className;</span>
+<span class="fc" id="L116">		this.generatedMethods = generatedMethods;</span>
+<span class="fc" id="L117">		this.allowDirectSupplierShortcut = allowDirectSupplierShortcut;</span>
+<span class="fc" id="L118">	}</span>
+
+
+	/**
+	 * Generate the instance supplier code.
+	 * @param registeredBean the bean to handle
+	 * @param constructorOrFactoryMethod the executable to use to create the bean
+	 * @return the generated code
+	 * @deprecated in favor of {@link #generateCode(RegisteredBean, InstantiationDescriptor)}
+	 */
+	@Deprecated(since = &quot;6.1.7&quot;)
+	public CodeBlock generateCode(RegisteredBean registeredBean, Executable constructorOrFactoryMethod) {
+<span class="nc" id="L130">		return generateCode(registeredBean, new InstantiationDescriptor(</span>
+<span class="nc" id="L131">				constructorOrFactoryMethod, constructorOrFactoryMethod.getDeclaringClass()));</span>
+	}
+
+	/**
+	 * Generate the instance supplier code.
+	 * @param registeredBean the bean to handle
+	 * @param instantiationDescriptor the executable to use to create the bean
+	 * @return the generated code
+	 * @since 6.1.7
+	 */
+	public CodeBlock generateCode(RegisteredBean registeredBean, InstantiationDescriptor instantiationDescriptor) {
+<span class="fc" id="L142">		Executable constructorOrFactoryMethod = instantiationDescriptor.executable();</span>
+<span class="fc" id="L143">		registerRuntimeHintsIfNecessary(registeredBean, constructorOrFactoryMethod);</span>
+<span class="fc bfc" id="L144" title="All 2 branches covered.">		if (constructorOrFactoryMethod instanceof Constructor&lt;?&gt; constructor) {</span>
+<span class="fc" id="L145">			return generateCodeForConstructor(registeredBean, constructor);</span>
+		}
+<span class="pc bpc" id="L147" title="1 of 4 branches missed.">		if (constructorOrFactoryMethod instanceof Method method &amp;&amp; !KotlinDetector.isSuspendingFunction(method)) {</span>
+<span class="fc" id="L148">			return generateCodeForFactoryMethod(registeredBean, method, instantiationDescriptor.targetClass());</span>
+		}
+<span class="fc" id="L150">		throw new AotBeanProcessingException(registeredBean, &quot;no suitable constructor or factory method found&quot;);</span>
+	}
+
+	private void registerRuntimeHintsIfNecessary(RegisteredBean registeredBean, Executable constructorOrFactoryMethod) {
+<span class="pc bpc" id="L154" title="1 of 2 branches missed.">		if (registeredBean.getBeanFactory() instanceof DefaultListableBeanFactory dlbf) {</span>
+<span class="fc" id="L155">			RuntimeHints runtimeHints = this.generationContext.getRuntimeHints();</span>
+<span class="fc" id="L156">			ProxyRuntimeHintsRegistrar registrar = new ProxyRuntimeHintsRegistrar(dlbf.getAutowireCandidateResolver());</span>
+<span class="fc" id="L157">			registrar.registerRuntimeHints(runtimeHints, constructorOrFactoryMethod);</span>
+		}
+<span class="fc" id="L159">	}</span>
+
+	private CodeBlock generateCodeForConstructor(RegisteredBean registeredBean, Constructor&lt;?&gt; constructor) {
+<span class="fc" id="L162">		ConstructorDescriptor descriptor = new ConstructorDescriptor(</span>
+<span class="fc" id="L163">				registeredBean.getBeanName(), constructor, registeredBean.getBeanClass());</span>
+
+<span class="fc" id="L165">		Class&lt;?&gt; publicType = descriptor.publicType();</span>
+<span class="pc bpc" id="L166" title="1 of 6 branches missed.">		if (KOTLIN_REFLECT_PRESENT &amp;&amp; KotlinDetector.isKotlinType(publicType) &amp;&amp; KotlinDelegate.hasConstructorWithOptionalParameter(publicType)) {</span>
+<span class="fc" id="L167">			return generateCodeForInaccessibleConstructor(descriptor,</span>
+<span class="fc" id="L168">					hints -&gt; hints.registerType(publicType, MemberCategory.INVOKE_DECLARED_CONSTRUCTORS));</span>
+		}
+
+<span class="fc bfc" id="L171" title="All 2 branches covered.">		if (!isVisible(constructor, constructor.getDeclaringClass()) ||</span>
+<span class="pc bpc" id="L172" title="1 of 2 branches missed.">				registeredBean.getMergedBeanDefinition().hasMethodOverrides()) {</span>
+<span class="fc" id="L173">			return generateCodeForInaccessibleConstructor(descriptor,</span>
+<span class="fc" id="L174">					hints -&gt; hints.registerConstructor(constructor, ExecutableMode.INVOKE));</span>
+		}
+<span class="fc" id="L176">		return generateCodeForAccessibleConstructor(descriptor);</span>
+	}
+
+	private CodeBlock generateCodeForAccessibleConstructor(ConstructorDescriptor descriptor) {
+<span class="fc" id="L180">		Constructor&lt;?&gt; constructor = descriptor.constructor();</span>
+<span class="fc" id="L181">		this.generationContext.getRuntimeHints().reflection().registerType(constructor.getDeclaringClass());</span>
+
+<span class="fc bfc" id="L183" title="All 2 branches covered.">		if (constructor.getParameterCount() == 0) {</span>
+<span class="fc bfc" id="L184" title="All 2 branches covered.">			if (!this.allowDirectSupplierShortcut) {</span>
+<span class="fc" id="L185">				return CodeBlock.of(&quot;$T.using($T::new)&quot;, InstanceSupplier.class, descriptor.actualType());</span>
+			}
+<span class="pc bpc" id="L187" title="1 of 2 branches missed.">			if (!isThrowingCheckedException(constructor)) {</span>
+<span class="fc" id="L188">				return CodeBlock.of(&quot;$T::new&quot;, descriptor.actualType());</span>
+			}
+<span class="nc" id="L190">			return CodeBlock.of(&quot;$T.of($T::new)&quot;, ThrowingSupplier.class, descriptor.actualType());</span>
+		}
+
+<span class="fc" id="L193">		GeneratedMethod generatedMethod = generateGetInstanceSupplierMethod(method -&gt;</span>
+<span class="fc" id="L194">				buildGetInstanceMethodForConstructor(method, descriptor, PRIVATE_STATIC));</span>
+<span class="fc" id="L195">		return generateReturnStatement(generatedMethod);</span>
+	}
+
+	private CodeBlock generateCodeForInaccessibleConstructor(ConstructorDescriptor descriptor,
+			Consumer&lt;ReflectionHints&gt; hints) {
+
+<span class="fc" id="L201">		Constructor&lt;?&gt; constructor = descriptor.constructor();</span>
+<span class="fc" id="L202">		CodeWarnings codeWarnings = new CodeWarnings();</span>
+<span class="fc" id="L203">		codeWarnings.detectDeprecation(constructor.getDeclaringClass(), constructor)</span>
+<span class="fc" id="L204">				.detectDeprecation(Arrays.stream(constructor.getParameters()).map(Parameter::getType));</span>
+<span class="fc" id="L205">		hints.accept(this.generationContext.getRuntimeHints().reflection());</span>
+
+<span class="fc" id="L207">		GeneratedMethod generatedMethod = generateGetInstanceSupplierMethod(method -&gt; {</span>
+<span class="fc" id="L208">			method.addJavadoc(&quot;Get the bean instance supplier for '$L'.&quot;, descriptor.beanName());</span>
+<span class="fc" id="L209">			method.addModifiers(PRIVATE_STATIC);</span>
+<span class="fc" id="L210">			codeWarnings.suppress(method);</span>
+<span class="fc" id="L211">			method.returns(ParameterizedTypeName.get(BeanInstanceSupplier.class, descriptor.publicType()));</span>
+<span class="fc" id="L212">			method.addStatement(generateResolverForConstructor(descriptor));</span>
+<span class="fc" id="L213">		});</span>
+
+<span class="fc" id="L215">		return generateReturnStatement(generatedMethod);</span>
+	}
+
+	private void buildGetInstanceMethodForConstructor(MethodSpec.Builder method, ConstructorDescriptor descriptor,
+			javax.lang.model.element.Modifier... modifiers) {
+
+<span class="fc" id="L221">		Constructor&lt;?&gt; constructor = descriptor.constructor();</span>
+<span class="fc" id="L222">		Class&lt;?&gt; publicType = descriptor.publicType();</span>
+<span class="fc" id="L223">		Class&lt;?&gt; actualType = descriptor.actualType();</span>
+
+<span class="fc" id="L225">		CodeWarnings codeWarnings = new CodeWarnings();</span>
+<span class="fc" id="L226">		codeWarnings.detectDeprecation(actualType, constructor)</span>
+<span class="fc" id="L227">				.detectDeprecation(Arrays.stream(constructor.getParameters()).map(Parameter::getType));</span>
+<span class="fc" id="L228">		method.addJavadoc(&quot;Get the bean instance supplier for '$L'.&quot;, descriptor.beanName());</span>
+<span class="fc" id="L229">		method.addModifiers(modifiers);</span>
+<span class="fc" id="L230">		codeWarnings.suppress(method);</span>
+<span class="fc" id="L231">		method.returns(ParameterizedTypeName.get(BeanInstanceSupplier.class, publicType));</span>
+
+<span class="fc" id="L233">		CodeBlock.Builder code = CodeBlock.builder();</span>
+<span class="fc" id="L234">		code.add(generateResolverForConstructor(descriptor));</span>
+<span class="pc bpc" id="L235" title="1 of 2 branches missed.">		boolean hasArguments = constructor.getParameterCount() &gt; 0;</span>
+<span class="fc" id="L236">		boolean onInnerClass = ClassUtils.isInnerClass(actualType);</span>
+
+<span class="pc bpc" id="L238" title="1 of 2 branches missed.">		CodeBlock arguments = hasArguments ?</span>
+				new AutowiredArgumentsCodeGenerator(actualType, constructor)
+<span class="pc bfc" id="L240" title="All 2 branches covered.">						.generateCode(constructor.getParameterTypes(), (onInnerClass ? 1 : 0)) : NO_ARGS;</span>
+
+<span class="fc" id="L242">		CodeBlock newInstance = generateNewInstanceCodeForConstructor(actualType, arguments);</span>
+<span class="fc" id="L243">		code.add(generateWithGeneratorCode(hasArguments, newInstance));</span>
+<span class="fc" id="L244">		method.addStatement(code.build());</span>
+<span class="fc" id="L245">	}</span>
+
+	private CodeBlock generateResolverForConstructor(ConstructorDescriptor descriptor) {
+<span class="fc" id="L248">		CodeBlock parameterTypes = generateParameterTypesCode(descriptor.constructor().getParameterTypes());</span>
+<span class="fc" id="L249">		return CodeBlock.of(&quot;return $T.&lt;$T&gt;forConstructor($L)&quot;, BeanInstanceSupplier.class,</span>
+<span class="fc" id="L250">				descriptor.publicType(), parameterTypes);</span>
+	}
+
+	private CodeBlock generateNewInstanceCodeForConstructor(Class&lt;?&gt; declaringClass, CodeBlock args) {
+<span class="fc bfc" id="L254" title="All 2 branches covered.">		if (ClassUtils.isInnerClass(declaringClass)) {</span>
+<span class="fc" id="L255">			return CodeBlock.of(&quot;$L.getBeanFactory().getBean($T.class).new $L($L)&quot;,</span>
+<span class="fc" id="L256">					REGISTERED_BEAN_PARAMETER_NAME, declaringClass.getEnclosingClass(),</span>
+<span class="fc" id="L257">					declaringClass.getSimpleName(), args);</span>
+		}
+<span class="fc" id="L259">		return CodeBlock.of(&quot;new $T($L)&quot;, declaringClass, args);</span>
+	}
+
+	private CodeBlock generateCodeForFactoryMethod(
+			RegisteredBean registeredBean, Method factoryMethod, Class&lt;?&gt; targetClass) {
+
+<span class="fc bfc" id="L265" title="All 2 branches covered.">		if (!isVisible(factoryMethod, targetClass)) {</span>
+<span class="fc" id="L266">			return generateCodeForInaccessibleFactoryMethod(registeredBean.getBeanName(), factoryMethod, targetClass);</span>
+		}
+<span class="fc" id="L268">		return generateCodeForAccessibleFactoryMethod(registeredBean.getBeanName(), factoryMethod, targetClass,</span>
+<span class="fc" id="L269">				registeredBean.getMergedBeanDefinition().getFactoryBeanName());</span>
+	}
+
+	private CodeBlock generateCodeForAccessibleFactoryMethod(String beanName,
+			Method factoryMethod, Class&lt;?&gt; targetClass, @Nullable String factoryBeanName) {
+
+<span class="fc" id="L275">		this.generationContext.getRuntimeHints().reflection().registerType(factoryMethod.getDeclaringClass());</span>
+
+<span class="fc bfc" id="L277" title="All 4 branches covered.">		if (factoryBeanName == null &amp;&amp; factoryMethod.getParameterCount() == 0) {</span>
+<span class="fc" id="L278">			Class&lt;?&gt; suppliedType = ClassUtils.resolvePrimitiveIfNecessary(factoryMethod.getReturnType());</span>
+<span class="fc" id="L279">			CodeBlock.Builder code = CodeBlock.builder();</span>
+<span class="fc" id="L280">			code.add(&quot;$T.&lt;$T&gt;forFactoryMethod($T.class, $S)&quot;, BeanInstanceSupplier.class,</span>
+<span class="fc" id="L281">					suppliedType, targetClass, factoryMethod.getName());</span>
+<span class="fc" id="L282">			code.add(&quot;.withGenerator(($L) -&gt; $T.$L())&quot;, REGISTERED_BEAN_PARAMETER_NAME,</span>
+<span class="fc" id="L283">					ClassUtils.getUserClass(targetClass), factoryMethod.getName());</span>
+<span class="fc" id="L284">			return code.build();</span>
+		}
+
+<span class="fc" id="L287">		GeneratedMethod getInstanceMethod = generateGetInstanceSupplierMethod(method -&gt;</span>
+<span class="fc" id="L288">				buildGetInstanceMethodForFactoryMethod(method, beanName, factoryMethod,</span>
+						targetClass, factoryBeanName, PRIVATE_STATIC));
+<span class="fc" id="L290">		return generateReturnStatement(getInstanceMethod);</span>
+	}
+
+	private CodeBlock generateCodeForInaccessibleFactoryMethod(
+			String beanName, Method factoryMethod, Class&lt;?&gt; targetClass) {
+
+<span class="fc" id="L296">		this.generationContext.getRuntimeHints().reflection().registerMethod(factoryMethod, ExecutableMode.INVOKE);</span>
+<span class="fc" id="L297">		GeneratedMethod getInstanceMethod = generateGetInstanceSupplierMethod(method -&gt; {</span>
+<span class="fc" id="L298">			CodeWarnings codeWarnings = new CodeWarnings();</span>
+<span class="fc" id="L299">			Class&lt;?&gt; suppliedType = ClassUtils.resolvePrimitiveIfNecessary(factoryMethod.getReturnType());</span>
+<span class="fc" id="L300">			codeWarnings.detectDeprecation(suppliedType, factoryMethod);</span>
+<span class="fc" id="L301">			method.addJavadoc(&quot;Get the bean instance supplier for '$L'.&quot;, beanName);</span>
+<span class="fc" id="L302">			method.addModifiers(PRIVATE_STATIC);</span>
+<span class="fc" id="L303">			codeWarnings.suppress(method);</span>
+<span class="fc" id="L304">			method.returns(ParameterizedTypeName.get(BeanInstanceSupplier.class, suppliedType));</span>
+<span class="fc" id="L305">			method.addStatement(generateInstanceSupplierForFactoryMethod(</span>
+<span class="fc" id="L306">					factoryMethod, suppliedType, targetClass, factoryMethod.getName()));</span>
+<span class="fc" id="L307">		});</span>
+<span class="fc" id="L308">		return generateReturnStatement(getInstanceMethod);</span>
+	}
+
+	private void buildGetInstanceMethodForFactoryMethod(MethodSpec.Builder method,
+			String beanName, Method factoryMethod, Class&lt;?&gt; targetClass,
+			@Nullable String factoryBeanName, javax.lang.model.element.Modifier... modifiers) {
+
+<span class="fc" id="L315">		String factoryMethodName = factoryMethod.getName();</span>
+<span class="fc" id="L316">		Class&lt;?&gt; suppliedType = ClassUtils.resolvePrimitiveIfNecessary(factoryMethod.getReturnType());</span>
+<span class="fc" id="L317">		CodeWarnings codeWarnings = new CodeWarnings();</span>
+<span class="fc" id="L318">		codeWarnings.detectDeprecation(ClassUtils.getUserClass(targetClass), factoryMethod, suppliedType)</span>
+<span class="fc" id="L319">				.detectDeprecation(Arrays.stream(factoryMethod.getParameters()).map(Parameter::getType));</span>
+
+<span class="fc" id="L321">		method.addJavadoc(&quot;Get the bean instance supplier for '$L'.&quot;, beanName);</span>
+<span class="fc" id="L322">		method.addModifiers(modifiers);</span>
+<span class="fc" id="L323">		codeWarnings.suppress(method);</span>
+<span class="fc" id="L324">		method.returns(ParameterizedTypeName.get(BeanInstanceSupplier.class, suppliedType));</span>
+
+<span class="fc" id="L326">		CodeBlock.Builder code = CodeBlock.builder();</span>
+<span class="fc" id="L327">		code.add(generateInstanceSupplierForFactoryMethod(</span>
+				factoryMethod, suppliedType, targetClass, factoryMethodName));
+
+<span class="fc bfc" id="L330" title="All 2 branches covered.">		boolean hasArguments = factoryMethod.getParameterCount() &gt; 0;</span>
+<span class="fc bfc" id="L331" title="All 2 branches covered.">		CodeBlock arguments = hasArguments ?</span>
+<span class="fc" id="L332">				new AutowiredArgumentsCodeGenerator(ClassUtils.getUserClass(targetClass), factoryMethod)</span>
+<span class="fc" id="L333">						.generateCode(factoryMethod.getParameterTypes()) : NO_ARGS;</span>
+
+<span class="fc" id="L335">		CodeBlock newInstance = generateNewInstanceCodeForMethod(</span>
+<span class="fc" id="L336">				factoryBeanName, ClassUtils.getUserClass(targetClass), factoryMethodName, arguments);</span>
+<span class="fc" id="L337">		code.add(generateWithGeneratorCode(hasArguments, newInstance));</span>
+<span class="fc" id="L338">		method.addStatement(code.build());</span>
+<span class="fc" id="L339">	}</span>
+
+	private CodeBlock generateInstanceSupplierForFactoryMethod(Method factoryMethod,
+			Class&lt;?&gt; suppliedType, Class&lt;?&gt; targetClass, String factoryMethodName) {
+
+<span class="fc bfc" id="L344" title="All 2 branches covered.">		if (factoryMethod.getParameterCount() == 0) {</span>
+<span class="fc" id="L345">			return CodeBlock.of(&quot;return $T.&lt;$T&gt;forFactoryMethod($T.class, $S)&quot;,</span>
+					BeanInstanceSupplier.class, suppliedType, targetClass, factoryMethodName);
+		}
+
+<span class="fc" id="L349">		CodeBlock parameterTypes = generateParameterTypesCode(factoryMethod.getParameterTypes());</span>
+<span class="fc" id="L350">		return CodeBlock.of(&quot;return $T.&lt;$T&gt;forFactoryMethod($T.class, $S, $L)&quot;,</span>
+				BeanInstanceSupplier.class, suppliedType, targetClass, factoryMethodName, parameterTypes);
+	}
+
+	private CodeBlock generateNewInstanceCodeForMethod(@Nullable String factoryBeanName,
+			Class&lt;?&gt; targetClass, String factoryMethodName, CodeBlock args) {
+
+<span class="fc bfc" id="L357" title="All 2 branches covered.">		if (factoryBeanName == null) {</span>
+<span class="fc" id="L358">			return CodeBlock.of(&quot;$T.$L($L)&quot;, targetClass, factoryMethodName, args);</span>
+		}
+<span class="fc" id="L360">		return CodeBlock.of(&quot;$L.getBeanFactory().getBean(\&quot;$L\&quot;, $T.class).$L($L)&quot;,</span>
+				REGISTERED_BEAN_PARAMETER_NAME, factoryBeanName, targetClass, factoryMethodName, args);
+	}
+
+	private CodeBlock generateReturnStatement(GeneratedMethod generatedMethod) {
+<span class="fc" id="L365">		return generatedMethod.toMethodReference().toInvokeCodeBlock(</span>
+<span class="fc" id="L366">				ArgumentCodeGenerator.none(), this.className);</span>
+	}
+
+	private CodeBlock generateWithGeneratorCode(boolean hasArguments, CodeBlock newInstance) {
+<span class="fc bfc" id="L370" title="All 2 branches covered.">		CodeBlock lambdaArguments = (hasArguments ?</span>
+<span class="fc" id="L371">				CodeBlock.of(&quot;($L, $L)&quot;, REGISTERED_BEAN_PARAMETER_NAME, ARGS_PARAMETER_NAME) :</span>
+<span class="fc" id="L372">				CodeBlock.of(&quot;($L)&quot;, REGISTERED_BEAN_PARAMETER_NAME));</span>
+<span class="fc" id="L373">		Builder code = CodeBlock.builder();</span>
+<span class="fc" id="L374">		code.add(&quot;\n&quot;);</span>
+<span class="fc" id="L375">		code.indent().indent();</span>
+<span class="fc" id="L376">		code.add(&quot;.withGenerator($L -&gt; $L)&quot;, lambdaArguments, newInstance);</span>
+<span class="fc" id="L377">		code.unindent().unindent();</span>
+<span class="fc" id="L378">		return code.build();</span>
+	}
+
+	private boolean isVisible(Member member, Class&lt;?&gt; targetClass) {
+<span class="fc" id="L382">		AccessControl classAccessControl = AccessControl.forClass(targetClass);</span>
+<span class="fc" id="L383">		AccessControl memberAccessControl = AccessControl.forMember(member);</span>
+<span class="fc" id="L384">		Visibility visibility = AccessControl.lowest(classAccessControl, memberAccessControl).getVisibility();</span>
+<span class="fc bfc" id="L385" title="All 4 branches covered.">		return (visibility == Visibility.PUBLIC || (visibility != Visibility.PRIVATE &amp;&amp;</span>
+<span class="pc bpc" id="L386" title="1 of 2 branches missed.">				member.getDeclaringClass().getPackageName().equals(this.className.packageName())));</span>
+	}
+
+	private CodeBlock generateParameterTypesCode(Class&lt;?&gt;[] parameterTypes) {
+<span class="fc" id="L390">		CodeBlock.Builder code = CodeBlock.builder();</span>
+<span class="fc bfc" id="L391" title="All 2 branches covered.">		for (int i = 0; i &lt; parameterTypes.length; i++) {</span>
+<span class="fc bfc" id="L392" title="All 2 branches covered.">			code.add(i &gt; 0 ? &quot;, &quot; : &quot;&quot;);</span>
+<span class="fc" id="L393">			code.add(&quot;$T.class&quot;, parameterTypes[i]);</span>
+		}
+<span class="fc" id="L395">		return code.build();</span>
+	}
+
+	private GeneratedMethod generateGetInstanceSupplierMethod(Consumer&lt;MethodSpec.Builder&gt; method) {
+<span class="fc" id="L399">		return this.generatedMethods.add(&quot;getInstanceSupplier&quot;, method);</span>
+	}
+
+	private boolean isThrowingCheckedException(Executable executable) {
+<span class="fc" id="L403">		return Arrays.stream(executable.getGenericExceptionTypes())</span>
+<span class="fc" id="L404">				.map(ResolvableType::forType)</span>
+<span class="fc" id="L405">				.map(ResolvableType::toClass)</span>
+<span class="fc" id="L406">				.anyMatch(Exception.class::isAssignableFrom);</span>
+	}
+
+
+	/**
+	 * Inner class to avoid a hard dependency on Kotlin at runtime.
+	 */
+	private static class KotlinDelegate {
+
+		public static boolean hasConstructorWithOptionalParameter(Class&lt;?&gt; beanClass) {
+<span class="fc" id="L416">			KClass&lt;?&gt; kClass = JvmClassMappingKt.getKotlinClass(beanClass);</span>
+<span class="fc bfc" id="L417" title="All 2 branches covered.">			for (KFunction&lt;?&gt; constructor : kClass.getConstructors()) {</span>
+<span class="fc bfc" id="L418" title="All 2 branches covered.">				for (KParameter parameter : constructor.getParameters()) {</span>
+<span class="pc bpc" id="L419" title="1 of 2 branches missed.">					if (parameter.isOptional()) {</span>
+<span class="fc" id="L420">						return true;</span>
+					}
+<span class="nc" id="L422">				}</span>
+<span class="fc" id="L423">			}</span>
+<span class="fc" id="L424">			return false;</span>
+		}
+	}
+
+
+<span class="fc" id="L429">	private record ProxyRuntimeHintsRegistrar(AutowireCandidateResolver candidateResolver) {</span>
+
+		public void registerRuntimeHints(RuntimeHints runtimeHints, Executable executable) {
+<span class="fc" id="L432">			Class&lt;?&gt;[] parameterTypes = executable.getParameterTypes();</span>
+<span class="fc bfc" id="L433" title="All 2 branches covered.">			for (int i = 0; i &lt; parameterTypes.length; i++) {</span>
+<span class="fc" id="L434">				MethodParameter methodParam = MethodParameter.forExecutable(executable, i);</span>
+<span class="fc" id="L435">				DependencyDescriptor dependencyDescriptor = new DependencyDescriptor(methodParam, true);</span>
+<span class="fc" id="L436">				registerProxyIfNecessary(runtimeHints, dependencyDescriptor);</span>
+			}
+<span class="fc" id="L438">		}</span>
+
+		private void registerProxyIfNecessary(RuntimeHints runtimeHints, DependencyDescriptor dependencyDescriptor) {
+<span class="fc" id="L441">			Class&lt;?&gt; proxyType = this.candidateResolver.getLazyResolutionProxyClass(dependencyDescriptor, null);</span>
+<span class="pc bpc" id="L442" title="3 of 4 branches missed.">			if (proxyType != null &amp;&amp; Proxy.isProxyClass(proxyType)) {</span>
+<span class="nc" id="L443">				runtimeHints.proxies().registerJdkProxy(proxyType.getInterfaces());</span>
+			}
+<span class="fc" id="L445">		}</span>
+	}
+
+
+<span class="fc" id="L449">	record ConstructorDescriptor(String beanName, Constructor&lt;?&gt; constructor, Class&lt;?&gt; publicType) {</span>
+
+		Class&lt;?&gt; actualType() {
+<span class="fc" id="L452">			return this.constructor.getDeclaringClass();</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>

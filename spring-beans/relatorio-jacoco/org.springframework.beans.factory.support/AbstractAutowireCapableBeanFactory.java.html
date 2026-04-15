@@ -1,0 +1,2063 @@
+<?xml version="1.0" encoding="UTF-8"?><!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd"><html xmlns="http://www.w3.org/1999/xhtml" lang="pt"><head><meta http-equiv="Content-Type" content="text/html;charset=UTF-8"/><link rel="stylesheet" href="../jacoco-resources/report.css" type="text/css"/><link rel="shortcut icon" href="../jacoco-resources/report.gif" type="image/gif"/><title>AbstractAutowireCapableBeanFactory.java</title><link rel="stylesheet" href="../jacoco-resources/prettify.css" type="text/css"/><script type="text/javascript" src="../jacoco-resources/prettify.js"></script></head><body onload="window['PR_TAB_WIDTH']=4;prettyPrint()"><div class="breadcrumb" id="breadcrumb"><span class="info"><a href="../jacoco-sessions.html" class="el_session">Sessions</a></span><a href="../index.html" class="el_report">JaCoCo Coverage Report</a> &gt; <a href="index.source.html" class="el_package">org.springframework.beans.factory.support</a> &gt; <span class="el_source">AbstractAutowireCapableBeanFactory.java</span></div><h1>AbstractAutowireCapableBeanFactory.java</h1><pre class="source lang-java linenums">/*
+ * Copyright 2002-present the original author or authors.
+ *
+ * Licensed under the Apache License, Version 2.0 (the &quot;License&quot;);
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *      https://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an &quot;AS IS&quot; BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package org.springframework.beans.factory.support;
+
+import java.beans.PropertyDescriptor;
+import java.lang.reflect.Constructor;
+import java.lang.reflect.InvocationTargetException;
+import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.function.Supplier;
+
+import org.apache.commons.logging.Log;
+import org.jspecify.annotations.Nullable;
+
+import org.springframework.beans.BeanUtils;
+import org.springframework.beans.BeanWrapper;
+import org.springframework.beans.BeanWrapperImpl;
+import org.springframework.beans.BeansException;
+import org.springframework.beans.InvalidPropertyException;
+import org.springframework.beans.MutablePropertyValues;
+import org.springframework.beans.PropertyAccessorUtils;
+import org.springframework.beans.PropertyValue;
+import org.springframework.beans.PropertyValues;
+import org.springframework.beans.TypeConverter;
+import org.springframework.beans.factory.Aware;
+import org.springframework.beans.factory.BeanClassLoaderAware;
+import org.springframework.beans.factory.BeanCreationException;
+import org.springframework.beans.factory.BeanCurrentlyInCreationException;
+import org.springframework.beans.factory.BeanDefinitionStoreException;
+import org.springframework.beans.factory.BeanFactory;
+import org.springframework.beans.factory.BeanFactoryAware;
+import org.springframework.beans.factory.BeanNameAware;
+import org.springframework.beans.factory.FactoryBean;
+import org.springframework.beans.factory.InitializingBean;
+import org.springframework.beans.factory.InjectionPoint;
+import org.springframework.beans.factory.UnsatisfiedDependencyException;
+import org.springframework.beans.factory.config.AutowireCapableBeanFactory;
+import org.springframework.beans.factory.config.AutowiredPropertyMarker;
+import org.springframework.beans.factory.config.BeanDefinition;
+import org.springframework.beans.factory.config.BeanPostProcessor;
+import org.springframework.beans.factory.config.ConfigurableBeanFactory;
+import org.springframework.beans.factory.config.ConstructorArgumentValues;
+import org.springframework.beans.factory.config.DependencyDescriptor;
+import org.springframework.beans.factory.config.InstantiationAwareBeanPostProcessor;
+import org.springframework.beans.factory.config.SmartInstantiationAwareBeanPostProcessor;
+import org.springframework.beans.factory.config.TypedStringValue;
+import org.springframework.core.DefaultParameterNameDiscoverer;
+import org.springframework.core.MethodParameter;
+import org.springframework.core.NamedThreadLocal;
+import org.springframework.core.ParameterNameDiscoverer;
+import org.springframework.core.PriorityOrdered;
+import org.springframework.core.ResolvableType;
+import org.springframework.util.ClassUtils;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.ReflectionUtils;
+import org.springframework.util.ReflectionUtils.MethodCallback;
+import org.springframework.util.StringUtils;
+import org.springframework.util.function.ThrowingSupplier;
+
+/**
+ * Abstract bean factory superclass that implements default bean creation,
+ * with the full capabilities specified by the {@link RootBeanDefinition} class.
+ * Implements the {@link org.springframework.beans.factory.config.AutowireCapableBeanFactory}
+ * interface in addition to AbstractBeanFactory's {@link #createBean} method.
+ *
+ * &lt;p&gt;Provides bean creation (with constructor resolution), property population,
+ * wiring (including autowiring), and initialization. Handles runtime bean
+ * references, resolves managed collections, calls initialization methods, etc.
+ * Supports autowiring constructors, properties by name, and properties by type.
+ *
+ * &lt;p&gt;The main template method to be implemented by subclasses is
+ * {@link #resolveDependency(DependencyDescriptor, String, Set, TypeConverter)}, used for
+ * autowiring. In case of a {@link org.springframework.beans.factory.ListableBeanFactory}
+ * which is capable of searching its bean definitions, matching beans will typically be
+ * implemented through such a search. Otherwise, simplified matching can be implemented.
+ *
+ * &lt;p&gt;Note that this class does &lt;i&gt;not&lt;/i&gt; assume or implement bean definition
+ * registry capabilities. See {@link DefaultListableBeanFactory} for an implementation
+ * of the {@link org.springframework.beans.factory.ListableBeanFactory} and
+ * {@link BeanDefinitionRegistry} interfaces, which represent the API and SPI
+ * view of such a factory, respectively.
+ *
+ * @author Rod Johnson
+ * @author Juergen Hoeller
+ * @author Rob Harrop
+ * @author Mark Fisher
+ * @author Costin Leau
+ * @author Chris Beams
+ * @author Sam Brannen
+ * @author Phillip Webb
+ * @since 13.02.2004
+ * @see RootBeanDefinition
+ * @see DefaultListableBeanFactory
+ * @see BeanDefinitionRegistry
+ */
+public abstract class AbstractAutowireCapableBeanFactory extends AbstractBeanFactory
+		implements AutowireCapableBeanFactory {
+
+	/** Strategy for creating bean instances. */
+	private InstantiationStrategy instantiationStrategy;
+
+	/** Resolver strategy for method parameter names. */
+<span class="fc" id="L128">	private @Nullable ParameterNameDiscoverer parameterNameDiscoverer = new DefaultParameterNameDiscoverer();</span>
+
+	/** Whether to automatically try to resolve circular references between beans. */
+<span class="fc" id="L131">	private boolean allowCircularReferences = true;</span>
+
+	/**
+	 * Whether to resort to injecting a raw bean instance in case of circular reference,
+	 * even if the injected bean eventually got wrapped.
+	 */
+<span class="fc" id="L137">	private boolean allowRawInjectionDespiteWrapping = false;</span>
+
+	/**
+	 * Dependency types to ignore on dependency check and autowire, as Set of
+	 * Class objects: for example, String. Default is none.
+	 */
+<span class="fc" id="L143">	private final Set&lt;Class&lt;?&gt;&gt; ignoredDependencyTypes = new HashSet&lt;&gt;();</span>
+
+	/**
+	 * Dependency interfaces to ignore on dependency check and autowire, as a Set
+	 * of Class objects.
+	 * &lt;p&gt;By default, the {@code BeanNameAware}, {@code BeanFactoryAware}, and
+	 * {@code BeanClassLoaderAware} interfaces are ignored.
+	 */
+<span class="fc" id="L151">	private final Set&lt;Class&lt;?&gt;&gt; ignoredDependencyInterfaces = new HashSet&lt;&gt;();</span>
+
+	/**
+	 * The name of the currently created bean, for implicit dependency registration
+	 * on getBean etc invocations triggered from a user-specified Supplier callback.
+	 */
+<span class="fc" id="L157">	private final NamedThreadLocal&lt;String&gt; currentlyCreatedBean = new NamedThreadLocal&lt;&gt;(&quot;Currently created bean&quot;);</span>
+
+	/** Cache of unfinished FactoryBean instances: FactoryBean name to BeanWrapper. */
+<span class="fc" id="L160">	private final ConcurrentMap&lt;String, BeanWrapper&gt; factoryBeanInstanceCache = new ConcurrentHashMap&lt;&gt;();</span>
+
+	/** Cache of candidate factory methods per factory class. */
+<span class="fc" id="L163">	private final ConcurrentMap&lt;Class&lt;?&gt;, Method[]&gt; factoryMethodCandidateCache = new ConcurrentHashMap&lt;&gt;();</span>
+
+	/** Cache of filtered PropertyDescriptors: bean Class to PropertyDescriptor array. */
+<span class="fc" id="L166">	private final ConcurrentMap&lt;Class&lt;?&gt;, PropertyDescriptor[]&gt; filteredPropertyDescriptorsCache =</span>
+			new ConcurrentHashMap&lt;&gt;();
+
+
+	/**
+	 * Create a new AbstractAutowireCapableBeanFactory.
+	 */
+	public AbstractAutowireCapableBeanFactory() {
+<span class="fc" id="L174">		super();</span>
+<span class="fc" id="L175">		ignoreDependencyInterface(BeanNameAware.class);</span>
+<span class="fc" id="L176">		ignoreDependencyInterface(BeanFactoryAware.class);</span>
+<span class="fc" id="L177">		ignoreDependencyInterface(BeanClassLoaderAware.class);</span>
+<span class="fc" id="L178">		this.instantiationStrategy = new CglibSubclassingInstantiationStrategy();</span>
+<span class="fc" id="L179">	}</span>
+
+	/**
+	 * Create a new AbstractAutowireCapableBeanFactory with the given parent.
+	 * @param parentBeanFactory parent bean factory, or {@code null} if none
+	 */
+	public AbstractAutowireCapableBeanFactory(@Nullable BeanFactory parentBeanFactory) {
+<span class="fc" id="L186">		this();</span>
+<span class="fc" id="L187">		setParentBeanFactory(parentBeanFactory);</span>
+<span class="fc" id="L188">	}</span>
+
+
+	/**
+	 * Set the instantiation strategy to use for creating bean instances.
+	 * Default is CglibSubclassingInstantiationStrategy.
+	 * @see CglibSubclassingInstantiationStrategy
+	 */
+	public void setInstantiationStrategy(InstantiationStrategy instantiationStrategy) {
+<span class="nc" id="L197">		this.instantiationStrategy = instantiationStrategy;</span>
+<span class="nc" id="L198">	}</span>
+
+	/**
+	 * Return the instantiation strategy to use for creating bean instances.
+	 */
+	public InstantiationStrategy getInstantiationStrategy() {
+<span class="fc" id="L204">		return this.instantiationStrategy;</span>
+	}
+
+	/**
+	 * Set the ParameterNameDiscoverer to use for resolving method parameter
+	 * names if needed (for example, for constructor names).
+	 * &lt;p&gt;Default is a {@link DefaultParameterNameDiscoverer}.
+	 */
+	public void setParameterNameDiscoverer(@Nullable ParameterNameDiscoverer parameterNameDiscoverer) {
+<span class="nc" id="L213">		this.parameterNameDiscoverer = parameterNameDiscoverer;</span>
+<span class="nc" id="L214">	}</span>
+
+	/**
+	 * Return the ParameterNameDiscoverer to use for resolving method parameter
+	 * names if needed.
+	 */
+	public @Nullable ParameterNameDiscoverer getParameterNameDiscoverer() {
+<span class="fc" id="L221">		return this.parameterNameDiscoverer;</span>
+	}
+
+	/**
+	 * Set whether to allow circular references between beans - and automatically
+	 * try to resolve them.
+	 * &lt;p&gt;Note that circular reference resolution means that one of the involved beans
+	 * will receive a reference to another bean that is not fully initialized yet.
+	 * This can lead to subtle and not-so-subtle side effects on initialization;
+	 * it does work fine for many scenarios, though.
+	 * &lt;p&gt;Default is &quot;true&quot;. Turn this off to throw an exception when encountering
+	 * a circular reference, disallowing them completely.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; It is generally recommended to not rely on circular references
+	 * between your beans. Refactor your application logic to have the two beans
+	 * involved delegate to a third bean that encapsulates their common logic.
+	 */
+	public void setAllowCircularReferences(boolean allowCircularReferences) {
+<span class="nc" id="L238">		this.allowCircularReferences = allowCircularReferences;</span>
+<span class="nc" id="L239">	}</span>
+
+	/**
+	 * Return whether to allow circular references between beans.
+	 * @since 5.3.10
+	 * @see #setAllowCircularReferences
+	 */
+	public boolean isAllowCircularReferences() {
+<span class="nc" id="L247">		return this.allowCircularReferences;</span>
+	}
+
+	/**
+	 * Set whether to allow the raw injection of a bean instance into some other
+	 * bean's property, despite the injected bean eventually getting wrapped
+	 * (for example, through AOP auto-proxying).
+	 * &lt;p&gt;This will only be used as a last resort in case of a circular reference
+	 * that cannot be resolved otherwise: essentially, preferring a raw instance
+	 * getting injected over a failure of the entire bean wiring process.
+	 * &lt;p&gt;Default is &quot;false&quot;. Turn this on to allow for non-wrapped
+	 * raw beans injected into some of your references.
+	 * &lt;p&gt;&lt;b&gt;NOTE:&lt;/b&gt; It is generally recommended to not rely on circular references
+	 * between your beans, in particular with auto-proxying involved.
+	 * @see #setAllowCircularReferences
+	 */
+	public void setAllowRawInjectionDespiteWrapping(boolean allowRawInjectionDespiteWrapping) {
+<span class="nc" id="L264">		this.allowRawInjectionDespiteWrapping = allowRawInjectionDespiteWrapping;</span>
+<span class="nc" id="L265">	}</span>
+
+	/**
+	 * Return whether to allow the raw injection of a bean instance.
+	 * @since 5.3.10
+	 * @see #setAllowRawInjectionDespiteWrapping
+	 */
+	public boolean isAllowRawInjectionDespiteWrapping() {
+<span class="nc" id="L273">		return this.allowRawInjectionDespiteWrapping;</span>
+	}
+
+	/**
+	 * Ignore the given dependency type for autowiring:
+	 * for example, String. Default is none.
+	 */
+	public void ignoreDependencyType(Class&lt;?&gt; type) {
+<span class="nc" id="L281">		this.ignoredDependencyTypes.add(type);</span>
+<span class="nc" id="L282">	}</span>
+
+	/**
+	 * Ignore the given dependency interface for autowiring.
+	 * &lt;p&gt;This will typically be used by application contexts to register
+	 * dependencies that are resolved in other ways, like {@code BeanFactory}
+	 * through {@code BeanFactoryAware} or {@code ApplicationContext} through
+	 * {@code ApplicationContextAware}.
+	 * &lt;p&gt;By default, the {@code BeanNameAware}, {@code BeanFactoryAware}, and
+	 * {@code BeanClassLoaderAware} interfaces are ignored.
+	 * For further types to ignore, invoke this method for each type.
+	 * @see org.springframework.beans.factory.BeanNameAware
+	 * @see org.springframework.beans.factory.BeanFactoryAware
+	 * @see org.springframework.beans.factory.BeanClassLoaderAware
+	 * @see org.springframework.context.ApplicationContextAware
+	 */
+	public void ignoreDependencyInterface(Class&lt;?&gt; ifc) {
+<span class="fc" id="L299">		this.ignoredDependencyInterfaces.add(ifc);</span>
+<span class="fc" id="L300">	}</span>
+
+	@Override
+	public void copyConfigurationFrom(ConfigurableBeanFactory otherFactory) {
+<span class="nc" id="L304">		super.copyConfigurationFrom(otherFactory);</span>
+<span class="nc bnc" id="L305" title="All 2 branches missed.">		if (otherFactory instanceof AbstractAutowireCapableBeanFactory otherAutowireFactory) {</span>
+<span class="nc" id="L306">			this.instantiationStrategy = otherAutowireFactory.instantiationStrategy;</span>
+<span class="nc" id="L307">			this.allowCircularReferences = otherAutowireFactory.allowCircularReferences;</span>
+<span class="nc" id="L308">			this.ignoredDependencyTypes.addAll(otherAutowireFactory.ignoredDependencyTypes);</span>
+<span class="nc" id="L309">			this.ignoredDependencyInterfaces.addAll(otherAutowireFactory.ignoredDependencyInterfaces);</span>
+		}
+<span class="nc" id="L311">	}</span>
+
+
+	//-------------------------------------------------------------------------
+	// Typical methods for creating and populating external bean instances
+	//-------------------------------------------------------------------------
+
+	@Override
+	@SuppressWarnings(&quot;unchecked&quot;)
+	public &lt;T&gt; T createBean(Class&lt;T&gt; beanClass) throws BeansException {
+		// Use non-singleton bean definition, to avoid registering bean as dependent bean.
+<span class="fc" id="L322">		RootBeanDefinition bd = new CreateFromClassBeanDefinition(beanClass);</span>
+<span class="fc" id="L323">		bd.setScope(SCOPE_PROTOTYPE);</span>
+<span class="fc" id="L324">		bd.allowCaching = ClassUtils.isCacheSafe(beanClass, getBeanClassLoader());</span>
+<span class="fc" id="L325">		return (T) createBean(beanClass.getName(), bd, null);</span>
+	}
+
+	@Override
+	public void autowireBean(Object existingBean) {
+		// Use non-singleton bean definition, to avoid registering bean as dependent bean.
+<span class="nc" id="L331">		RootBeanDefinition bd = new RootBeanDefinition(ClassUtils.getUserClass(existingBean));</span>
+<span class="nc" id="L332">		bd.setScope(SCOPE_PROTOTYPE);</span>
+<span class="nc" id="L333">		bd.allowCaching = ClassUtils.isCacheSafe(bd.getBeanClass(), getBeanClassLoader());</span>
+<span class="nc" id="L334">		BeanWrapper bw = new BeanWrapperImpl(existingBean);</span>
+<span class="nc" id="L335">		initBeanWrapper(bw);</span>
+<span class="nc" id="L336">		populateBean(bd.getBeanClass().getName(), bd, bw);</span>
+<span class="nc" id="L337">	}</span>
+
+	@Override
+	public Object configureBean(Object existingBean, String beanName) throws BeansException {
+<span class="fc" id="L341">		markBeanAsCreated(beanName);</span>
+<span class="fc" id="L342">		BeanDefinition mbd = getMergedBeanDefinition(beanName);</span>
+<span class="fc" id="L343">		RootBeanDefinition bd = null;</span>
+<span class="pc bpc" id="L344" title="1 of 2 branches missed.">		if (mbd instanceof RootBeanDefinition rbd) {</span>
+<span class="pc bpc" id="L345" title="1 of 2 branches missed.">			bd = (rbd.isPrototype() ? rbd : rbd.cloneBeanDefinition());</span>
+		}
+<span class="pc bpc" id="L347" title="1 of 2 branches missed.">		if (bd == null) {</span>
+<span class="nc" id="L348">			bd = new RootBeanDefinition(mbd);</span>
+		}
+<span class="pc bpc" id="L350" title="1 of 2 branches missed.">		if (!bd.isPrototype()) {</span>
+<span class="fc" id="L351">			bd.setScope(SCOPE_PROTOTYPE);</span>
+<span class="fc" id="L352">			bd.allowCaching = ClassUtils.isCacheSafe(ClassUtils.getUserClass(existingBean), getBeanClassLoader());</span>
+		}
+<span class="fc" id="L354">		BeanWrapper bw = new BeanWrapperImpl(existingBean);</span>
+<span class="fc" id="L355">		initBeanWrapper(bw);</span>
+<span class="fc" id="L356">		populateBean(beanName, bd, bw);</span>
+<span class="fc" id="L357">		return initializeBean(beanName, existingBean, bd);</span>
+	}
+
+
+	//-------------------------------------------------------------------------
+	// Specialized methods for fine-grained control over the bean lifecycle
+	//-------------------------------------------------------------------------
+
+	@Deprecated(since = &quot;6.1&quot;)
+	@Override
+	public Object createBean(Class&lt;?&gt; beanClass, int autowireMode, boolean dependencyCheck) throws BeansException {
+		// Use non-singleton bean definition, to avoid registering bean as dependent bean.
+<span class="nc" id="L369">		RootBeanDefinition bd = new RootBeanDefinition(beanClass, autowireMode, dependencyCheck);</span>
+<span class="nc" id="L370">		bd.setScope(SCOPE_PROTOTYPE);</span>
+<span class="nc" id="L371">		return createBean(beanClass.getName(), bd, null);</span>
+	}
+
+	@Override
+	public Object autowire(Class&lt;?&gt; beanClass, int autowireMode, boolean dependencyCheck) throws BeansException {
+		// Use non-singleton bean definition, to avoid registering bean as dependent bean.
+<span class="fc" id="L377">		RootBeanDefinition bd = new RootBeanDefinition(beanClass, autowireMode, dependencyCheck);</span>
+<span class="fc" id="L378">		bd.setScope(SCOPE_PROTOTYPE);</span>
+<span class="fc bfc" id="L379" title="All 2 branches covered.">		if (bd.getResolvedAutowireMode() == AUTOWIRE_CONSTRUCTOR) {</span>
+<span class="fc" id="L380">			return autowireConstructor(beanClass.getName(), bd, null, null).getWrappedInstance();</span>
+		}
+		else {
+<span class="fc" id="L383">			Object bean = getInstantiationStrategy().instantiate(bd, null, this);</span>
+<span class="fc" id="L384">			populateBean(beanClass.getName(), bd, new BeanWrapperImpl(bean));</span>
+<span class="fc" id="L385">			return bean;</span>
+		}
+	}
+
+	@Override
+	public void autowireBeanProperties(Object existingBean, int autowireMode, boolean dependencyCheck)
+			throws BeansException {
+
+<span class="fc bfc" id="L393" title="All 2 branches covered.">		if (autowireMode == AUTOWIRE_CONSTRUCTOR) {</span>
+<span class="fc" id="L394">			throw new IllegalArgumentException(&quot;AUTOWIRE_CONSTRUCTOR not supported for existing bean instance&quot;);</span>
+		}
+		// Use non-singleton bean definition, to avoid registering bean as dependent bean.
+<span class="fc" id="L397">		RootBeanDefinition bd =</span>
+<span class="fc" id="L398">				new RootBeanDefinition(ClassUtils.getUserClass(existingBean), autowireMode, dependencyCheck);</span>
+<span class="fc" id="L399">		bd.setScope(SCOPE_PROTOTYPE);</span>
+<span class="fc" id="L400">		BeanWrapper bw = new BeanWrapperImpl(existingBean);</span>
+<span class="fc" id="L401">		initBeanWrapper(bw);</span>
+<span class="fc" id="L402">		populateBean(bd.getBeanClass().getName(), bd, bw);</span>
+<span class="fc" id="L403">	}</span>
+
+	@Override
+	public void applyBeanPropertyValues(Object existingBean, String beanName) throws BeansException {
+<span class="fc" id="L407">		markBeanAsCreated(beanName);</span>
+<span class="fc" id="L408">		BeanDefinition bd = getMergedBeanDefinition(beanName);</span>
+<span class="fc" id="L409">		BeanWrapper bw = new BeanWrapperImpl(existingBean);</span>
+<span class="fc" id="L410">		initBeanWrapper(bw);</span>
+<span class="fc" id="L411">		applyPropertyValues(beanName, bd, bw, bd.getPropertyValues());</span>
+<span class="fc" id="L412">	}</span>
+
+	@Override
+	public Object initializeBean(Object existingBean, String beanName) {
+<span class="fc" id="L416">		return initializeBean(beanName, existingBean, null);</span>
+	}
+
+	@Deprecated(since = &quot;6.1&quot;)
+	@Override
+	public Object applyBeanPostProcessorsBeforeInitialization(Object existingBean, String beanName)
+			throws BeansException {
+
+<span class="fc" id="L424">		Object result = existingBean;</span>
+<span class="fc bfc" id="L425" title="All 2 branches covered.">		for (BeanPostProcessor processor : getBeanPostProcessors()) {</span>
+<span class="fc" id="L426">			Object current = processor.postProcessBeforeInitialization(result, beanName);</span>
+<span class="pc bpc" id="L427" title="1 of 2 branches missed.">			if (current == null) {</span>
+<span class="nc" id="L428">				return result;</span>
+			}
+<span class="fc" id="L430">			result = current;</span>
+<span class="fc" id="L431">		}</span>
+<span class="fc" id="L432">		return result;</span>
+	}
+
+	@Deprecated(since = &quot;6.1&quot;)
+	@Override
+	public Object applyBeanPostProcessorsAfterInitialization(Object existingBean, String beanName)
+			throws BeansException {
+
+<span class="fc" id="L440">		Object result = existingBean;</span>
+<span class="fc bfc" id="L441" title="All 2 branches covered.">		for (BeanPostProcessor processor : getBeanPostProcessors()) {</span>
+<span class="fc" id="L442">			Object current = processor.postProcessAfterInitialization(result, beanName);</span>
+<span class="pc bpc" id="L443" title="1 of 2 branches missed.">			if (current == null) {</span>
+<span class="nc" id="L444">				return result;</span>
+			}
+<span class="fc" id="L446">			result = current;</span>
+<span class="fc" id="L447">		}</span>
+<span class="fc" id="L448">		return result;</span>
+	}
+
+	@Override
+	public void destroyBean(Object existingBean) {
+<span class="fc" id="L453">		new DisposableBeanAdapter(existingBean, getBeanPostProcessorCache().destructionAware).destroy();</span>
+<span class="fc" id="L454">	}</span>
+
+
+	//-------------------------------------------------------------------------
+	// Delegate methods for resolving injection points
+	//-------------------------------------------------------------------------
+
+	@Override
+	public Object resolveBeanByName(String name, DependencyDescriptor descriptor) {
+<span class="nc" id="L463">		InjectionPoint previousInjectionPoint = ConstructorResolver.setCurrentInjectionPoint(descriptor);</span>
+		try {
+<span class="nc" id="L465">			return getBean(name, descriptor.getDependencyType());</span>
+		}
+		finally {
+<span class="nc" id="L468">			ConstructorResolver.setCurrentInjectionPoint(previousInjectionPoint);</span>
+		}
+	}
+
+	@Override
+	public @Nullable Object resolveDependency(DependencyDescriptor descriptor, @Nullable String requestingBeanName) throws BeansException {
+<span class="fc" id="L474">		return resolveDependency(descriptor, requestingBeanName, null, null);</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation of relevant AbstractBeanFactory template methods
+	//---------------------------------------------------------------------
+
+	/**
+	 * Central method of this class: creates a bean instance,
+	 * populates the bean instance, applies post-processors, etc.
+	 * @see #doCreateBean
+	 */
+	@Override
+	protected Object createBean(String beanName, RootBeanDefinition mbd, @Nullable Object @Nullable [] args)
+			throws BeanCreationException {
+
+<span class="pc bpc" id="L491" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L492">			logger.trace(&quot;Creating instance of bean '&quot; + beanName + &quot;'&quot;);</span>
+		}
+<span class="fc" id="L494">		RootBeanDefinition mbdToUse = mbd;</span>
+
+		// Make sure bean class is actually resolved at this point, and
+		// clone the bean definition in case of a dynamically resolved Class
+		// which cannot be stored in the shared merged bean definition.
+<span class="fc" id="L499">		Class&lt;?&gt; resolvedClass = resolveBeanClass(mbd, beanName);</span>
+<span class="pc bpc" id="L500" title="3 of 6 branches missed.">		if (resolvedClass != null &amp;&amp; !mbd.hasBeanClass() &amp;&amp; mbd.getBeanClassName() != null) {</span>
+<span class="nc" id="L501">			mbdToUse = new RootBeanDefinition(mbd);</span>
+<span class="nc" id="L502">			mbdToUse.setBeanClass(resolvedClass);</span>
+			try {
+<span class="nc" id="L504">				mbdToUse.prepareMethodOverrides();</span>
+			}
+<span class="nc" id="L506">			catch (BeanDefinitionValidationException ex) {</span>
+<span class="nc" id="L507">				throw new BeanDefinitionStoreException(mbdToUse.getResourceDescription(),</span>
+						beanName, &quot;Validation of method overrides failed&quot;, ex);
+<span class="nc" id="L509">			}</span>
+		}
+
+		try {
+			// Give BeanPostProcessors a chance to return a proxy instead of the target bean instance.
+<span class="fc" id="L514">			Object bean = resolveBeforeInstantiation(beanName, mbdToUse);</span>
+<span class="pc bpc" id="L515" title="1 of 2 branches missed.">			if (bean != null) {</span>
+<span class="nc" id="L516">				return bean;</span>
+			}
+		}
+<span class="nc" id="L519">		catch (Throwable ex) {</span>
+<span class="nc" id="L520">			throw new BeanCreationException(mbdToUse.getResourceDescription(), beanName,</span>
+					&quot;BeanPostProcessor before instantiation of bean failed&quot;, ex);
+<span class="fc" id="L522">		}</span>
+
+		try {
+<span class="fc" id="L525">			Object beanInstance = doCreateBean(beanName, mbdToUse, args);</span>
+<span class="pc bpc" id="L526" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L527">				logger.trace(&quot;Finished creating instance of bean '&quot; + beanName + &quot;'&quot;);</span>
+			}
+<span class="fc" id="L529">			return beanInstance;</span>
+		}
+<span class="fc" id="L531">		catch (BeanCreationException | ImplicitlyAppearedSingletonException ex) {</span>
+			// A previously detected exception with proper bean creation context already,
+			// or illegal singleton state to be communicated up to DefaultSingletonBeanRegistry.
+<span class="fc" id="L534">			throw ex;</span>
+		}
+<span class="nc" id="L536">		catch (Throwable ex) {</span>
+<span class="nc" id="L537">			throw new BeanCreationException(</span>
+<span class="nc" id="L538">					mbdToUse.getResourceDescription(), beanName, &quot;Unexpected exception during bean creation&quot;, ex);</span>
+		}
+	}
+
+	/**
+	 * Actually create the specified bean. Pre-creation processing has already happened
+	 * at this point, for example, checking {@code postProcessBeforeInstantiation} callbacks.
+	 * &lt;p&gt;Differentiates between default bean instantiation, use of a
+	 * factory method, and autowiring a constructor.
+	 * @param beanName the name of the bean
+	 * @param mbd the merged bean definition for the bean
+	 * @param args explicit arguments to use for constructor or factory method invocation
+	 * @return a new instance of the bean
+	 * @throws BeanCreationException if the bean could not be created
+	 * @see #instantiateBean
+	 * @see #instantiateUsingFactoryMethod
+	 * @see #autowireConstructor
+	 */
+	protected Object doCreateBean(String beanName, RootBeanDefinition mbd, @Nullable Object @Nullable [] args)
+			throws BeanCreationException {
+
+		// Instantiate the bean.
+<span class="fc" id="L560">		BeanWrapper instanceWrapper = null;</span>
+<span class="fc bfc" id="L561" title="All 2 branches covered.">		if (mbd.isSingleton()) {</span>
+<span class="fc" id="L562">			instanceWrapper = this.factoryBeanInstanceCache.remove(beanName);</span>
+		}
+<span class="fc bfc" id="L564" title="All 2 branches covered.">		if (instanceWrapper == null) {</span>
+<span class="fc" id="L565">			instanceWrapper = createBeanInstance(beanName, mbd, args);</span>
+		}
+<span class="fc" id="L567">		Object bean = instanceWrapper.getWrappedInstance();</span>
+<span class="fc" id="L568">		Class&lt;?&gt; beanType = instanceWrapper.getWrappedClass();</span>
+<span class="fc bfc" id="L569" title="All 2 branches covered.">		if (beanType != NullBean.class) {</span>
+<span class="fc" id="L570">			mbd.resolvedTargetType = beanType;</span>
+		}
+
+		// Allow post-processors to modify the merged bean definition.
+<span class="fc" id="L574">		synchronized (mbd.postProcessingLock) {</span>
+<span class="fc bfc" id="L575" title="All 2 branches covered.">			if (!mbd.postProcessed) {</span>
+				try {
+<span class="fc" id="L577">					applyMergedBeanDefinitionPostProcessors(mbd, beanType, beanName);</span>
+				}
+<span class="nc" id="L579">				catch (Throwable ex) {</span>
+<span class="nc" id="L580">					throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+							&quot;Post-processing of merged bean definition failed&quot;, ex);
+<span class="fc" id="L582">				}</span>
+<span class="fc" id="L583">				mbd.markAsPostProcessed();</span>
+			}
+<span class="fc" id="L585">		}</span>
+
+		// Eagerly cache singletons to be able to resolve circular references
+		// even when triggered by lifecycle interfaces like BeanFactoryAware.
+<span class="pc bpc" id="L589" title="1 of 4 branches missed.">		boolean earlySingletonExposure = (mbd.isSingleton() &amp;&amp; this.allowCircularReferences &amp;&amp;</span>
+<span class="fc bfc" id="L590" title="All 2 branches covered.">				isSingletonCurrentlyInCreation(beanName));</span>
+<span class="fc bfc" id="L591" title="All 2 branches covered.">		if (earlySingletonExposure) {</span>
+<span class="pc bpc" id="L592" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L593">				logger.trace(&quot;Eagerly caching bean '&quot; + beanName +</span>
+						&quot;' to allow for resolving potential circular references&quot;);
+			}
+<span class="fc" id="L596">			addSingletonFactory(beanName, () -&gt; getEarlyBeanReference(beanName, mbd, bean));</span>
+		}
+
+		// Initialize the bean instance.
+<span class="fc" id="L600">		Object exposedObject = bean;</span>
+		try {
+<span class="fc" id="L602">			populateBean(beanName, mbd, instanceWrapper);</span>
+<span class="fc" id="L603">			exposedObject = initializeBean(beanName, exposedObject, mbd);</span>
+		}
+<span class="fc" id="L605">		catch (Throwable ex) {</span>
+<span class="pc bpc" id="L606" title="1 of 4 branches missed.">			if (ex instanceof BeanCreationException bce &amp;&amp; beanName.equals(bce.getBeanName())) {</span>
+<span class="fc" id="L607">				throw bce;</span>
+			}
+			else {
+<span class="fc" id="L610">				throw new BeanCreationException(mbd.getResourceDescription(), beanName, ex.getMessage(), ex);</span>
+			}
+<span class="fc" id="L612">		}</span>
+
+<span class="fc bfc" id="L614" title="All 2 branches covered.">		if (earlySingletonExposure) {</span>
+<span class="fc" id="L615">			Object earlySingletonReference = getSingleton(beanName, false);</span>
+<span class="fc bfc" id="L616" title="All 2 branches covered.">			if (earlySingletonReference != null) {</span>
+<span class="pc bpc" id="L617" title="1 of 2 branches missed.">				if (exposedObject == bean) {</span>
+<span class="fc" id="L618">					exposedObject = earlySingletonReference;</span>
+				}
+<span class="nc bnc" id="L620" title="All 4 branches missed.">				else if (!this.allowRawInjectionDespiteWrapping &amp;&amp; hasDependentBean(beanName)) {</span>
+<span class="nc" id="L621">					String[] dependentBeans = getDependentBeans(beanName);</span>
+<span class="nc" id="L622">					Set&lt;String&gt; actualDependentBeans = CollectionUtils.newLinkedHashSet(dependentBeans.length);</span>
+<span class="nc bnc" id="L623" title="All 2 branches missed.">					for (String dependentBean : dependentBeans) {</span>
+<span class="nc bnc" id="L624" title="All 2 branches missed.">						if (!removeSingletonIfCreatedForTypeCheckOnly(dependentBean)) {</span>
+<span class="nc" id="L625">							actualDependentBeans.add(dependentBean);</span>
+						}
+					}
+<span class="nc bnc" id="L628" title="All 2 branches missed.">					if (!actualDependentBeans.isEmpty()) {</span>
+<span class="nc" id="L629">						throw new BeanCurrentlyInCreationException(beanName,</span>
+								&quot;Bean with name '&quot; + beanName + &quot;' has been injected into other beans [&quot; +
+<span class="nc" id="L631">								StringUtils.collectionToCommaDelimitedString(actualDependentBeans) +</span>
+								&quot;] in its raw version as part of a circular reference, but has eventually been &quot; +
+								&quot;wrapped. This means that said other beans do not use the final version of the &quot; +
+								&quot;bean. This is often the result of over-eager type matching - consider using &quot; +
+								&quot;'getBeanNamesForType' with the 'allowEagerInit' flag turned off, for example.&quot;);
+					}
+				}
+			}
+		}
+
+		// Register bean as disposable.
+		try {
+<span class="fc" id="L643">			registerDisposableBeanIfNecessary(beanName, bean, mbd);</span>
+		}
+<span class="fc" id="L645">		catch (BeanDefinitionValidationException ex) {</span>
+<span class="fc" id="L646">			throw new BeanCreationException(</span>
+<span class="fc" id="L647">					mbd.getResourceDescription(), beanName, &quot;Invalid destruction signature&quot;, ex);</span>
+<span class="fc" id="L648">		}</span>
+
+<span class="fc" id="L650">		return exposedObject;</span>
+	}
+
+	@Override
+	protected @Nullable Class&lt;?&gt; predictBeanType(String beanName, RootBeanDefinition mbd, Class&lt;?&gt;... typesToMatch) {
+<span class="fc" id="L655">		Class&lt;?&gt; targetType = determineTargetType(beanName, mbd, typesToMatch);</span>
+		// Apply SmartInstantiationAwareBeanPostProcessors to predict the
+		// eventual type after a before-instantiation shortcut.
+<span class="pc bpc" id="L658" title="1 of 6 branches missed.">		if (targetType != null &amp;&amp; !mbd.isSynthetic() &amp;&amp; hasInstantiationAwareBeanPostProcessors()) {</span>
+<span class="pc bpc" id="L659" title="1 of 4 branches missed.">			boolean matchingOnlyFactoryBean = (typesToMatch.length == 1 &amp;&amp; typesToMatch[0] == FactoryBean.class);</span>
+<span class="fc bfc" id="L660" title="All 2 branches covered.">			for (SmartInstantiationAwareBeanPostProcessor bp : getBeanPostProcessorCache().smartInstantiationAware) {</span>
+<span class="fc" id="L661">				Class&lt;?&gt; predicted = bp.predictBeanType(targetType, beanName);</span>
+<span class="fc bfc" id="L662" title="All 4 branches covered.">				if (predicted != null &amp;&amp;</span>
+<span class="pc bpc" id="L663" title="1 of 2 branches missed.">						(!matchingOnlyFactoryBean || FactoryBean.class.isAssignableFrom(predicted))) {</span>
+<span class="fc" id="L664">					return predicted;</span>
+				}
+<span class="fc" id="L666">			}</span>
+		}
+<span class="fc" id="L668">		return targetType;</span>
+	}
+
+	/**
+	 * Determine the target type for the given bean definition.
+	 * @param beanName the name of the bean (for error handling purposes)
+	 * @param mbd the merged bean definition for the bean
+	 * @param typesToMatch the types to match in case of internal type matching purposes
+	 * (also signals that the returned {@code Class} will never be exposed to application code)
+	 * @return the type for the bean if determinable, or {@code null} otherwise
+	 */
+	protected @Nullable Class&lt;?&gt; determineTargetType(String beanName, RootBeanDefinition mbd, Class&lt;?&gt;... typesToMatch) {
+<span class="fc" id="L680">		Class&lt;?&gt; targetType = mbd.getTargetType();</span>
+<span class="fc bfc" id="L681" title="All 2 branches covered.">		if (targetType == null) {</span>
+<span class="fc bfc" id="L682" title="All 2 branches covered.">			if (mbd.getFactoryMethodName() != null) {</span>
+<span class="fc" id="L683">				targetType = getTypeForFactoryMethod(beanName, mbd, typesToMatch);</span>
+			}
+			else {
+<span class="fc" id="L686">				targetType = resolveBeanClass(mbd, beanName, typesToMatch);</span>
+<span class="fc bfc" id="L687" title="All 2 branches covered.">				if (mbd.hasBeanClass()) {</span>
+<span class="fc" id="L688">					targetType = getInstantiationStrategy().getActualBeanClass(mbd, beanName, this);</span>
+				}
+			}
+<span class="fc bfc" id="L691" title="All 4 branches covered.">			if (ObjectUtils.isEmpty(typesToMatch) || getTempClassLoader() == null) {</span>
+<span class="fc" id="L692">				mbd.resolvedTargetType = targetType;</span>
+			}
+		}
+<span class="fc" id="L695">		return targetType;</span>
+	}
+
+	/**
+	 * Determine the target type for the given bean definition which is based on
+	 * a factory method. Only called if there is no singleton instance registered
+	 * for the target bean already.
+	 * &lt;p&gt;This implementation determines the type matching {@link #createBean}'s
+	 * different creation strategies. As far as possible, we'll perform static
+	 * type checking to avoid creation of the target bean.
+	 * @param beanName the name of the bean (for error handling purposes)
+	 * @param mbd the merged bean definition for the bean
+	 * @param typesToMatch the types to match in case of internal type matching purposes
+	 * (also signals that the returned {@code Class} will never be exposed to application code)
+	 * @return the type for the bean if determinable, or {@code null} otherwise
+	 * @see #createBean
+	 */
+	protected @Nullable Class&lt;?&gt; getTypeForFactoryMethod(String beanName, RootBeanDefinition mbd, Class&lt;?&gt;... typesToMatch) {
+<span class="fc" id="L713">		ResolvableType cachedReturnType = mbd.factoryMethodReturnType;</span>
+<span class="fc bfc" id="L714" title="All 2 branches covered.">		if (cachedReturnType != null) {</span>
+<span class="fc" id="L715">			return cachedReturnType.resolve();</span>
+		}
+
+<span class="fc" id="L718">		Class&lt;?&gt; commonType = null;</span>
+<span class="fc" id="L719">		Method uniqueCandidate = mbd.factoryMethodToIntrospect;</span>
+
+<span class="fc bfc" id="L721" title="All 2 branches covered.">		if (uniqueCandidate == null) {</span>
+			Class&lt;?&gt; factoryClass;
+<span class="fc" id="L723">			boolean isStatic = true;</span>
+
+<span class="fc" id="L725">			String factoryBeanName = mbd.getFactoryBeanName();</span>
+<span class="fc bfc" id="L726" title="All 2 branches covered.">			if (factoryBeanName != null) {</span>
+<span class="pc bpc" id="L727" title="1 of 2 branches missed.">				if (factoryBeanName.equals(beanName)) {</span>
+<span class="nc" id="L728">					throw new BeanDefinitionStoreException(mbd.getResourceDescription(), beanName,</span>
+							&quot;factory-bean reference points back to the same bean definition&quot;);
+				}
+				// Check declared factory method return type on factory class.
+<span class="fc" id="L732">				factoryClass = getType(factoryBeanName);</span>
+<span class="fc" id="L733">				isStatic = false;</span>
+			}
+			else {
+				// Check declared factory method return type on bean class.
+<span class="fc" id="L737">				factoryClass = resolveBeanClass(mbd, beanName, typesToMatch);</span>
+			}
+
+<span class="fc bfc" id="L740" title="All 2 branches covered.">			if (factoryClass == null) {</span>
+<span class="fc" id="L741">				return null;</span>
+			}
+<span class="fc" id="L743">			factoryClass = ClassUtils.getUserClass(factoryClass);</span>
+
+			// If all factory methods have the same return type, return that type.
+			// Can't clearly figure out exact method due to type converting / autowiring!
+			int minNrOfArgs =
+<span class="fc bfc" id="L748" title="All 2 branches covered.">					(mbd.hasConstructorArgumentValues() ? mbd.getConstructorArgumentValues().getArgumentCount() : 0);</span>
+<span class="fc" id="L749">			Method[] candidates = this.factoryMethodCandidateCache.computeIfAbsent(factoryClass,</span>
+<span class="fc" id="L750">					clazz -&gt; ReflectionUtils.getUniqueDeclaredMethods(clazz, ReflectionUtils.USER_DECLARED_METHODS));</span>
+
+<span class="fc bfc" id="L752" title="All 2 branches covered.">			for (Method candidate : candidates) {</span>
+<span class="fc bfc" id="L753" title="All 4 branches covered.">				if (Modifier.isStatic(candidate.getModifiers()) == isStatic &amp;&amp; mbd.isFactoryMethod(candidate) &amp;&amp;</span>
+<span class="fc bfc" id="L754" title="All 2 branches covered.">						candidate.getParameterCount() &gt;= minNrOfArgs) {</span>
+					// Declared type variables to inspect?
+<span class="fc bfc" id="L756" title="All 2 branches covered.">					if (candidate.getTypeParameters().length &gt; 0) {</span>
+						try {
+							// Fully resolve parameter names and argument values.
+<span class="fc" id="L759">							ConstructorArgumentValues cav = mbd.getConstructorArgumentValues();</span>
+<span class="fc" id="L760">							Class&lt;?&gt;[] paramTypes = candidate.getParameterTypes();</span>
+<span class="fc" id="L761">							@Nullable String[] paramNames = null;</span>
+<span class="pc bpc" id="L762" title="1 of 2 branches missed.">							if (cav.containsNamedArgument()) {</span>
+<span class="nc" id="L763">								ParameterNameDiscoverer pnd = getParameterNameDiscoverer();</span>
+<span class="nc bnc" id="L764" title="All 2 branches missed.">								if (pnd != null) {</span>
+<span class="nc" id="L765">									paramNames = pnd.getParameterNames(candidate);</span>
+								}
+							}
+<span class="fc" id="L768">							Set&lt;ConstructorArgumentValues.ValueHolder&gt; usedValueHolders = CollectionUtils.newHashSet(paramTypes.length);</span>
+<span class="fc" id="L769">							@Nullable Object[] args = new Object[paramTypes.length];</span>
+<span class="fc bfc" id="L770" title="All 2 branches covered.">							for (int i = 0; i &lt; args.length; i++) {</span>
+<span class="fc" id="L771">								ConstructorArgumentValues.ValueHolder valueHolder = cav.getArgumentValue(</span>
+<span class="pc bpc" id="L772" title="1 of 2 branches missed.">										i, paramTypes[i], (paramNames != null ? paramNames[i] : null), usedValueHolders);</span>
+<span class="fc bfc" id="L773" title="All 2 branches covered.">								if (valueHolder == null) {</span>
+<span class="fc" id="L774">									valueHolder = cav.getGenericArgumentValue(null, null, usedValueHolders);</span>
+								}
+<span class="pc bpc" id="L776" title="1 of 2 branches missed.">								if (valueHolder != null) {</span>
+<span class="fc" id="L777">									args[i] = valueHolder.getValue();</span>
+<span class="fc" id="L778">									usedValueHolders.add(valueHolder);</span>
+								}
+							}
+<span class="fc" id="L781">							Class&lt;?&gt; returnType = AutowireUtils.resolveReturnTypeForFactoryMethod(</span>
+<span class="fc" id="L782">									candidate, args, getBeanClassLoader());</span>
+<span class="pc bpc" id="L783" title="1 of 4 branches missed.">							uniqueCandidate = (commonType == null &amp;&amp; returnType == candidate.getReturnType() ?</span>
+<span class="fc" id="L784">									candidate : null);</span>
+<span class="fc" id="L785">							commonType = ClassUtils.determineCommonAncestor(returnType, commonType);</span>
+<span class="pc bpc" id="L786" title="1 of 2 branches missed.">							if (commonType == null) {</span>
+								// Ambiguous return types found: return null to indicate &quot;not determinable&quot;.
+<span class="nc" id="L788">								return null;</span>
+							}
+						}
+<span class="fc" id="L791">						catch (Throwable ex) {</span>
+<span class="pc bpc" id="L792" title="1 of 2 branches missed.">							if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L793">								logger.debug(&quot;Failed to resolve generic return type for factory method: &quot; + ex);</span>
+							}
+<span class="fc" id="L795">						}</span>
+					}
+					else {
+<span class="fc bfc" id="L798" title="All 2 branches covered.">						uniqueCandidate = (commonType == null ? candidate : null);</span>
+<span class="fc" id="L799">						commonType = ClassUtils.determineCommonAncestor(candidate.getReturnType(), commonType);</span>
+<span class="pc bpc" id="L800" title="1 of 2 branches missed.">						if (commonType == null) {</span>
+							// Ambiguous return types found: return null to indicate &quot;not determinable&quot;.
+<span class="nc" id="L802">							return null;</span>
+						}
+					}
+				}
+			}
+
+<span class="fc" id="L808">			mbd.factoryMethodToIntrospect = uniqueCandidate;</span>
+<span class="fc bfc" id="L809" title="All 2 branches covered.">			if (commonType == null) {</span>
+<span class="fc" id="L810">				return null;</span>
+			}
+		}
+
+		// Common return type found: all factory methods return same type. For a non-parameterized
+		// unique candidate, cache the full type declaration context of the target factory method.
+		try {
+<span class="fc bfc" id="L817" title="All 2 branches covered.">			cachedReturnType = (uniqueCandidate != null ?</span>
+<span class="fc" id="L818">					ResolvableType.forMethodReturnType(uniqueCandidate) : ResolvableType.forClass(commonType));</span>
+<span class="fc" id="L819">			mbd.factoryMethodReturnType = cachedReturnType;</span>
+<span class="fc" id="L820">			return cachedReturnType.resolve();</span>
+		}
+<span class="nc" id="L822">		catch (LinkageError err) {</span>
+			// For example, a NoClassDefFoundError for a generic method return type
+<span class="nc bnc" id="L824" title="All 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L825">				logger.debug(&quot;Failed to resolve type for factory method of bean '&quot; + beanName + &quot;': &quot; +</span>
+<span class="nc bnc" id="L826" title="All 2 branches missed.">						(uniqueCandidate != null ? uniqueCandidate : commonType), err);</span>
+			}
+<span class="nc" id="L828">			return null;</span>
+		}
+	}
+
+	/**
+	 * This implementation attempts to query the FactoryBean's generic parameter metadata
+	 * if present to determine the object type. If not present, i.e. the FactoryBean is
+	 * declared as a raw type, it checks the FactoryBean's {@code getObjectType} method
+	 * on a plain instance of the FactoryBean, without bean properties applied yet.
+	 * If this doesn't return a type yet and {@code allowInit} is {@code true}, full
+	 * creation of the FactoryBean is attempted as fallback (through delegation to the
+	 * superclass implementation).
+	 * &lt;p&gt;The shortcut check for a FactoryBean is only applied in case of a singleton
+	 * FactoryBean. If the FactoryBean instance itself is not kept as singleton,
+	 * it will be fully created to check the type of its exposed object.
+	 */
+	@Override
+	protected ResolvableType getTypeForFactoryBean(String beanName, RootBeanDefinition mbd, boolean allowInit) {
+		ResolvableType result;
+
+		// Check if the bean definition itself has defined the type with an attribute
+		try {
+<span class="fc" id="L850">			result = getTypeForFactoryBeanFromAttributes(mbd);</span>
+<span class="fc bfc" id="L851" title="All 2 branches covered.">			if (result != ResolvableType.NONE) {</span>
+<span class="fc" id="L852">				return result;</span>
+			}
+		}
+<span class="nc" id="L855">		catch (IllegalArgumentException ex) {</span>
+<span class="nc" id="L856">			throw new BeanDefinitionStoreException(mbd.getResourceDescription(), beanName,</span>
+<span class="nc" id="L857">					String.valueOf(ex.getMessage()));</span>
+<span class="fc" id="L858">		}</span>
+
+		// For instance supplied beans, try the target type and bean class immediately
+<span class="fc bfc" id="L861" title="All 2 branches covered.">		if (mbd.getInstanceSupplier() != null) {</span>
+<span class="fc" id="L862">			result = getFactoryBeanGeneric(mbd.targetType);</span>
+<span class="pc bpc" id="L863" title="1 of 2 branches missed.">			if (result.resolve() != null) {</span>
+<span class="nc" id="L864">				return result;</span>
+			}
+<span class="pc bpc" id="L866" title="1 of 2 branches missed.">			result = getFactoryBeanGeneric(mbd.hasBeanClass() ? ResolvableType.forClass(mbd.getBeanClass()) : null);</span>
+<span class="pc bpc" id="L867" title="1 of 2 branches missed.">			if (result.resolve() != null) {</span>
+<span class="fc" id="L868">				return result;</span>
+			}
+		}
+
+		// Consider factory methods
+<span class="fc" id="L873">		String factoryBeanName = mbd.getFactoryBeanName();</span>
+<span class="fc" id="L874">		String factoryMethodName = mbd.getFactoryMethodName();</span>
+
+		// Scan the factory bean methods
+<span class="pc bpc" id="L877" title="1 of 2 branches missed.">		if (factoryBeanName != null) {</span>
+<span class="nc bnc" id="L878" title="All 2 branches missed.">			if (factoryMethodName != null) {</span>
+				// Try to obtain the FactoryBean's object type from its factory method
+				// declaration without instantiating the containing bean at all.
+<span class="nc" id="L881">				BeanDefinition factoryBeanDefinition = getBeanDefinition(factoryBeanName);</span>
+				Class&lt;?&gt; factoryBeanClass;
+<span class="nc bnc" id="L883" title="All 2 branches missed.">				if (factoryBeanDefinition instanceof AbstractBeanDefinition abstractBeanDefinition &amp;&amp;</span>
+<span class="nc bnc" id="L884" title="All 2 branches missed.">						abstractBeanDefinition.hasBeanClass()) {</span>
+<span class="nc" id="L885">					factoryBeanClass = abstractBeanDefinition.getBeanClass();</span>
+				}
+				else {
+<span class="nc" id="L888">					RootBeanDefinition fbmbd = getMergedBeanDefinition(factoryBeanName, factoryBeanDefinition);</span>
+<span class="nc" id="L889">					factoryBeanClass = determineTargetType(factoryBeanName, fbmbd);</span>
+				}
+<span class="nc bnc" id="L891" title="All 2 branches missed.">				if (factoryBeanClass != null) {</span>
+<span class="nc" id="L892">					result = getTypeForFactoryBeanFromMethod(factoryBeanClass, factoryMethodName);</span>
+<span class="nc bnc" id="L893" title="All 2 branches missed.">					if (result.resolve() != null) {</span>
+<span class="nc" id="L894">						return result;</span>
+					}
+				}
+			}
+			// If not resolvable above and the referenced factory bean doesn't exist yet,
+			// exit here - we don't want to force the creation of another bean just to
+			// obtain a FactoryBean's object type...
+<span class="nc bnc" id="L901" title="All 2 branches missed.">			if (!isBeanEligibleForMetadataCaching(factoryBeanName)) {</span>
+<span class="nc" id="L902">				return ResolvableType.NONE;</span>
+			}
+		}
+
+		// If we're allowed, we can create the factory bean and call getObjectType() early
+<span class="fc bfc" id="L907" title="All 2 branches covered.">		if (allowInit) {</span>
+<span class="fc bfc" id="L908" title="All 2 branches covered.">			FactoryBean&lt;?&gt; factoryBean = (mbd.isSingleton() ?</span>
+<span class="fc" id="L909">					getSingletonFactoryBeanForTypeCheck(beanName, mbd) :</span>
+<span class="fc" id="L910">					getNonSingletonFactoryBeanForTypeCheck(beanName, mbd));</span>
+<span class="fc bfc" id="L911" title="All 2 branches covered.">			if (factoryBean != null) {</span>
+				// Try to obtain the FactoryBean's object type from this early stage of the instance.
+<span class="fc" id="L913">				Class&lt;?&gt; type = getTypeForFactoryBean(factoryBean);</span>
+<span class="fc bfc" id="L914" title="All 2 branches covered.">				if (type != null) {</span>
+<span class="fc" id="L915">					return ResolvableType.forClass(type);</span>
+				}
+				// No type found for shortcut FactoryBean instance:
+				// fall back to full creation of the FactoryBean instance.
+<span class="fc" id="L919">				return super.getTypeForFactoryBean(beanName, mbd, true);</span>
+			}
+		}
+
+<span class="pc bpc" id="L923" title="1 of 6 branches missed.">		if (factoryBeanName == null &amp;&amp; mbd.hasBeanClass() &amp;&amp; factoryMethodName != null) {</span>
+			// No early bean instantiation possible: determine FactoryBean's type from
+			// static factory method signature or from class inheritance hierarchy...
+<span class="fc" id="L926">			return getTypeForFactoryBeanFromMethod(mbd.getBeanClass(), factoryMethodName);</span>
+		}
+
+		// For regular beans, try the target type and bean class as fallback
+<span class="pc bpc" id="L930" title="1 of 2 branches missed.">		if (mbd.getInstanceSupplier() == null) {</span>
+<span class="fc" id="L931">			result = getFactoryBeanGeneric(mbd.targetType);</span>
+<span class="fc bfc" id="L932" title="All 2 branches covered.">			if (result.resolve() != null) {</span>
+<span class="fc" id="L933">				return result;</span>
+			}
+<span class="pc bpc" id="L935" title="1 of 2 branches missed.">			result = getFactoryBeanGeneric(mbd.hasBeanClass() ? ResolvableType.forClass(mbd.getBeanClass()) : null);</span>
+<span class="pc bpc" id="L936" title="1 of 2 branches missed.">			if (result.resolve() != null) {</span>
+<span class="fc" id="L937">				return result;</span>
+			}
+		}
+
+		// FactoryBean type not resolvable
+<span class="nc" id="L942">		return ResolvableType.NONE;</span>
+	}
+
+	/**
+	 * Introspect the factory method signatures on the given bean class,
+	 * trying to find a common {@code FactoryBean} object type declared there.
+	 * @param beanClass the bean class to find the factory method on
+	 * @param factoryMethodName the name of the factory method
+	 * @return the common {@code FactoryBean} object type, or {@code null} if none
+	 */
+	private ResolvableType getTypeForFactoryBeanFromMethod(Class&lt;?&gt; beanClass, String factoryMethodName) {
+		// CGLIB subclass methods hide generic parameters; look at the original user class.
+<span class="fc" id="L954">		Class&lt;?&gt; factoryBeanClass = ClassUtils.getUserClass(beanClass);</span>
+<span class="fc" id="L955">		FactoryBeanMethodTypeFinder finder = new FactoryBeanMethodTypeFinder(factoryMethodName);</span>
+<span class="fc" id="L956">		ReflectionUtils.doWithMethods(factoryBeanClass, finder, ReflectionUtils.USER_DECLARED_METHODS);</span>
+<span class="fc" id="L957">		return finder.getResult();</span>
+	}
+
+	/**
+	 * Obtain a reference for early access to the specified bean,
+	 * typically for the purpose of resolving a circular reference.
+	 * @param beanName the name of the bean (for error handling purposes)
+	 * @param mbd the merged bean definition for the bean
+	 * @param bean the raw bean instance
+	 * @return the object to expose as bean reference
+	 */
+	protected Object getEarlyBeanReference(String beanName, RootBeanDefinition mbd, Object bean) {
+<span class="fc" id="L969">		Object exposedObject = bean;</span>
+<span class="pc bpc" id="L970" title="1 of 4 branches missed.">		if (!mbd.isSynthetic() &amp;&amp; hasInstantiationAwareBeanPostProcessors()) {</span>
+<span class="fc bfc" id="L971" title="All 2 branches covered.">			for (SmartInstantiationAwareBeanPostProcessor bp : getBeanPostProcessorCache().smartInstantiationAware) {</span>
+<span class="fc" id="L972">				exposedObject = bp.getEarlyBeanReference(exposedObject, beanName);</span>
+<span class="fc" id="L973">			}</span>
+		}
+<span class="fc" id="L975">		return exposedObject;</span>
+	}
+
+
+	//---------------------------------------------------------------------
+	// Implementation methods
+	//---------------------------------------------------------------------
+
+	/**
+	 * Obtain a &quot;shortcut&quot; singleton FactoryBean instance to use for a
+	 * {@code getObjectType()} call, without full initialization of the FactoryBean.
+	 * @param beanName the name of the bean
+	 * @param mbd the bean definition for the bean
+	 * @return the FactoryBean instance, or {@code null} to indicate
+	 * that we couldn't obtain a shortcut FactoryBean instance
+	 */
+	private @Nullable FactoryBean&lt;?&gt; getSingletonFactoryBeanForTypeCheck(String beanName, RootBeanDefinition mbd) {
+<span class="fc" id="L992">		Boolean lockFlag = isCurrentThreadAllowedToHoldSingletonLock();</span>
+<span class="fc bfc" id="L993" title="All 2 branches covered.">		if (lockFlag == null) {</span>
+<span class="fc" id="L994">			this.singletonLock.lock();</span>
+		}
+		else {
+<span class="pc bpc" id="L997" title="2 of 4 branches missed.">			boolean locked = (lockFlag &amp;&amp; this.singletonLock.tryLock());</span>
+<span class="pc bpc" id="L998" title="1 of 2 branches missed.">			if (!locked) {</span>
+				// Avoid shortcut FactoryBean instance but allow for subsequent type-based resolution.
+<span class="nc" id="L1000">				resolveBeanClass(mbd, beanName);</span>
+<span class="nc" id="L1001">				return null;</span>
+			}
+		}
+
+		try {
+<span class="fc" id="L1006">			BeanWrapper bw = this.factoryBeanInstanceCache.get(beanName);</span>
+<span class="fc bfc" id="L1007" title="All 2 branches covered.">			if (bw != null) {</span>
+<span class="fc" id="L1008">				return (FactoryBean&lt;?&gt;) bw.getWrappedInstance();</span>
+			}
+<span class="fc" id="L1010">			Object beanInstance = getSingleton(beanName, false);</span>
+<span class="pc bpc" id="L1011" title="1 of 2 branches missed.">			if (beanInstance instanceof FactoryBean&lt;?&gt; factoryBean) {</span>
+<span class="nc" id="L1012">				return factoryBean;</span>
+			}
+<span class="fc bfc" id="L1014" title="All 2 branches covered.">			if (isSingletonCurrentlyInCreation(beanName) ||</span>
+<span class="pc bpc" id="L1015" title="3 of 4 branches missed.">					(mbd.getFactoryBeanName() != null &amp;&amp; isSingletonCurrentlyInCreation(mbd.getFactoryBeanName()))) {</span>
+<span class="fc" id="L1016">				return null;</span>
+			}
+
+			Object instance;
+			try {
+				// Mark this bean as currently in creation, even if just partially.
+<span class="fc" id="L1022">				beforeSingletonCreation(beanName);</span>
+				// Give BeanPostProcessors a chance to return a proxy instead of the target bean instance.
+<span class="fc" id="L1024">				instance = resolveBeforeInstantiation(beanName, mbd);</span>
+<span class="pc bpc" id="L1025" title="1 of 2 branches missed.">				if (instance == null) {</span>
+<span class="fc" id="L1026">					bw = createBeanInstance(beanName, mbd, null);</span>
+<span class="fc" id="L1027">					instance = bw.getWrappedInstance();</span>
+<span class="fc" id="L1028">					this.factoryBeanInstanceCache.put(beanName, bw);</span>
+				}
+			}
+<span class="fc" id="L1031">			catch (UnsatisfiedDependencyException ex) {</span>
+				// Don't swallow, probably misconfiguration...
+<span class="fc" id="L1033">				throw ex;</span>
+			}
+<span class="nc" id="L1035">			catch (BeanCreationException ex) {</span>
+				// Don't swallow a linkage error since it contains a full stacktrace on
+				// first occurrence... and just a plain NoClassDefFoundError afterwards.
+<span class="nc bnc" id="L1038" title="All 2 branches missed.">				if (ex.contains(LinkageError.class)) {</span>
+<span class="nc" id="L1039">					throw ex;</span>
+				}
+				// Instantiation failure, maybe too early...
+<span class="nc bnc" id="L1042" title="All 2 branches missed.">				if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1043">					logger.debug(&quot;Bean creation exception on singleton FactoryBean type check: &quot; + ex);</span>
+				}
+<span class="nc" id="L1045">				onSuppressedException(ex);</span>
+<span class="nc" id="L1046">				return null;</span>
+			}
+			finally {
+				// Finished partial creation of this bean.
+<span class="fc" id="L1050">				afterSingletonCreation(beanName);</span>
+			}
+
+<span class="fc" id="L1053">			return getFactoryBean(beanName, instance);</span>
+		}
+		finally {
+<span class="fc" id="L1056">			this.singletonLock.unlock();</span>
+		}
+	}
+
+	/**
+	 * Obtain a &quot;shortcut&quot; non-singleton FactoryBean instance to use for a
+	 * {@code getObjectType()} call, without full initialization of the FactoryBean.
+	 * @param beanName the name of the bean
+	 * @param mbd the bean definition for the bean
+	 * @return the FactoryBean instance, or {@code null} to indicate
+	 * that we couldn't obtain a shortcut FactoryBean instance
+	 */
+	private @Nullable FactoryBean&lt;?&gt; getNonSingletonFactoryBeanForTypeCheck(String beanName, RootBeanDefinition mbd) {
+<span class="pc bpc" id="L1069" title="1 of 2 branches missed.">		if (isPrototypeCurrentlyInCreation(beanName)) {</span>
+<span class="nc" id="L1070">			return null;</span>
+		}
+
+		Object instance;
+		try {
+			// Mark this bean as currently in creation, even if just partially.
+<span class="fc" id="L1076">			beforePrototypeCreation(beanName);</span>
+			// Give BeanPostProcessors a chance to return a proxy instead of the target bean instance.
+<span class="fc" id="L1078">			instance = resolveBeforeInstantiation(beanName, mbd);</span>
+<span class="pc bpc" id="L1079" title="1 of 2 branches missed.">			if (instance == null) {</span>
+<span class="fc" id="L1080">				BeanWrapper bw = createBeanInstance(beanName, mbd, null);</span>
+<span class="fc" id="L1081">				instance = bw.getWrappedInstance();</span>
+			}
+		}
+<span class="nc" id="L1084">		catch (UnsatisfiedDependencyException ex) {</span>
+			// Don't swallow, probably misconfiguration...
+<span class="nc" id="L1086">			throw ex;</span>
+		}
+<span class="fc" id="L1088">		catch (BeanCreationException ex) {</span>
+			// Instantiation failure, maybe too early...
+<span class="pc bpc" id="L1090" title="1 of 2 branches missed.">			if (logger.isDebugEnabled()) {</span>
+<span class="nc" id="L1091">				logger.debug(&quot;Bean creation exception on non-singleton FactoryBean type check: &quot; + ex);</span>
+			}
+<span class="fc" id="L1093">			onSuppressedException(ex);</span>
+<span class="fc" id="L1094">			return null;</span>
+		}
+		finally {
+			// Finished partial creation of this bean.
+<span class="fc" id="L1098">			afterPrototypeCreation(beanName);</span>
+		}
+
+<span class="fc" id="L1101">		return getFactoryBean(beanName, instance);</span>
+	}
+
+	/**
+	 * Apply MergedBeanDefinitionPostProcessors to the specified bean definition,
+	 * invoking their {@code postProcessMergedBeanDefinition} methods.
+	 * @param mbd the merged bean definition for the bean
+	 * @param beanType the actual type of the managed bean instance
+	 * @param beanName the name of the bean
+	 * @see MergedBeanDefinitionPostProcessor#postProcessMergedBeanDefinition
+	 */
+	protected void applyMergedBeanDefinitionPostProcessors(RootBeanDefinition mbd, Class&lt;?&gt; beanType, String beanName) {
+<span class="fc bfc" id="L1113" title="All 2 branches covered.">		for (MergedBeanDefinitionPostProcessor processor : getBeanPostProcessorCache().mergedDefinition) {</span>
+<span class="fc" id="L1114">			processor.postProcessMergedBeanDefinition(mbd, beanType, beanName);</span>
+<span class="fc" id="L1115">		}</span>
+<span class="fc" id="L1116">	}</span>
+
+	/**
+	 * Apply before-instantiation post-processors, resolving whether there is a
+	 * before-instantiation shortcut for the specified bean.
+	 * @param beanName the name of the bean
+	 * @param mbd the bean definition for the bean
+	 * @return the shortcut-determined bean instance, or {@code null} if none
+	 */
+	@SuppressWarnings(&quot;deprecation&quot;)
+	protected @Nullable Object resolveBeforeInstantiation(String beanName, RootBeanDefinition mbd) {
+<span class="fc" id="L1127">		Object bean = null;</span>
+<span class="fc bfc" id="L1128" title="All 2 branches covered.">		if (!Boolean.FALSE.equals(mbd.beforeInstantiationResolved)) {</span>
+			// Make sure bean class is actually resolved at this point.
+<span class="pc bpc" id="L1130" title="1 of 4 branches missed.">			if (!mbd.isSynthetic() &amp;&amp; hasInstantiationAwareBeanPostProcessors()) {</span>
+<span class="fc" id="L1131">				Class&lt;?&gt; targetType = determineTargetType(beanName, mbd);</span>
+<span class="fc bfc" id="L1132" title="All 2 branches covered.">				if (targetType != null) {</span>
+<span class="fc" id="L1133">					bean = applyBeanPostProcessorsBeforeInstantiation(targetType, beanName);</span>
+<span class="pc bpc" id="L1134" title="1 of 2 branches missed.">					if (bean != null) {</span>
+<span class="nc" id="L1135">						bean = applyBeanPostProcessorsAfterInitialization(bean, beanName);</span>
+					}
+				}
+			}
+<span class="pc bpc" id="L1139" title="1 of 2 branches missed.">			mbd.beforeInstantiationResolved = (bean != null);</span>
+		}
+<span class="fc" id="L1141">		return bean;</span>
+	}
+
+	/**
+	 * Apply InstantiationAwareBeanPostProcessors to the specified bean definition
+	 * (by class and name), invoking their {@code postProcessBeforeInstantiation} methods.
+	 * &lt;p&gt;Any returned object will be used as the bean instead of actually instantiating
+	 * the target bean. A {@code null} return value from the post-processor will
+	 * result in the target bean being instantiated.
+	 * @param beanClass the class of the bean to be instantiated
+	 * @param beanName the name of the bean
+	 * @return the bean object to use instead of a default instance of the target bean, or {@code null}
+	 * @see InstantiationAwareBeanPostProcessor#postProcessBeforeInstantiation
+	 */
+	protected @Nullable Object applyBeanPostProcessorsBeforeInstantiation(Class&lt;?&gt; beanClass, String beanName) {
+<span class="fc bfc" id="L1156" title="All 2 branches covered.">		for (InstantiationAwareBeanPostProcessor bp : getBeanPostProcessorCache().instantiationAware) {</span>
+<span class="fc" id="L1157">			Object result = bp.postProcessBeforeInstantiation(beanClass, beanName);</span>
+<span class="pc bpc" id="L1158" title="1 of 2 branches missed.">			if (result != null) {</span>
+<span class="nc" id="L1159">				return result;</span>
+			}
+<span class="fc" id="L1161">		}</span>
+<span class="fc" id="L1162">		return null;</span>
+	}
+
+	/**
+	 * Create a new instance for the specified bean, using an appropriate instantiation strategy:
+	 * factory method, constructor autowiring, or simple instantiation.
+	 * @param beanName the name of the bean
+	 * @param mbd the bean definition for the bean
+	 * @param args explicit arguments to use for constructor or factory method invocation
+	 * @return a BeanWrapper for the new instance
+	 * @see #obtainFromSupplier
+	 * @see #instantiateUsingFactoryMethod
+	 * @see #autowireConstructor
+	 * @see #instantiateBean
+	 */
+	protected BeanWrapper createBeanInstance(String beanName, RootBeanDefinition mbd, @Nullable Object @Nullable [] args) {
+		// Make sure bean class is actually resolved at this point.
+<span class="fc" id="L1179">		Class&lt;?&gt; beanClass = resolveBeanClass(mbd, beanName);</span>
+
+<span class="pc bpc" id="L1181" title="1 of 6 branches missed.">		if (beanClass != null &amp;&amp; !Modifier.isPublic(beanClass.getModifiers()) &amp;&amp; !mbd.isNonPublicAccessAllowed()) {</span>
+<span class="nc" id="L1182">			throw new BeanCreationException(mbd.getResourceDescription(), beanName,</span>
+<span class="nc" id="L1183">					&quot;Bean class isn't public, and non-public access not allowed: &quot; + beanClass.getName());</span>
+		}
+
+<span class="fc bfc" id="L1186" title="All 2 branches covered.">		if (args == null) {</span>
+<span class="fc" id="L1187">			Supplier&lt;?&gt; instanceSupplier = mbd.getInstanceSupplier();</span>
+<span class="fc bfc" id="L1188" title="All 2 branches covered.">			if (instanceSupplier != null) {</span>
+<span class="fc" id="L1189">				return obtainFromSupplier(instanceSupplier, beanName, mbd);</span>
+			}
+		}
+
+<span class="fc bfc" id="L1193" title="All 2 branches covered.">		if (mbd.getFactoryMethodName() != null) {</span>
+<span class="fc" id="L1194">			return instantiateUsingFactoryMethod(beanName, mbd, args);</span>
+		}
+
+		// Shortcut when re-creating the same bean...
+<span class="fc" id="L1198">		boolean resolved = false;</span>
+<span class="fc" id="L1199">		boolean autowireNecessary = false;</span>
+<span class="fc bfc" id="L1200" title="All 2 branches covered.">		if (args == null) {</span>
+<span class="fc" id="L1201">			synchronized (mbd.constructorArgumentLock) {</span>
+<span class="fc bfc" id="L1202" title="All 2 branches covered.">				if (mbd.resolvedConstructorOrFactoryMethod != null) {</span>
+<span class="fc" id="L1203">					resolved = true;</span>
+<span class="fc" id="L1204">					autowireNecessary = mbd.constructorArgumentsResolved;</span>
+				}
+<span class="fc" id="L1206">			}</span>
+		}
+<span class="fc bfc" id="L1208" title="All 2 branches covered.">		if (resolved) {</span>
+<span class="fc bfc" id="L1209" title="All 2 branches covered.">			if (autowireNecessary) {</span>
+<span class="fc" id="L1210">				return autowireConstructor(beanName, mbd, null, null);</span>
+			}
+			else {
+<span class="fc" id="L1213">				return instantiateBean(beanName, mbd);</span>
+			}
+		}
+
+		// Candidate constructors for autowiring?
+<span class="fc" id="L1218">		Constructor&lt;?&gt;[] ctors = determineConstructorsFromBeanPostProcessors(beanClass, beanName);</span>
+<span class="fc bfc" id="L1219" title="All 4 branches covered.">		if (ctors != null || mbd.getResolvedAutowireMode() == AUTOWIRE_CONSTRUCTOR ||</span>
+<span class="fc bfc" id="L1220" title="All 4 branches covered.">				mbd.hasConstructorArgumentValues() || !ObjectUtils.isEmpty(args)) {</span>
+<span class="fc" id="L1221">			return autowireConstructor(beanName, mbd, ctors, args);</span>
+		}
+
+		// Preferred constructors for default construction?
+<span class="fc" id="L1225">		ctors = mbd.getPreferredConstructors();</span>
+<span class="fc bfc" id="L1226" title="All 2 branches covered.">		if (ctors != null) {</span>
+<span class="fc" id="L1227">			return autowireConstructor(beanName, mbd, ctors, null);</span>
+		}
+
+		// No special handling: simply use no-arg constructor.
+<span class="fc" id="L1231">		return instantiateBean(beanName, mbd);</span>
+	}
+
+	/**
+	 * Obtain a bean instance from the given supplier.
+	 * @param supplier the configured supplier
+	 * @param beanName the corresponding bean name
+	 * @return a BeanWrapper for the new instance
+	 */
+	private BeanWrapper obtainFromSupplier(Supplier&lt;?&gt; supplier, String beanName, RootBeanDefinition mbd) {
+<span class="fc" id="L1241">		String outerBean = this.currentlyCreatedBean.get();</span>
+<span class="fc" id="L1242">		this.currentlyCreatedBean.set(beanName);</span>
+		Object instance;
+
+		try {
+<span class="fc" id="L1246">			instance = obtainInstanceFromSupplier(supplier, beanName, mbd);</span>
+		}
+<span class="fc" id="L1248">		catch (Throwable ex) {</span>
+<span class="fc bfc" id="L1249" title="All 2 branches covered.">			if (ex instanceof BeansException beansException) {</span>
+<span class="fc" id="L1250">				throw beansException;</span>
+			}
+<span class="fc" id="L1252">			throw new BeanCreationException(beanName, &quot;Instantiation of supplied bean failed&quot;, ex);</span>
+		}
+		finally {
+<span class="pc bpc" id="L1255" title="1 of 2 branches missed.">			if (outerBean != null) {</span>
+<span class="nc" id="L1256">				this.currentlyCreatedBean.set(outerBean);</span>
+			}
+			else {
+<span class="fc" id="L1259">				this.currentlyCreatedBean.remove();</span>
+			}
+		}
+
+<span class="fc bfc" id="L1263" title="All 2 branches covered.">		if (instance == null) {</span>
+<span class="fc" id="L1264">			instance = new NullBean();</span>
+		}
+<span class="fc" id="L1266">		BeanWrapper bw = new BeanWrapperImpl(instance);</span>
+<span class="fc" id="L1267">		initBeanWrapper(bw);</span>
+<span class="fc" id="L1268">		return bw;</span>
+	}
+
+	/**
+	 * Obtain a bean instance from the given supplier.
+	 * @param supplier the configured supplier
+	 * @param beanName the corresponding bean name
+	 * @param mbd the bean definition for the bean
+	 * @return the bean instance (possibly {@code null})
+	 * @since 6.0.7
+	 */
+	protected @Nullable Object obtainInstanceFromSupplier(Supplier&lt;?&gt; supplier, String beanName, RootBeanDefinition mbd)
+			throws Exception {
+
+<span class="fc bfc" id="L1282" title="All 2 branches covered.">		if (supplier instanceof ThrowingSupplier&lt;?&gt; throwingSupplier) {</span>
+<span class="fc" id="L1283">			return throwingSupplier.getWithException();</span>
+		}
+<span class="fc" id="L1285">		return supplier.get();</span>
+	}
+
+	/**
+	 * Overridden in order to implicitly register the currently created bean as
+	 * dependent on further beans getting programmatically retrieved during a
+	 * {@link Supplier} callback.
+	 * @since 5.0
+	 * @see #obtainFromSupplier
+	 */
+	@Override
+	protected Object getObjectForBeanInstance(Object beanInstance, @Nullable Class&lt;?&gt; requiredType,
+			String name, String beanName, @Nullable RootBeanDefinition mbd) {
+
+<span class="fc" id="L1299">		String currentlyCreatedBean = this.currentlyCreatedBean.get();</span>
+<span class="fc bfc" id="L1300" title="All 2 branches covered.">		if (currentlyCreatedBean != null) {</span>
+<span class="fc" id="L1301">			registerDependentBean(beanName, currentlyCreatedBean);</span>
+		}
+
+<span class="fc" id="L1304">		return super.getObjectForBeanInstance(beanInstance, requiredType, name, beanName, mbd);</span>
+	}
+
+	/**
+	 * Determine candidate constructors to use for the given bean, checking all registered
+	 * {@link SmartInstantiationAwareBeanPostProcessor SmartInstantiationAwareBeanPostProcessors}.
+	 * @param beanClass the raw class of the bean
+	 * @param beanName the name of the bean
+	 * @return the candidate constructors, or {@code null} if none specified
+	 * @throws org.springframework.beans.BeansException in case of errors
+	 * @see org.springframework.beans.factory.config.SmartInstantiationAwareBeanPostProcessor#determineCandidateConstructors
+	 */
+	protected Constructor&lt;?&gt; @Nullable [] determineConstructorsFromBeanPostProcessors(@Nullable Class&lt;?&gt; beanClass, String beanName)
+			throws BeansException {
+
+<span class="fc bfc" id="L1319" title="All 4 branches covered.">		if (beanClass != null &amp;&amp; hasInstantiationAwareBeanPostProcessors()) {</span>
+<span class="fc bfc" id="L1320" title="All 2 branches covered.">			for (SmartInstantiationAwareBeanPostProcessor bp : getBeanPostProcessorCache().smartInstantiationAware) {</span>
+<span class="fc" id="L1321">				Constructor&lt;?&gt;[] ctors = bp.determineCandidateConstructors(beanClass, beanName);</span>
+<span class="fc bfc" id="L1322" title="All 2 branches covered.">				if (ctors != null) {</span>
+<span class="fc" id="L1323">					return ctors;</span>
+				}
+<span class="fc" id="L1325">			}</span>
+		}
+<span class="fc" id="L1327">		return null;</span>
+	}
+
+	/**
+	 * Instantiate the given bean using its default constructor.
+	 * @param beanName the name of the bean
+	 * @param mbd the bean definition for the bean
+	 * @return a BeanWrapper for the new instance
+	 */
+	protected BeanWrapper instantiateBean(String beanName, RootBeanDefinition mbd) {
+		try {
+<span class="fc" id="L1338">			Object beanInstance = getInstantiationStrategy().instantiate(mbd, beanName, this);</span>
+<span class="fc" id="L1339">			BeanWrapper bw = new BeanWrapperImpl(beanInstance);</span>
+<span class="fc" id="L1340">			initBeanWrapper(bw);</span>
+<span class="fc" id="L1341">			return bw;</span>
+		}
+<span class="fc" id="L1343">		catch (Throwable ex) {</span>
+<span class="fc" id="L1344">			throw new BeanCreationException(mbd.getResourceDescription(), beanName, ex.getMessage(), ex);</span>
+		}
+	}
+
+	/**
+	 * Instantiate the bean using a named factory method. The method may be static, if the
+	 * mbd parameter specifies a class, rather than a factoryBean, or an instance variable
+	 * on a factory object itself configured using Dependency Injection.
+	 * @param beanName the name of the bean
+	 * @param mbd the bean definition for the bean
+	 * @param explicitArgs argument values passed in programmatically via the getBean method,
+	 * or {@code null} if none (implying the use of constructor argument values from bean definition)
+	 * @return a BeanWrapper for the new instance
+	 * @see #getBean(String, Object[])
+	 */
+	protected BeanWrapper instantiateUsingFactoryMethod(
+			String beanName, RootBeanDefinition mbd, @Nullable Object @Nullable [] explicitArgs) {
+
+<span class="fc" id="L1362">		return new ConstructorResolver(this).instantiateUsingFactoryMethod(beanName, mbd, explicitArgs);</span>
+	}
+
+	/**
+	 * &quot;autowire constructor&quot; (with constructor arguments by type) behavior.
+	 * Also applied if explicit constructor argument values are specified,
+	 * matching all remaining arguments with beans from the bean factory.
+	 * &lt;p&gt;This corresponds to constructor injection: In this mode, a Spring
+	 * bean factory is able to host components that expect constructor-based
+	 * dependency resolution.
+	 * @param beanName the name of the bean
+	 * @param mbd the bean definition for the bean
+	 * @param ctors the chosen candidate constructors
+	 * @param explicitArgs argument values passed in programmatically via the getBean method,
+	 * or {@code null} if none (implying the use of constructor argument values from bean definition)
+	 * @return a BeanWrapper for the new instance
+	 */
+	protected BeanWrapper autowireConstructor(
+			String beanName, RootBeanDefinition mbd, Constructor&lt;?&gt; @Nullable [] ctors, @Nullable Object @Nullable [] explicitArgs) {
+
+<span class="fc" id="L1382">		return new ConstructorResolver(this).autowireConstructor(beanName, mbd, ctors, explicitArgs);</span>
+	}
+
+	/**
+	 * Populate the bean instance in the given BeanWrapper with the property values
+	 * from the bean definition.
+	 * @param beanName the name of the bean
+	 * @param mbd the bean definition for the bean
+	 * @param bw the BeanWrapper with bean instance
+	 */
+	protected void populateBean(String beanName, RootBeanDefinition mbd, @Nullable BeanWrapper bw) {
+<span class="pc bpc" id="L1393" title="1 of 2 branches missed.">		if (bw == null) {</span>
+<span class="nc bnc" id="L1394" title="All 2 branches missed.">			if (mbd.hasPropertyValues()) {</span>
+<span class="nc" id="L1395">				throw new BeanCreationException(</span>
+<span class="nc" id="L1396">						mbd.getResourceDescription(), beanName, &quot;Cannot apply property values to null instance&quot;);</span>
+			}
+			else {
+				// Skip property population phase for null instance.
+<span class="nc" id="L1400">				return;</span>
+			}
+		}
+
+<span class="pc bpc" id="L1404" title="1 of 2 branches missed.">		if (bw.getWrappedClass().isRecord()) {</span>
+<span class="nc bnc" id="L1405" title="All 2 branches missed.">			if (mbd.hasPropertyValues()) {</span>
+<span class="nc" id="L1406">				throw new BeanCreationException(</span>
+<span class="nc" id="L1407">						mbd.getResourceDescription(), beanName, &quot;Cannot apply property values to a record&quot;);</span>
+			}
+			else {
+				// Skip property population phase for records since they are immutable.
+<span class="nc" id="L1411">				return;</span>
+			}
+		}
+
+		// Give any InstantiationAwareBeanPostProcessors the opportunity to modify the
+		// state of the bean before properties are set. This can be used, for example,
+		// to support styles of field injection.
+<span class="pc bpc" id="L1418" title="1 of 4 branches missed.">		if (!mbd.isSynthetic() &amp;&amp; hasInstantiationAwareBeanPostProcessors()) {</span>
+<span class="fc bfc" id="L1419" title="All 2 branches covered.">			for (InstantiationAwareBeanPostProcessor bp : getBeanPostProcessorCache().instantiationAware) {</span>
+<span class="fc bfc" id="L1420" title="All 2 branches covered.">				if (!bp.postProcessAfterInstantiation(bw.getWrappedInstance(), beanName)) {</span>
+<span class="fc" id="L1421">					return;</span>
+				}
+<span class="fc" id="L1423">			}</span>
+		}
+
+<span class="fc bfc" id="L1426" title="All 2 branches covered.">		PropertyValues pvs = (mbd.hasPropertyValues() ? mbd.getPropertyValues() : null);</span>
+
+<span class="fc" id="L1428">		int resolvedAutowireMode = mbd.getResolvedAutowireMode();</span>
+<span class="fc bfc" id="L1429" title="All 4 branches covered.">		if (resolvedAutowireMode == AUTOWIRE_BY_NAME || resolvedAutowireMode == AUTOWIRE_BY_TYPE) {</span>
+<span class="fc" id="L1430">			MutablePropertyValues newPvs = new MutablePropertyValues(pvs);</span>
+			// Add property values based on autowire by name if applicable.
+<span class="fc bfc" id="L1432" title="All 2 branches covered.">			if (resolvedAutowireMode == AUTOWIRE_BY_NAME) {</span>
+<span class="fc" id="L1433">				autowireByName(beanName, mbd, bw, newPvs);</span>
+			}
+			// Add property values based on autowire by type if applicable.
+<span class="fc bfc" id="L1436" title="All 2 branches covered.">			if (resolvedAutowireMode == AUTOWIRE_BY_TYPE) {</span>
+<span class="fc" id="L1437">				autowireByType(beanName, mbd, bw, newPvs);</span>
+			}
+<span class="fc" id="L1439">			pvs = newPvs;</span>
+		}
+<span class="fc bfc" id="L1441" title="All 2 branches covered.">		if (hasInstantiationAwareBeanPostProcessors()) {</span>
+<span class="fc bfc" id="L1442" title="All 2 branches covered.">			if (pvs == null) {</span>
+<span class="fc" id="L1443">				pvs = mbd.getPropertyValues();</span>
+			}
+<span class="fc bfc" id="L1445" title="All 2 branches covered.">			for (InstantiationAwareBeanPostProcessor bp : getBeanPostProcessorCache().instantiationAware) {</span>
+<span class="fc" id="L1446">				PropertyValues pvsToUse = bp.postProcessProperties(pvs, bw.getWrappedInstance(), beanName);</span>
+<span class="pc bpc" id="L1447" title="1 of 2 branches missed.">				if (pvsToUse == null) {</span>
+<span class="nc" id="L1448">					return;</span>
+				}
+<span class="fc" id="L1450">				pvs = pvsToUse;</span>
+<span class="fc" id="L1451">			}</span>
+		}
+
+<span class="fc bfc" id="L1454" title="All 2 branches covered.">		boolean needsDepCheck = (mbd.getDependencyCheck() != AbstractBeanDefinition.DEPENDENCY_CHECK_NONE);</span>
+<span class="fc bfc" id="L1455" title="All 2 branches covered.">		if (needsDepCheck) {</span>
+<span class="fc" id="L1456">			PropertyDescriptor[] filteredPds = filterPropertyDescriptorsForDependencyCheck(bw, mbd.allowCaching);</span>
+<span class="fc" id="L1457">			checkDependencies(beanName, mbd, filteredPds, pvs);</span>
+		}
+
+<span class="fc bfc" id="L1460" title="All 2 branches covered.">		if (pvs != null) {</span>
+<span class="fc" id="L1461">			applyPropertyValues(beanName, mbd, bw, pvs);</span>
+		}
+<span class="fc" id="L1463">	}</span>
+
+	/**
+	 * Fill in any missing property values with references to
+	 * other beans in this factory if autowire is set to &quot;byName&quot;.
+	 * @param beanName the name of the bean we're wiring up.
+	 * Useful for debugging messages; not used functionally.
+	 * @param mbd bean definition to update through autowiring
+	 * @param bw the BeanWrapper from which we can obtain information about the bean
+	 * @param pvs the PropertyValues to register wired objects with
+	 */
+	protected void autowireByName(
+			String beanName, AbstractBeanDefinition mbd, BeanWrapper bw, MutablePropertyValues pvs) {
+
+<span class="fc" id="L1477">		String[] propertyNames = unsatisfiedNonSimpleProperties(mbd, bw);</span>
+<span class="fc bfc" id="L1478" title="All 2 branches covered.">		for (String propertyName : propertyNames) {</span>
+<span class="fc bfc" id="L1479" title="All 2 branches covered.">			if (containsBean(propertyName)) {</span>
+<span class="fc" id="L1480">				Object bean = getBean(propertyName);</span>
+<span class="fc" id="L1481">				pvs.add(propertyName, bean);</span>
+<span class="fc" id="L1482">				registerDependentBean(propertyName, beanName);</span>
+<span class="pc bpc" id="L1483" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1484">					logger.trace(&quot;Added autowiring by name from bean name '&quot; + beanName +</span>
+							&quot;' via property '&quot; + propertyName + &quot;' to bean named '&quot; + propertyName + &quot;'&quot;);
+				}
+<span class="fc" id="L1487">			}</span>
+			else {
+<span class="pc bpc" id="L1489" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1490">					logger.trace(&quot;Not autowiring property '&quot; + propertyName + &quot;' of bean '&quot; + beanName +</span>
+							&quot;' by name: no matching bean found&quot;);
+				}
+			}
+		}
+<span class="fc" id="L1495">	}</span>
+
+	/**
+	 * Abstract method defining &quot;autowire by type&quot; (bean properties by type) behavior.
+	 * &lt;p&gt;This is like PicoContainer default, in which there must be exactly one bean
+	 * of the property type in the bean factory. This makes bean factories simple to
+	 * configure for small namespaces, but doesn't work as well as standard Spring
+	 * behavior for bigger applications.
+	 * @param beanName the name of the bean to autowire by type
+	 * @param mbd the merged bean definition to update through autowiring
+	 * @param bw the BeanWrapper from which we can obtain information about the bean
+	 * @param pvs the PropertyValues to register wired objects with
+	 */
+	protected void autowireByType(
+			String beanName, AbstractBeanDefinition mbd, BeanWrapper bw, MutablePropertyValues pvs) {
+
+<span class="fc" id="L1511">		TypeConverter converter = getCustomTypeConverter();</span>
+<span class="pc bpc" id="L1512" title="1 of 2 branches missed.">		if (converter == null) {</span>
+<span class="fc" id="L1513">			converter = bw;</span>
+		}
+
+<span class="fc" id="L1516">		String[] propertyNames = unsatisfiedNonSimpleProperties(mbd, bw);</span>
+<span class="fc" id="L1517">		Set&lt;String&gt; autowiredBeanNames = new LinkedHashSet&lt;&gt;(propertyNames.length * 2);</span>
+<span class="fc bfc" id="L1518" title="All 2 branches covered.">		for (String propertyName : propertyNames) {</span>
+			try {
+<span class="fc" id="L1520">				PropertyDescriptor pd = bw.getPropertyDescriptor(propertyName);</span>
+				// Don't try autowiring by type for type Object: never makes sense,
+				// even if it technically is an unsatisfied, non-simple property.
+<span class="fc bfc" id="L1523" title="All 2 branches covered.">				if (Object.class != pd.getPropertyType()) {</span>
+<span class="fc" id="L1524">					MethodParameter methodParam = BeanUtils.getWriteMethodParameter(pd);</span>
+					// Do not allow eager init for type matching in case of a prioritized post-processor.
+<span class="pc bpc" id="L1526" title="1 of 2 branches missed.">					boolean eager = !(bw.getWrappedInstance() instanceof PriorityOrdered);</span>
+<span class="fc" id="L1527">					DependencyDescriptor desc = new AutowireByTypeDependencyDescriptor(methodParam, eager);</span>
+<span class="fc" id="L1528">					Object autowiredArgument = resolveDependency(desc, beanName, autowiredBeanNames, converter);</span>
+<span class="fc bfc" id="L1529" title="All 2 branches covered.">					if (autowiredArgument != null) {</span>
+<span class="fc" id="L1530">						pvs.add(propertyName, autowiredArgument);</span>
+					}
+<span class="fc bfc" id="L1532" title="All 2 branches covered.">					for (String autowiredBeanName : autowiredBeanNames) {</span>
+<span class="fc" id="L1533">						registerDependentBean(autowiredBeanName, beanName);</span>
+<span class="pc bpc" id="L1534" title="1 of 2 branches missed.">						if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1535">							logger.trace(&quot;Autowiring by type from bean name '&quot; + beanName + &quot;' via property '&quot; +</span>
+									propertyName + &quot;' to bean named '&quot; + autowiredBeanName + &quot;'&quot;);
+						}
+<span class="fc" id="L1538">					}</span>
+<span class="fc" id="L1539">					autowiredBeanNames.clear();</span>
+				}
+			}
+<span class="fc" id="L1542">			catch (BeansException ex) {</span>
+<span class="fc" id="L1543">				throw new UnsatisfiedDependencyException(mbd.getResourceDescription(), beanName, propertyName, ex);</span>
+<span class="fc" id="L1544">			}</span>
+		}
+<span class="fc" id="L1546">	}</span>
+
+
+	/**
+	 * Return an array of non-simple bean properties that are unsatisfied.
+	 * These are probably unsatisfied references to other beans in the
+	 * factory. Does not include simple properties like primitives or Strings.
+	 * @param mbd the merged bean definition the bean was created with
+	 * @param bw the BeanWrapper the bean was created with
+	 * @return an array of bean property names
+	 * @see org.springframework.beans.BeanUtils#isSimpleProperty
+	 */
+	protected String[] unsatisfiedNonSimpleProperties(AbstractBeanDefinition mbd, BeanWrapper bw) {
+<span class="fc" id="L1559">		Set&lt;String&gt; result = new TreeSet&lt;&gt;();</span>
+<span class="fc" id="L1560">		PropertyValues pvs = mbd.getPropertyValues();</span>
+<span class="fc" id="L1561">		PropertyDescriptor[] pds = bw.getPropertyDescriptors();</span>
+<span class="fc bfc" id="L1562" title="All 2 branches covered.">		for (PropertyDescriptor pd : pds) {</span>
+<span class="fc bfc" id="L1563" title="All 6 branches covered.">			if (pd.getWriteMethod() != null &amp;&amp; !isExcludedFromDependencyCheck(pd) &amp;&amp; !pvs.contains(pd.getName()) &amp;&amp;</span>
+<span class="fc bfc" id="L1564" title="All 2 branches covered.">					!BeanUtils.isSimpleProperty(pd.getPropertyType())) {</span>
+<span class="fc" id="L1565">				result.add(pd.getName());</span>
+			}
+		}
+<span class="fc" id="L1568">		return StringUtils.toStringArray(result);</span>
+	}
+
+	/**
+	 * Extract a filtered set of PropertyDescriptors from the given BeanWrapper,
+	 * excluding ignored dependency types or properties defined on ignored dependency interfaces.
+	 * @param bw the BeanWrapper the bean was created with
+	 * @param cache whether to cache filtered PropertyDescriptors for the given bean Class
+	 * @return the filtered PropertyDescriptors
+	 * @see #isExcludedFromDependencyCheck
+	 * @see #filterPropertyDescriptorsForDependencyCheck(org.springframework.beans.BeanWrapper)
+	 */
+	protected PropertyDescriptor[] filterPropertyDescriptorsForDependencyCheck(BeanWrapper bw, boolean cache) {
+<span class="fc" id="L1581">		PropertyDescriptor[] filtered = this.filteredPropertyDescriptorsCache.get(bw.getWrappedClass());</span>
+<span class="pc bpc" id="L1582" title="1 of 2 branches missed.">		if (filtered == null) {</span>
+<span class="fc" id="L1583">			filtered = filterPropertyDescriptorsForDependencyCheck(bw);</span>
+<span class="pc bpc" id="L1584" title="1 of 2 branches missed.">			if (cache) {</span>
+<span class="fc" id="L1585">				PropertyDescriptor[] existing =</span>
+<span class="fc" id="L1586">						this.filteredPropertyDescriptorsCache.putIfAbsent(bw.getWrappedClass(), filtered);</span>
+<span class="pc bpc" id="L1587" title="1 of 2 branches missed.">				if (existing != null) {</span>
+<span class="nc" id="L1588">					filtered = existing;</span>
+				}
+			}
+		}
+<span class="fc" id="L1592">		return filtered;</span>
+	}
+
+	/**
+	 * Extract a filtered set of PropertyDescriptors from the given BeanWrapper,
+	 * excluding ignored dependency types or properties defined on ignored dependency interfaces.
+	 * @param bw the BeanWrapper the bean was created with
+	 * @return the filtered PropertyDescriptors
+	 * @see #isExcludedFromDependencyCheck
+	 */
+	protected PropertyDescriptor[] filterPropertyDescriptorsForDependencyCheck(BeanWrapper bw) {
+<span class="fc" id="L1603">		List&lt;PropertyDescriptor&gt; pds = new ArrayList&lt;&gt;(Arrays.asList(bw.getPropertyDescriptors()));</span>
+<span class="fc" id="L1604">		pds.removeIf(this::isExcludedFromDependencyCheck);</span>
+<span class="fc" id="L1605">		return pds.toArray(new PropertyDescriptor[0]);</span>
+	}
+
+	/**
+	 * Determine whether the given bean property is excluded from dependency checks.
+	 * &lt;p&gt;This implementation excludes properties defined by CGLIB and
+	 * properties whose type matches an ignored dependency type or which
+	 * are defined by an ignored dependency interface.
+	 * @param pd the PropertyDescriptor of the bean property
+	 * @return whether the bean property is excluded
+	 * @see #ignoreDependencyType(Class)
+	 * @see #ignoreDependencyInterface(Class)
+	 */
+	protected boolean isExcludedFromDependencyCheck(PropertyDescriptor pd) {
+<span class="pc bpc" id="L1619" title="1 of 2 branches missed.">		return (AutowireUtils.isExcludedFromDependencyCheck(pd) ||</span>
+<span class="pc bpc" id="L1620" title="1 of 2 branches missed.">				this.ignoredDependencyTypes.contains(pd.getPropertyType()) ||</span>
+<span class="fc bfc" id="L1621" title="All 2 branches covered.">				AutowireUtils.isSetterDefinedInInterface(pd, this.ignoredDependencyInterfaces));</span>
+	}
+
+	/**
+	 * Perform a dependency check that all properties exposed have been set,
+	 * if desired. Dependency checks can be objects (collaborating beans),
+	 * simple (primitives and String), or all (both).
+	 * @param beanName the name of the bean
+	 * @param mbd the merged bean definition the bean was created with
+	 * @param pds the relevant property descriptors for the target bean
+	 * @param pvs the property values to be applied to the bean
+	 * @see #isExcludedFromDependencyCheck(java.beans.PropertyDescriptor)
+	 */
+	protected void checkDependencies(
+			String beanName, AbstractBeanDefinition mbd, PropertyDescriptor[] pds, @Nullable PropertyValues pvs)
+			throws UnsatisfiedDependencyException {
+
+<span class="fc" id="L1638">		int dependencyCheck = mbd.getDependencyCheck();</span>
+<span class="fc bfc" id="L1639" title="All 2 branches covered.">		for (PropertyDescriptor pd : pds) {</span>
+<span class="pc bpc" id="L1640" title="1 of 6 branches missed.">			if (pd.getWriteMethod() != null &amp;&amp; (pvs == null || !pvs.contains(pd.getName()))) {</span>
+<span class="fc" id="L1641">				boolean isSimple = BeanUtils.isSimpleProperty(pd.getPropertyType());</span>
+<span class="pc bpc" id="L1642" title="3 of 10 branches missed.">				boolean unsatisfied = (dependencyCheck == AbstractBeanDefinition.DEPENDENCY_CHECK_ALL) ||</span>
+						(isSimple &amp;&amp; dependencyCheck == AbstractBeanDefinition.DEPENDENCY_CHECK_SIMPLE) ||
+						(!isSimple &amp;&amp; dependencyCheck == AbstractBeanDefinition.DEPENDENCY_CHECK_OBJECTS);
+<span class="fc bfc" id="L1645" title="All 2 branches covered.">				if (unsatisfied) {</span>
+<span class="fc" id="L1646">					throw new UnsatisfiedDependencyException(mbd.getResourceDescription(), beanName, pd.getName(),</span>
+							&quot;Set this property value or disable dependency checking for this bean.&quot;);
+				}
+			}
+		}
+<span class="fc" id="L1651">	}</span>
+
+	/**
+	 * Apply the given property values, resolving any runtime references
+	 * to other beans in this bean factory. Must use deep copy, so we
+	 * don't permanently modify this property.
+	 * @param beanName the bean name passed for better exception information
+	 * @param mbd the merged bean definition
+	 * @param bw the BeanWrapper wrapping the target object
+	 * @param pvs the new property values
+	 */
+	protected void applyPropertyValues(String beanName, BeanDefinition mbd, BeanWrapper bw, PropertyValues pvs) {
+<span class="fc bfc" id="L1663" title="All 2 branches covered.">		if (pvs.isEmpty()) {</span>
+<span class="fc" id="L1664">			return;</span>
+		}
+
+<span class="fc" id="L1667">		MutablePropertyValues mpvs = null;</span>
+		List&lt;PropertyValue&gt; original;
+
+<span class="pc bpc" id="L1670" title="1 of 2 branches missed.">		if (pvs instanceof MutablePropertyValues _mpvs) {</span>
+<span class="fc" id="L1671">			mpvs = _mpvs;</span>
+<span class="fc bfc" id="L1672" title="All 2 branches covered.">			if (mpvs.isConverted()) {</span>
+				// Shortcut: use the pre-converted values as-is.
+				try {
+<span class="fc" id="L1675">					bw.setPropertyValues(mpvs);</span>
+<span class="fc" id="L1676">					return;</span>
+				}
+<span class="nc" id="L1678">				catch (BeansException ex) {</span>
+<span class="nc" id="L1679">					throw new BeanCreationException(</span>
+<span class="nc" id="L1680">							mbd.getResourceDescription(), beanName, &quot;Error setting property values&quot;, ex);</span>
+				}
+			}
+<span class="fc" id="L1683">			original = mpvs.getPropertyValueList();</span>
+		}
+		else {
+<span class="nc" id="L1686">			original = Arrays.asList(pvs.getPropertyValues());</span>
+		}
+
+<span class="fc" id="L1689">		TypeConverter converter = getCustomTypeConverter();</span>
+<span class="fc bfc" id="L1690" title="All 2 branches covered.">		if (converter == null) {</span>
+<span class="fc" id="L1691">			converter = bw;</span>
+		}
+<span class="fc" id="L1693">		BeanDefinitionValueResolver valueResolver = new BeanDefinitionValueResolver(this, beanName, mbd, converter);</span>
+
+		// Create a deep copy, resolving any references for values.
+<span class="fc" id="L1696">		List&lt;PropertyValue&gt; deepCopy = new ArrayList&lt;&gt;(original.size());</span>
+<span class="fc" id="L1697">		boolean resolveNecessary = false;</span>
+<span class="fc bfc" id="L1698" title="All 2 branches covered.">		for (PropertyValue pv : original) {</span>
+<span class="fc bfc" id="L1699" title="All 2 branches covered.">			if (pv.isConverted()) {</span>
+<span class="fc" id="L1700">				deepCopy.add(pv);</span>
+			}
+			else {
+<span class="fc" id="L1703">				String propertyName = pv.getName();</span>
+<span class="fc" id="L1704">				Object originalValue = pv.getValue();</span>
+<span class="fc bfc" id="L1705" title="All 2 branches covered.">				if (originalValue == AutowiredPropertyMarker.INSTANCE) {</span>
+<span class="fc" id="L1706">					Method writeMethod = bw.getPropertyDescriptor(propertyName).getWriteMethod();</span>
+<span class="pc bpc" id="L1707" title="1 of 2 branches missed.">					if (writeMethod == null) {</span>
+<span class="nc" id="L1708">						throw new IllegalArgumentException(&quot;Autowire marker for property without write method: &quot; + pv);</span>
+					}
+<span class="fc" id="L1710">					originalValue = new DependencyDescriptor(new MethodParameter(writeMethod, 0), true);</span>
+				}
+<span class="fc" id="L1712">				Object resolvedValue = valueResolver.resolveValueIfNecessary(pv, originalValue);</span>
+<span class="fc" id="L1713">				Object convertedValue = resolvedValue;</span>
+<span class="fc" id="L1714">				boolean convertible = isConvertibleProperty(propertyName, bw);</span>
+<span class="fc bfc" id="L1715" title="All 2 branches covered.">				if (convertible) {</span>
+<span class="fc" id="L1716">					convertedValue = convertForProperty(resolvedValue, propertyName, bw, converter);</span>
+				}
+				// Possibly store converted value in merged bean definition,
+				// in order to avoid re-conversion for every created bean instance.
+<span class="fc bfc" id="L1720" title="All 2 branches covered.">				if (resolvedValue == originalValue) {</span>
+<span class="fc bfc" id="L1721" title="All 2 branches covered.">					if (convertible) {</span>
+<span class="fc" id="L1722">						pv.setConvertedValue(convertedValue);</span>
+					}
+<span class="fc" id="L1724">					deepCopy.add(pv);</span>
+				}
+<span class="fc bfc" id="L1726" title="All 4 branches covered.">				else if (convertible &amp;&amp; originalValue instanceof TypedStringValue typedStringValue &amp;&amp;</span>
+<span class="pc bpc" id="L1727" title="1 of 4 branches missed.">						!typedStringValue.isDynamic() &amp;&amp;</span>
+<span class="fc bfc" id="L1728" title="All 2 branches covered.">						!(convertedValue instanceof Collection || ObjectUtils.isArray(convertedValue))) {</span>
+<span class="fc" id="L1729">					pv.setConvertedValue(convertedValue);</span>
+<span class="fc" id="L1730">					deepCopy.add(pv);</span>
+				}
+				else {
+<span class="fc" id="L1733">					resolveNecessary = true;</span>
+<span class="fc" id="L1734">					deepCopy.add(new PropertyValue(pv, convertedValue));</span>
+				}
+			}
+<span class="fc" id="L1737">		}</span>
+<span class="pc bpc" id="L1738" title="1 of 4 branches missed.">		if (mpvs != null &amp;&amp; !resolveNecessary) {</span>
+<span class="fc" id="L1739">			mpvs.setConverted();</span>
+		}
+
+		// Set our (possibly massaged) deep copy.
+		try {
+<span class="fc" id="L1744">			bw.setPropertyValues(new MutablePropertyValues(deepCopy));</span>
+		}
+<span class="fc" id="L1746">		catch (BeansException ex) {</span>
+<span class="fc" id="L1747">			throw new BeanCreationException(mbd.getResourceDescription(), beanName, ex.getMessage(), ex);</span>
+<span class="fc" id="L1748">		}</span>
+<span class="fc" id="L1749">	}</span>
+
+	/**
+	 * Determine whether the factory should cache a converted value for the given property.
+	 */
+	private boolean isConvertibleProperty(String propertyName, BeanWrapper bw) {
+		try {
+<span class="fc bfc" id="L1756" title="All 2 branches covered.">			return !PropertyAccessorUtils.isNestedOrIndexedProperty(propertyName) &amp;&amp;</span>
+<span class="fc bfc" id="L1757" title="All 2 branches covered.">					BeanUtils.hasUniqueWriteMethod(bw.getPropertyDescriptor(propertyName));</span>
+		}
+<span class="fc" id="L1759">		catch (InvalidPropertyException ex) {</span>
+<span class="fc" id="L1760">			return false;</span>
+		}
+	}
+
+	/**
+	 * Convert the given value for the specified target property.
+	 */
+	private @Nullable Object convertForProperty(
+			@Nullable Object value, String propertyName, BeanWrapper bw, TypeConverter converter) {
+
+<span class="fc bfc" id="L1770" title="All 2 branches covered.">		if (converter instanceof BeanWrapperImpl beanWrapper) {</span>
+<span class="fc" id="L1771">			return beanWrapper.convertForProperty(value, propertyName);</span>
+		}
+		else {
+<span class="fc" id="L1774">			PropertyDescriptor pd = bw.getPropertyDescriptor(propertyName);</span>
+<span class="fc" id="L1775">			MethodParameter methodParam = BeanUtils.getWriteMethodParameter(pd);</span>
+<span class="fc" id="L1776">			return converter.convertIfNecessary(value, pd.getPropertyType(), methodParam);</span>
+		}
+	}
+
+
+	/**
+	 * Initialize the given bean instance, applying factory callbacks
+	 * as well as init methods and bean post processors.
+	 * &lt;p&gt;Called from {@link #createBean} for traditionally defined beans,
+	 * and from {@link #initializeBean} for existing bean instances.
+	 * @param beanName the bean name in the factory (for debugging purposes)
+	 * @param bean the new bean instance we may need to initialize
+	 * @param mbd the bean definition that the bean was created with
+	 * (can also be {@code null}, if given an existing bean instance)
+	 * @return the initialized bean instance (potentially wrapped)
+	 * @see BeanNameAware
+	 * @see BeanClassLoaderAware
+	 * @see BeanFactoryAware
+	 * @see #applyBeanPostProcessorsBeforeInitialization
+	 * @see #invokeInitMethods
+	 * @see #applyBeanPostProcessorsAfterInitialization
+	 */
+	@SuppressWarnings(&quot;deprecation&quot;)
+	protected Object initializeBean(String beanName, Object bean, @Nullable RootBeanDefinition mbd) {
+		// Skip initialization of a NullBean
+<span class="fc bfc" id="L1801" title="All 2 branches covered.">		if (bean.getClass() == NullBean.class) {</span>
+<span class="fc" id="L1802">			return bean;</span>
+		}
+
+<span class="fc" id="L1805">		invokeAwareMethods(beanName, bean);</span>
+
+<span class="fc" id="L1807">		Object wrappedBean = bean;</span>
+<span class="pc bpc" id="L1808" title="1 of 4 branches missed.">		if (mbd == null || !mbd.isSynthetic()) {</span>
+<span class="fc" id="L1809">			wrappedBean = applyBeanPostProcessorsBeforeInitialization(wrappedBean, beanName);</span>
+		}
+
+		try {
+<span class="fc" id="L1813">			invokeInitMethods(beanName, wrappedBean, mbd);</span>
+		}
+<span class="nc" id="L1815">		catch (Throwable ex) {</span>
+<span class="nc" id="L1816">			throw new BeanCreationException(</span>
+<span class="nc bnc" id="L1817" title="All 2 branches missed.">					(mbd != null ? mbd.getResourceDescription() : null), beanName, ex.getMessage(), ex);</span>
+<span class="fc" id="L1818">		}</span>
+<span class="pc bpc" id="L1819" title="1 of 4 branches missed.">		if (mbd == null || !mbd.isSynthetic()) {</span>
+<span class="fc" id="L1820">			wrappedBean = applyBeanPostProcessorsAfterInitialization(wrappedBean, beanName);</span>
+		}
+
+<span class="fc" id="L1823">		return wrappedBean;</span>
+	}
+
+	private void invokeAwareMethods(String beanName, Object bean) {
+<span class="fc bfc" id="L1827" title="All 2 branches covered.">		if (bean instanceof Aware) {</span>
+<span class="fc bfc" id="L1828" title="All 2 branches covered.">			if (bean instanceof BeanNameAware beanNameAware) {</span>
+<span class="fc" id="L1829">				beanNameAware.setBeanName(beanName);</span>
+			}
+<span class="fc bfc" id="L1831" title="All 2 branches covered.">			if (bean instanceof BeanClassLoaderAware beanClassLoaderAware) {</span>
+<span class="fc" id="L1832">				ClassLoader bcl = getBeanClassLoader();</span>
+<span class="pc bpc" id="L1833" title="1 of 2 branches missed.">				if (bcl != null) {</span>
+<span class="fc" id="L1834">					beanClassLoaderAware.setBeanClassLoader(bcl);</span>
+				}
+			}
+<span class="fc bfc" id="L1837" title="All 2 branches covered.">			if (bean instanceof BeanFactoryAware beanFactoryAware) {</span>
+<span class="fc" id="L1838">				beanFactoryAware.setBeanFactory(AbstractAutowireCapableBeanFactory.this);</span>
+			}
+		}
+<span class="fc" id="L1841">	}</span>
+
+	/**
+	 * Give a bean a chance to initialize itself after all its properties are set,
+	 * and a chance to know about its owning bean factory (this object).
+	 * &lt;p&gt;This means checking whether the bean implements {@link InitializingBean}
+	 * or defines any custom init methods, and invoking the necessary callback(s)
+	 * if it does.
+	 * @param beanName the bean name in the factory (for debugging purposes)
+	 * @param bean the new bean instance we may need to initialize
+	 * @param mbd the merged bean definition that the bean was created with
+	 * (can also be {@code null}, if given an existing bean instance)
+	 * @throws Throwable if thrown by init methods or by the invocation process
+	 * @see #invokeCustomInitMethod
+	 */
+	protected void invokeInitMethods(String beanName, Object bean, @Nullable RootBeanDefinition mbd)
+			throws Throwable {
+
+<span class="fc" id="L1859">		boolean isInitializingBean = (bean instanceof InitializingBean);</span>
+<span class="pc bpc" id="L1860" title="2 of 6 branches missed.">		if (isInitializingBean &amp;&amp; (mbd == null || !mbd.hasAnyExternallyManagedInitMethod(&quot;afterPropertiesSet&quot;))) {</span>
+<span class="pc bpc" id="L1861" title="1 of 2 branches missed.">			if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1862">				logger.trace(&quot;Invoking afterPropertiesSet() on bean with name '&quot; + beanName + &quot;'&quot;);</span>
+			}
+<span class="fc" id="L1864">			((InitializingBean) bean).afterPropertiesSet();</span>
+		}
+
+<span class="pc bpc" id="L1867" title="1 of 4 branches missed.">		if (mbd != null &amp;&amp; bean.getClass() != NullBean.class) {</span>
+<span class="fc" id="L1868">			String[] initMethodNames = mbd.getInitMethodNames();</span>
+<span class="fc bfc" id="L1869" title="All 2 branches covered.">			if (initMethodNames != null) {</span>
+<span class="fc bfc" id="L1870" title="All 2 branches covered.">				for (String initMethodName : initMethodNames) {</span>
+<span class="fc bfc" id="L1871" title="All 4 branches covered.">					if (StringUtils.hasLength(initMethodName) &amp;&amp;</span>
+<span class="pc bpc" id="L1872" title="1 of 2 branches missed.">							!(isInitializingBean &amp;&amp; &quot;afterPropertiesSet&quot;.equals(initMethodName)) &amp;&amp;</span>
+<span class="pc bpc" id="L1873" title="1 of 2 branches missed.">							!mbd.hasAnyExternallyManagedInitMethod(initMethodName)) {</span>
+<span class="fc" id="L1874">						invokeCustomInitMethod(beanName, bean, mbd, initMethodName);</span>
+					}
+				}
+			}
+		}
+<span class="fc" id="L1879">	}</span>
+
+	/**
+	 * Invoke the specified custom init method on the given bean.
+	 * &lt;p&gt;Called by {@link #invokeInitMethods(String, Object, RootBeanDefinition)}.
+	 * &lt;p&gt;Can be overridden in subclasses for custom resolution of init methods
+	 * with arguments.
+	 * @see #invokeInitMethods
+	 */
+	protected void invokeCustomInitMethod(String beanName, Object bean, RootBeanDefinition mbd, String initMethodName)
+			throws Throwable {
+
+<span class="fc" id="L1891">		Class&lt;?&gt; beanClass = bean.getClass();</span>
+<span class="fc" id="L1892">		MethodDescriptor descriptor = MethodDescriptor.create(beanName, beanClass, initMethodName);</span>
+<span class="fc" id="L1893">		String methodName = descriptor.methodName();</span>
+
+<span class="pc bpc" id="L1895" title="1 of 2 branches missed.">		Method initMethod = (mbd.isNonPublicAccessAllowed() ?</span>
+<span class="fc" id="L1896">				BeanUtils.findMethod(descriptor.declaringClass(), methodName) :</span>
+<span class="pc" id="L1897">				ClassUtils.getMethodIfAvailable(beanClass, methodName));</span>
+
+<span class="fc bfc" id="L1899" title="All 2 branches covered.">		if (initMethod == null) {</span>
+<span class="pc bpc" id="L1900" title="1 of 2 branches missed.">			if (mbd.isEnforceInitMethod()) {</span>
+<span class="nc" id="L1901">				throw new BeanDefinitionValidationException(&quot;Could not find an init method named '&quot; +</span>
+						methodName + &quot;' on bean with name '&quot; + beanName + &quot;'&quot;);
+			}
+			else {
+<span class="pc bpc" id="L1905" title="1 of 2 branches missed.">				if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1906">					logger.trace(&quot;No default init method named '&quot; + methodName +</span>
+							&quot;' found on bean with name '&quot; + beanName + &quot;'&quot;);
+				}
+				// Ignore non-existent default lifecycle methods.
+<span class="fc" id="L1910">				return;</span>
+			}
+		}
+
+<span class="pc bpc" id="L1914" title="1 of 2 branches missed.">		if (logger.isTraceEnabled()) {</span>
+<span class="nc" id="L1915">			logger.trace(&quot;Invoking init method '&quot; + methodName + &quot;' on bean with name '&quot; + beanName + &quot;'&quot;);</span>
+		}
+<span class="fc" id="L1917">		Method methodToInvoke = ClassUtils.getPubliclyAccessibleMethodIfPossible(initMethod, beanClass);</span>
+
+		try {
+<span class="fc" id="L1920">			ReflectionUtils.makeAccessible(methodToInvoke);</span>
+<span class="fc" id="L1921">			methodToInvoke.invoke(bean);</span>
+		}
+<span class="nc" id="L1923">		catch (InvocationTargetException ex) {</span>
+<span class="nc" id="L1924">			throw ex.getTargetException();</span>
+<span class="fc" id="L1925">		}</span>
+<span class="fc" id="L1926">	}</span>
+
+
+	/**
+	 * Applies the {@code postProcessAfterInitialization} callback of all
+	 * registered BeanPostProcessors, giving them a chance to post-process the
+	 * object obtained from FactoryBeans (for example, to auto-proxy them).
+	 * @see #applyBeanPostProcessorsAfterInitialization
+	 */
+	@SuppressWarnings(&quot;deprecation&quot;)
+	@Override
+	protected Object postProcessObjectFromFactoryBean(Object object, String beanName) {
+<span class="fc" id="L1938">		return applyBeanPostProcessorsAfterInitialization(object, beanName);</span>
+	}
+
+	/**
+	 * Overridden to clear FactoryBean instance cache as well.
+	 */
+	@Override
+	protected void removeSingleton(String beanName) {
+<span class="fc" id="L1946">		super.removeSingleton(beanName);</span>
+<span class="fc" id="L1947">		this.factoryBeanInstanceCache.remove(beanName);</span>
+<span class="fc" id="L1948">	}</span>
+
+	/**
+	 * Overridden to clear FactoryBean instance cache as well.
+	 */
+	@Override
+	protected void clearSingletonCache() {
+<span class="fc" id="L1955">		super.clearSingletonCache();</span>
+<span class="fc" id="L1956">		this.factoryBeanInstanceCache.clear();</span>
+<span class="fc" id="L1957">	}</span>
+
+	/**
+	 * Expose the logger to collaborating delegates.
+	 * @since 5.0.7
+	 */
+	Log getLogger() {
+<span class="fc" id="L1964">		return logger;</span>
+	}
+
+
+	/**
+	 * {@link RootBeanDefinition} subclass for {@code #createBean} calls with
+	 * flexible selection of a Kotlin primary / single public / single non-public
+	 * constructor candidate in addition to the default constructor.
+	 * @see BeanUtils#getResolvableConstructor(Class)
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	private static class CreateFromClassBeanDefinition extends RootBeanDefinition {
+
+		public CreateFromClassBeanDefinition(Class&lt;?&gt; beanClass) {
+<span class="fc" id="L1978">			super(beanClass);</span>
+<span class="fc" id="L1979">		}</span>
+
+		public CreateFromClassBeanDefinition(CreateFromClassBeanDefinition original) {
+<span class="nc" id="L1982">			super(original);</span>
+<span class="nc" id="L1983">		}</span>
+
+		@Override
+		public Constructor&lt;?&gt; @Nullable [] getPreferredConstructors() {
+<span class="fc" id="L1987">			Constructor&lt;?&gt;[] fromAttribute = super.getPreferredConstructors();</span>
+<span class="pc bpc" id="L1988" title="1 of 2 branches missed.">			if (fromAttribute != null) {</span>
+<span class="nc" id="L1989">				return fromAttribute;</span>
+			}
+<span class="fc" id="L1991">			return ConstructorResolver.determinePreferredConstructors(getBeanClass());</span>
+		}
+
+		@Override
+		public RootBeanDefinition cloneBeanDefinition() {
+<span class="nc" id="L1996">			return new CreateFromClassBeanDefinition(this);</span>
+		}
+	}
+
+
+	/**
+	 * Special DependencyDescriptor variant for Spring's good old autowire=&quot;byType&quot; mode.
+	 * Always optional; never considering the parameter name for choosing a primary candidate.
+	 */
+	@SuppressWarnings(&quot;serial&quot;)
+	private static class AutowireByTypeDependencyDescriptor extends DependencyDescriptor {
+
+		public AutowireByTypeDependencyDescriptor(MethodParameter methodParameter, boolean eager) {
+<span class="fc" id="L2009">			super(methodParameter, false, eager);</span>
+<span class="fc" id="L2010">		}</span>
+
+		@Override
+		public @Nullable String getDependencyName() {
+<span class="fc" id="L2014">			return null;</span>
+		}
+	}
+
+
+	/**
+	 * {@link MethodCallback} used to find {@link FactoryBean} type information.
+	 */
+	private static class FactoryBeanMethodTypeFinder implements MethodCallback {
+
+		private final String factoryMethodName;
+
+<span class="fc" id="L2026">		private ResolvableType result = ResolvableType.NONE;</span>
+
+<span class="fc" id="L2028">		FactoryBeanMethodTypeFinder(String factoryMethodName) {</span>
+<span class="fc" id="L2029">			this.factoryMethodName = factoryMethodName;</span>
+<span class="fc" id="L2030">		}</span>
+
+		@Override
+		public void doWith(Method method) throws IllegalArgumentException {
+<span class="fc bfc" id="L2034" title="All 2 branches covered.">			if (isFactoryBeanMethod(method)) {</span>
+<span class="fc" id="L2035">				ResolvableType returnType = ResolvableType.forMethodReturnType(method);</span>
+<span class="fc" id="L2036">				ResolvableType candidate = returnType.as(FactoryBean.class).getGeneric();</span>
+<span class="pc bpc" id="L2037" title="1 of 2 branches missed.">				if (this.result == ResolvableType.NONE) {</span>
+<span class="fc" id="L2038">					this.result = candidate;</span>
+				}
+				else {
+<span class="nc" id="L2041">					Class&lt;?&gt; resolvedResult = this.result.resolve();</span>
+<span class="nc" id="L2042">					Class&lt;?&gt; commonAncestor = ClassUtils.determineCommonAncestor(candidate.resolve(), resolvedResult);</span>
+<span class="nc bnc" id="L2043" title="All 2 branches missed.">					if (!ObjectUtils.nullSafeEquals(resolvedResult, commonAncestor)) {</span>
+<span class="nc" id="L2044">						this.result = ResolvableType.forClass(commonAncestor);</span>
+					}
+				}
+			}
+<span class="fc" id="L2048">		}</span>
+
+		private boolean isFactoryBeanMethod(Method method) {
+<span class="fc bfc" id="L2051" title="All 2 branches covered.">			return (method.getName().equals(this.factoryMethodName) &amp;&amp;</span>
+<span class="pc bpc" id="L2052" title="1 of 2 branches missed.">					FactoryBean.class.isAssignableFrom(method.getReturnType()));</span>
+		}
+
+		ResolvableType getResult() {
+<span class="fc" id="L2056">			Class&lt;?&gt; resolved = this.result.resolve();</span>
+<span class="pc bpc" id="L2057" title="2 of 4 branches missed.">			boolean foundResult = resolved != null &amp;&amp; resolved != Object.class;</span>
+<span class="pc bpc" id="L2058" title="1 of 2 branches missed.">			return (foundResult ? this.result : ResolvableType.NONE);</span>
+		}
+	}
+
+}
+</pre><div class="footer"><span class="right">Created with <a href="http://www.jacoco.org/jacoco">JaCoCo</a> 0.8.14.202510111229</span></div></body></html>
