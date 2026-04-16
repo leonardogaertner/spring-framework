@@ -105,7 +105,7 @@ public class JavaConventions {
 					});
 			p.getTasks().withType(JavaCompile.class)
 					.matching(compileTask -> compileTask.getName().startsWith(JavaPlugin.COMPILE_TEST_JAVA_TASK_NAME)
-							|| compileTask.getName().equals("compileTestFixturesJava"))
+							|| "compileTestFixturesJava".equals(compileTask.getName())
 					.forEach(compileTask -> {
 						compileTask.getOptions().setCompilerArgs(TEST_COMPILER_ARGS);
 						compileTask.getOptions().setEncoding("UTF-8");
