@@ -213,7 +213,7 @@ class NeverMatchAdvisor extends StaticMethodMatcherPointcutAdvisor {
 
 class NoSetters {
 
-	public void A() {
+	public void doSomething() {
 
 	}
 
