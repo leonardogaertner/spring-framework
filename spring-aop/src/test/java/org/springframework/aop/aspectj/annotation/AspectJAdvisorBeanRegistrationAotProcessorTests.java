@@ -74,11 +74,11 @@ class AspectJAdvisorBeanRegistrationAotProcessorTests {
 
 
 	static class AspectJClass {
-		private static java.lang.Throwable ajc$initFailureCause;
+		private static Throwable ajc$initFailureCause;
 	}
 
 	static class RegularClass {
-		private static java.lang.Throwable initFailureCause;
+		private static Throwable initFailureCause;
 	}
 
 }
