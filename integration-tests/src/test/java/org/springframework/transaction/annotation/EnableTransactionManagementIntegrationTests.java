@@ -151,7 +151,6 @@ class EnableTransactionManagementIntegrationTests {
 					.anyMatch(BeanFactoryTransactionAttributeSourceAdvisor.class::isInstance);
 	}
 
-
 	@Configuration
 	@EnableTransactionManagement
 	@ImportResource("org/springframework/transaction/annotation/enable-caching.xml")
