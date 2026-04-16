@@ -194,7 +194,8 @@ class RuntimeHintsAgentTests {
 							try {
 								ResourceBundle.getBundle("testBundle");
 							}
-							catch (Throwable exc) {
+							catch (Exception e) {
+								throw new RuntimeException(e);
 							}
 						},
 						MethodReference.of(ResourceBundle.class, "getBundle"))
