@@ -26,7 +26,7 @@ public class ListConcatenation implements OperatorOverloader {
 
 	@Override
 	public boolean overridesOperation(Operation operation, Object left, Object right) {
-		return (operation == Operation.ADD && left instanceof List && right instanceof List);
+		return operation == Operation.ADD && left instanceof List && right instanceof List;
 	}
 
 	@Override
