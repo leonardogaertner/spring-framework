@@ -128,6 +128,7 @@ class RuntimeHintsAgentTests {
 						String.class.getField("value");
 					}
 					catch (NoSuchFieldException e) {
+						throw new RuntimeException(e);
 					}
 				}, MethodReference.of(Class.class, "getField")),
 				Arguments.of((Runnable) () -> String.class.getFields(), MethodReference.of(Class.class, "getFields")),
